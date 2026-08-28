@@ -116,16 +116,29 @@ The ACP client works end-to-end and is launchable in the running editor:
   / `weft.fileRead` throws.
 
 **Multi-turn:** `weft.lineText()` + the `agent-send` command send the current
-line as the next prompt on the running session (a real conversation), and
-`sendPrompt` echoes it into the transcript. Bind `SPC o s`.
+line as the next prompt on the focused conversation, and `sendPrompt` echoes it
+into that conversation's transcript. Bind `SPC o s`.
+
+**Conversations are instances.** Every `agent-start` mints one: its own
+subprocess, its own ACP session, its own transcript buffer (`*agent*`,
+`*agent:2*`, … — the instanced tool-buffer naming idiom) and its own live
+`TranscriptDoc` on the host (one per projected buffer, `JsPlugin.conversations`).
+Streamed updates route by the proc handle that carried them, so two agents in
+flight can never land a chunk in each other's transcript. `agent-focus` picks
+which one `agent-send` addresses.
 
 **Permission:** `session/request_permission` → a pick — `weft.pick(prompt,
-options)` (bound to the JsPlugin) + `weft.onPick` answer the agent with the
-chosen `optionId`, so tool calls needing approval prompt you.
+options, token)` (bound to the JsPlugin) + `weft.onPick` answer the agent with
+the chosen `optionId`. The `token` is CONTINUATION IDENTITY (§14.7):
+conversation + tool-call id, handed back with the outcome, so an answer resolves
+exactly the request it was opened for — never "the pending one". Requests
+arriving while a pick is open queue and open in turn, each with its own token,
+so the order they open in never decides which call an answer unblocks.
 
 **Per-agent identity:** `weft.fileWrite(path, content, agent)` authors as the
-named agent peer (derived from `weft.config("name")` or the launch command), so
-each agent's edits attribute to a distinct CRDT peer.
+named agent peer — `<name>#<ordinal>` per conversation (`claude#1`, `codex#2`),
+from `startAgent`'s `name`, else `weft.config("name")`, else the launch command
+— so selective undo separates one agent's edits from another's.
 
 **UI:** a generic plugin **status chip** (`weft.status` → the status-line
 right cluster; the agent shows ● starting/thinking/streaming, ◌ waiting, ○
@@ -141,8 +154,10 @@ prompts for tool permission, shows live status + usage.
 **Related primitive:** span-level read-only (`weft.readOnlySpan` — a comint's
 produced output read-only, its input line editable), guarded at the edit door.
 
-Only a multi-session **dashboard** (one list across agents) is left as a future
-nicety; a single conversation is fully supported.
+Concurrent conversations are supported (isolated transcripts, isolated
+permission continuations, per-conversation peers). Only a **dashboard** (one
+list across agents, grouped by status) is left as a future nicety — `agent-focus`
+is the plain-pick stand-in.
 
 ## Build order (each phase committable, independently useful)
 

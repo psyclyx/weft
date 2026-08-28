@@ -355,54 +355,71 @@ pub const JsPlugin = struct {
     /// Proc streams this plugin spawned, indexed by the handle the JS holds.
     /// A closed slot is left null so handles stay stable (never reused).
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
-    /// This plugin's single-instance live transcript MODEL (W6 check-in
-    /// producer seam, doc/contextual-workspace-architecture.md §12) — created on first
-    /// `weft.transcriptEntry` call. Single-instance, the SAME limitation
-    /// `transcript.zig`'s `SaveBinding` documents (no per-buffer registry
-    /// yet — named, not silently dropped): one JS plugin drives at most one
-    /// live transcript at a time. **`name` (both handlers' first arg) is
-    /// BUFFER SELECTION ONLY, never a second model key** — there is exactly
-    /// one `TranscriptDoc` here regardless of how many distinct `name`s get
-    /// passed. Calling with a NEW name re-projects the SAME model into a
-    /// (possibly fresh) buffer by that name; the buffer used by an EARLIER
-    /// call simply stops being updated (it goes stale, silently, from that
-    /// point on — nothing deletes or marks it). A plugin that wants two
-    /// independently-updating transcript buffers needs the not-yet-built
-    /// per-buffer registry `SaveBinding`'s doc comment already names; this
-    /// is a precondition, not enforced, exactly like that one.
-    transcript: ?TranscriptDoc = null,
-    /// The transcript's subbuffer claims — one table shared by every
-    /// `TranscriptDoc.fill` call this plugin makes (mirrors `fill`'s own
-    /// `subs` parameter; owned here, not stack-local, because it must
-    /// outlive any single membrane call).
-    transcript_subs: subbuffer.SubBuffers = .empty,
-    /// The currently-streaming entry's TEXT object — `weft.transcriptAppend`
-    /// inserts at its end (in the MODEL; see `transcript_live_sub` for the
-    /// matching BUFFER-side claim `cTranscriptAppend` grows incrementally).
-    /// `null` until the first `weft.transcriptEntry` call; a stream chunk
-    /// with nothing open is a silent no-op (see `cTranscriptAppend`), not a
-    /// trap — an adapter racing its first chunk ahead of the entry-open
-    /// call is that plugin's protocol-timing bug to fix, not a membrane
-    /// violation this handler should punish.
-    transcript_live_text: ?GraphDoc.ObjId = null,
-    /// Bytes already written into `transcript_live_text` — where the next
-    /// streamed chunk's `editText` insert lands (append-only: this producer
-    /// never edits earlier in the body, the "append-mostly shape
-    /// transcript.zig's own docs anticipate").
-    transcript_live_len: usize = 0,
-    /// The PROJECTED BUFFER's claim for the same live entry — `transcript.
-    /// lastRowClaim`'s return, cached right after the `fill()` that
-    /// `cTranscriptEntry` runs for this row, so `cTranscriptAppend` can grow
-    /// it INCREMENTALLY (a point-insert + `SubBuffer.extendEnd`) instead of
-    /// re-running `fill` on every streamed chunk — see `cTranscriptAppend`'s
-    /// doc comment for the full mechanism and its full-`fill` fallback.
-    /// `null` exactly when `transcript_live_text` is (kept in lockstep by
-    /// both handlers); also invalidated (read but never trusted) if the
-    /// caller's `name` names a DIFFERENT buffer than the one this claim
-    /// lives on — see that fallback.
-    transcript_live_sub: ?*subbuffer.SubBuffer = null,
+    /// This plugin's live transcripts, one per projected buffer name (W6
+    /// check-in producer seam, doc/contextual-workspace-architecture.md §12)
+    /// — minted on the first `weft.transcriptEntry` naming that buffer. The
+    /// buffer name IS the conversation's identity: two ACP agents in flight
+    /// stream into `*agent*` and `*agent:2*`, each with its OWN model, its
+    /// own claims and its own open entry, so neither can land a chunk in the
+    /// other's transcript (§18's isolation gate).
+    conversations: std.ArrayList(*Conversation) = .empty,
 
     const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
+
+    /// One live transcript conversation, keyed by the buffer it projects
+    /// into. Heap-owned: `live_sub` and the model must survive the list
+    /// growing, and a conversation outlives any single membrane call.
+    pub const Conversation = struct {
+        /// The projected buffer's name — this conversation's identity.
+        buffer: []u8,
+        /// The MODEL (replication's source of truth).
+        transcript: TranscriptDoc,
+        /// This conversation's subbuffer claims (mirrors `fill`'s `subs`).
+        subs: subbuffer.SubBuffers = .empty,
+        /// The currently-streaming entry's TEXT object —
+        /// `weft.transcriptAppend` inserts at its end. `null` until the
+        /// first entry; a chunk with nothing open is a silent no-op, not a
+        /// trap — an adapter racing its first chunk ahead of the entry-open
+        /// call is that plugin's protocol-timing bug to fix.
+        live_text: ?GraphDoc.ObjId = null,
+        /// Bytes already written into `live_text` — where the next streamed
+        /// chunk's `editText` insert lands (append-only).
+        live_len: usize = 0,
+        /// The PROJECTED BUFFER's claim for the same live entry, cached
+        /// right after `cTranscriptEntry`'s `fill` so `cTranscriptAppend`
+        /// can grow it INCREMENTALLY — see that handler's doc comment.
+        live_sub: ?*subbuffer.SubBuffer = null,
+
+        fn deinit(self: *Conversation, gpa: Allocator) void {
+            self.subs.deinit(gpa);
+            self.transcript.deinit(gpa);
+            gpa.free(self.buffer);
+            gpa.destroy(self);
+        }
+    };
+
+    /// The conversation projecting into `name`, or null if none was opened.
+    pub fn conversation(self: *JsPlugin, name: []const u8) ?*Conversation {
+        for (self.conversations.items) |c| {
+            if (std.mem.eql(u8, c.buffer, name)) return c;
+        }
+        return null;
+    }
+
+    /// The conversation projecting into `name`, minted on first use. Its
+    /// CRDT identity is the buffer name, so two conversations of the same
+    /// plugin are distinct replicas, not one doc with two views.
+    fn openConversation(self: *JsPlugin, gpa: Allocator, name: []const u8) !*Conversation {
+        if (self.conversation(name)) |c| return c;
+        const conv = try gpa.create(Conversation);
+        errdefer gpa.destroy(conv);
+        conv.* = .{ .buffer = try gpa.dupe(u8, name), .transcript = undefined };
+        errdefer gpa.free(conv.buffer);
+        conv.transcript = try TranscriptDoc.create(gpa, name);
+        errdefer conv.transcript.deinit(gpa);
+        try self.conversations.append(gpa, conv);
+        return conv;
+    }
 
     /// Instantiate `quickjs.wasm`, wire the membrane + registrar, and run the
     /// plugin body (`src`), which registers its commands. Heap-owned so the
@@ -544,8 +561,8 @@ pub const JsPlugin = struct {
         gpa.free(self.name);
         for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
         self.streams.deinit(gpa);
-        self.transcript_subs.deinit(gpa);
-        if (self.transcript) |*tr| tr.deinit(gpa);
+        for (self.conversations.items) |c| c.deinit(gpa);
+        self.conversations.deinit(gpa);
         for (self.cmds.items) |c| {
             gpa.free(c.name);
             gpa.destroy(c);
@@ -741,8 +758,8 @@ fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 }
 
 /// weft.transcriptEntry(name, role, text): begin a new entry in this
-/// plugin's live transcript (created on first use — `JsPlugin.transcript`'s
-/// doc comment), then FULLY re-fill `name`'s tool-backed projection buffer
+/// plugin's conversation for `name` (minted on first use —
+/// `JsPlugin.conversations`), then FULLY re-fill `name`'s projection buffer
 /// from the model. Full `fill` (not the incremental path `cTranscriptAppend`
 /// below uses) is the honest choice HERE: a new entry is a structural
 /// change to the model (a new row, new decoration prefix, a whole new
@@ -770,28 +787,28 @@ fn cTranscriptEntry(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 }
 
 fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []const u8, text: []const u8) !void {
-    if (self.transcript == null) self.transcript = try TranscriptDoc.create(gpa, self.name);
-    const tr = &self.transcript.?;
+    const conv = try self.openConversation(gpa, name);
+    const tr = &conv.transcript;
     const obj = try tr.append(gpa, role, @bitCast(task.nowNs()), text);
-    self.transcript_live_text = tr.graph.ref(obj).mapGet("text").?.objId().?;
-    self.transcript_live_len = text.len;
+    conv.live_text = tr.graph.ref(obj).mapGet("text").?.objId().?;
+    conv.live_len = text.len;
     // Cleared BEFORE the buffer lookup/fill below, not after: if either
     // fails partway (buffer creation, `fill`'s allocation), an early
     // `return`/error must never leave a STALE claim pointing at the
-    // PREVIOUS entry's row cached under `transcript_live_text` now naming
+    // PREVIOUS entry's row cached under `live_text` now naming
     // the NEW one — `cTranscriptAppend`'s `sub.?.doc != doc` guard only
     // catches a buffer/name mismatch, not this. `null` here always means
     // "fall back to a full fill", which is always correct.
-    self.transcript_live_sub = null;
+    conv.live_sub = null;
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
     const ed = b.textEditor() orelse return;
     try b.setTool(gpa, TranscriptDoc.projection_author);
-    try TranscriptDoc.fill(gpa, tr, &ed.doc, &self.transcript_subs);
+    try TranscriptDoc.fill(gpa, tr, &ed.doc, &conv.subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
     // safe to grab right here (nothing else claims on `ed.doc`
     // between the `fill` above and this line).
-    self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, &ed.doc);
+    conv.live_sub = TranscriptDoc.lastRowClaim(&conv.subs, &ed.doc);
 }
 
 /// weft.transcriptAppend(name, text): stream `text` onto the currently-open
@@ -803,7 +820,7 @@ fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []co
 /// bytes + n_rows)) — every entry re-read, the whole buffer text rebuilt,
 /// every row's claim dropped and re-minted — for a chunk that only ever
 /// touches ONE row's tail). The buffer-side update instead: (1) a
-/// zero-width point-insert at `self.transcript_live_sub`'s CURRENT end —
+/// zero-width point-insert at the conversation's `live_sub`'s CURRENT end —
 /// the exact shape `appendNamed` already uses for a plain buffer, so it's
 /// the SAME `command.renderInto` call, just aimed at one claim's tail
 /// instead of the whole document — then (2) `SubBuffer.extendEnd` to widen
@@ -812,13 +829,14 @@ fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []co
 /// doc comment for why that's a real gap this closes, not a workaround).
 /// Cost: O(chunk_len), independent of transcript size or row count.
 ///
+/// A chunk for a buffer no `weft.transcriptEntry` ever opened is a no-op:
+/// `name` selects the CONVERSATION, so a stray append can never leak into
+/// another agent's transcript.
+///
 /// Falls back to a full `fill` (loud in effect, not in a log — see below)
 /// in exactly two cases, both meaning the cached claim can't be trusted:
-/// no claim was ever cached (`transcript_live_sub == null` — e.g. `name`
-/// pointed at a fresh/different buffer than the one `cTranscriptEntry` last
-/// filled; `JsPlugin.transcript`'s doc comment on `name` being
-/// buffer-selection-only, never a second model key, is the precise
-/// contract this degrades under), or the cached claim's OWN buffer no
+/// no claim was ever cached (`live_sub == null`, e.g. the entry's own
+/// `fill` failed partway), or the cached claim's OWN buffer no
 /// longer matches `name`'s buffer right now (the same cross-buffer case,
 /// caught defensively even if the cache was stale for another reason). A
 /// full `fill` is always a CORRECT answer for either case — the fallback
@@ -837,21 +855,22 @@ fn cTranscriptAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
 
 fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text: []const u8) !void {
     if (text.len == 0) return;
-    const tr = if (self.transcript) |*trp| trp else return;
-    const text_obj = self.transcript_live_text orelse return;
+    const conv = self.conversation(name) orelse return;
+    const tr = &conv.transcript;
+    const text_obj = conv.live_text orelse return;
     // The model insert always happens — replication's source of truth,
     // independent of whatever the buffer-side fast/slow path below does.
-    try tr.editText(gpa, text_obj, self.transcript_live_len, text);
-    self.transcript_live_len += text.len;
+    try tr.editText(gpa, text_obj, conv.live_len, text);
+    conv.live_len += text.len;
 
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
     const doc = &(b.textEditor() orelse return).doc;
-    const sub = self.transcript_live_sub;
+    const sub = conv.live_sub;
     if (sub == null or sub.?.doc != doc) {
         // Slow path: no trustworthy cached claim (see this fn's doc
         // comment for the two cases) — a full re-fill is always correct.
-        try TranscriptDoc.fill(gpa, tr, doc, &self.transcript_subs);
-        self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, doc);
+        try TranscriptDoc.fill(gpa, tr, doc, &conv.subs);
+        conv.live_sub = TranscriptDoc.lastRowClaim(&conv.subs, doc);
         return;
     }
     // Fast path: grow the buffer and the one claim that names this row,
@@ -968,6 +987,11 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 /// instance via `weft_on_pick`. Freed by `jsPickCleanup`.
 const JsBoundPick = struct {
     plugin: *JsPlugin,
+    /// The opaque continuation identity the caller minted (owned copy,
+    /// delivered back with the outcome): WHICH request this pick answers.
+    /// A plugin with two agents in flight keys its pending tool calls by
+    /// conversation + call id, so an answer can only ever resolve its own.
+    token: []u8,
 };
 
 fn allocPickBuffer(plugin: *JsPlugin, cap: usize) !i32 {
@@ -977,9 +1001,11 @@ fn allocPickBuffer(plugin: *JsPlugin, cap: usize) !i32 {
     return if (ptr == 0) error.OutOfMemory else ptr;
 }
 
-/// weft.pick(prompt, options): open a pick over the newline-joined options,
-/// bound to this JS plugin; the structured outcome returns via `weft_on_pick`
-/// (the async approve/deny round-trip — an agent's permission request).
+/// weft.pick(prompt, options, token): open a pick over the newline-joined
+/// options, bound to this JS plugin; the structured outcome returns via
+/// `weft_on_pick` carrying `token` (the async approve/deny round-trip — an
+/// agent's permission request, answered by continuation identity rather
+/// than by "whatever was pending").
 fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
@@ -992,12 +1018,16 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     defer gpa.free(prompt);
     const opts = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(opts);
+    const token = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     var entries: std.ArrayList(pick_mod.Entry) = .empty;
     defer entries.deinit(gpa);
     var it = std.mem.splitScalar(u8, opts, '\n');
     while (it.next()) |o| entries.append(gpa, .{ .text = o, .doc = "" }) catch {};
-    const bp = gpa.create(JsBoundPick) catch return;
-    bp.* = .{ .plugin = self };
+    const bp = gpa.create(JsBoundPick) catch {
+        gpa.free(token);
+        return;
+    };
+    bp.* = .{ .plugin = self, .token = token };
     // pick.open copies the entry text/doc, so `opts` may free after this.
     const ctx = self.bridge.activeCtx();
     ctx.head.pick.open(ctx, prompt, entries.items, .{
@@ -1046,13 +1076,20 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
     defer if (text_ptr != 0) bp.plugin.instance.callVoid("free", &.{text_ptr}) catch {};
     var query_ptr: i32 = 0;
     defer if (query_ptr != 0) bp.plugin.instance.callVoid("free", &.{query_ptr}) catch {};
+    // The token rides the SAME copy: an outcome that reaches the guest
+    // without it could only be routed by guessing, which is the failure
+    // this seam exists to make impossible.
+    var token_ptr: i32 = 0;
+    defer if (token_ptr != 0) bp.plugin.instance.callVoid("free", &.{token_ptr}) catch {};
 
     var copied = false;
     copy: {
         text_ptr = allocPickBuffer(bp.plugin, text.len) catch break :copy;
         query_ptr = allocPickBuffer(bp.plugin, query.len) catch break :copy;
+        token_ptr = allocPickBuffer(bp.plugin, bp.token.len) catch break :copy;
         if (text.len > 0) bp.plugin.instance.writeGuest(@intCast(text_ptr), text) catch break :copy;
         if (query.len > 0) bp.plugin.instance.writeGuest(@intCast(query_ptr), query) catch break :copy;
+        if (bp.token.len > 0) bp.plugin.instance.writeGuest(@intCast(token_ptr), bp.token) catch break :copy;
         copied = true;
     }
     if (!copied) {
@@ -1081,11 +1118,14 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
         std.math.cast(i32, query.len) orelse 0,
         match_start,
         match_span,
+        token_ptr,
+        if (copied) std.math.cast(i32, bp.token.len) orelse 0 else 0,
     }) catch {};
 }
 
 fn jsPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
+    gpa.free(bp.token);
     gpa.destroy(bp);
 }
 
@@ -2103,12 +2143,12 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
 
     // "open": the model gets its first (role, text) entry; the FULL `fill`
     // path runs (a structural change — new row), which mints entry 0's
-    // subbuffer claim — cached as `transcript_live_sub`.
+    // subbuffer claim — cached as `live_sub`.
     _ = try command.run(&env.commands, &env.ctx, "open", &.{});
-    try t.expectEqual(@as(usize, 1), plugin.transcript.?.count());
-    try t.expectEqualStrings("user", plugin.transcript.?.at(0).role());
+    try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.transcript.count());
+    try t.expectEqualStrings("user", plugin.conversation("*t*").?.transcript.at(0).role());
     {
-        const b0 = try plugin.transcript.?.at(0).text(gpa);
+        const b0 = try plugin.conversation("*t*").?.transcript.at(0).text(gpa);
         defer gpa.free(b0);
         try t.expectEqualStrings("hi", b0);
     }
@@ -2117,8 +2157,8 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         defer gpa.free(got);
         try t.expectEqualStrings("user: hi", got);
     }
-    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len);
-    const sub_a = plugin.transcript_live_sub.?;
+    try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len);
+    const sub_a = plugin.conversation("*t*").?.live_sub.?;
 
     // "chunk" ×2: streamed onto the SAME row. The claim object's IDENTITY
     // (not just its resolved range) stays the SAME pointer across both —
@@ -2127,18 +2167,18 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
     // `dropDoc` + re-`claim`, minting a BRAND NEW object each time, which
     // this asserts did NOT happen.
     _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
-    const sub_b = plugin.transcript_live_sub.?;
-    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len); // no new/leaked claim
+    const sub_b = plugin.conversation("*t*").?.live_sub.?;
+    try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len); // no new/leaked claim
     try t.expect(sub_a == sub_b);
 
     _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
-    const sub_c = plugin.transcript_live_sub.?;
-    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len);
+    const sub_c = plugin.conversation("*t*").?.live_sub.?;
+    try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len);
     try t.expect(sub_b == sub_c);
 
     // The MODEL accumulated both chunks (replication's source of truth)...
     {
-        const b0 = try plugin.transcript.?.at(0).text(gpa);
+        const b0 = try plugin.conversation("*t*").?.transcript.at(0).text(gpa);
         defer gpa.free(b0);
         try t.expectEqualStrings("hi!!", b0);
     }
@@ -2155,7 +2195,7 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         defer doc_check.deinit(gpa);
         var subs_check: subbuffer.SubBuffers = .empty;
         defer subs_check.deinit(gpa);
-        try TranscriptDoc.fill(gpa, &plugin.transcript.?, &doc_check, &subs_check);
+        try TranscriptDoc.fill(gpa, &plugin.conversation("*t*").?.transcript, &doc_check, &subs_check);
         const full = try doc_check.text().toOwnedSlice(gpa);
         defer gpa.free(full);
         try t.expectEqualStrings(full, got);
@@ -2165,11 +2205,11 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
     // per plugin — and its claim is a genuinely DIFFERENT object (the full
     // `fill` this triggers re-mints every row's claim, entry 0's included).
     _ = try command.run(&env.commands, &env.ctx, "open2", &.{});
-    try t.expectEqual(@as(usize, 2), plugin.transcript.?.count());
-    try t.expectEqualStrings("agent", plugin.transcript.?.at(1).role());
-    const sub_d = plugin.transcript_live_sub.?;
+    try t.expectEqual(@as(usize, 2), plugin.conversation("*t*").?.transcript.count());
+    try t.expectEqualStrings("agent", plugin.conversation("*t*").?.transcript.at(1).role());
+    const sub_d = plugin.conversation("*t*").?.live_sub.?;
     try t.expect(sub_d != sub_c);
-    try t.expectEqual(@as(usize, 2), plugin.transcript_subs.list.items.len);
+    try t.expectEqual(@as(usize, 2), plugin.conversation("*t*").?.subs.list.items.len);
     {
         const got = try bufText(&env, gpa);
         defer gpa.free(got);
@@ -3019,5 +3059,173 @@ test "quickjs: a degenerate weft.bind list fails the eval loudly — never a sil
         try Env.init(gpa, &env);
         defer env.deinit(gpa);
         try t.expectError(error.ConfigException, evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config"));
+    }
+}
+
+// The §18 isolation gate for ACP: "Two repositories, REPLs, DAP sessions, and
+// ACP conversations remain isolated." Two mock agents run CONCURRENTLY through
+// the real `config/plugins/acp.js` — each mints its own transcript instance
+// (`*agent*`, `*agent:2*`), its own CRDT sub-peer (`claude#1`, `codex#2`), and
+// its own pending permission request. Answering one permission resolves ONLY
+// its own tool call: the other agent stays blocked until its OWN answer, which
+// is continuation identity (§14.7) rather than "whatever was pending".
+test "quickjs: two ACP conversations stream into their own transcripts, and a permission answered for one never unblocks the other" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try pick_mod.install(gpa, &env.commands, &env.keymap);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // One mock ACP agent, parameterized by TAG (sh builtins only): handshake,
+    // a message chunk, a file write, then a permission request — and after
+    // that it BLOCKS on stdin, acking only when its own answer arrives. So
+    // "TAG ack" in a transcript is proof that THAT agent was unblocked.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const template =
+        \\printf '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}\n'
+        \\printf '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"TAG"}}\n'
+        \\printf '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TAG one"}}}}\n'
+        \\printf '{"jsonrpc":"2.0","id":8,"method":"fs/write_text_file","params":{"path":"SHARED","content":"TAG wrote"}}\n'
+        \\printf '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"TAG-call","title":"TAG edit"},"options":[{"optionId":"allow","name":"Allow"},{"optionId":"deny","name":"Deny"}]}}\n'
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *outcome*) printf '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TAG ack"}}}}\n' ;;
+        \\  esac
+        \\done
+    ;
+    const shared = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/shared.txt", .{tmp.sub_path});
+    defer gpa.free(shared);
+    const with_path = try std.mem.replaceOwned(u8, gpa, template, "SHARED", shared);
+    defer gpa.free(with_path);
+    var mocks: [2][]u8 = undefined;
+    defer for (mocks) |m| gpa.free(m);
+    const tags = [_][]const u8{ "alpha", "beta" };
+    for (tags, 0..) |tag, i| {
+        mocks[i] = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}.sh", .{ tmp.sub_path, tag });
+        const body = try std.mem.replaceOwned(u8, gpa, with_path, "TAG", tag);
+        defer gpa.free(body);
+        try @import("file.zig").writeBytes(gpa, mocks[i], body);
+    }
+
+    // The REAL plugin, plus one start command per agent (named, so each
+    // conversation's sub-peer is its own agent's — `claude#1`, `codex#2`).
+    const acp = try @import("file.zig").readAlloc(gpa, "config/plugins/acp.js");
+    defer gpa.free(acp);
+    const src = try std.fmt.allocPrint(gpa,
+        \\{s}
+        \\weft.command("start-a", () => startAgent("/bin/sh {s}", "hi", "claude"));
+        \\weft.command("start-b", () => startAgent("/bin/sh {s}", "hi", "codex"));
+    , .{ acp, mocks[0], mocks[1] });
+    defer gpa.free(src);
+
+    try env.grant("test", "proc");
+    // Two live agents pin two reader tasks (each mock BLOCKS on stdin waiting
+    // for its own answer), so the shared fixture's single-thread pool would
+    // starve the second spawn — concurrency here is the subject, not scenery.
+    const pool = try task.Pool.init(gpa, .{ .threads = 4 });
+    defer pool.deinit();
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, pool, .empty, "test", null, src);
+    defer plugin.deinit();
+    // A bail with a request still open must not leave the head's pick session
+    // live — teardown asserts every acceptor was answered.
+    defer if (env.head.pick.active) {
+        _ = command.run(&env.commands, &env.ctx, "pick-cancel", &.{}) catch {};
+    };
+
+    const H = struct {
+        fn text(e: *Env, gpa2: Allocator, name: []const u8) ?[]u8 {
+            var it = e.buffers.iterator();
+            while (it.next()) |b| {
+                if (!std.mem.eql(u8, b.name, name)) continue;
+                const ed = b.textEditor() orelse return null;
+                return ed.text().toOwnedSlice(gpa2) catch null;
+            }
+            return null;
+        }
+        /// Tick the plugin until `name`'s buffer contains `needle`.
+        fn until(p: *JsPlugin, e: *Env, gpa2: Allocator, name: []const u8, needle: []const u8) bool {
+            const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+            while (task.nowNs() < deadline) {
+                _ = p.tick();
+                if (text(e, gpa2, name)) |txt| {
+                    defer gpa2.free(txt);
+                    if (std.mem.indexOf(u8, txt, needle) != null) return true;
+                }
+                std.atomic.spinLoopHint();
+            }
+            return false;
+        }
+        /// Tick for a bounded stretch, asserting `needle` never shows up.
+        fn absent(p: *JsPlugin, e: *Env, gpa2: Allocator, name: []const u8, needle: []const u8) bool {
+            const deadline = task.nowNs() + 300 * std.time.ns_per_ms;
+            while (task.nowNs() < deadline) {
+                _ = p.tick();
+                if (text(e, gpa2, name)) |txt| {
+                    defer gpa2.free(txt);
+                    if (std.mem.indexOf(u8, txt, needle) != null) return false;
+                }
+                std.atomic.spinLoopHint();
+            }
+            return true;
+        }
+    };
+
+    // Agent one: its own transcript instance, and its permission pick opens
+    // (from the BACKGROUND output handler, through the nested-run door).
+    _ = try command.run(&env.commands, &env.ctx, "start-a", &.{});
+    try t.expect(H.until(plugin, &env, gpa, "*agent*", "alpha one"));
+    while (!env.head.pick.active) _ = plugin.tick();
+
+    // Agent two: a SECOND instance — its own buffer, its own model. Its
+    // permission request queues behind agent one's open pick.
+    _ = try command.run(&env.commands, &env.ctx, "start-b", &.{});
+    try t.expect(H.until(plugin, &env, gpa, "*agent:2*", "beta one"));
+
+    // Interleaved updates landed in the right transcripts, both directions.
+    {
+        const a = H.text(&env, gpa, "*agent*").?;
+        defer gpa.free(a);
+        const b = H.text(&env, gpa, "*agent:2*").?;
+        defer gpa.free(b);
+        try t.expect(std.mem.indexOf(u8, a, "beta") == null);
+        try t.expect(std.mem.indexOf(u8, b, "alpha") == null);
+    }
+    // Two conversations, two models — not one doc with two views.
+    try t.expectEqual(@as(usize, 2), plugin.conversations.items.len);
+    try t.expect(plugin.conversation("*agent*") != plugin.conversation("*agent:2*"));
+
+    // Each agent's edit authors as its OWN sub-peer, so selective undo can
+    // separate claude#1 from codex#2 on the file they both wrote.
+    {
+        const id = env.buffers.findByPath(shared) orelse return error.NoAgentBuffer;
+        const doc = &env.buffers.get(id).?.textEditor().?.doc;
+        var seen_claude = false;
+        var seen_codex = false;
+        for (doc.peers.items) |slot| {
+            const p = slot orelse continue;
+            if (std.mem.eql(u8, p.name, "claude#1")) seen_claude = true;
+            if (std.mem.eql(u8, p.name, "codex#2")) seen_codex = true;
+        }
+        try t.expect(seen_claude and seen_codex);
+    }
+
+    // Answer the OPEN pick — agent one's. Only agent one unblocks: agent two
+    // is still waiting for the answer to ITS own tool call.
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(H.until(plugin, &env, gpa, "*agent*", "alpha ack"));
+    try t.expect(H.absent(plugin, &env, gpa, "*agent:2*", "beta ack"));
+
+    // Agent two's queued request opened on the freed head; answering IT
+    // resolves ITS call, and its ack lands in ITS transcript.
+    try t.expect(env.head.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(H.until(plugin, &env, gpa, "*agent:2*", "beta ack"));
+    {
+        const a = H.text(&env, gpa, "*agent*").?;
+        defer gpa.free(a);
+        try t.expect(std.mem.indexOf(u8, a, "beta ack") == null);
     }
 }

@@ -83,8 +83,8 @@ extern void host_buffer_fold(const char *name, int name_len, int start, int end)
 __attribute__((import_module("weft"), import_name("qjs_buffer_len")))
 extern int host_buffer_len(const char *name, int name_len);
 // W6 check-in producer seam (doc/agents.md, north-star-plan.md §6 W5/W6):
-// start a new role-tagged entry in this plugin's single-instance live
-// TranscriptDoc (created on first call), re-filling `name`'s projected
+// start a new role-tagged entry in the live TranscriptDoc `name` projects
+// (one conversation per buffer name, minted on first call), re-filling that
 // buffer from the model. Config stubs it (never called there).
 __attribute__((import_module("weft"), import_name("qjs_transcript_entry")))
 extern void host_transcript_entry(const char *name, int name_len,
@@ -119,9 +119,12 @@ extern int host_line_text(char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_active_buffer")))
 extern int host_active_buffer(char *out, int cap);
 // Open a pick (prompt + newline-joined options); the structured acceptance
-// comes back via weft_on_pick. An async approve/deny for a permission request.
+// comes back via weft_on_pick carrying `token` — the opaque continuation
+// identity the caller minted, so an async approve/deny answers the ONE
+// request it was opened for even with several in flight.
 __attribute__((import_module("weft"), import_name("qjs_pick")))
-extern void host_pick(const char *prompt, int plen, const char *opts, int olen);
+extern void host_pick(const char *prompt, int plen, const char *opts, int olen,
+                      const char *token, int tlen);
 // Set the status-line chip (the "● agent · waiting" indicator). "" clears it.
 __attribute__((import_module("weft"), import_name("qjs_status")))
 extern void host_status(const char *text, int len);
@@ -794,18 +797,22 @@ static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.pick(prompt, options): options is a newline-joined list. Empty rows are
-// retained, so the candidate index is the original line ordinal. The handler
-// receives one object describing candidate/input/cancelled acceptance.
+// weft.pick(prompt, options, token): options is a newline-joined list. Empty
+// rows are retained, so the candidate index is the original line ordinal. The
+// handler receives one object describing candidate/input/cancelled acceptance,
+// carrying `token` (optional, "" when omitted) back untouched.
 static JSValue js_pick(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
-    size_t pl, ol;
+    size_t pl, ol, tl = 0;
     const char *prompt = JS_ToCStringLen(ctx, &pl, argv[0]);
     const char *opts = JS_ToCStringLen(ctx, &ol, argv[1]);
-    if (prompt && opts) host_pick(prompt, (int)pl, opts, (int)ol);
+    const char *token = argc > 2 ? JS_ToCStringLen(ctx, &tl, argv[2]) : NULL;
+    if (prompt && opts)
+        host_pick(prompt, (int)pl, opts, (int)ol, token ? token : "", (int)tl);
     JS_FreeCString(ctx, prompt);
     JS_FreeCString(ctx, opts);
+    JS_FreeCString(ctx, token);
     return JS_UNDEFINED;
 }
 
@@ -875,7 +882,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
-    JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 2));
+    JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));
     JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
     JS_SetPropertyStr(g_ctx, weft, "status", JS_NewCFunction(g_ctx, js_status, "status", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
@@ -903,12 +910,14 @@ void weft_on_output(int handle) {
 }
 
 // weft_on_pick(kind, index, text, text_len, query, query_len, match_start,
-//              match_span): dispatch one structured pick outcome. kind is
-// 0=candidate, 1=input, 2=cancelled.
+//              match_span, token, token_len): dispatch one structured pick
+// outcome. kind is 0=candidate, 1=input, 2=cancelled. `token` is the
+// continuation identity `weft.pick` was opened with, delivered on EVERY kind
+// (a cancellation must resolve its own request too).
 __attribute__((export_name("weft_on_pick")))
 void weft_on_pick(int kind, int index, const char *text, int text_len,
                   const char *query, int query_len, int match_start,
-                  int match_span) {
+                  int match_span, const char *token, int token_len) {
     if (!g_ctx || !JS_IsFunction(g_ctx, g_on_pick)) return;
     JSValue arg = JS_NewObject(g_ctx);
     const char *text_ptr = text ? text : "";
@@ -928,6 +937,9 @@ void weft_on_pick(int kind, int index, const char *text, int text_len,
     } else {
         JS_SetPropertyStr(g_ctx, arg, "kind", JS_NewString(g_ctx, "cancelled"));
     }
+    JS_SetPropertyStr(g_ctx, arg, "token",
+                      JS_NewStringLen(g_ctx, token ? token : "",
+                                      (size_t)(token_len < 0 ? 0 : token_len)));
     JSValue r = JS_Call(g_ctx, g_on_pick, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(r)) log_exception(g_ctx);
     JS_FreeValue(g_ctx, r);

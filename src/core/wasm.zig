@@ -321,11 +321,16 @@ pub const Instance = struct {
         @memcpy(data[ptr .. ptr + bytes.len], bytes);
     }
 
+    /// Scalar arguments one export call may carry — the widest reactor
+    /// export (`weft_on_pick`: an outcome plus its continuation token) sets
+    /// the floor. Exceeding it is `error.BadType`, never a truncated call.
+    const max_call_args = 16;
+
     /// Call an exported `(iN…) -> ()` function (the common plugin export
     /// shape: side effects through host imports, no return).
     pub fn callVoid(self: *Instance, name: []const u8, args: []const i32) Error!void {
         var func = try self.exportFunc(name);
-        var argv: [8]c.wasmtime_val_t = undefined;
+        var argv: [max_call_args]c.wasmtime_val_t = undefined;
         if (args.len > argv.len) return error.BadType;
         for (args, 0..) |a, i| argv[i] = .{ .kind = c.WASMTIME_I32, .of = .{ .i32 = a } };
         var trap: ?*c.wasm_trap_t = null;
@@ -337,7 +342,7 @@ pub const Instance = struct {
     /// i32 result. The bulk-Value marshalling (abi.zig) builds on this.
     pub fn callI32(self: *Instance, name: []const u8, args: []const i32) Error!i32 {
         var func = try self.exportFunc(name);
-        var argv: [8]c.wasmtime_val_t = undefined;
+        var argv: [max_call_args]c.wasmtime_val_t = undefined;
         if (args.len > argv.len) return error.BadType;
         for (args, 0..) |a, i| argv[i] = .{ .kind = c.WASMTIME_I32, .of = .{ .i32 = a } };
         var results: [1]c.wasmtime_val_t = undefined;
