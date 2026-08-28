@@ -1057,6 +1057,15 @@ pub fn loadHeadtest(ed: *Editor) !void {
     try ed.load("headtest", guest.headtest);
 }
 
+/// Load ONE grammar from the embedded catalog by name — the load a config's
+/// `weft.plugin(name)` performs, without a config in the way. For gates that
+/// drive several grammars through the same script (the §10.4 posture gate),
+/// where the interesting difference is the grammar, not the config.
+pub fn loadGrammar(ed: *Editor, name: []const u8) !void {
+    try ed.load(name, plugin_catalog.get(name) orelse return error.UnknownPlugin);
+    try setResting(ed);
+}
+
 /// Mirror main.zig: after the editor guest has set the base editing mode, capture
 /// it as `default_mode` so a file opened fresh (e.g. from *grep*/files) lands in
 /// that mode, not stuck in the tool buffer's mode or an empty mode.

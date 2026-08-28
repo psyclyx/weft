@@ -141,6 +141,20 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
             });
         }
 
+        // §19's "`semanticActive` branches", at the site that mattered: a
+        // grammar picking its RESTING state by asking whether a semantic view
+        // is live (the survivor deleted from vim.zig). Resting comes from the
+        // entry's declared posture now (§10.4, `weft.posture()`/
+        // `weft.exitToResting`) — asking a view instead is the mode-leak
+        // class growing back. Calling `semanticActive` for what it means
+        // (dispatching a structured action, `guest/ex.zig`) stays fine; what
+        // this refuses is the FORK between it and a mode change.
+        if (std.mem.indexOf(u8, line, "semanticActive") != null and
+            (std.mem.indexOf(u8, line, "setMode") != null or
+                std.mem.indexOf(u8, line, "exitToResting") != null or
+                std.mem.indexOf(u8, line, "restingMode") != null))
+            try scan.record(rel_path, line_no, "resting-mode restoration forked on semanticActive (doc §19; read the declared posture instead — §10.4)");
+
         if (containsIgnoreCase(line, "lockedmode"))
             try scan.record(rel_path, line_no, "lockedMode call site (the Keymap machinery is deleted — doc §19 'locked tool modes')");
 

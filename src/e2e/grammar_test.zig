@@ -529,3 +529,192 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     ed.runStr("open", "child");
     try t.expectEqual(@as(usize, 1), try countName(ed, gpa, "top.txt"));
 }
+
+// ── §10.4: input postures ────────────────────────────────────────────
+
+/// One grammar's declared answer to §10.4, as the mode-leak gate reads it.
+/// The gate drives the SAME script through each: what differs is the
+/// vocabulary, not the mechanism — which is the whole point of declaring a
+/// posture instead of asking what tool an entry is.
+const PostureCase = struct {
+    /// The grammar plugin to load from the embedded catalog.
+    grammar: []const u8,
+    /// The key that puts this grammar in a text-committing state, or null
+    /// where its RESTING state already commits (a modeless grammar) or where
+    /// it has no such state at all.
+    enter_text: ?[]const u8 = null,
+    /// The state reached that way — asserted to commit text, so the gate
+    /// proves the leak's precondition before proving it cannot leak.
+    committing: ?[]const u8 = null,
+    text_resting: []const u8,
+    structural_resting: []const u8,
+    /// The chord this grammar keeps bound for `std.input.break-out` — each
+    /// picks its own, which is exactly why the vocabulary is an intention
+    /// and not a key core reserves.
+    break_out: []const u8,
+};
+
+const posture_cases = [_]PostureCase{
+    // Vim: modal, so its text resting state commits nothing already; the
+    // insert-like state is what a structural entry must not inherit.
+    .{ .grammar = "vim", .enter_text = "i", .committing = "insert", .text_resting = "normal", .structural_resting = "normal", .break_out = "C-backslash" },
+    // Emacs: MODELESS — its text resting state IS the committing one, so it
+    // must declare a separate structural state or every letter leaks.
+    .{ .grammar = "emacs", .committing = "emacs", .text_resting = "emacs", .structural_resting = "emacs-structural", .break_out = "C-c C-backslash" },
+    // The synthetic std-only grammar: one state, committing nothing, and it
+    // DECLARES that as its answer for both postures rather than defaulting.
+    .{ .grammar = "gramtest", .text_resting = "gramtest", .structural_resting = "gramtest", .break_out = "C-backslash" },
+};
+
+test "e2e/grammar: GATE 5 — a structural entry rests structurally, and the text entry's resting state comes back" {
+    const gpa = t.allocator;
+    for (posture_cases) |case| {
+        var ed: h.Editor = undefined;
+        try h.Editor.init(gpa, &ed);
+        defer ed.deinit();
+        try h.loadGrammar(&ed, case.grammar);
+
+        // A text entry: the full grammar applies, by DERIVATION — nobody
+        // declared anything about the scratch buffer.
+        const text_id = ed.buffers.active_id;
+        try t.expectEqual(core.input.Posture.text, ed.ctx.posture());
+        try t.expectEqualStrings(case.text_resting, ed.mode());
+
+        // Get into the state text comes from, and prove it is one.
+        if (case.enter_text) |key| ed.press(key, key);
+        if (case.committing) |committing| {
+            try t.expectEqualStrings(committing, ed.mode());
+            try t.expect(ed.keymap.commitCommand(committing) != null);
+        }
+
+        // Enter a STRUCTURAL entry (a view entry holds no text, so it derives
+        // `structural` — no tool had to declare anything).
+        const view_id = try ed.buffers.createView(gpa, "*view*", "tool");
+        try ed.buffers.switchTo(gpa, view_id, ed.head, ed.keymap);
+
+        try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+        // THE MODE-LEAK CLASS: the entry rests in the grammar's structural
+        // state, and no key in that state can become text — by declaration,
+        // not by refusing edits after the fact.
+        try t.expectEqualStrings(case.structural_resting, ed.mode());
+        try t.expectEqual(@as(?[]const u8, null), ed.keymap.commitCommand(ed.mode()));
+
+        // The grammar DECLINES its insert-like state here rather than parking
+        // the user in it.
+        if (case.enter_text) |key| {
+            ed.press(key, key);
+            try t.expectEqualStrings(case.structural_resting, ed.mode());
+        }
+
+        // Returning restores the TEXT entry's resting state — the entry left
+        // mid-insert comes back at its base, not in insert.
+        try ed.buffers.switchTo(gpa, text_id, ed.head, ed.keymap);
+        try t.expectEqual(core.input.Posture.text, ed.ctx.posture());
+        try t.expectEqualStrings(case.text_resting, ed.mode());
+    }
+}
+
+test "e2e/grammar: a capture declaration round-trips, and break-out returns the posture it displaced" {
+    const gpa = t.allocator;
+    for (posture_cases) |case| {
+        var ed: h.Editor = undefined;
+        try h.Editor.init(gpa, &ed);
+        defer ed.deinit();
+        try h.loadGrammar(&ed, case.grammar);
+        try h.loadHeadtest(&ed); // `head-capture`: a presentation owner, across the membrane
+
+        // No capture consumer exists in-tree (§10.4), so what is wired is the
+        // DECLARATION and its pairing: a presentation declares capture on its
+        // entry, the read reports it, and the grammar's always-retained
+        // break-out chord returns the posture capture displaced.
+        const view_id = try ed.buffers.createView(gpa, "*view*", "tool");
+        try ed.buffers.switchTo(gpa, view_id, ed.head, ed.keymap);
+        try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+
+        ed.run("head-capture");
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+        // A capture entry still rests where its grammar answers keys, so the
+        // break-out chord can be pressed at all.
+        try t.expectEqualStrings(case.structural_resting, ed.mode());
+
+        ed.chord(case.break_out);
+        try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+
+        // The DISPLACED declaration comes back, not merely "the derivation":
+        // an owner that declared `text` on a text-less entry gets that back.
+        // (An in-process presentation owner declares through the same door a
+        // guest's `weft.declarePosture` funnels into.)
+        ed.buffers.active().declarePosture(.text);
+        ed.run("head-capture");
+        ed.chord(case.break_out);
+        try t.expectEqual(core.input.Posture.text, ed.ctx.posture());
+    }
+}
+
+test "e2e/grammar: a focused editable field reports `field`, and rests where structural rests" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try authorTree(ed);
+
+    // The browser's focus traversal stops on each row's editable name column,
+    // so commits belong to the FIELD, not to any document (§11.8). That is a
+    // refinement of `structural`, not a departure from it: the entry still
+    // rests where the grammar's structural state is, which is what keeps the
+    // browser's own keys live while a field has the focus.
+    ed.runStr("open", ".");
+    try focusRowByName(ed, gpa, "top.txt");
+    try t.expect(ed.head.semantic_focus.field != null);
+    try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
+    try t.expectEqualStrings("gramtest", ed.mode());
+    try t.expectEqualStrings("gramtest", ed.buffers.restingModeFor(.field));
+}
+
+test "e2e/grammar: an open interaction owns input first, and the grammar sees exactly what it declines" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try authorTree(ed);
+
+    ed.runStr("open", ".");
+    try focusRowByName(ed, gpa, "child");
+    ed.press("Tab", "\t");
+    try focusRowByName(ed, gpa, "top.txt");
+    ed.press("d", "d");
+    try focusRowByName(ed, gpa, "inner.txt");
+    ed.press("p", "p");
+
+    // Applying the draft asks first: an interaction goes on the head's stack.
+    ed.run("view-apply");
+    try t.expect(ed.head.interactions.active() != null);
+
+    // §10.4's standing precedence rule (enforced in `dispatchSpec`, which
+    // offers every key to `invokeInteractionInput` BEFORE the keymap): the
+    // interaction declines `j`/`k`, so the grammar still navigates under an
+    // open dialog — and the dialog stays up, because declining is not
+    // dismissing.
+    try focusRowByName(ed, gpa, "child");
+    try t.expect(ed.head.interactions.active() != null);
+    {
+        const at = try focusedName(ed, gpa);
+        defer gpa.free(at);
+        try t.expectEqualStrings("child", at);
+    }
+
+    // A key it DOES bind never reaches the grammar. `y` is this grammar's
+    // std.transfer.yank; here it confirms and the interaction closes — had
+    // the grammar seen it, the dialog would still be open and the draft
+    // unapplied.
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
+    try t.expect(h.drainUntilOracle(
+        &app.proj,
+        ed,
+        "test -f child/top.txt && test ! -e top.txt && printf ok",
+        "ok",
+    ));
+}

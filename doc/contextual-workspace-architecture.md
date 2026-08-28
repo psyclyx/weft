@@ -743,6 +743,19 @@ While an interaction is on the head's stack, the interaction's presenter owns
 input first, under the same posture vocabulary; grammars see what it
 declines. Escape never force-changes a resting posture.
 
+Landed surface: the posture is DERIVED from what an entry can do (an entry
+that takes interactive text edits is `text`; a semantic view or produced
+read-only projection is `structural`, refined to `field` while an editable
+field holds focus) and overridable by the presentation owner
+(`weft.declarePosture`). A grammar reads the declaration with
+`weft.posture()` and declares what each posture means in its own vocabulary
+with `weft.restingPosture(posture, mode)`; core pairs the two on entry
+switch and on `weft.exitToResting`, so no grammar asks what tool an entry is
+and no entry names a mode. Break-out is the standard intention
+`std.input.break-out` (core command `posture-break-out`), which every
+shipped grammar keeps bound; declaring `capture` stacks the declaration it
+displaced, and breaking out restores it.
+
 ## 11. Presentation and IDE UI
 
 ### 11.1 Presentation contract
