@@ -113,3 +113,155 @@ test "app/window: a further split tiles three panes and still composites" {
     try t.expect(harness.hasContent(pixels, app_w, 0, 0, app_w, app_h));
     ed.snapshotPanes("tri-pane");
 }
+
+// ── GATE: a sidebar is a config fragment ──
+//
+// doc/cwa-config-decisions.md D1-D3 (and architecture §7/§9.4/§18): "a docked
+// sidebar showing project files is a config fragment plus the generic tree
+// presentation — expressible with zero interposing behavior, everything
+// visible to explain()". The fragment (`config/sidebar.js`) declares four
+// viewport ATTRIBUTES and one `present`; nothing else in this file is
+// sidebar-aware, and no code anywhere names "sidebar" as a kind.
+//
+// What each primitive has to do for this to work: the pane tree docks a leaf
+// and refuses to restructure it (D1); the layout phase routes the
+// activation's open by POLICY rather than by whoever opened it (D3); and the
+// focus feed marks this viewport's focus as companion focus, so nothing
+// follows it (D2).
+
+/// The name column of the focused files row, or null when the focus is not on
+/// one. The rename field IS the row's name (editable projection), so reading
+/// its draft is reading what the user sees.
+fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
+    const path = ed.head.semantic_focus.path() orelse return null;
+    const leaf = path.leaf() orelse return null;
+    const view = ed.session.system.semantic.views.get(path.view) orelse return null;
+    for (view.scene.content.container.children) |row| {
+        const column = row.content.container.children[2];
+        if (column.id != leaf and row.id != leaf) continue;
+        var snapshot = try ed.session.system.semantic.fields.get(column.content.field.ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        return try gpa.dupe(u8, snapshot.value.bytes);
+    }
+    return null;
+}
+
+/// Press `j` until the focused row is `want`. Navigation is the std intention
+/// `std.navigation.down` (vim binds `j` to it, with a text motion as the
+/// fallback arm) — no files-specific key anywhere.
+fn navigateToRow(ed: *Editor, gpa: std.mem.Allocator, want: []const u8) !void {
+    for (0..64) |_| {
+        if (try focusedRowName(ed, gpa)) |name| {
+            defer gpa.free(name);
+            if (std.mem.eql(u8, name, want)) return;
+        }
+        ed.press("j", "");
+    }
+    return error.RowNeverFocused;
+}
+
+test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in the primary pane" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytes(gpa, "alpha.txt", "ALPHA CONTENT\n");
+    try core.file.writeBytes(gpa, "bravo.txt", "BRAVO CONTENT\n");
+
+    // Import the fragment through the ordinary import verb, evaluated sealed
+    // like any other config. Nothing here is a test-only door.
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{app.proj.prev_cwd});
+    defer gpa.free(config_dir);
+    const editor_entry = ed.buffers.active_id;
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, config_dir, "weft.use(\"sidebar\");");
+
+    // The layout phase realizes declared viewports — an ordinary application
+    // wake, not a harness-selectable operation.
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
+    const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
+    try t.expect(panel != primary);
+
+    // The declared attributes are what the workspace enforces — read them off
+    // the live pane, not off the fragment.
+    try t.expect(!panel.pane().attrs.cycles);
+    try t.expect(panel.pane().attrs.persistent);
+    try t.expect(!panel.pane().attrs.focus_source);
+    try t.expectEqual(@as(?core.viewport.Edge, .left), panel.pane().attrs.dock);
+
+    // Presenting the subject stole neither the editor pane nor the focus.
+    const browser = panel.pane().buffer_id;
+    try t.expect(browser != editor_entry);
+    try t.expectEqual(editor_entry, primary.pane().buffer_id);
+    try t.expectEqual(editor_entry, ed.buffers.active_id);
+
+    // Focus the sidebar deliberately (directional focus reaches it; cycling
+    // never would) — the active entry follows the pane, so its rows are what
+    // keys act on.
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expectEqual(browser, ed.buffers.active_id);
+
+    // j/k navigate the tree through std intentions. Row order is the
+    // directory's, not this test's business, so the walk is stated relative
+    // to wherever the focus starts.
+    const first_row = (try focusedRowName(ed, gpa)) orelse return error.RowNeverFocused;
+    defer gpa.free(first_row);
+    ed.press("j", "");
+    {
+        const next = (try focusedRowName(ed, gpa)) orelse return error.RowNeverFocused;
+        defer gpa.free(next);
+        try t.expect(!std.mem.eql(u8, next, first_row)); // j moved
+    }
+    ed.press("k", "");
+    {
+        const back = (try focusedRowName(ed, gpa)) orelse return error.RowNeverFocused;
+        defer gpa.free(back);
+        try t.expectEqualStrings(first_row, back); // and k moved back
+    }
+    try navigateToRow(ed, gpa, "alpha.txt");
+
+    // Return activates the row. The file opens through the same `open` a
+    // picker runs; WHERE it lands is the placement policy's answer, and from
+    // a companion viewport that answer is the primary pane.
+    ed.press("Return", "");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+
+    const opened = primary.pane().buffer_id;
+    try t.expect(opened != editor_entry);
+    const text = try ed.buffers.get(opened).?.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("ALPHA CONTENT\n", text);
+
+    // The sidebar kept its root AND its focus discipline: same entry, still
+    // focused, still on the row it was on. This is the whole gate — without a
+    // placement policy the open lands in the FOCUSED pane, which is the
+    // sidebar.
+    try t.expectEqual(browser, panel.pane().buffer_id);
+    try t.expectEqual(browser, ed.buffers.active_id);
+    try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
+    {
+        const still = (try focusedRowName(ed, gpa)) orelse return error.RowNeverFocused;
+        defer gpa.free(still);
+        try t.expectEqualStrings("alpha.txt", still);
+    }
+
+    // And the companion's own focus is not a primary-focus change: the feed's
+    // last event carries the sidebar's attributes, so a follower built on the
+    // shipped helper ignores it rather than retargeting to itself.
+    const last = ed.session.system.focus.last orelse return error.NoFocusEvent;
+    try t.expect(!last.attrs.focus_source);
+    const follower: core.focus_feed.Companion = .{
+        .viewport = 999,
+        .retarget = struct {
+            fn never(_: ?*anyopaque, _: core.focus_feed.Event) void {
+                unreachable;
+            }
+        }.never,
+    };
+    try t.expect(!follower.follows(last));
+}
