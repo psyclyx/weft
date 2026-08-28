@@ -1,9 +1,20 @@
 //! window_layout — a recursive tree of editor panes ("what vim does").
 //! Leaves are panes (a buffer + its own scroll); internal nodes split a
-//! rect between two children along an axis. All geometry is delegated to
-//! `region.Rect` (the pure split/contains primitive), so this module owns
-//! only the *mutable* tree region.Tree can't hold: which buffer a leaf
-//! shows and its scroll.
+//! rect between two children — a `.split` by axis and fraction, a `.dock` by
+//! frame EDGE and extent. All geometry is delegated to `region.Rect` (the
+//! pure split/contains primitive), so this module owns only the *mutable*
+//! tree region.Tree can't hold: which buffer a leaf shows, its scroll, and
+//! its viewport attributes.
+//!
+//! A DOCK is not a second layout system: it is one more internal node kind,
+//! walked by the same `children`/`childRects` pair every other operation
+//! uses, so hit-testing, directional focus, rect assignment, and pruning got
+//! docks for free rather than each learning about them. What the dock node
+//! adds over a plain split is that the panel's side is DATA (`edge`) instead
+//! of a convention, and that the leaf under it carries companion attributes
+//! (`core.viewport.Attrs`) the structural operations here refuse to violate.
+//! "Sidebar" is that bundle of attributes, declared per viewport — not a
+//! kind this module knows (doc/cwa-config-decisions.md D1).
 //!
 //! FOCUS is deliberately NOT part of `Layout`'s own storage
 //! (doc/contextual-workspace-architecture.md §7): the split TREE is
@@ -64,10 +75,19 @@ pub const Dir = enum { left, right, up, down };
 /// `id` names this pane in `Layout`'s slot table (`headFocus`/
 /// `setHeadFocus`'s handle validation) — assigned when the pane is
 /// (re)created, never chosen by a caller.
+///
+/// `attrs` are the workspace-enforced viewport attributes
+/// (`core.viewport.Attrs`, §7): this module is where three of the four are
+/// actually ENFORCED rather than merely declared — `cycles` by `focusNext`,
+/// `dock` by the `.dock` node this pane hangs under, and the pair of them by
+/// `splitFocused`/`swapNeighbor`/`closeFocused` refusing to restructure a
+/// companion. `persistent` and `focus_source` are enforced one layer up
+/// (`app/window_cmds.zig`), where the active entry and the focus feed live.
 pub const Pane = struct {
     id: PaneId,
     buffer_id: core.Buffers.Id,
     top_row: usize = 0,
+    attrs: core.viewport.Attrs = .tiled,
 };
 
 /// A slot-table index for a live pane — the numerator half of the
@@ -96,6 +116,7 @@ pub const max_panes = 64;
 pub const Node = union(enum) {
     leaf: Pane,
     split: Split,
+    dock: Dock,
 
     const Split = struct {
         axis: Axis,
@@ -105,6 +126,21 @@ pub const Node = union(enum) {
         second: *Node,
     };
 
+    /// An edge-anchored panel plus everything else. Structurally a split
+    /// whose geometry is stated as an EDGE and an extent rather than an axis
+    /// and a fraction, so which side the panel sits on is data the tree
+    /// carries instead of a convention every reader re-derives. `panel` is
+    /// always a `.leaf` (a docked viewport is one pane, by construction);
+    /// `rest` is an arbitrary subtree — nesting two docks is just two of
+    /// these.
+    const Dock = struct {
+        edge: core.viewport.Edge,
+        /// The panel's share of this rect (0..1).
+        extent: f32,
+        panel: *Node,
+        rest: *Node,
+    };
+
     /// The pane a (leaf) focus node names. Caller's responsibility that
     /// `self` is actually a leaf — true of every `*Node` this module hands
     /// back as a focus value.
@@ -112,6 +148,21 @@ pub const Node = union(enum) {
         return &self.leaf;
     }
 };
+
+/// Carve `rect` for a dock: the panel takes `extent` off `edge`, the rest
+/// keeps the remainder. The single place edge-to-geometry is decided.
+fn dockHalves(d: Node.Dock, rect: Rect) struct { panel: Rect, rest: Rect } {
+    const axis: Axis = switch (d.edge) {
+        .left, .right => .vertical,
+        .top, .bottom => .horizontal,
+    };
+    const panel_first = d.edge == .left or d.edge == .top;
+    const halves = rect.split(axis, if (panel_first) d.extent else 1 - d.extent);
+    return if (panel_first)
+        .{ .panel = halves[0], .rest = halves[1] }
+    else
+        .{ .panel = halves[1], .rest = halves[0] };
+}
 
 /// One slot in `Layout`'s pane table: the pane's CURRENT node address (null
 /// once freed) and a generation bumped every time this id's occupancy
@@ -144,7 +195,9 @@ pub fn headFocus(layout: *Layout, head: *core.Head) *Node {
         std.debug.assert(n.* == .leaf);
         return n;
     }
-    const recovered = firstLeaf(layout.root);
+    // Recovery lands on an EDITING pane when one exists: a head whose handle
+    // went stale must never wake up inside a companion it never focused.
+    const recovered = firstPrimaryLeaf(layout.root) orelse firstLeaf(layout.root);
     setHeadFocus(head, recovered, layout);
     return recovered;
 }
@@ -225,9 +278,58 @@ pub const Layout = struct {
         self.free.append(self.gpa, id) catch {};
     }
 
-    /// Leaf count (== the number of panes on screen).
+    /// Leaf count (== the number of panes on screen, docked panels
+    /// included).
     pub fn count(self: *const Layout) usize {
         return countLeaves(self.root);
+    }
+
+    /// How many panes can host an ordinary workspace entry. Distinct from
+    /// `count` on purpose: "may I close this?" and "is anything left to
+    /// edit in?" are different questions the moment a companion exists.
+    pub fn primaryCount(self: *const Layout) usize {
+        return countPrimary(self.root);
+    }
+
+    /// The pane an entry with no viewport of its own belongs in — the first
+    /// primary-eligible leaf, or null when the workspace is all companions.
+    pub fn primaryPane(self: *Layout) ?*Node {
+        return firstPrimaryLeaf(self.root);
+    }
+
+    /// Anchor a new panel to `edge`, taking `extent` (0..1) of the frame,
+    /// showing `buffer_id` under `attrs`; returns the panel leaf.
+    ///
+    /// Nothing existing MOVES: the fresh `.dock` node becomes the new root
+    /// and adopts the old root as its `rest`, so every live pane keeps its
+    /// address and every head's focus handle keeps resolving. (Copying the
+    /// old root's value into a new node instead would retire its slot and
+    /// scatter focus for no reason — see `splitFocused`'s note on why a
+    /// relocation always earns a fresh handle.)
+    pub fn dock(
+        self: *Layout,
+        edge: core.viewport.Edge,
+        extent: f32,
+        buffer_id: core.Buffers.Id,
+        attrs: core.viewport.Attrs,
+    ) !*Node {
+        const panel = try self.gpa.create(Node);
+        errdefer self.gpa.destroy(panel);
+        const node = try self.gpa.create(Node);
+        errdefer self.gpa.destroy(node);
+        const id = try self.allocSlot(panel);
+        var docked = attrs;
+        docked.dock = edge; // the tree and the attributes cannot disagree
+        panel.* = .{ .leaf = .{ .id = id, .buffer_id = buffer_id, .attrs = docked } };
+        node.* = .{ .dock = .{ .edge = edge, .extent = extent, .panel = panel, .rest = self.root } };
+        self.root = node;
+        return panel;
+    }
+
+    /// The docked panel on `edge`, or null. Panels are identified by their
+    /// edge because that is what a config fragment names them by.
+    pub fn dockedPanel(self: *Layout, edge: core.viewport.Edge) ?*Node {
+        return findDock(self.root, edge);
     }
 
     /// Visit every pane (leaf order). Used to keep panes in sync with the
@@ -250,14 +352,17 @@ pub const Layout = struct {
     /// structural change always earns a fresh handle, never a silent carry.
     pub fn splitFocused(self: *Layout, focused: *Node, axis: Axis) !*Node {
         const old = focused.leaf;
+        // A companion is one pane by construction: splitting a sidebar would
+        // make "the sidebar" ambiguous for every later placement decision.
+        if (!old.attrs.isPrimary()) return error.NotSplittable;
         const first = try self.gpa.create(Node);
         errdefer self.gpa.destroy(first);
         const second = try self.gpa.create(Node);
         errdefer self.gpa.destroy(second);
         const first_id = try self.allocSlot(first);
         const second_id = try self.allocSlot(second);
-        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row } }; // keeps the focus + scroll
-        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row } };
+        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs } }; // keeps the focus + scroll
+        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs } };
         self.freeSlot(old.id); // retire the pre-split identity — only now that the new slots are committed
         // Mutate the focused leaf into a split in place — no parent relink,
         // so pointers elsewhere in the tree stay valid.
@@ -265,9 +370,11 @@ pub const Layout = struct {
         return first;
     }
 
-    /// Remove `focused`, collapsing its parent split into the surviving
-    /// sibling; returns the new focus (the first leaf of that sibling), or
-    /// `focused` unchanged when it is the only pane (no-op).
+    /// Remove `focused`, collapsing its parent split (or dock) into the
+    /// surviving sibling; returns the new focus (the first leaf of that
+    /// sibling), or `focused` unchanged when it is the only pane, or when
+    /// closing it would leave nothing to edit in (a workspace of nothing but
+    /// companions is not a state the user can get back out of).
     ///
     /// TWO nodes are freed here — `focused` AND its sibling shell (the
     /// sibling's CONTENT survives, copied up into the parent's address, but
@@ -283,8 +390,8 @@ pub const Layout = struct {
     /// OTHER head that might be holding a handle into this tree.
     pub fn closeFocused(self: *Layout, focused: *Node) !*Node {
         const parent = findParent(self.root, focused) orelse return focused; // only pane
-        const p = &parent.node.split;
-        const sibling = if (parent.side_first) p.second else p.first;
+        if (focused.leaf.attrs.isPrimary() and countPrimary(self.root) == 1) return focused;
+        const sibling = parent.sibling();
         const sib_val = sibling.*;
         // Mint the surviving content's new identity at the parent's
         // (about-to-be-overwritten) address FIRST, so a failure here leaves
@@ -338,6 +445,10 @@ pub const Layout = struct {
     /// content). Returns true if a neighbor existed.
     pub fn swapNeighbor(self: *Layout, focused: *Node, frame: Rect, dir: Dir) bool {
         const nb = self.neighborNode(focused, frame, dir) orelse return false;
+        // A companion owns its subject: moving an editor entry INTO a sidebar
+        // (or its tree out of one) is exactly the misplacement the attributes
+        // exist to make unrepresentable.
+        if (!focused.leaf.attrs.isPrimary() or !nb.leaf.attrs.isPrimary()) return false;
         const fb = focused.leaf.buffer_id;
         const ft = focused.leaf.top_row;
         focused.leaf.buffer_id = nb.leaf.buffer_id;
@@ -347,15 +458,27 @@ pub const Layout = struct {
         return true;
     }
 
-    /// The next leaf after `focused` in tree order (wraps) — the legacy
-    /// `focus-other` with more than two panes. Null if fewer than two panes.
+    /// The next CYCLING leaf after `focused` in tree order (wraps) — the
+    /// legacy `focus-other` with more than two panes. Null if fewer than two
+    /// panes take part.
+    ///
+    /// Panes whose `cycles` attribute is false are not in the rotation, which
+    /// is the whole of "a sidebar does not appear in `focus-other`": it is
+    /// enforced here, once, rather than by every caller remembering to skip
+    /// it. `focused` itself may be one (cycling OUT of a companion is fine —
+    /// it is cycling INTO one that is unwanted).
     pub fn focusNext(self: *Layout, focused: *Node) ?*Node {
         var buf: [max_panes]*Node = undefined;
         var n: usize = 0;
         leafNodes(self.root, &buf, &n);
-        if (n < 2) return null;
+        var start: ?usize = null;
         for (buf[0..n], 0..) |node, i| {
-            if (node == focused) return buf[(i + 1) % n];
+            if (node == focused) start = i;
+        }
+        const from = start orelse return null;
+        for (1..n) |step| {
+            const cand = buf[(from + step) % n];
+            if (cand != focused and cand.leaf.attrs.cycles) return cand;
         }
         return null;
     }
@@ -406,12 +529,9 @@ pub const Layout = struct {
 const NodeRect = struct { node: *Node, rect: Rect };
 
 fn freeNode(gpa: std.mem.Allocator, node: *Node) void {
-    switch (node.*) {
-        .leaf => {},
-        .split => |s| {
-            freeNode(gpa, s.first);
-            freeNode(gpa, s.second);
-        },
+    if (children(node)) |pair| {
+        freeNode(gpa, pair[0]);
+        freeNode(gpa, pair[1]);
     }
     gpa.destroy(node);
 }
@@ -420,90 +540,139 @@ fn countLeaves(node: *const Node) usize {
     return switch (node.*) {
         .leaf => 1,
         .split => |s| countLeaves(s.first) + countLeaves(s.second),
+        .dock => |d| countLeaves(d.rest) + countLeaves(d.panel),
+    };
+}
+
+fn countPrimary(node: *const Node) usize {
+    return switch (node.*) {
+        .leaf => |p| @intFromBool(p.attrs.isPrimary()),
+        .split => |s| countPrimary(s.first) + countPrimary(s.second),
+        .dock => |d| countPrimary(d.rest) + countPrimary(d.panel),
     };
 }
 
 fn eachPaneRec(node: *Node, ctx: anytype, comptime visit: fn (@TypeOf(ctx), *Pane) void) void {
-    switch (node.*) {
-        .leaf => visit(ctx, &node.leaf),
-        .split => |s| {
-            eachPaneRec(s.first, ctx, visit);
-            eachPaneRec(s.second, ctx, visit);
-        },
-    }
+    const pair = children(node) orelse return visit(ctx, &node.leaf);
+    eachPaneRec(pair[0], ctx, visit);
+    eachPaneRec(pair[1], ctx, visit);
 }
 
-const Parent = struct { node: *Node, side_first: bool };
+/// `side_first` says the target was the first of this node's children in
+/// `children` order — a split's `first`, or a dock's `rest`.
+const Parent = struct {
+    node: *Node,
+    side_first: bool,
 
-/// The split node one of whose children == `target`, or null when target
+    /// The child that survives when the target is closed.
+    fn sibling(self: Parent) *Node {
+        return switch (self.node.*) {
+            .leaf => unreachable,
+            .split => |s| if (self.side_first) s.second else s.first,
+            .dock => |d| if (self.side_first) d.panel else d.rest,
+        };
+    }
+};
+
+/// The internal node one of whose children == `target`, or null when target
 /// is the root (has no parent).
 fn findParent(node: *Node, target: *Node) ?Parent {
-    switch (node.*) {
-        .leaf => return null,
-        .split => |s| {
-            if (s.first == target) return .{ .node = node, .side_first = true };
-            if (s.second == target) return .{ .node = node, .side_first = false };
-            return findParent(s.first, target) orelse findParent(s.second, target);
-        },
-    }
+    const pair = children(node) orelse return null;
+    if (pair[0] == target) return .{ .node = node, .side_first = true };
+    if (pair[1] == target) return .{ .node = node, .side_first = false };
+    return findParent(pair[0], target) orelse findParent(pair[1], target);
 }
 
-fn firstLeaf(node: *Node) *Node {
-    var cur = node;
-    while (cur.* == .split) cur = cur.split.first;
-    return cur;
+/// An internal node's two children in traversal order — `rest` BEFORE
+/// `panel` for a dock, so pane order (and therefore `firstLeaf`) stays the
+/// editing side no matter which edge a companion is anchored to.
+fn children(node: *Node) ?[2]*Node {
+    return switch (node.*) {
+        .leaf => null,
+        .split => |s| .{ s.first, s.second },
+        .dock => |d| .{ d.rest, d.panel },
+    };
 }
 
-fn rectOfNode(node: *Node, rect: Rect, target: *Node) ?Rect {
-    if (node == target) return rect;
+/// The same pair with each child's rect — the geometry half of `children`.
+fn childRects(node: *Node, rect: Rect) ?[2]NodeRect {
     return switch (node.*) {
         .leaf => null,
         .split => |s| blk: {
             const halves = rect.split(s.axis, s.frac);
-            break :blk rectOfNode(s.first, halves[0], target) orelse rectOfNode(s.second, halves[1], target);
+            break :blk .{ .{ .node = s.first, .rect = halves[0] }, .{ .node = s.second, .rect = halves[1] } };
+        },
+        .dock => |d| blk: {
+            const halves = dockHalves(d, rect);
+            break :blk .{ .{ .node = d.rest, .rect = halves.rest }, .{ .node = d.panel, .rect = halves.panel } };
         },
     };
 }
 
-fn leafAt(node: *Node, rect: Rect, px: f32, py: f32) ?*Node {
+fn firstLeaf(node: *Node) *Node {
+    var cur = node;
+    while (children(cur)) |pair| cur = pair[0];
+    return cur;
+}
+
+/// The first leaf that can host an ordinary workspace entry, or null.
+fn firstPrimaryLeaf(node: *Node) ?*Node {
     switch (node.*) {
-        .leaf => return if (rect.contains(px, py)) node else null,
-        .split => |s| {
-            const halves = rect.split(s.axis, s.frac);
-            return leafAt(s.first, halves[0], px, py) orelse leafAt(s.second, halves[1], px, py);
+        .leaf => return if (node.leaf.attrs.isPrimary()) node else null,
+        else => {
+            const pair = children(node).?;
+            return firstPrimaryLeaf(pair[0]) orelse firstPrimaryLeaf(pair[1]);
         },
     }
+}
+
+fn findDock(node: *Node, edge: core.viewport.Edge) ?*Node {
+    switch (node.*) {
+        .leaf => return null,
+        .dock => |d| {
+            if (d.edge == edge) return d.panel;
+            return findDock(d.rest, edge) orelse findDock(d.panel, edge);
+        },
+        .split => |s| return findDock(s.first, edge) orelse findDock(s.second, edge),
+    }
+}
+
+fn rectOfNode(node: *Node, rect: Rect, target: *Node) ?Rect {
+    if (node == target) return rect;
+    const pair = childRects(node, rect) orelse return null;
+    return rectOfNode(pair[0].node, pair[0].rect, target) orelse
+        rectOfNode(pair[1].node, pair[1].rect, target);
+}
+
+fn leafAt(node: *Node, rect: Rect, px: f32, py: f32) ?*Node {
+    const pair = childRects(node, rect) orelse
+        return if (rect.contains(px, py)) node else null;
+    return leafAt(pair[0].node, pair[0].rect, px, py) orelse
+        leafAt(pair[1].node, pair[1].rect, px, py);
 }
 
 fn leafNodes(node: *Node, out: []*Node, n: *usize) void {
-    switch (node.*) {
-        .leaf => {
-            if (n.* < out.len) {
-                out[n.*] = node;
-                n.* += 1;
-            }
-        },
-        .split => |s| {
-            leafNodes(s.first, out, n);
-            leafNodes(s.second, out, n);
-        },
-    }
+    const pair = children(node) orelse {
+        if (n.* < out.len) {
+            out[n.*] = node;
+            n.* += 1;
+        }
+        return;
+    };
+    leafNodes(pair[0], out, n);
+    leafNodes(pair[1], out, n);
 }
 
 fn leafRects(node: *Node, rect: Rect, out: []NodeRect, n: *usize) void {
-    switch (node.*) {
-        .leaf => {
-            if (n.* < out.len) {
-                out[n.*] = .{ .node = node, .rect = rect };
-                n.* += 1;
-            }
-        },
-        .split => |s| {
-            const halves = rect.split(s.axis, s.frac);
-            leafRects(s.first, halves[0], out, n);
-            leafRects(s.second, halves[1], out, n);
-        },
-    }
+    const pair = childRects(node, rect) orelse {
+        if (n.* < out.len) {
+            out[n.*] = .{ .node = node, .rect = rect };
+            n.* += 1;
+        }
+        return;
+    };
+    leafRects(pair[0].node, pair[0].rect, out, n);
+    leafRects(pair[1].node, pair[1].rect, out, n);
 }
 
 /// A rect edge is a divider exactly when it is off the outer frame (a
@@ -519,24 +688,20 @@ fn edgesOf(rect: Rect, frame: Rect) region.Edges {
 }
 
 fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot, n: *usize) void {
-    switch (node.*) {
-        .leaf => {
-            if (n.* < out.len) {
-                out[n.*] = .{
-                    .pane = &node.leaf,
-                    .rect = rect,
-                    .focused = node == focused,
-                    .border = edgesOf(rect, frame),
-                };
-                n.* += 1;
-            }
-        },
-        .split => |s| {
-            const halves = rect.split(s.axis, s.frac);
-            collectRec(s.first, halves[0], frame, focused, out, n);
-            collectRec(s.second, halves[1], frame, focused, out, n);
-        },
-    }
+    const pair = childRects(node, rect) orelse {
+        if (n.* < out.len) {
+            out[n.*] = .{
+                .pane = &node.leaf,
+                .rect = rect,
+                .focused = node == focused,
+                .border = edgesOf(rect, frame),
+            };
+            n.* += 1;
+        }
+        return;
+    };
+    collectRec(pair[0].node, pair[0].rect, frame, focused, out, n);
+    collectRec(pair[1].node, pair[1].rect, frame, focused, out, n);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -652,6 +817,100 @@ test "headFocus/setHeadFocus: closing a pane invalidates ANOTHER head's handle �
     // B's handle is now freshly valid — the NEXT lookup resolves directly,
     // no repeated recovery.
     try t.expectEqual(b_focus, headFocus(&l, &head_b));
+}
+
+test "dock: an edge-anchored panel takes its extent and leaves the rest tiled" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const editor = l.root;
+    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+    // Nothing relocated: the pre-existing pane kept its exact address, so
+    // every head's focus handle still resolves.
+    try t.expectEqual(editor, l.root.dock.rest);
+    try t.expectEqual(@as(usize, 2), l.count());
+    try t.expectEqual(@as(usize, 1), l.primaryCount());
+    try t.expectEqual(editor, l.primaryPane().?);
+    try t.expectEqual(panel, l.dockedPanel(.left).?);
+    try t.expectEqual(@as(?*Node, null), l.dockedPanel(.right));
+
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    var slots: [max_panes]Slot = undefined;
+    const n = l.collect(editor, frame, &slots);
+    try t.expectEqual(@as(usize, 2), n);
+    // Pane order stays editor-first whichever edge the panel is on.
+    try t.expectEqual(Rect{ .x = 50, .y = 0, .w = 150, .h = 100 }, slots[0].rect);
+    try t.expectEqual(Rect{ .x = 0, .y = 0, .w = 50, .h = 100 }, slots[1].rect);
+    try t.expectEqual(@as(core.Buffers.Id, 99), slots[1].pane.buffer_id);
+    // Hit-testing and rect assignment agree about the panel's strip.
+    try t.expectEqual(panel, l.focusAt(frame, 10, 50).?);
+    try t.expectEqual(editor, l.focusAt(frame, 120, 50).?);
+    try t.expectEqual(slots[1].rect, l.focusedRect(panel, frame));
+}
+
+test "dock: a bottom panel anchors to the far edge" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const panel = try l.dock(.bottom, 0.2, 5, .sidebar(.bottom));
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    try t.expectEqual(Rect{ .x = 0, .y = 80, .w = 200, .h = 20 }, l.focusedRect(panel, frame));
+    try t.expectEqual(panel, l.focusAt(frame, 100, 90).?);
+}
+
+test "dock: the workspace enforces the attributes the panel declares" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const editor = l.root;
+    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+
+    // Cycling never lands IN the companion, but always lets you back OUT of
+    // one: `focus-other` from the editor has nowhere to go, and from the
+    // sidebar returns to the editor.
+    try t.expectEqual(@as(?*Node, null), l.focusNext(editor));
+    try t.expectEqual(editor, l.focusNext(panel).?);
+
+    // Directional focus still reaches it — geometry is not membership.
+    try t.expectEqual(panel, l.focusNeighbor(editor, frame, .left).?);
+    try t.expectEqual(editor, l.focusNeighbor(panel, frame, .right).?);
+
+    // A companion is one pane, and its content never trades places with an
+    // editor pane's.
+    try t.expectError(error.NotSplittable, l.splitFocused(panel, .vertical));
+    try t.expect(!l.swapNeighbor(editor, frame, .left));
+    try t.expect(!l.swapNeighbor(panel, frame, .right));
+    try t.expectEqual(@as(core.Buffers.Id, 99), panel.leaf.buffer_id);
+
+    // Closing the last editing pane is a no-op: a workspace of nothing but
+    // companions is not a state a user can get back out of.
+    try t.expectEqual(editor, try l.closeFocused(editor));
+    try t.expectEqual(@as(usize, 2), l.count());
+
+    // A split beside the sidebar cycles normally, and now the editor pane
+    // CAN be closed — the dock is untouched by either.
+    const left = try l.splitFocused(editor, .vertical);
+    try t.expectEqual(@as(usize, 2), l.primaryCount());
+    const other = l.focusNext(left).?;
+    try t.expect(other != panel);
+    try t.expectEqual(left, l.focusNext(other).?);
+    _ = try l.closeFocused(left);
+    try t.expectEqual(@as(usize, 2), l.count());
+    try t.expectEqual(panel, l.dockedPanel(.left).?);
+}
+
+test "dock: closing the panel collapses the dock and recovery avoids companions" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    var head: core.Head = .empty;
+    defer head.deinit(t.allocator);
+    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+
+    // A head parked in the sidebar whose handle goes stale recovers onto the
+    // EDITING pane, never into a companion it never chose.
+    setHeadFocus(&head, panel, &l);
+    const editor = try l.closeFocused(panel);
+    try t.expectEqual(@as(usize, 1), l.count());
+    try t.expectEqual(l.root, editor);
+    try t.expectEqual(editor, headFocus(&l, &head));
 }
 
 test {
