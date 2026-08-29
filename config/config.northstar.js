@@ -69,6 +69,7 @@ weft.plugin("llm");         // grant bundle: proc + fs.read
 weft.plugin("console");     // grant bundle: proc
 weft.plugin("repl");        // grant bundle: proc (persistent subprocess)
 weft.plugin("net");         // grant bundle: net
+weft.plugin("http");        // grant bundle: net (HTTP is guest code over the socket)
 weft.plugin("which_key");   // menu-hint overlay over the surface door
 // An fs capability nobody narrows is confined to the dispatching place, so
 // `notes`/`snippets`/`lsp` above need no grant line at all. The browser is the
@@ -210,6 +211,7 @@ weft.bind("normal", "SPC o q", "repl-quit");
 weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o C", "console-send");
 weft.bind("normal", "SPC o a", "llm-ask-line");
+weft.bind("normal", "SPC o h", "http-get");
 
 // SPC a — coding agents (ACP). Under the north star this is also where a
 // SECOND system would first appear:

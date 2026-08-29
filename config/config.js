@@ -71,6 +71,7 @@ weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
 weft.plugin("console");     // a command console — run a line, append output
 weft.plugin("repl");        // a stateful interactive REPL (persistent subprocess)
 weft.plugin("net");         // raw TCP/TLS transport (net.connect)
+weft.plugin("http");        // HTTP/1.0 over that transport — built in the guest, never native
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
@@ -313,6 +314,7 @@ weft.bind("normal", "SPC o q", "repl-quit");
 weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o C", "console-send");
 weft.bind("normal", "SPC o a", "llm-ask-line"); // one-shot: each ask is its own instance
+weft.bind("normal", "SPC o h", "http-get");     // fetch a URL into its own *http* buffer
 
 // SPC a — coding agents (ACP). Each `agent-start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo
