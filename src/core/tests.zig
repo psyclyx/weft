@@ -1193,7 +1193,10 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/big.txt", .{tmp_dir.sub_path});
     defer gpa.free(path);
     {
-        const big = try gpa.alloc(u8, core.Editor.bulk_load_bytes + 4096);
+        // A megabyte is no longer a threshold — every load takes this path
+        // now — but a size that used to be "big" still makes the O(1)-events
+        // assertion below mean something a small file could fake.
+        const big = try gpa.alloc(u8, (1 << 20) + 4096);
         defer gpa.free(big);
         for (big, 0..) |*b, i| b.* = if (i % 64 == 63) '\n' else 'x';
         var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -1222,6 +1225,43 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(!try ed.isDirty(gpa));
+}
+
+test "editor: loaded content is anchorable — every open, not just small ones" {
+    // The gate on the bulk load path having no size threshold. A region
+    // grant, a shared cursor and a shell insertion all name a character in
+    // the file rather than an offset into it, so a load whose content could
+    // not be anchored would break every one of them the moment it became
+    // the only load path.
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/small.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = "hello world\n" });
+    }
+
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.openFile(gpa, path);
+
+    // Anchor the 'w' of "world" — content that came from the file, not typed.
+    const anchor = try ed.doc.exportAnchor(gpa, 6, .before);
+    defer gpa.free(anchor.agent);
+    var out: [1]usize = undefined;
+    try ed.doc.resolveAnchors(gpa, &.{anchor}, &out);
+    try t.expectEqual(@as(usize, 6), out[0]);
+
+    // It tracks the character across an edit ahead of it, which is the whole
+    // reason to hold an anchor instead of an offset.
+    try ed.insertText(gpa, "say: ");
+    try ed.doc.resolveAnchors(gpa, &.{anchor}, &out);
+    try t.expectEqual(@as(usize, 11), out[0]);
 }
 
 test "completion UI: source-driven fold into the pick; accept replaces the prefix" {

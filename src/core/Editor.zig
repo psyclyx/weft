@@ -170,34 +170,26 @@ fn setBackingLoaded(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.doc.anchors.set(self.cursor, .{ .offset = 0, .bias = .right });
 }
 
-/// Above this, loads go through the bulk path (content becomes the
-/// compacted base, zero events) instead of per-scalar events. The
-/// trade: identity anchors into the loaded content report Compacted.
-pub const bulk_load_bytes = 1 << 20;
-
-/// Open a local file as this buffer's backing: content arrives as the
-/// backing peer's commit (not undoable) — or, for large files, as a
-/// compacted base. Startup path, allowed to block. The document must
-/// not already have a backing.
+/// Open a local file as this buffer's backing: the content BECOMES the
+/// document's base — one event, whatever the file's size — rather than
+/// one event per scalar. Startup path, allowed to block. The document
+/// must not already have a backing.
+///
+/// There is deliberately no size threshold here. Loading per-scalar used
+/// to buy identity anchors into the content, which a base could not offer;
+/// stemma 0.7 anchors base scalars as (creating event, offset), so the
+/// bulk path lost its only drawback and a small file has no reason to pay
+/// millions of events for what one event expresses.
 pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Error || file.ReadError || Document.AddPeerError)!void {
     task.assertMayBlock();
     assert(self.backing == .none);
     const bytes = try file.readAlloc(gpa, path);
     defer gpa.free(bytes);
     const token = backing_mod.localToken(bytes);
-    var sync = if (bytes.len >= bulk_load_bytes) blk: {
-        try self.doc.adoptContent(gpa, bytes);
-        var sync = try backing_mod.Sync.init(gpa, &self.doc);
-        errdefer sync.deinit(gpa, &self.doc);
-        try sync.loadBased(gpa, &self.doc, &token);
-        break :blk sync;
-    } else blk: {
-        var sync = try backing_mod.Sync.init(gpa, &self.doc);
-        errdefer sync.deinit(gpa, &self.doc);
-        try sync.load(gpa, &self.doc, bytes, &token);
-        break :blk sync;
-    };
+    try self.doc.adoptContent(gpa, bytes);
+    var sync = try backing_mod.Sync.init(gpa, &self.doc);
     errdefer sync.deinit(gpa, &self.doc);
+    try sync.loadBased(gpa, &self.doc, &token);
     self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
     try self.setBackingLoaded(gpa);
 }
