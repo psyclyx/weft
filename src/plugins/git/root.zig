@@ -70,6 +70,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const prompt = @import("weft_prompt");
 
 // ── Caps on ONE repository's working state (bounded, degrade loud) ──
 // These bound what a single gather can show — files, hunks, bytes of git
@@ -262,9 +263,10 @@ const RepoSession = struct {
     /// drop, reset --hard) — run verbatim once the answer comes back `yes`.
     confirm_cmd: [1 << 12]u8 = undefined,
     confirm_len: usize = 0,
-    /// Name typed into the `*git-input*` prompt (branch names, rebase depth).
-    input_name: [256]u8 = undefined,
-    input_name_len: usize = 0,
+    /// WHICH question the open prompt is asking. The typed TEXT is the
+    /// prompt library's, not ours — a session used to carry a copy of it
+    /// (`input_name`) because the answer had to survive a round trip through
+    /// a real buffer; it is handed straight to `onInput` now.
     input_action: InputAction = .none,
     /// Extra flags the commit-finish path passes to `git commit` (amend/
     /// reword), so the ONE editable `*git-commit*` buffer serves commit AND
@@ -361,7 +363,7 @@ const Cmd = struct {
     route: Route = .focus,
     scope: Scope = .durable,
 };
-const cmds = [_]Cmd{
+const base_cmds = [_]Cmd{
     .{ .name = "git-status", .handler = gitStatus, .route = .repo },
     .{ .name = "git-init", .handler = gitInit, .route = .repo },
     .{ .name = "git-refresh", .handler = gitRefresh },
@@ -416,10 +418,6 @@ const cmds = [_]Cmd{
     .{ .name = "git-stash-drop", .handler = gitStashDrop },
     // Log transient.
     .{ .name = "git-log-all", .handler = gitLogAll },
-    // The `*git-input*` prompt (branch names / rebase depth).
-    .{ .name = "git-input-finish", .handler = gitInputFinish },
-    .{ .name = "git-input-abort", .handler = gitInputAbort },
-    .{ .name = "git-input-resume", .handler = gitInputResume },
     // Push/pull/fetch flag transients (toggle flags, then execute).
     .{ .name = "git-push", .handler = gitPush },
     .{ .name = "git-pull", .handler = gitPull },
@@ -450,6 +448,19 @@ const cmds = [_]Cmd{
     // user-facing verb, invoked only via `weft.run` from `on_fill_token`.
     .{ .name = "git-note-drops-deliver", .handler = gitNoteDropsDeliver, .route = .carried },
 };
+
+/// The shared prompt's five editing commands (`input`, below), mapped into
+/// git's `Cmd`. They route like any other git verb: the prompt is an
+/// echo-line overlay, not a buffer, so the focused entry is still the `*git*`
+/// the branch name is for — which is precisely what the old `*git-input*`
+/// buffer had to work around by carrying the session in `input_action`.
+const input_cmds: [input.commands.len]Cmd = blk: {
+    var arr: [input.commands.len]Cmd = undefined;
+    for (input.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+    break :blk arr;
+};
+
+const cmds = base_cmds ++ input_cmds;
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
@@ -584,16 +595,9 @@ export fn init() void {
     weft.bindKey("git-rebase-menu", "Escape", "git-menu-cancel");
     weft.bindKey("git-rebase-menu", "C-g", "git-menu-cancel");
 
-    // A generic single-line prompt buffer (branch names, rebase depth). Same
-    // editable shape as the commit buffer; the pending `input_action` routes it.
-    weft.setFallback("git-input", "default");
-    weft.textInput("git-input", "insert-text");
-    weft.bindKey("git-input", "C-c", "git-input-menu");
-    weft.menuMode("git-input-menu");
-    weft.bindKey("git-input-menu", "C-c", "git-input-finish");
-    weft.bindKey("git-input-menu", "C-k", "git-input-abort");
-    weft.bindKey("git-input-menu", "Escape", "git-input-resume");
-    weft.bindKey("git-input-menu", "C-g", "git-input-resume");
+    // The single-line prompt (branch names, rebase depth): the shared
+    // minibuffer's mode and keys, not a bespoke buffer with a C-c submenu.
+    input.install();
 
     // Push/pull/fetch flag transients: STICKY menu modes. Sticky means a leaf key
     // does NOT one-shot auto-pop — the transient stays open while flags
@@ -2481,7 +2485,7 @@ fn show(cmd: []const u8, name: []const u8, fill: Fill) void {
 /// Every file git used to drop into the work tree (`.weft-git.patch`, a draft's
 /// message, a rebase plan) comes through here instead, which is why git holds
 /// no `fs_write` and no command of ours ends in `rm -f`.
-fn showInput(cmd: []const u8, input: ?[]const u8, name: []const u8, fill: Fill) void {
+fn showInput(cmd: []const u8, stdin: ?[]const u8, name: []const u8, fill: Fill) void {
     const body = std.fmt.bufPrint(&run_buf, "cd '{s}' || exit 0\n{s}", .{ cur().root, cmd }) catch return;
     if (!focusBuffer(name)) weft.runStr("buffer-create", name);
     if (gathers(fill)) {
@@ -2491,7 +2495,7 @@ fn showInput(cmd: []const u8, input: ?[]const u8, name: []const u8, fill: Fill) 
         cur().gathering = true; // the projection is now provisional
     }
     const token = fillToken(fill, cur());
-    if (input) |bytes| weft.procSpool(body, bytes, name, token) else weft.procToBuffer(body, name, token);
+    if (stdin) |bytes| weft.procSpool(body, bytes, name, token) else weft.procToBuffer(body, name, token);
 }
 
 /// Re-gather this session's status into its own buffer.
@@ -2568,18 +2572,18 @@ const Confirm = enum(u32) { discard = 1, staged = 2, close = 3 };
 /// Ask, safe answer first, so accepting the leading candidate changes nothing.
 /// The id carries the session as well as the question, exactly as a fill token
 /// does: repository 2's answer can only ever act on repository 2.
-fn confirmPick(which: Confirm, prompt: []const u8) void {
-    weft.pickBegin(prompt, @intFromEnum(which) | (cur().id << 8));
+fn confirmPick(which: Confirm, question: []const u8) void {
+    weft.pickBegin(question, @intFromEnum(which) | (cur().id << 8));
     weft.pickAdd("no", "leave it alone");
     weft.pickAdd("yes", "go ahead");
     weft.pickEnd();
 }
 
 /// Stage a full mutation behind that confirmation.
-fn confirmThen(cmd: []const u8, prompt: []const u8) void {
+fn confirmThen(cmd: []const u8, question: []const u8) void {
     cur().confirm_len = @min(cmd.len, cur().confirm_cmd.len);
     @memcpy(cur().confirm_cmd[0..cur().confirm_len], cmd[0..cur().confirm_len]);
-    confirmPick(.staged, prompt);
+    confirmPick(.staged, question);
 }
 
 export fn on_pick_accept(pick_id: u32) void {
@@ -2708,39 +2712,39 @@ fn gitLogAll() void {
     weft.setMode("git-view");
 }
 
-// ── The `*git-input*` single-line prompt ────────────────────────────────────
-fn openInput(action: InputAction, prompt: []const u8) void {
+// ── The single-line prompt (branch names, rebase depth) ─────────────────────
+// This used to be a REAL BUFFER — `*git-input*`, created, focused, cleared
+// with an `edit`, then read back out of the document line by line, with its
+// own mode, its own C-c menu, and its own abort/resume/finish commands. All
+// of that to ask for a branch name. It is `weft_prompt` now: the same
+// minibuffer vim's `:` and lsp's rename use, so backing out of a branch name
+// is the same key as backing out of anything else, and git no longer owns
+// four commands and two modes for text entry.
+const input = prompt.Prompt(.{
+    .name = "git-input",
+    .resting = "git",
+    .capacity = 256,
+    .on_accept = onInput,
+    .on_cancel = struct {
+        fn cancelled() void {
+            cur().input_action = .none;
+            weft.echo("cancelled");
+        }
+    }.cancelled,
+});
+
+fn openInput(action: InputAction, label: []const u8) void {
     cur().input_action = action;
-    if (!focusBuffer("*git-input*")) weft.runStr("buffer-create", "*git-input*");
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, "");
-    weft.jump(0);
-    weft.setMode("git-input");
-    weft.echo(prompt);
+    input.open(label);
 }
-fn gitInputAbort() void {
-    cur().input_action = .none;
-    weft.setMode("git");
-    weft.echo("cancelled");
-}
-fn gitInputResume() void {
-    weft.setMode("git-input");
-}
-fn gitInputFinish() void {
-    // First line, trimmed — the typed name/depth. Copy off the shared scratch
-    // before any further host read reuses it.
-    const text = weft.slice(0, weft.byteLen());
-    var e: usize = 0;
-    while (e < text.len and text[e] != '\n') e += 1;
-    const line = std.mem.trim(u8, text[0..e], " \t\r");
-    cur().input_name_len = @min(line.len, cur().input_name.len);
-    @memcpy(cur().input_name[0..cur().input_name_len], line[0..cur().input_name_len]);
-    const name = cur().input_name[0..cur().input_name_len];
-    if (name.len == 0) {
-        gitInputAbort();
-        return;
-    }
+
+fn onInput(name: []const u8) void {
     const act = cur().input_action;
     cur().input_action = .none;
+    if (name.len == 0) {
+        weft.echo("cancelled");
+        return;
+    }
     switch (act) {
         .branch_checkout => gatherAfterSeq1("git checkout '{s}'", name),
         .branch_create => gatherAfterSeq1("git checkout -b '{s}'", name),
@@ -2751,7 +2755,7 @@ fn gitInputFinish() void {
             confirmThen(cmd, "delete branch?");
         },
         .rebase_start => startRebase(name),
-        .none => weft.setMode("git"),
+        .none => {},
     }
 }
 

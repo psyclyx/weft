@@ -899,14 +899,14 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
     try t.expectEqualStrings("ex", env.head.currentMode());
     _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "3" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode()); // back in normal
     try t.expectEqual(@as(usize, 6), ed.cursorOffset());
 
     // `:%s/l/X/g` — a whole-file literal substitute, one user edit.
     _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
     _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "%s/l/X/g" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -918,7 +918,7 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     env.head.echo.clearRetainingCapacity();
     _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
     _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "definitely-not-a-command" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "not an editor command") != null);
 }
 

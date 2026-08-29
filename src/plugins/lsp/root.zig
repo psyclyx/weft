@@ -24,6 +24,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const rpc = @import("weft_jsonrpc");
+const prompt = @import("weft_prompt");
 
 // ── Captured document identities ─────────────────────────────────────
 // LSP byte positions are converted once, when they are presented; everything
@@ -54,10 +55,10 @@ fn releaseTarget(target: PickTarget) void {
     weft.releaseRange(target.range);
 }
 
-// A location pick (references / symbols) and the rename prompt share the Head's
-// one picker, so their retained targets are one list.
+// The picker holds locations (references / symbols) and nothing else. It used
+// to double as the rename prompt — opened with no items so its free-text
+// accept could stand in for a text field — which is `weft_prompt`'s job now.
 const pick_id_results: u32 = 1;
-const pick_id_rename: u32 = 2;
 var pick_targets: [256]PickTarget = undefined;
 var pick_n: usize = 0;
 
@@ -546,7 +547,7 @@ fn reqParams(comptime fmt: []const u8, args: anytype) ?[]const u8 {
 
 // ── Plugin surface ───────────────────────────────────────────────────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
+const base_cmds = [_]Cmd{
     .{ .name = "hover", .handler = cmdHover },
     .{ .name = "goto-definition", .handler = cmdDefinition },
     .{ .name = "references", .handler = cmdReferences },
@@ -564,6 +565,16 @@ const cmds = [_]Cmd{
     .{ .name = "lsp-deliver-internal", .handler = lspDeliverInternal },
 };
 
+/// The rename prompt's five editing commands (`rename_prompt`, below),
+/// mapped into lsp's `Cmd` so `on_command`'s id indexing stays one table.
+const prompt_cmds: [rename_prompt.commands.len]Cmd = blk: {
+    var arr: [rename_prompt.commands.len]Cmd = undefined;
+    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+    break :blk arr;
+};
+
+const cmds = base_cmds ++ prompt_cmds;
+
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.declareCapability("edit/completion");
@@ -573,6 +584,7 @@ export fn describe() void {
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
     weft.provideCompletion();
+    rename_prompt.install();
 }
 
 /// Completion request (caps provider): send textDocument/completion for the
@@ -648,45 +660,22 @@ export fn on_activate() void {
     paintDiagnostics(s);
 }
 
-/// A pick entry was chosen: a location jump, or the rename name.
+/// A pick entry was chosen — a location jump. The picker is a PICKER again:
+/// its one job here is choosing among references and symbols, which are
+/// candidates. Typing a new name is `rename_prompt`'s.
 export fn on_pick_accept(pick_id: u32) void {
+    if (pick_id != pick_id_results) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
-    if (pick_id == pick_id_results) {
-        defer releasePickTargets();
-        const idx = switch (outcome) {
-            .candidate => |candidate| candidate.index,
-            .input, .cancelled => return,
-        };
-        if (idx < pick_n) {
-            const target = pick_targets[idx];
-            weft.jump(targetOffset(target) orelse return);
-        }
-        return;
+    defer releasePickTargets();
+    const idx = switch (outcome) {
+        .candidate => |candidate| candidate.index,
+        .input, .cancelled => return,
+    };
+    if (idx < pick_n) {
+        const target = pick_targets[idx];
+        weft.jump(targetOffset(target) orelse return);
     }
-    if (pick_id != pick_id_rename) return;
-    const s = prompting orelse return;
-    prompting = null;
-    const p = slotOf(s, .rename);
-    if (!p.used or p.id != 0) return;
-    const name = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => {
-            retire(s, p);
-            return;
-        },
-    }; // owned by `outcome` until this callback returns
-    if (name.len == 0) {
-        retire(s, p);
-        return;
-    }
-    if (!setRename(s, name)) {
-        weft.echo("lsp: out of memory — rename not sent");
-        retire(s, p);
-        return;
-    }
-    if (s.ready) _ = send(s, p, .rename);
 }
 
 /// Hold the new name this session will rename to. False when the guest heap
@@ -760,10 +749,49 @@ fn cmdRename() void {
             return;
         }
     }
-    resetPickTargets();
     prompting = s;
-    weft.pickBegin("rename to", pick_id_rename);
-    weft.pickEnd(); // no items — the typed query is the new name
+    rename_prompt.open("rename to: ");
+}
+
+/// The new-name prompt. This used to be `pickBegin`/`pickEnd` with NO ITEMS
+/// — the fuzzy picker opened as an empty list so its free-text accept could
+/// be read as a text field. It worked, but it told the user "search" when it
+/// meant "type a name", it put the answer through candidate ranking that had
+/// nothing to rank, and it made cancelling a rename a different gesture from
+/// cancelling anything else. It is the shared minibuffer now.
+///
+/// `resting` is null deliberately: lsp is a SERVICE, live under vim, helix
+/// and emacs alike, so it returns you to the mode the ENTRY declares rather
+/// than to a mode lsp chose on your behalf.
+const rename_prompt = prompt.Prompt(.{
+    .name = "lsp-rename",
+    .capacity = 256,
+    .on_accept = onRenameName,
+    .on_cancel = struct {
+        fn cancelled() void {
+            const s = prompting orelse return;
+            prompting = null;
+            retire(s, slotOf(s, .rename));
+        }
+    }.cancelled,
+});
+
+/// The typed name: hold it on the session and send, or refuse out loud.
+fn onRenameName(name: []const u8) void {
+    const s = prompting orelse return;
+    prompting = null;
+    const p = slotOf(s, .rename);
+    if (!p.used or p.id != 0) return;
+    if (name.len == 0) {
+        retire(s, p);
+        return;
+    }
+    if (!setRename(s, name)) {
+        weft.echo("lsp: out of memory — rename not sent");
+        retire(s, p);
+        return;
+    }
+    if (s.ready) _ = send(s, p, .rename);
 }
 
 /// Jump to the next/previous stored diagnostic from the cursor (wrapping) and
@@ -1218,11 +1246,11 @@ fn presentDefinition(s: *Session, result: rpc.Value) void {
     weft.jump(offsetOf(loc.line, loc.col));
 }
 
-fn presentLocations(s: *Session, result: rpc.Value, prompt: []const u8) void {
+fn presentLocations(s: *Session, result: rpc.Value, title: []const u8) void {
     resetPickTargets();
     var dropped = false;
     if (result == .array) {
-        weft.pickBegin(prompt, pick_id_results);
+        weft.pickBegin(title, pick_id_results);
         for (result.array.items) |item| {
             const loc = locationOf(item) orelse continue;
             if (!sameUri(s, loc.uri)) continue; // cross-file later

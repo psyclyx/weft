@@ -38,11 +38,13 @@ const Guest = struct {
 };
 
 /// The shared plugin libraries (`src/plugin_lib/<name>/root.zig`). Each is a
-/// NAMED module a guest gets only by declaring it: `ex` is vim's and helix's
-/// command line, `output` is the tool-buffer surface `run`/`make`/`grep`
-/// share, `jsonrpc` is the framing under `lsp`, `files` is the portable draft
-/// model + its sandbox adapter.
+/// NAMED module a guest gets only by declaring it: `prompt` is the one
+/// read-a-line minibuffer, `ex` is vim's and helix's command line, `output`
+/// is the tool-buffer surface `run`/`make`/`grep` share, `jsonrpc` is the
+/// framing under `lsp`, `files` is the portable draft model + its sandbox
+/// adapter.
 const Library = enum {
+    prompt,
     ex,
     jsonrpc,
     output,
@@ -52,10 +54,21 @@ const Library = enum {
     /// reached under two names.
     fn importName(self: Library) []const u8 {
         return switch (self) {
+            .prompt => "weft_prompt",
             .ex => "weft_ex",
             .jsonrpc => "weft_jsonrpc",
             .output => "weft_output",
             .files => "weft_files",
+        };
+    }
+
+    /// Libraries a library itself needs. `ex` is a command-line: a parser
+    /// plus a prompt, and the prompt half is the same one git and lsp use —
+    /// it does not get a private copy just because it got there first.
+    fn deps(self: Library) []const Library {
+        return switch (self) {
+            .ex => &.{.prompt},
+            else => &.{},
         };
     }
 };
@@ -298,13 +311,13 @@ const guests = [_]Guest{
     .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
-    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{.jsonrpc} },
+    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt } },
     .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
     .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
     .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
     .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
-    .{ .name = "git", .import = "guest_git_wasm", .install = true },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{.prompt} },
     .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },
@@ -928,6 +941,47 @@ fn configureTestModule(
 /// Tree-sitter (milestone 7): the library links normally; grammar
 /// packages contribute a runtime dlopen path (baked via build options)
 /// and an embedded highlight query, both from pinned store paths.
+/// One plugin library, wired with the SDK and its own declared library
+/// dependencies (`Library.deps`) and nothing else. A fresh module per
+/// consuming guest, because each guest is a separate wasm compilation with
+/// its own linear memory — a library's module-level state is per-consumer by
+/// construction, never shared behind anyone's back.
+fn libraryModule(
+    b: *std.Build,
+    comptime lib: Library,
+    wasm_target: std.Build.ResolvedTarget,
+    guest_sdk: *std.Build.Module,
+    semantic: *std.Build.Module,
+    fs: *std.Build.Module,
+    /// `files` also hands its consumer the sandbox adapter, a second named
+    /// module rather than a decl of the facade (it needs the SDK; the
+    /// portable half deliberately does not).
+    consumer: *std.Build.Module,
+) *std.Build.Module {
+    if (lib == .files) {
+        const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
+        const adapter = b.createModule(.{
+            .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        adapter.addImport("weft", guest_sdk);
+        adapter.addImport("weft_files", files.facade);
+        consumer.addImport("weft_files_adapter", adapter);
+        return files.facade;
+    }
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/" ++ @tagName(lib) ++ "/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    mod.addImport("weft", guest_sdk);
+    inline for (comptime lib.deps()) |dep| {
+        mod.addImport(comptime dep.importName(), libraryModule(b, dep, wasm_target, guest_sdk, semantic, fs, mod));
+    }
+    return mod;
+}
+
 /// Compile one guest (a plugin's `src/plugins/<name>/root.zig`, or a
 /// fixture) to a `wasm32-freestanding` reactor module — no `_start`,
 /// exported functions + memory via rdynamic — so the host can instantiate it
@@ -1027,31 +1081,7 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
     // discouraged — it is absent, so "plugin A quietly reached into plugin
     // B's implementation" cannot be written.
     inline for (guest_spec.libraries) |lib| {
-        const mod = switch (lib) {
-            .ex, .jsonrpc, .output => b.createModule(.{
-                .root_source_file = b.path("src/plugin_lib/" ++ @tagName(lib) ++ "/root.zig"),
-                .target = wasm_target,
-                .optimize = .ReleaseSmall,
-            }),
-            // Files is a module GRAPH, not a single root: the portable draft
-            // model + its sandbox adapter, composed over public architecture
-            // contracts so the build itself rejects plugin-to-provider
-            // reach-through.
-            .files => blk: {
-                const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
-                const adapter = b.createModule(.{
-                    .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
-                    .target = wasm_target,
-                    .optimize = .ReleaseSmall,
-                });
-                adapter.addImport("weft", guest_sdk);
-                adapter.addImport("weft_files", files.facade);
-                guest_mod.addImport("weft_files_adapter", adapter);
-                break :blk files.facade;
-            },
-        };
-        // Every library speaks the same ABI its consumer does.
-        if (lib != .files) mod.addImport("weft", guest_sdk);
+        const mod = libraryModule(b, lib, wasm_target, guest_sdk, semantic, fs, guest_mod);
         guest_mod.addImport(comptime lib.importName(), mod);
     }
     const guest = b.addExecutable(.{

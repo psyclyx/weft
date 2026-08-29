@@ -362,13 +362,18 @@ const static_cmds = [_]Cmd{
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
     .{ .name = "vim-zero", .handler = zeroKey },
     .{ .name = "vim-delete-char", .handler = deleteCharFwd },
-    // The `:` ex command line (see ex.zig).
+    // The `:` ex command line — the key that OPENS it. Its five editing
+    // commands come from the shared prompt, spliced in as `ex_cmds` below.
     .{ .name = "vim-ex", .handler = ex.enter },
-    .{ .name = "ex-type", .handler = ex.onType },
-    .{ .name = "ex-backspace", .handler = ex.onBackspace },
-    .{ .name = "ex-clear", .handler = ex.onClear },
-    .{ .name = "ex-run", .handler = ex.onRun },
-    .{ .name = "ex-cancel", .handler = ex.onCancel },
+};
+
+/// The `:` line's own editing commands, from the shared `prompt` library —
+/// the same five every other prompt in the editor registers, mapped into
+/// vim's `Cmd` so `on_command`'s id indexing stays one flat table.
+const ex_cmds: [ex.commands.len]Cmd = blk: {
+    var arr: [ex.commands.len]Cmd = undefined;
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+    break :blk arr;
 };
 
 /// Generated normal- and op-mode motion commands (one `vim/n/*` per motion, plus
@@ -415,7 +420,7 @@ const count_cmds: [9]Cmd = blk: {
     };
     break :blk arr;
 };
-const cmds = static_cmds ++ register_cmds ++ gen_cmds ++ count_cmds;
+const cmds = static_cmds ++ ex_cmds ++ register_cmds ++ gen_cmds ++ count_cmds;
 
 /// Commands that PRESERVE a pending count instead of clearing it: the digit keys
 /// themselves, `0` (which may be a digit), and the operator entries (so `3dw`
@@ -611,17 +616,11 @@ export fn init() void {
     weft.textInput("replace-char", "do-replace-char");
     weft.bindKey("replace-char", "Escape", "leader-cancel");
 
-    // The `:` command line. `ex` is a text-input mode: unbound printable keys
-    // route to `ex-type` (accumulate into the line buffer, re-echoed as ":…");
-    // Backspace edits, Enter executes, Escape/C-c cancel, C-u clears. No
-    // fallback, so stray control keys are swallowed (a real command line).
-    weft.textInput("ex", "ex-type");
-    weft.bindKey("ex", "Return", "ex-run");
-    weft.bindKey("ex", "KP_Enter", "ex-run");
-    weft.bindKey("ex", "BackSpace", "ex-backspace");
-    weft.bindKey("ex", "Escape", "ex-cancel");
-    weft.bindKey("ex", "C-c", "ex-cancel");
-    weft.bindKey("ex", "C-u", "ex-clear");
+    // The `:` command line. Its mode and keys are the shared prompt's — the
+    // same Escape/C-c/C-u/Backspace that back out of git's branch name and
+    // lsp's rename, because there is one implementation of "a line of text"
+    // and it is not vim's private one.
+    ex.install();
 
     const np = [_][2][]const u8{
         .{ "colon", "vim-ex" },

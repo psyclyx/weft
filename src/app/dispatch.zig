@@ -13,7 +13,7 @@
 //! the actual production shape of a menu open — real examples:
 //! `src/plugins/git/root.zig`'s `weft.bindKey("git", "c", "git-commit-dispatch")`,
 //! `git-branch-menu`, `git-stash-menu`, `git-log-menu`, `git-rebase-menu`,
-//! `git-commit-menu`, `git-input-menu`. Entering one now PUSHES a paired
+//! `git-commit-menu`, `git-push-menu`. Entering one now PUSHES a paired
 //! transient (`core/ctx.zig`'s `Ctx.pushTransient`, backed by
 //! `core.Head.transient_stack`) instead of a bare `Head.enterMode`; the
 //! matching leaf auto-pop and `menu-escape` are the POP, reconstructed from

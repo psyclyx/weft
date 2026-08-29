@@ -1,18 +1,16 @@
-//! ex — a real vim/helix `:` command line, as a reusable comptime module
-//! (wasm32-freestanding: no allocator, fixed static buffers). Two parts:
+//! ex — a real vim/helix `:` command line. What is left here after the
+//! minibuffer moved out is the PART THAT IS ABOUT EX: the parser, with the
+//! composition design — vim OWNS the classic abbreviated commands (w/q/wq/x/e/s
+//! + ranges + `!`, :N goto, :noh) with vim semantics; EVERYTHING ELSE falls
+//! THROUGH to the weft command registry, so `:name arg…` runs the command
+//! `name`. Any plugin command (`:git-status`, `:grep foo`, `:sort`) is
+//! ex-callable with zero integration: plugins compose by registering ordinary
+//! commands.
 //!
-//!   1) a live bottom MINIBUFFER — printable keys route (via the mode's text
-//!      command) into a static line buffer, re-echoed as ":…"; Backspace edits,
-//!      Enter executes, Escape cancels. The lightest primitive that reads like
-//!      vim's command line and needs NO new core door (it reuses the exact
-//!      textInput-mode pattern vim's f/F/t/T already use).
-//!
-//!   2) an ex PARSER with the composition design: vim OWNS the classic
-//!      abbreviated commands (w/q/wq/x/e/s + ranges + `!`, :N goto, :noh) with
-//!      vim semantics; EVERYTHING ELSE falls THROUGH to the weft command
-//!      registry — `:name arg…` runs the command `name`. So any plugin command
-//!      (`:git-status`, `:grep foo`, `:sort`) is ex-callable with zero
-//!      integration: plugins compose by registering ordinary commands.
+//! The line EDITING is `weft_prompt` — the same minibuffer git's branch names
+//! and lsp's renames go through, so "how do I get out of this" has one answer
+//! everywhere. This module used to own a private copy of it; that copy is why
+//! there were three.
 //!
 //! Instantiated per editor with its own mode names (`Ex("normal","ex")` for vim,
 //! `Ex("helix-normal","helix-ex")` for helix). Each guest is a separate wasm
@@ -20,6 +18,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const prompt = @import("weft_prompt");
 
 // ── Caps (bounded; degrade + echo on overflow, never overrun) ──────────────
 const LINE_CAP = 1024; // the typed command line
@@ -36,68 +35,40 @@ fn echoFmt(comptime fmt: []const u8, args: anytype) void {
     weft.echo(std.fmt.bufPrint(&msg_buf, fmt, args) catch return);
 }
 
-// ── The command-line minibuffer (mode-parametric) ──────────────────────────
+// ── The command line: a prompt, plus what to do with the line ──────────────
 /// A `:` command line for an editor whose resting mode is `normal_mode` and
-/// whose command-line keymap mode is `ex_mode`. Returns a struct of handlers a
-/// guest registers as commands and binds in `ex_mode`.
+/// whose command-line keymap mode is `ex_mode`.
+///
+/// The whole minibuffer half is `prompt.Prompt` now — `:` is a prompt whose
+/// label is ":" and whose accept handler is `exec`. Every key that gets you
+/// out of it is the one that gets you out of any other prompt in the editor,
+/// because there is only one implementation left to disagree with.
 pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
     return struct {
-        var buf: [LINE_CAP]u8 = undefined;
-        var len: usize = 0;
-        var render_buf: [1 + LINE_CAP]u8 = undefined;
+        pub const line = prompt.Prompt(.{
+            .name = ex_mode,
+            .resting = normal_mode,
+            .capacity = LINE_CAP,
+            .on_accept = struct {
+                fn accept(text: []const u8) void {
+                    if (text.len > 0) exec(text);
+                }
+            }.accept,
+        });
 
-        /// `:` in normal — open the command line (empty) and echo the prompt.
+        /// The commands this command line answers to, for a guest's table.
+        pub const commands = line.commands;
+
+        /// `:` in normal — open the command line, empty.
         pub fn enter() void {
-            len = 0;
-            render();
-            weft.setMode(ex_mode);
-        }
-        /// A committed character (the ex mode's commit command): append + re-echo.
-        pub fn onType() void {
-            const s = weft.argStr(0) orelse return;
-            if (s.len == 0) return;
-            if (len + s.len > buf.len) {
-                weft.echo("ex: line too long");
-                return;
-            }
-            @memcpy(buf[len .. len + s.len], s);
-            len += s.len;
-            render();
-        }
-        /// Backspace: drop one UTF-8 char; on the empty line, cancel (vim).
-        pub fn onBackspace() void {
-            if (len == 0) return cancel();
-            var n: usize = 1;
-            while (len - n > 0 and (buf[len - n] & 0xc0) == 0x80) n += 1; // utf8 tail
-            len -= n;
-            render();
-        }
-        /// C-u: clear the line (stay open).
-        pub fn onClear() void {
-            len = 0;
-            render();
-        }
-        pub fn onCancel() void {
-            cancel();
-        }
-        /// Enter: leave the command line, then parse + dispatch the line.
-        pub fn onRun() void {
-            const line = trim(buf[0..len]);
-            weft.setMode(normal_mode); // land back in normal before the command runs
-            weft.echo(""); // clear the ":" prompt; a command may echo its own result
-            if (line.len > 0) exec(line);
-            len = 0;
+            line.open(":");
         }
 
-        fn cancel() void {
-            len = 0;
-            weft.echo("");
-            weft.setMode(normal_mode);
+        pub fn declare() void {
+            line.declare();
         }
-        fn render() void {
-            render_buf[0] = ':';
-            @memcpy(render_buf[1 .. 1 + len], buf[0..len]);
-            weft.echo(render_buf[0 .. 1 + len]);
+        pub fn install() void {
+            line.install();
         }
     };
 }

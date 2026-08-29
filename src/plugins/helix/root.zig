@@ -68,13 +68,18 @@ const base_cmds = [_]Cmd{
     .{ .name = "hx-open-below", .handler = hxOpenBelow },
     .{ .name = "hx-normal", .handler = hxNormal },
     .{ .name = "hx-delete-op", .handler = enterDeleteOp },
-    // The `:` ex command line (shared engine; helix mode namespace).
+    // The `:` ex command line — the key that OPENS it (shared engine; helix
+    // mode namespace). Its five editing commands come from the shared
+    // prompt, spliced in as `ex_cmds` below.
     .{ .name = "helix-ex", .handler = ex.enter },
-    .{ .name = "hx-ex-type", .handler = ex.onType },
-    .{ .name = "hx-ex-backspace", .handler = ex.onBackspace },
-    .{ .name = "hx-ex-clear", .handler = ex.onClear },
-    .{ .name = "hx-ex-run", .handler = ex.onRun },
-    .{ .name = "hx-ex-cancel", .handler = ex.onCancel },
+};
+
+/// The `:` line's editing commands, from the shared `prompt` library, mapped
+/// into helix's `Cmd` so `on_command`'s id indexing stays one flat table.
+const ex_cmds: [ex.commands.len]Cmd = blk: {
+    var arr: [ex.commands.len]Cmd = undefined;
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+    break :blk arr;
 };
 
 /// Generated: `hx/n/<motion>` (move) for every motion, `hx/d/<motion>` (delete)
@@ -90,7 +95,7 @@ const gen_cmds = blk: {
     break :blk arr;
 };
 
-const cmds = base_cmds ++ gen_cmds;
+const cmds = base_cmds ++ ex_cmds ++ gen_cmds;
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
@@ -164,13 +169,7 @@ export fn init() void {
 
     // The `:` command line (helix mode namespace). Same shape as vim's `ex`:
     // printable → hx-ex-type, Backspace/Enter/Escape edit/run/cancel.
-    weft.textInput("helix-ex", "hx-ex-type");
-    weft.bindKey("helix-ex", "Return", "hx-ex-run");
-    weft.bindKey("helix-ex", "KP_Enter", "hx-ex-run");
-    weft.bindKey("helix-ex", "BackSpace", "hx-ex-backspace");
-    weft.bindKey("helix-ex", "Escape", "hx-ex-cancel");
-    weft.bindKey("helix-ex", "C-c", "hx-ex-cancel");
-    weft.bindKey("helix-ex", "C-u", "hx-ex-clear");
+    ex.install();
 
     // Cursor: block in normal, bar in insert — helix's own config, by ITS mode
     // names (proving set-cursor doesn't assume vim's).
