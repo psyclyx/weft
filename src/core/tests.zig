@@ -570,8 +570,10 @@ test "syntax: incremental highlight tracks edits and peer merges" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     const whole: stemma.Range = .{ .start = 0, .end = doc.text().byteLen() };
@@ -612,8 +614,10 @@ test "syntax: tree queries — node-at-offset, ancestors, and captures" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42;\n");
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // node-at-offset: the "42" literal is a number node.
@@ -676,8 +680,10 @@ test "syntax: createAsync returns before the initial parse runs" {
     }
     try doc.insert(gpa, 0, src.items);
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("big.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // No one but `sync`/`destroy` ever clears `pending_initial` or sets
@@ -705,8 +711,10 @@ test "syntax: highlights arrive and paint once the background parse lands" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     try t.expectEqual(@as(?*core.syntax.c.TSTree, null), syn.tree);
 
@@ -731,8 +739,10 @@ test "syntax: an edit during the pending initial parse lands coherently, not tor
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     // Guaranteed still pending here (see the test above) — no `sync`
     // call has happened yet to adopt anything.
@@ -783,8 +793,10 @@ test "syntax: destroy while pending on a saturated pool returns promptly, no lea
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     // Queued behind the hog — cannot have started.
     try t.expect(syn.pending_initial != null);
 
@@ -913,8 +925,10 @@ test "syntax: instant-tier definition + symbols providers race through registry"
         \\}
     );
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     try core.syntax.registerProviders(&host.caps, syn);
 
@@ -965,16 +979,20 @@ test "capability: two languages' tree-sitter providers bind without collision an
     var doc_zig = try Document.init(gpa, "user");
     defer doc_zig.deinit(gpa);
     try doc_zig.insert(gpa, 0, "fn f() void {}\n");
+    var zig_spec_rt: core.syntax.Runtime = .empty;
+    defer zig_spec_rt.deinit(gpa);
     const zig_spec = core.syntax.builtinForPath("a.zig").?;
-    const zig_syn = try core.syntax.Syntax.create(gpa, zig_spec, &doc_zig);
+    const zig_syn = try core.syntax.Syntax.create(gpa, &zig_spec_rt, zig_spec, &doc_zig);
     defer zig_syn.destroy();
     try core.syntax.registerProviders(&host.caps, zig_syn);
 
     var doc_nix = try Document.init(gpa, "user");
     defer doc_nix.deinit(gpa);
     try doc_nix.insert(gpa, 0, "{ x = 1; }\n");
+    var nix_spec_rt: core.syntax.Runtime = .empty;
+    defer nix_spec_rt.deinit(gpa);
     const nix_spec = core.syntax.builtinForPath("b.nix").?;
-    const nix_syn = try core.syntax.Syntax.create(gpa, nix_spec, &doc_nix);
+    const nix_syn = try core.syntax.Syntax.create(gpa, &nix_spec_rt, nix_spec, &doc_nix);
     defer nix_syn.destroy();
     // Must NOT error — the exact call that used to trap with SlotCollision.
     try core.syntax.registerProviders(&host.caps, nix_syn);
@@ -1005,8 +1023,10 @@ test "syntax: highlight feed publishes stamped bulk into its layer" {
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "const x = 1;\n");
 
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("a.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     const layer = try host.caps.registerFeed(&host.editor().doc, "edit/highlight", "highlight", .local, "treesitter");
     try syn.publishHighlight(gpa, &host.editor().doc, layer, .{ .start = 0, .end = host.editor().text().byteLen() });
@@ -1023,8 +1043,10 @@ test "syntax: holey document parses the realized prefix, never crashes" {
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "fn seed() void {}\n");
+    var spec_rt: core.syntax.Runtime = .empty;
+    defer spec_rt.deinit(gpa);
     const spec = core.syntax.builtinForPath("h.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // A synthetic partially-materialized rope: realized prefix, hole tail.
@@ -1362,4 +1384,44 @@ test "editor: compactNow keeps the backing mirror and saves working" {
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(ed.save_state == .idle);
     try t.expect(!try ed.isDirty(gpa));
+}
+
+test "syntax: a grammar compiles once per runtime, not once per buffer" {
+    // Compiling a highlight query costs ~18ms in ReleaseFast — an order of
+    // magnitude more than opening the file it highlights, reading it and
+    // building its CRDT put together. Two buffers of the same language must
+    // therefore share one compiled grammar; a regression to per-buffer
+    // compilation would put that cost back on every single open, which is
+    // exactly where it used to be.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    var doc_a = try Document.init(gpa, "user");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "const a = 1;\n");
+    var doc_b = try Document.init(gpa, "user");
+    defer doc_b.deinit(gpa);
+    try doc_b.insert(gpa, 0, "const b = 2;\n");
+
+    const spec = core.syntax.builtinForPath("a.zig").?;
+    const a = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_a);
+    defer a.destroy();
+    const b = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_b);
+    defer b.destroy();
+    try t.expectEqual(a.compiled, b.compiled);
+
+    // Shared does not mean entangled: the parse-time state each buffer
+    // mutates stays its own, which is what makes sharing the query safe.
+    try t.expect(a.parser != b.parser);
+    try t.expect(a.qcursor != b.qcursor);
+
+    // A different language is a different entry, not a clobbered one.
+    const nix_spec = core.syntax.builtinForPath("b.nix").?;
+    const n = try core.syntax.Syntax.create(gpa, &rt, nix_spec, &doc_a);
+    defer n.destroy();
+    try t.expect(a.compiled != n.compiled);
+
+    // Both still highlight — sharing the query did not break painting.
+    try t.expect(a.tree != null);
+    try t.expect(b.tree != null);
 }

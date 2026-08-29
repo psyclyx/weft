@@ -134,9 +134,58 @@ pub const languages = [_]LanguageSpec{
     },
 };
 
+/// Everything about a language whose cost depends on the GRAMMAR rather
+/// than on the buffer: the opened `.so`, the language, the compiled
+/// highlight query and the tables derived from it. All of it is immutable
+/// once built, so every buffer of a language shares one instance.
+///
+/// This exists because compiling the highlight query is not cheap and is
+/// not proportional to anything per-buffer: `ts_query_new` on zig's 3.3KB
+/// highlights costs ~18ms in ReleaseFast, which was previously paid on
+/// EVERY buffer open — an order of magnitude more than opening the file,
+/// reading it and building its CRDT put together. Compiling once per
+/// grammar is the whole point of the type; a `Syntax` cannot compile its
+/// own, so "accidentally recompile per buffer" is no longer expressible.
+pub const Compiled = struct {
+    lib: std.DynLib,
+    lang: *const c.TSLanguage,
+    query: *c.TSQuery,
+    /// capture id → class; pattern id → enabled.
+    classes: []Class,
+    enabled: []bool,
+    /// Owned copies of the inputs that determined everything above, held
+    /// so the cache can recognise a spec by what it SAYS rather than by
+    /// where it lives — `Runtime.specs` is an ArrayList, so a spec's
+    /// address is not stable across `add`, and a config grammar may
+    /// replace a built-in under the same name.
+    key_parser_dir: []u8,
+    key_symbol: []u8,
+    key_highlights: []u8,
+
+    fn matches(self: *const Compiled, spec: *const LanguageSpec) bool {
+        return std.mem.eql(u8, self.key_parser_dir, spec.parser_dir) and
+            std.mem.eql(u8, self.key_symbol, spec.symbol) and
+            std.mem.eql(u8, self.key_highlights, spec.highlights);
+    }
+
+    fn destroy(self: *Compiled, gpa: Allocator) void {
+        c.ts_query_delete(self.query);
+        gpa.free(self.classes);
+        gpa.free(self.enabled);
+        gpa.free(self.key_parser_dir);
+        gpa.free(self.key_symbol);
+        gpa.free(self.key_highlights);
+        self.lib.close();
+        gpa.destroy(self);
+    }
+};
+
 /// The runtime grammar registry: seeded with the built-ins, extended by
 /// config through the `grammar-add` command (extension, package dir,
-/// symbol — the highlight query is read from the package).
+/// symbol — the highlight query is read from the package). Also the owner
+/// of every `Compiled` grammar (see `compiledFor`) — the registry of
+/// languages is the natural home for the artifacts of those languages,
+/// and it gives them a lifetime that outlives any one buffer.
 pub const Runtime = struct {
     const Owned = struct {
         spec: LanguageSpec,
@@ -144,6 +193,13 @@ pub const Runtime = struct {
     };
 
     specs: std.ArrayList(Owned) = .empty,
+    /// Compiled grammars, built on first use and kept for the registry's
+    /// life. A handful of entries at most, so a linear scan beats the
+    /// ceremony of a keyed map.
+    compiled: std.ArrayList(*Compiled) = .empty,
+    /// `compiledFor` can be reached from more than one buffer attaching at
+    /// once; the list and the compile itself are what this guards.
+    compiled_mu: task.Mutex = .{},
 
     pub const empty: Runtime = .{};
 
@@ -156,7 +212,65 @@ pub const Runtime = struct {
         return self;
     }
 
+    /// The compiled form of `spec`, built once and shared thereafter.
+    /// The result belongs to this `Runtime` and stays valid until it is
+    /// deinit'd — callers borrow, never free.
+    pub fn compiledFor(self: *Runtime, gpa: Allocator, spec: *const LanguageSpec) Error!*const Compiled {
+        self.compiled_mu.lock();
+        defer self.compiled_mu.unlock();
+        for (self.compiled.items) |ce| if (ce.matches(spec)) return ce;
+
+        const g = try loadGrammar(spec);
+        var lib = g.lib;
+        errdefer lib.close();
+        // The parser `loadGrammar` hands back is per-USE state, not part of
+        // the shared artifact — each `Syntax` makes its own from `lang`.
+        c.ts_parser_delete(g.parser);
+
+        var err_offset: u32 = 0;
+        var err_type: c.TSQueryError = c.TSQueryErrorNone;
+        const query = c.ts_query_new(
+            g.lang,
+            spec.highlights.ptr,
+            @intCast(spec.highlights.len),
+            &err_offset,
+            &err_type,
+        ) orelse {
+            std.log.err("syntax {s}: query error {d} at byte {d}", .{ spec.name, err_type, err_offset });
+            return error.QueryLoad;
+        };
+        errdefer c.ts_query_delete(query);
+
+        const classes, const enabled = try deriveQueryTables(gpa, query);
+        errdefer gpa.free(classes);
+        errdefer gpa.free(enabled);
+
+        const key_parser_dir = try gpa.dupe(u8, spec.parser_dir);
+        errdefer gpa.free(key_parser_dir);
+        const key_symbol = try gpa.dupe(u8, spec.symbol);
+        errdefer gpa.free(key_symbol);
+        const key_highlights = try gpa.dupe(u8, spec.highlights);
+        errdefer gpa.free(key_highlights);
+
+        const entry = try gpa.create(Compiled);
+        errdefer gpa.destroy(entry);
+        entry.* = .{
+            .lib = lib,
+            .lang = g.lang,
+            .query = query,
+            .classes = classes,
+            .enabled = enabled,
+            .key_parser_dir = key_parser_dir,
+            .key_symbol = key_symbol,
+            .key_highlights = key_highlights,
+        };
+        try self.compiled.append(gpa, entry);
+        return entry;
+    }
+
     pub fn deinit(self: *Runtime, gpa: Allocator) void {
+        for (self.compiled.items) |ce| ce.destroy(gpa);
+        self.compiled.deinit(gpa);
         for (self.specs.items) |*o| {
             if (o.owned) {
                 gpa.free(@constCast(o.spec.name));
@@ -389,17 +503,58 @@ fn initialParseWorker(job: *InitialParseJob) void {
     }
 }
 
+/// capture id → class, and pattern id → enabled, read off a compiled
+/// query. Both depend only on the query, so they are built once with it
+/// and shared by every buffer of the language (see `Compiled`).
+fn deriveQueryTables(gpa: Allocator, query: *c.TSQuery) Allocator.Error!struct { []Class, []bool } {
+    const capture_count = c.ts_query_capture_count(query);
+    const classes = try gpa.alloc(Class, capture_count);
+    errdefer gpa.free(classes);
+    for (0..capture_count) |i| {
+        var len: u32 = 0;
+        const name = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
+        classes[i] = classOf(name[0..len]);
+    }
+    const pattern_count = c.ts_query_pattern_count(query);
+    const enabled = try gpa.alloc(bool, pattern_count);
+    errdefer gpa.free(enabled);
+    for (0..pattern_count) |i| {
+        var n: u32 = 0;
+        const steps = c.ts_query_predicates_for_pattern(query, @intCast(i), &n);
+        // Directives (`#set!`) are settings, not filters — patterns
+        // carrying only those stay enabled; real predicates
+        // (`#lua-match?`, `#eq?`, …) disable their pattern.
+        enabled[i] = ok: {
+            if (n == 0) break :ok true; // steps may be null
+            var at_group_head = true;
+            for (steps[0..n]) |step| {
+                if (step.type == c.TSQueryPredicateStepTypeDone) {
+                    at_group_head = true;
+                    continue;
+                }
+                if (at_group_head) {
+                    at_group_head = false;
+                    if (step.type != c.TSQueryPredicateStepTypeString) break :ok false;
+                    var len: u32 = 0;
+                    const name = c.ts_query_string_value_for_id(query, step.value_id, &len);
+                    if (!std.mem.eql(u8, name[0..len], "set!")) break :ok false;
+                }
+            }
+            break :ok true;
+        };
+    }
+    return .{ classes, enabled };
+}
+
 pub const Syntax = struct {
     gpa: Allocator,
-    lib: std.DynLib,
+    /// The shared per-grammar artifacts — borrowed from the `Runtime` that
+    /// owns them, never freed here.
+    compiled: *const Compiled,
     parser: *c.TSParser,
-    query: *c.TSQuery,
     qcursor: *c.TSQueryCursor,
     tree: ?*c.TSTree = null,
     mirror: Mirror = .empty,
-    /// capture id → class; pattern id → enabled.
-    classes: []Class,
-    enabled: []bool,
     spec: LanguageSpec,
     /// The document this instance mirrors (providers decline others;
     /// per-buffer instances race under the capability model).
@@ -413,82 +568,26 @@ pub const Syntax = struct {
     /// While set: `self.tree` is null. Never set by `create`.
     pending_initial: ?*InitialParseJob = null,
 
-    /// Shared setup for both constructors below: loads the grammar and
-    /// compiles the highlight query (cheap — proportional to the query
-    /// text, not the file), and positions the mirror at the document's
-    /// current commit. Does NOT parse; callers finish the job.
-    fn createUnparsed(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+    /// Shared setup for both constructors below: makes this buffer's own
+    /// parse-time state (parser, query cursor) over the already-`Compiled`
+    /// grammar, and positions the mirror at the document's current commit.
+    /// Does NOT parse, and does NOT compile — see `Compiled` for why that
+    /// distinction is the difference between a 18ms open and a free one.
+    fn createUnparsed(gpa: Allocator, compiled: *const Compiled, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
         const self = try gpa.create(Syntax);
         errdefer gpa.destroy(self);
 
-        const g = try loadGrammar(spec);
-        var lib = g.lib;
-        errdefer lib.close();
-        const parser = g.parser;
+        const parser = c.ts_parser_new() orelse return error.OutOfMemory;
         errdefer c.ts_parser_delete(parser);
-        const lang = g.lang;
-
-        var err_offset: u32 = 0;
-        var err_type: c.TSQueryError = c.TSQueryErrorNone;
-        const query = c.ts_query_new(
-            lang,
-            spec.highlights.ptr,
-            @intCast(spec.highlights.len),
-            &err_offset,
-            &err_type,
-        ) orelse {
-            std.log.err("syntax {s}: query error {d} at byte {d}", .{ spec.name, err_type, err_offset });
-            return error.QueryLoad;
-        };
-        errdefer c.ts_query_delete(query);
+        if (!c.ts_parser_set_language(parser, compiled.lang)) return error.GrammarLoad;
         const qcursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
         errdefer c.ts_query_cursor_delete(qcursor);
 
-        const capture_count = c.ts_query_capture_count(query);
-        const classes = try gpa.alloc(Class, capture_count);
-        errdefer gpa.free(classes);
-        for (0..capture_count) |i| {
-            var len: u32 = 0;
-            const name = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
-            classes[i] = classOf(name[0..len]);
-        }
-        const pattern_count = c.ts_query_pattern_count(query);
-        const enabled = try gpa.alloc(bool, pattern_count);
-        errdefer gpa.free(enabled);
-        for (0..pattern_count) |i| {
-            var n: u32 = 0;
-            const steps = c.ts_query_predicates_for_pattern(query, @intCast(i), &n);
-            // Directives (`#set!`) are settings, not filters — patterns
-            // carrying only those stay enabled; real predicates
-            // (`#lua-match?`, `#eq?`, …) disable their pattern.
-            enabled[i] = ok: {
-                if (n == 0) break :ok true; // steps may be null
-                var at_group_head = true;
-                for (steps[0..n]) |step| {
-                    if (step.type == c.TSQueryPredicateStepTypeDone) {
-                        at_group_head = true;
-                        continue;
-                    }
-                    if (at_group_head) {
-                        at_group_head = false;
-                        if (step.type != c.TSQueryPredicateStepTypeString) break :ok false;
-                        var len: u32 = 0;
-                        const name = c.ts_query_string_value_for_id(query, step.value_id, &len);
-                        if (!std.mem.eql(u8, name[0..len], "set!")) break :ok false;
-                    }
-                }
-                break :ok true;
-            };
-        }
-
         self.* = .{
             .gpa = gpa,
-            .lib = lib,
+            .compiled = compiled,
             .parser = parser,
-            .query = query,
             .qcursor = qcursor,
-            .classes = classes,
-            .enabled = enabled,
             .spec = spec.*,
             .doc = doc,
         };
@@ -504,8 +603,8 @@ pub const Syntax = struct {
     /// The interactive open path uses `createAsync` instead (see module
     /// doc): a full parse costs the whole file, and that must not run on
     /// the path that makes a buffer usable.
-    pub fn create(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
-        const self = try createUnparsed(gpa, spec, doc);
+    pub fn create(gpa: Allocator, rt: *Runtime, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, try rt.compiledFor(gpa, spec), spec, doc);
         self.tree = self.parse(doc.text(), null);
         return self;
     }
@@ -517,8 +616,8 @@ pub const Syntax = struct {
     /// immediately usable and paints unhighlighted until the worker's
     /// tree lands (see module doc for how `sync` adopts it and folds in
     /// edits that landed meanwhile).
-    pub fn createAsync(gpa: Allocator, pool: *task.Pool, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
-        const self = try createUnparsed(gpa, spec, doc);
+    pub fn createAsync(gpa: Allocator, pool: *task.Pool, rt: *Runtime, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, try rt.compiledFor(gpa, spec), spec, doc);
         // A second, independent snapshot for the job: `self.mirror.rope`
         // stays put (untouched — `sync` won't drain it until the tree
         // lands), but the job needs its own refcounted handle since it
@@ -580,12 +679,10 @@ pub const Syntax = struct {
         }
         if (self.tree) |t_| c.ts_tree_delete(t_);
         c.ts_query_cursor_delete(self.qcursor);
-        c.ts_query_delete(self.query);
         c.ts_parser_delete(self.parser);
         self.mirror.deinit(gpa);
-        gpa.free(self.classes);
-        gpa.free(self.enabled);
-        self.lib.close();
+        // `self.compiled` belongs to the `Runtime`, which outlives every
+        // buffer — nothing of it is freed here.
         gpa.destroy(self);
     }
 
@@ -887,12 +984,12 @@ pub const Syntax = struct {
         const tree = self.tree orelse return out;
         const root = c.ts_tree_root_node(tree);
         _ = c.ts_query_cursor_set_byte_range(self.qcursor, @intCast(range.start), @intCast(range.end));
-        c.ts_query_cursor_exec(self.qcursor, self.query, root);
+        c.ts_query_cursor_exec(self.qcursor, self.compiled.query, root);
         var match: c.TSQueryMatch = undefined;
         while (c.ts_query_cursor_next_match(self.qcursor, &match)) {
-            if (!self.enabled[match.pattern_index]) continue;
+            if (!self.compiled.enabled[match.pattern_index]) continue;
             for (match.captures[0..match.capture_count]) |cap| {
-                const class = self.classes[cap.index];
+                const class = self.compiled.classes[cap.index];
                 if (class == .none) continue;
                 const s = c.ts_node_start_byte(cap.node);
                 const e = c.ts_node_end_byte(cap.node);

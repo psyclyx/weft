@@ -126,7 +126,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
         // tree-sitter does that part for free), so it runs on the
         // buffer's own pool worker instead of blocking `open`. See
         // src/core/syntax.zig's module doc for how the tree lands.
-        at.syntax = core.syntax.Syntax.createAsync(gpa, editor.pool, spec, doc) catch |err| blk: {
+        at.syntax = core.syntax.Syntax.createAsync(gpa, editor.pool, deps.grammars, spec, doc) catch |err| blk: {
             std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
             break :blk null;
         };
