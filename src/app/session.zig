@@ -772,7 +772,10 @@ fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref)
 const t = std.testing;
 
 fn testGrammars(gpa: std.mem.Allocator) !core.syntax.Runtime {
-    return core.syntax.Runtime.initBuiltins(gpa);
+    // No built-in set to inherit: these tests need only a registry that
+    // exists, not one that knows any particular language.
+    _ = gpa;
+    return .empty;
 }
 
 test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to it, quit/mode match System.create's floor" {

@@ -1,7 +1,8 @@
 //! Syntax — incremental tree-sitter parsing + highlighting, driven by
 //! the commit log. The grammar is a pinned shared object opened at
-//! runtime (`build_options` carries the store paths); the highlight
-//! query is embedded at build time.
+//! runtime, and the highlight query is read from the grammar package.
+//! WHICH grammars exist is not this file's business: they arrive through
+//! `Runtime.add`, driven by config.
 //!
 //! Change flow: a `Mirror` drains commits; each patch becomes a
 //! `ts_tree_edit` (old coordinates from the pre-patch shadow, new-end
@@ -58,7 +59,6 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const stemma = @import("stemma");
-const build_options = @import("build_options");
 const Document = @import("Document.zig");
 const Mirror = @import("mirror.zig");
 const task = @import("task.zig");
@@ -83,56 +83,13 @@ pub const LanguageSpec = struct {
     symbol_kinds: []const []const u8 = &.{},
 };
 
-/// Built-in grammar registrations (pinned store paths via build
-/// options). Runtime additions go through `Runtime.add` — a config/data
-/// change, not code.
-pub const languages = [_]LanguageSpec{
-    .{
-        .name = "zig",
-        .extensions = &.{".zig"},
-        .parser_dir = build_options.ts_zig,
-        .symbol = "tree_sitter_zig",
-        .highlights = @embedFile("ts_zig_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "variable_declaration", "struct_declaration" },
-    },
-    .{
-        .name = "fennel",
-        .extensions = &.{".fnl"},
-        .parser_dir = build_options.ts_fennel,
-        .symbol = "tree_sitter_fennel",
-        .highlights = @embedFile("ts_fennel_highlights"),
-    },
-    .{
-        .name = "lua",
-        .extensions = &.{".lua"},
-        .parser_dir = build_options.ts_lua,
-        .symbol = "tree_sitter_lua",
-        .highlights = @embedFile("ts_lua_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "function_definition" },
-    },
-    .{
-        .name = "nix",
-        .extensions = &.{".nix"},
-        .parser_dir = build_options.ts_nix,
-        .symbol = "tree_sitter_nix",
-        .highlights = @embedFile("ts_nix_highlights"),
-    },
-    .{
-        .name = "javascript",
-        .extensions = &.{ ".js", ".jsx", ".mjs", ".cjs" },
-        .parser_dir = build_options.ts_javascript,
-        .symbol = "tree_sitter_javascript",
-        .highlights = @embedFile("ts_javascript_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "class_declaration", "lexical_declaration" },
-    },
-    .{
-        .name = "html",
-        .extensions = &.{ ".html", ".htm" },
-        .parser_dir = build_options.ts_html,
-        .symbol = "tree_sitter_html",
-        .highlights = @embedFile("ts_html_highlights"),
-    },
-};
+// There is deliberately no built-in language table here. Which languages
+// exist is not core's business: this file knows how to load A grammar and
+// highlight with it, and learns about specific ones only through
+// `Runtime.add`, which config drives. A compiled-in list would make "the
+// languages weft supports" a property of the binary — and would make the
+// built-in path strictly more expressive than the one everyone else has to
+// use, which is the shape that lets a second-class config path survive.
 
 /// Everything about a language whose cost depends on the GRAMMAR rather
 /// than on the buffer: the opened `.so`, the language, the compiled
@@ -180,12 +137,6 @@ pub const Compiled = struct {
     }
 };
 
-/// The runtime grammar registry: seeded with the built-ins, extended by
-/// config through the `grammar-add` command (extension, package dir,
-/// symbol — the highlight query is read from the package). Also the owner
-/// of every `Compiled` grammar (see `compiledFor`) — the registry of
-/// languages is the natural home for the artifacts of those languages,
-/// and it gives them a lifetime that outlives any one buffer.
 /// Split a comma-separated list into owned pieces, dropping empties. A
 /// registration's lists arrive this way because commands carry strings, not
 /// lists (`command.Value` has no sequence variant).
@@ -216,6 +167,12 @@ fn freeOwned(gpa: Allocator, list: [][]const u8) void {
     gpa.free(list);
 }
 
+/// The grammar registry: empty until config fills it through `grammar-add`.
+/// There is no seeded set — every grammar arrives the same way, so there is
+/// no privileged one to be more capable than the rest. Also the owner of
+/// every `Compiled` grammar (see `compiledFor`): the registry of languages is
+/// the natural home for the artifacts of those languages, and it gives them a
+/// lifetime that outlives any one buffer.
 pub const Runtime = struct {
     const Owned = struct {
         spec: LanguageSpec,
@@ -226,6 +183,10 @@ pub const Runtime = struct {
     /// Colon-separated directories a grammar NAME resolves against — see
     /// `setSearchPath`. Owned; empty means "absolute paths only".
     search_path: []u8 = &.{},
+    /// Where a newly registered grammar's compile is queued (`warm`). Null —
+    /// the default, and what tests use — simply means grammars compile on
+    /// first use instead.
+    pool: ?*task.Pool = null,
     /// Compiled grammars, built on first use and kept for the registry's
     /// life. A handful of entries at most, so a linear scan beats the
     /// ceremony of a keyed map.
@@ -235,15 +196,6 @@ pub const Runtime = struct {
     compiled_mu: task.Mutex = .{},
 
     pub const empty: Runtime = .{};
-
-    pub fn initBuiltins(gpa: Allocator) !Runtime {
-        var self: Runtime = .empty;
-        errdefer self.deinit(gpa);
-        for (&languages) |*spec| {
-            try self.specs.append(gpa, .{ .spec = spec.*, .owned = false });
-        }
-        return self;
-    }
 
     /// The compiled form of `spec`, built once and shared thereafter.
     /// The result belongs to this `Runtime` and stays valid until it is
@@ -301,6 +253,11 @@ pub const Runtime = struct {
         return entry;
     }
 
+    /// How many grammars are registered. For tests and diagnostics.
+    pub fn specCount(self: *const Runtime) usize {
+        return self.specs.items.len;
+    }
+
     /// How many grammars are compiled so far. For tests and diagnostics —
     /// nothing about behaviour depends on it.
     pub fn compiledCount(self: *Runtime) usize {
@@ -309,37 +266,40 @@ pub const Runtime = struct {
         return self.compiled.items.len;
     }
 
-    const WarmJob = struct { rt: *Runtime, gpa: Allocator };
+    const WarmJob = struct { rt: *Runtime, gpa: Allocator, spec: LanguageSpec };
 
     fn warmWorker(job: *WarmJob) void {
         defer job.gpa.destroy(job);
         // Best effort by construction: a grammar that cannot be compiled is
         // not this job's problem to report — the open that actually needs it
         // will try again and log there, exactly as if no warm had run.
-        for (&languages) |*spec| _ = job.rt.compiledFor(job.gpa, spec) catch {};
+        _ = job.rt.compiledFor(job.gpa, &job.spec) catch {};
     }
 
-    /// Compile the BUILT-IN grammars on `pool`, so the first file of a
-    /// language does not pay for it on the frame thread. tree-sitter offers
-    /// no way to persist a compiled query (there is no serialization entry
-    /// point in its API at all), so precomputing within the session is the
-    /// only caching available — see `Compiled`.
+    /// Queue `spec`'s compile onto the long-lived pool. Registering a grammar
+    /// and paying for it are one act: there is no separate "warm everything"
+    /// step to remember to call, no ordering constraint against config load,
+    /// and a grammar added at any later moment gets the same treatment as one
+    /// added at startup — the asymmetry that a batch warm would reintroduce.
     ///
-    /// Built-ins only, and deliberately: their `LanguageSpec`s are static
-    /// comptime data, so the worker cannot race `Runtime.add` reallocating
-    /// `specs` out from under it. Config grammars still compile on first use.
+    /// tree-sitter cannot persist a compiled query across runs (its API has no
+    /// serialization entry point at all), so doing it here, off the frame
+    /// thread, is the only way the ~18ms avoids landing on the first open of a
+    /// language — see `Compiled`.
     ///
-    /// The caller must join `pool` before `deinit`ing this `Runtime` — the
-    /// worker touches it. `main.zig` gets that from defer order (the pool is
-    /// created after the registry, so it tears down first).
-    pub fn warmBuiltins(self: *Runtime, gpa: Allocator, pool: *task.Pool) void {
+    /// The job holds a COPY of the spec: `specs` is an ArrayList whose backing
+    /// can move under a later `add`, while the strings it points at are owned
+    /// by this `Runtime` and outlive the job — the caller must join the pool
+    /// before `deinit`ing the registry, which `main.zig` gets from defer order.
+    fn warm(self: *Runtime, gpa: Allocator, spec: LanguageSpec) void {
+        const pool = self.pool orelse return;
         const job = gpa.create(WarmJob) catch return;
-        job.* = .{ .rt = self, .gpa = gpa };
+        job.* = .{ .rt = self, .gpa = gpa, .spec = spec };
         var handle = pool.spawn(warmWorker, .{job}) catch {
             gpa.destroy(job);
             return;
         };
-        // Nothing to poll it for: the results land in `compiled`, not in the
+        // Nothing to poll it for: the result lands in `compiled`, not in the
         // handle, and a warm that never runs is merely a slower first open.
         handle.detach();
     }
@@ -444,6 +404,13 @@ pub const Runtime = struct {
             .highlights = highlights,
             .symbol_kinds = kinds,
         } });
+        self.warm(gpa, self.specs.items[self.specs.items.len - 1].spec);
+    }
+
+    /// Adopt the pool newly registered grammars compile on. Set once at
+    /// startup, before config runs.
+    pub fn setPool(self: *Runtime, pool: *task.Pool) void {
+        self.pool = pool;
     }
 
     pub fn forPath(self: *const Runtime, path: []const u8) ?*const LanguageSpec {
@@ -459,17 +426,6 @@ pub const Runtime = struct {
         return null;
     }
 };
-
-/// Test/embedding escape hatch for the compile-time catalog. Application code
-/// must resolve through `Runtime.forPath`, so config-added grammars participate.
-pub fn builtinForPath(path: []const u8) ?*const LanguageSpec {
-    for (&languages) |*spec| {
-        for (spec.extensions) |ext| {
-            if (std.mem.endsWith(u8, path, ext)) return spec;
-        }
-    }
-    return null;
-}
 
 fn classOf(name: []const u8) Class {
     const head = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];

@@ -1141,39 +1141,36 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
     mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
+/// Built once and shared by every module `addSyntax` touches. It must be ONE
+/// object: `b.addOptions()` content-addresses its emitted file, so three
+/// separate-but-identical option sets are three names for one physical file,
+/// and Zig refuses to let one file root two named modules ("file exists in
+/// modules 'build_options' and 'build_options0'"). The same hazard the
+/// `popup_layout_options` comment above describes, reached from the other
+/// direction — there the fix was to make the content differ, here it is to
+/// stop duplicating it.
+var syntax_options: ?*std.Build.Module = null;
+
 fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("tree-sitter", .{});
-    const opts = b.addOptions();
-    const grammars = [_]struct {
-        env: []const u8,
-        opt: []const u8,
-        import: []const u8,
-        /// In-repo query for grammar packages that ship none.
-        local_query: ?[]const u8 = null,
-    }{
-        .{ .env = "WEFT_TS_ZIG", .opt = "ts_zig", .import = "ts_zig_highlights" },
-        .{
-            .env = "WEFT_TS_FENNEL",
-            .opt = "ts_fennel",
-            .import = "ts_fennel_highlights",
-            .local_query = "assets/fennel-highlights.scm",
-        },
-        .{ .env = "WEFT_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
-        .{ .env = "WEFT_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
-        .{ .env = "WEFT_TS_JAVASCRIPT", .opt = "ts_javascript", .import = "ts_javascript_highlights" },
-        .{ .env = "WEFT_TS_HTML", .opt = "ts_html", .import = "ts_html_highlights" },
+    const opts = syntax_options orelse blk: {
+        const o = b.addOptions();
+        // The DEFAULT grammar search path, and nothing else about grammars.
+        // The build does not know which languages exist — that set lives in
+        // the directory this points at and in the config that asks for them,
+        // so adding a language never touches Zig source or this file. `main`
+        // still prefers `WEFT_GRAMMAR_PATH` from the environment at runtime;
+        // this is only what a build inside the nix shell falls back to.
+        o.addOption([]const u8, "grammar_path", b.graph.environ_map.get("WEFT_GRAMMAR_PATH") orelse
+            @panic("WEFT_GRAMMAR_PATH not set — build inside the nix shell"));
+        // `createModule` once, not `addOptions` per module: `addOptions` wraps
+        // the options in a FRESH module every call, which is what puts two
+        // module names on one content-addressed file.
+        const m = o.createModule();
+        syntax_options = m;
+        break :blk m;
     };
-    inline for (grammars) |g| {
-        const dir = b.graph.environ_map.get(g.env) orelse
-            @panic(g.env ++ " not set — build inside the nix shell");
-        opts.addOption([]const u8, g.opt, dir);
-        const query: std.Build.LazyPath = if (g.local_query) |lq|
-            b.path(lq)
-        else
-            .{ .cwd_relative = b.pathJoin(&.{ dir, "queries", "highlights.scm" }) };
-        mod.addAnonymousImport(g.import, .{ .root_source_file = query });
-    }
-    mod.addOptions("build_options", opts);
+    mod.addImport("build_options", opts);
 }
 
 /// Generate the xdg-shell client glue with wayland-scanner and add it to

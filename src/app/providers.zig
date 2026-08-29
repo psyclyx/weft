@@ -201,8 +201,11 @@ pub const Providers = struct {
     attached: bool,
 
     /// Phase one: the config-extended registries, built before the session.
+    /// The grammar registry starts EMPTY — weft ships no languages. Config
+    /// fills it through `grammar-add`; the search path names are resolved
+    /// against is supplied by `main`.
     pub fn initRegistries(self: *Providers, gpa: std.mem.Allocator) !void {
-        self.grammars = try core.syntax.Runtime.initBuiltins(gpa);
+        self.grammars = .empty;
         errdefer self.grammars.deinit(gpa);
         self.attached = false;
     }

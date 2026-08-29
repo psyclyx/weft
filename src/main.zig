@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const core = @import("core/core.zig");
+const build_options = @import("build_options");
 const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
 const window_layout = @import("gfx/window_layout.zig");
@@ -122,13 +123,21 @@ pub fn main(init: std.process.Init) !void {
     defer providers_state.deinit(gpa);
     var pool = try core.task.Pool.init(gpa, .{});
     // Ordering matters and is load-bearing: this defer is registered AFTER
-    // the registry's, so the pool joins first and the warm below can never
-    // outlive the `Runtime` it writes into (see `Runtime.warmBuiltins`).
+    // the registry's, so the pool joins first and a queued grammar compile
+    // can never outlive the `Runtime` it writes into (see `Runtime.warm`).
     defer pool.deinit();
-    // Compiling a highlight query costs ~18ms for zig, and tree-sitter has no
-    // way to persist one across runs — so pay it here, on a worker, instead
-    // of on the frame thread the first time a file of that language opens.
-    providers_state.grammars.warmBuiltins(gpa, pool);
+    // Where `grammar-add` resolves a grammar NAME. The environment wins so a
+    // user can point at their own tree; the build-time value is the fallback
+    // that makes a nix build work unwrapped. Weft supplies the PATH and knows
+    // nothing about what is on it.
+    try providers_state.grammars.setSearchPath(
+        gpa,
+        std.process.Environ.getPosix(init.minimal.environ, "WEFT_GRAMMAR_PATH") orelse
+            build_options.grammar_path,
+    );
+    // Registering a grammar queues its compile here instead of paying ~18ms
+    // on the frame thread at the first open of that language.
+    providers_state.grammars.setPool(pool);
 
     // ── Core editing state ──
     // `Session` owns the buffers, the command/keymap/pick surfaces, the caps

@@ -31,8 +31,27 @@ fn ownedText(gpa: Allocator, doc: *const Document) ![]u8 {
     return doc.text().toOwnedSlice(gpa);
 }
 
+/// A registry holding the grammars these tests highlight with, registered the
+/// SAME way config does it — there is no built-in set to fall back on, so a
+/// test that wants zig has to ask for zig, exactly like a user's config. The
+/// search path comes from the build (the nix shell's `WEFT_GRAMMAR_PATH`),
+/// which is the only thing the test knows that a user wouldn't.
+fn testRuntime(gpa: Allocator) !core.syntax.Runtime {
+    var rt: core.syntax.Runtime = .empty;
+    errdefer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{
+        .extensions = ".zig",
+        .grammar = "zig",
+        .symbol = "tree_sitter_zig",
+        .symbol_kinds = "function_declaration,variable_declaration,struct_declaration",
+    });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    return rt;
+}
+
 test "syntax: application lookup goes through the runtime grammar registry" {
-    var runtime = try core.syntax.Runtime.initBuiltins(t.allocator);
+    var runtime = try testRuntime(t.allocator);
     defer runtime.deinit(t.allocator);
     try t.expect(runtime.forPath("demo.zig") != null);
     try t.expect(runtime.forPath("demo.unknown") == null);
@@ -570,9 +589,9 @@ test "syntax: incremental highlight tracks edits and peer merges" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
@@ -614,9 +633,9 @@ test "syntax: tree queries — node-at-offset, ancestors, and captures" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42;\n");
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
@@ -680,9 +699,9 @@ test "syntax: createAsync returns before the initial parse runs" {
     }
     try doc.insert(gpa, 0, src.items);
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("big.zig").?;
+    const spec = spec_rt.forPath("big.zig").?;
     const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
 
@@ -711,9 +730,9 @@ test "syntax: highlights arrive and paint once the background parse lands" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     try t.expectEqual(@as(?*core.syntax.c.TSTree, null), syn.tree);
@@ -739,9 +758,9 @@ test "syntax: an edit during the pending initial parse lands coherently, not tor
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     // Guaranteed still pending here (see the test above) — no `sync`
@@ -793,9 +812,9 @@ test "syntax: destroy while pending on a saturated pool returns promptly, no lea
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     // Queued behind the hog — cannot have started.
     try t.expect(syn.pending_initial != null);
@@ -925,9 +944,9 @@ test "syntax: instant-tier definition + symbols providers race through registry"
         \\}
     );
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("demo.zig").?;
+    const spec = spec_rt.forPath("demo.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     try core.syntax.registerProviders(&host.caps, syn);
@@ -979,9 +998,9 @@ test "capability: two languages' tree-sitter providers bind without collision an
     var doc_zig = try Document.init(gpa, "user");
     defer doc_zig.deinit(gpa);
     try doc_zig.insert(gpa, 0, "fn f() void {}\n");
-    var zig_spec_rt: core.syntax.Runtime = .empty;
+    var zig_spec_rt = try testRuntime(gpa);
     defer zig_spec_rt.deinit(gpa);
-    const zig_spec = core.syntax.builtinForPath("a.zig").?;
+    const zig_spec = zig_spec_rt.forPath("a.zig").?;
     const zig_syn = try core.syntax.Syntax.create(gpa, &zig_spec_rt, zig_spec, &doc_zig);
     defer zig_syn.destroy();
     try core.syntax.registerProviders(&host.caps, zig_syn);
@@ -989,9 +1008,9 @@ test "capability: two languages' tree-sitter providers bind without collision an
     var doc_nix = try Document.init(gpa, "user");
     defer doc_nix.deinit(gpa);
     try doc_nix.insert(gpa, 0, "{ x = 1; }\n");
-    var nix_spec_rt: core.syntax.Runtime = .empty;
+    var nix_spec_rt = try testRuntime(gpa);
     defer nix_spec_rt.deinit(gpa);
-    const nix_spec = core.syntax.builtinForPath("b.nix").?;
+    const nix_spec = nix_spec_rt.forPath("b.nix").?;
     const nix_syn = try core.syntax.Syntax.create(gpa, &nix_spec_rt, nix_spec, &doc_nix);
     defer nix_syn.destroy();
     // Must NOT error — the exact call that used to trap with SlotCollision.
@@ -1023,9 +1042,9 @@ test "syntax: highlight feed publishes stamped bulk into its layer" {
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "const x = 1;\n");
 
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("a.zig").?;
+    const spec = spec_rt.forPath("a.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     const layer = try host.caps.registerFeed(&host.editor().doc, "edit/highlight", "highlight", .local, "treesitter");
@@ -1043,9 +1062,9 @@ test "syntax: holey document parses the realized prefix, never crashes" {
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "fn seed() void {}\n");
-    var spec_rt: core.syntax.Runtime = .empty;
+    var spec_rt = try testRuntime(gpa);
     defer spec_rt.deinit(gpa);
-    const spec = core.syntax.builtinForPath("h.zig").?;
+    const spec = spec_rt.forPath("h.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
@@ -1394,7 +1413,7 @@ test "syntax: a grammar compiles once per runtime, not once per buffer" {
     // compilation would put that cost back on every single open, which is
     // exactly where it used to be.
     const gpa = t.allocator;
-    var rt: core.syntax.Runtime = .empty;
+    var rt = try testRuntime(gpa);
     defer rt.deinit(gpa);
     var doc_a = try Document.init(gpa, "user");
     defer doc_a.deinit(gpa);
@@ -1403,7 +1422,7 @@ test "syntax: a grammar compiles once per runtime, not once per buffer" {
     defer doc_b.deinit(gpa);
     try doc_b.insert(gpa, 0, "const b = 2;\n");
 
-    const spec = core.syntax.builtinForPath("a.zig").?;
+    const spec = rt.forPath("a.zig").?;
     const a = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_a);
     defer a.destroy();
     const b = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_b);
@@ -1416,7 +1435,7 @@ test "syntax: a grammar compiles once per runtime, not once per buffer" {
     try t.expect(a.qcursor != b.qcursor);
 
     // A different language is a different entry, not a clobbered one.
-    const nix_spec = core.syntax.builtinForPath("b.nix").?;
+    const nix_spec = rt.forPath("b.nix").?;
     const n = try core.syntax.Syntax.create(gpa, &rt, nix_spec, &doc_a);
     defer n.destroy();
     try t.expect(a.compiled != n.compiled);
@@ -1426,34 +1445,43 @@ test "syntax: a grammar compiles once per runtime, not once per buffer" {
     try t.expect(b.tree != null);
 }
 
-test "syntax: warming compiles the built-ins off the frame thread" {
+test "syntax: registering a grammar queues its compile off the frame thread" {
     // tree-sitter cannot persist a compiled query between runs, so the only
-    // caching available is to precompute within the session. This asserts the
-    // warm actually populates the cache — without a clock and without a
-    // sleep: `Pool.deinit` joins its threads and drains whatever is still
-    // queued, so by the time the block below exits the job has run, however
-    // the OS chose to schedule it.
+    // caching available is to precompute within the session — and the moment
+    // to do it is registration, which is why there is no separate warm step to
+    // forget. Asserted without a clock and without a sleep: `Pool.deinit`
+    // joins its threads and drains whatever is still queued, so once the block
+    // exits the job has run however the OS chose to schedule it.
     const gpa = t.allocator;
     var rt: core.syntax.Runtime = .empty;
     defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
     try t.expectEqual(@as(usize, 0), rt.compiledCount());
     {
         var pool = try task.Pool.init(gpa, .{ .threads = 1 });
         defer pool.deinit();
-        rt.warmBuiltins(gpa, pool);
+        rt.setPool(pool);
+        try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+        try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+        // A grammar registered LATE is not second class — this one is queued
+        // by the same act, with no batch pass to have missed it.
+        try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
     }
-    try t.expectEqual(core.syntax.languages.len, rt.compiledCount());
+    // The pool is gone; nothing may be queued against it afterwards.
+    rt.pool = null;
+    try t.expectEqual(rt.specCount(), rt.compiledCount());
 
-    // A warmed grammar is the SAME entry a buffer then gets — warming that
-    // built a second, parallel copy would cost the compile twice and defeat
-    // the point entirely.
+    // A warmed grammar is the SAME entry a buffer then gets — a warm that
+    // built a second, parallel copy would pay the compile twice and defeat the
+    // point entirely.
+    const before = rt.compiledCount();
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
-    const spec = core.syntax.builtinForPath("a.zig").?;
+    const spec = rt.forPath("a.zig").?;
     const syn = try core.syntax.Syntax.create(gpa, &rt, spec, &doc);
     defer syn.destroy();
-    try t.expectEqual(core.syntax.languages.len, rt.compiledCount());
+    try t.expectEqual(before, rt.compiledCount());
 }
 
 test "syntax: an external registration can say everything a built-in can" {

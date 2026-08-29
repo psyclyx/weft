@@ -188,6 +188,7 @@ pub const Editor = struct {
         // Session (builtins + capability/caret commands), then Providers' attach
         // phase (borrows the session caps).
         try self.prov.initRegistries(gpa);
+        try registerGrammars(&self.prov.grammars, gpa);
         try self.session.init(gpa, self.pool, user, &self.prov.grammars);
         self.prov.initAttach(gpa, &self.session.system.caps, parentEnviron());
 
@@ -2458,3 +2459,33 @@ pub const App = struct {
         self.proj.deinit();
     }
 };
+
+/// Stand in for config. Weft ships no languages, so a bare `Editor` has no
+/// grammars at all — production gets them from `config/defaults.js`, and the
+/// harness registers the same set here so tests that boot no config still
+/// highlight. Kept deliberately in step with that file: a language added there
+/// and not here is a language the e2e suite silently stops covering.
+fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{
+        .extensions = ".zig",
+        .grammar = "zig",
+        .symbol = "tree_sitter_zig",
+        .symbol_kinds = "function_declaration,variable_declaration,struct_declaration",
+    });
+    try rt.add(gpa, .{ .extensions = ".fnl", .grammar = "fennel", .symbol = "tree_sitter_fennel" });
+    try rt.add(gpa, .{
+        .extensions = ".lua",
+        .grammar = "lua",
+        .symbol = "tree_sitter_lua",
+        .symbol_kinds = "function_declaration,function_definition",
+    });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    try rt.add(gpa, .{
+        .extensions = ".js,.jsx,.mjs,.cjs",
+        .grammar = "javascript",
+        .symbol = "tree_sitter_javascript",
+        .symbol_kinds = "function_declaration,class_declaration,lexical_declaration",
+    });
+    try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
+}
