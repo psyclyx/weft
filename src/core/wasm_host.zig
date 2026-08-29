@@ -28,6 +28,7 @@ pub const perm_fs_write = plugin.perm_fs_write;
 pub const perm_net = plugin.perm_net;
 pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
+pub const perm_env = plugin.perm_env;
 pub const setEnviron = plugin.setEnviron;
 // The shared guard predicates (W0b, doc/extensibility-native-surface.md) — the ONE
 // grant/dispatch check both the wasm transport (`requirePerm`/
@@ -59,6 +60,16 @@ pub const deliverToBuffer = fs.deliverToBuffer;
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
+
+/// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
+/// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
+/// ever reaches core through this facade — can recompute each handler from
+/// the table and compare pointers.
+const proc = @import("wasm_host/proc.zig");
+pub const proc_doors = struct {
+    pub const doors = proc.doors;
+    pub const wasmDoor = proc.wasmDoor;
+};
 
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;

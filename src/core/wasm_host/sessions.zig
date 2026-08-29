@@ -34,10 +34,35 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         return;
     };
     defer gpa.free(buf);
-    const s = repl_session.Session.start(gpa, pool, p.activeCtx(), p.name, buf, &.{ "/bin/sh", "-c", cmd }, shared.g_environ, null) catch {
+    // A REPL runs where its entry is (`doc/place.md`): two interpreters started
+    // from two projects are two interpreters IN those projects, not two names
+    // for the same directory. `Session.start` dups the cwd, so this one is ours.
+    const at = shared.resolveSpawnAt(p, gpa);
+    defer switch (at) {
+        .at => |dir| gpa.free(dir),
+        else => {},
+    };
+    const cwd: ?[]const u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            results[0] = -1;
+            return;
+        },
+    };
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
+    const s = repl_session.Session.start(gpa, pool, p.activeCtx(), p.name, buf, &.{ "/bin/sh", "-c", cmd }, spawn_env orelse shared.g_environ, cwd) catch {
         results[0] = -1;
         return;
     };
+    // The session outlives this call and uses its environment throughout.
+    if (spawn_env != null) {
+        s.adoptEnviron();
+        env_owned = false;
+    }
     p.sessions.append(gpa, s) catch {
         s.deinit();
         results[0] = -1;

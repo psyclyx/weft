@@ -20,6 +20,12 @@
   "git", "grep", "run", "make", "notes", "fmt", "buffers", "windows",
   "modes", "snippets", "direnv", "llm", "console", "repl", "which_key", "files",
 ].forEach((p) => weft.plugin(p));
+// An fs capability nobody narrows is confined to the dispatching place, so
+// `notes`/`snippets` above need no line here. The browser is the exception
+// that has to say so: `{root: "/"}` is the written-down spelling of
+// unconfined, and its typed target doors take nothing narrower.
+weft.grant("files", "fs_read", { root: "/" });
+weft.grant("files", "fs_write", { root: "/" });
 weft.use("defaults"); // shared picker + which-key nav bindings
 
 // which-key: a short idle delay, F1 peeks the current chord's choices.

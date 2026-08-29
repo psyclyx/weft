@@ -100,7 +100,7 @@ pub const Group = enum {
 /// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
 /// gates alone — modeled honestly as the pair it always is, rather than
 /// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer };
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -375,9 +375,14 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .doc = "write to a spawned subprocess's stdin" },
     .{ .name = "wl_proc_read", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "drain buffered stdout from a spawned subprocess" },
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
-    .{ .name = "wl_cwd", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the process working directory (for absolute `file://` uris)" },
+    .{ .name = "wl_place_root", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the dispatching place's absolute directory, or 0 bytes when it has none locally" },
+    .{ .name = "wl_place_id", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "a dense opaque id for the dispatching place; compare it, never interpret it" },
+    .{ .name = "wl_place_has", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "what `<the dispatching place>/<rel>` is (absent/file/dir/other), resolved BENEATH the place root — a question about the place you are in, not filesystem access" },
+    .{ .name = "wl_env_publish", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "publish this plugin's environment overlay (NUL-separated KEY=VALUE) for the dispatching place" },
+    .{ .name = "wl_env_retract", .params = &.{}, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "withdraw this plugin's environment overlay for the dispatching place" },
     .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
     .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
+    .{ .name = "wl_proc_spool", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer`, but write `<input>` to a HOST-NAMED temp file, substitute it for `{}` in `<cmd>`, and delete it afterwards — a subprocess gets a real path without the guest holding fs_write" },
     .{ .name = "wl_proc_filter", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "filter `[start,end)` through `<cmd>` in place (formatters)" },
 
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
@@ -389,8 +394,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_net_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "close a net session" },
 
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
-    .{ .name = "wl_fs_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "read a file into the guest" },
-    .{ .name = "wl_fs_exists", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "what a cwd-relative path is (absent/file/dir/other), without reading it" },
+    .{ .name = "wl_fs_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "read a file into the guest, within the grant's bounds (the dispatching place by default)" },
+    .{ .name = "wl_fs_exists", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "what a path is (absent/file/dir/other), without reading it; resolved against the grant's bounds — the dispatching place by default" },
     .{ .name = "wl_fs_write", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "replace a file's contents" },
     .{ .name = "wl_fs_append", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "append to a file (capture)" },
     .{ .name = "wl_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list a local directory (locus-routed; remote authorities degrade to -1)" },
@@ -428,7 +433,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 204;
+const expected_import_count = 209;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -549,6 +554,49 @@ test "membrane contract data: every import entry is well-formed, documented, and
         try t.expect(!gop.found_existing);
     }
     try t.expectEqual(@as(usize, expected_import_count), imports.len);
+}
+
+test "membrane contract data: exactly one door answers WHERE, and it is place-shaped" {
+    // The membrane used to answer "where does this run" with the process's
+    // launch directory — ONE value fixed at startup, handed to every guest that
+    // asked, with no relation to what the dispatch was about. Its four
+    // consumers each meant something narrower by it (a language server's
+    // workspace, a `.git` climb's floor, a file browser's root), and with two
+    // projects open at once the single answer was wrong for at least one of
+    // them. `wl_place_root` answers WHERE THIS DISPATCH IS instead, and answers
+    // nothing at all when that place has no local directory, so a guest
+    // declines rather than acting in the launch directory (`doc/place.md`).
+    //
+    // This is the positive half of the gate: the replacement is bound, in the
+    // proc group beside the spawn doors that read the same place host-side. The
+    // ABSENCE of the retired process-directory door — in this table, in the
+    // handler list, and in the guest shim — is gated over the real source tree
+    // by `e2e/demolition_test.zig`, which is the only file allowed to spell it.
+    var saw_place_root = false;
+    for (imports) |entry| {
+        if (!std.mem.eql(u8, entry.name, "wl_place_root")) continue;
+        saw_place_root = true;
+        try t.expectEqual(Group.proc, entry.group);
+        try t.expectEqual(@as(?Perm, null), entry.perm); // narrower than what it replaced; no new authority
+    }
+    try t.expect(saw_place_root);
+
+    // `wl_place_has` is the same door asked a NARROWER question — what is at
+    // one name inside that directory, rather than what the directory is — so
+    // it carries the same (absent) permission for the same reason. Gating it
+    // where `wl_place_root` is ungated would be theatre: a guest holding the
+    // root can hand the whole path to anything, and the answer here cannot
+    // leave the place at all (`wasm_host/proc.zig`'s `placeKind`). Pinned
+    // here so a later "tighten the fs doors" sweep cannot quietly attach
+    // `fs_read` to it and un-do the two grants it exists to remove.
+    var saw_place_has = false;
+    for (imports) |entry| {
+        if (!std.mem.eql(u8, entry.name, "wl_place_has")) continue;
+        saw_place_has = true;
+        try t.expectEqual(Group.proc, entry.group);
+        try t.expectEqual(@as(?Perm, null), entry.perm);
+    }
+    try t.expect(saw_place_has);
 }
 
 test "membrane contract data: every export entry is well-formed, documented, and unique" {

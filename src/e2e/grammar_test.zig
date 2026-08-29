@@ -31,9 +31,19 @@ const semantic = h.semantic_model;
 const App = h.App;
 
 /// The whole configuration under test (doc/configuration.md §5.2): two
-/// `weft.plugin` declarations, no bindings of its own — the grammar owns
-/// its table, and it is written against protocols, not against Files.
+/// `weft.plugin` declarations plus the browser's breadth, no bindings of its
+/// own — the grammar owns its table, and it is written against protocols, not
+/// against Files.
+///
+/// The two `weft.grant` lines are the shipped config's, verbatim
+/// (doc/place.md §4.1): an fs capability nobody narrows is confined to the
+/// dispatching place, and the browser's typed target doors need the
+/// written-down unconfined form because they prove authority against a
+/// provider root rather than a path. Without them this fixture browses
+/// nothing.
 const gate_config =
+    \\weft.grant("files", "fs_read", { root: "/" });
+    \\weft.grant("files", "fs_write", { root: "/" });
     \\weft.plugin("files");
     \\weft.plugin("gramtest");
 ;

@@ -188,6 +188,7 @@ pub const Editor = struct {
         // Session (builtins + capability/caret commands), then Providers' attach
         // phase (borrows the session caps).
         try self.prov.initRegistries(gpa);
+        try registerGrammars(&self.prov.grammars, gpa);
         try self.session.init(gpa, self.pool, user, &self.prov.grammars);
         self.prov.initAttach(gpa, &self.session.system.caps, parentEnviron());
 
@@ -239,6 +240,7 @@ pub const Editor = struct {
             .directories = .{
                 .context = &self.session,
                 .open = app_session.Session.openLocalDirectoryOpaque,
+                .place_for = app_session.Session.placeForFileOpaque,
             },
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
@@ -296,12 +298,25 @@ pub const Editor = struct {
     }
 
     /// Mint what `weft.grant(plugin, capability)` mints from config — for a
-    /// test that loads a `.js` plugin DIRECTLY (`loadJs`) instead of through
-    /// a config manifest, which would mint these itself. Must precede
-    /// `loadJs`: that is when a plugin adopts its rows. `plugin`/`capability`
-    /// are borrowed by the table (string literals at every call site).
+    /// test that loads a plugin DIRECTLY (`load`/`loadJs`) instead of through
+    /// a config manifest, which would mint these itself. Must precede the
+    /// load: that is when a plugin adopts (or composes with) its rows.
+    /// `plugin`/`capability` are borrowed by the table (string literals at
+    /// every call site).
     pub fn grant(self: *Editor, plugin: []const u8, capability: []const u8) !void {
-        _ = try self.session.system.grants.grant(.{ .capability = capability }, plugin, null);
+        return self.grantRooted(plugin, capability, "");
+    }
+
+    /// `weft.grant(plugin, capability, { root })`, with the SAME limit rule
+    /// config applies (`grants.limitForRoot`) rather than a second one that
+    /// could drift: `""` means no `opts` at all — CONFINED to the dispatching
+    /// place for the fs capabilities (doc/place.md §4.1) — and `"/"` is the
+    /// written-down unconfined form.
+    pub fn grantRooted(self: *Editor, plugin: []const u8, capability: []const u8, root: []const u8) !void {
+        _ = try self.session.system.grants.grant(.{
+            .capability = capability,
+            .limit = core.grants.limitForRoot(capability, root),
+        }, plugin, null);
     }
 
     /// Load a resident JS plugin (a quickjs reactor — acp.js / dap.js), named so
@@ -388,12 +403,37 @@ pub const Editor = struct {
         return elapsed;
     }
 
+    /// This thread's CPU time — NOT the wall clock.
+    ///
+    /// The gate this feeds exists to catch dispatch that does more WORK:
+    /// "scales worse with provider count, allocates where it didn't, adds a
+    /// syscall" (see `latency_test.zig`'s header). Wall time answers a
+    /// different question — "was this box busy" — and answers it with whatever
+    /// else the machine was doing. `zig build` schedules test binaries across
+    /// every core, so a sibling binary is routinely running during these
+    /// samples; a p95 over wall time then reports the scheduler, not the code.
+    /// Measured that way, p95 intermittently tripled (91.9µs against a 28.4µs
+    /// baseline) with no change on the dispatch path at all — ~5% of samples
+    /// catching a deschedule is all it takes.
+    ///
+    /// Dispatch is synchronous and is fenced against blocking
+    /// (`task.assertMayBlock`), so thread CPU time and honest elapsed time are
+    /// the same quantity here whenever the box is idle — this narrows what is
+    /// measured, it does not soften it. Off-thread work is deliberately
+    /// excluded, exactly as it already was.
+    fn threadCpuNs() u64 {
+        var ts: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+        if (std.os.linux.errno(rc) != .SUCCESS) return core.task.nowNs();
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
     fn inputTimed(self: *Editor, spec_in: []const u8, commit: core.TextCommit) u64 {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
-        const start = core.task.nowNs();
+        const start = threadCpuNs();
         self.application.input(spec, commit) catch {};
-        return core.task.nowNs() -| start;
+        return threadCpuNs() -| start;
     }
 
     /// Press each key of a space-separated chord in turn — the natural way to
@@ -1047,7 +1087,21 @@ const guest = struct {
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
+    /// Test fixture only — `src/guest/fs_limit.zig`: declares fs_read +
+    /// fs_write and exposes each path-taking door as a command reading its
+    /// path from the args, so a test controls exactly which path to try
+    /// against whichever grant is in force. The place gates
+    /// (`project_test.zig`) drive it across two projects.
+    const fs_limit = @embedFile("guest_fs_limit_wasm");
 };
+
+/// Load the fs-door probe fixture with NO config grant of any kind, so it
+/// holds exactly the confined-by-default baseline `describe()` earns it
+/// (doc/place.md §4.1). Deliberately not part of any bundle: a test that wants
+/// to probe filesystem reach should have said so.
+pub fn loadFsLimit(ed: *Editor) !void {
+    try ed.load("fs_limit", guest.fs_limit);
+}
 
 /// The base editing set under an EMACS keymap (modeless: printable keys self-
 /// insert). The coworker in the collab matrix who "uses emacs, but can edit".
@@ -1141,6 +1195,14 @@ pub fn loadSpine(ed: *Editor) !void {
 /// whole-app "web" e2e verticals.
 pub fn loadWebIde(ed: *Editor) !void {
     try loadWorkspace(ed);
+    // The two grant lines config.js carries for the browser, minted the same
+    // way here because this harness bypasses the config manifest. Without
+    // them the browser holds the confined-by-default `.place` grant, and its
+    // typed target doors refuse — they prove authority against a provider
+    // root, so there is no path for a path-shaped limit to be checked against
+    // (doc/place.md §4.1).
+    try ed.grantRooted("files", "fs_read", "/");
+    try ed.grantRooted("files", "fs_write", "/");
     try ed.load("files", guest.files);
     try ed.load("grep", guest.grep);
     try ed.load("run", guest.run);
@@ -2397,3 +2459,21 @@ pub const App = struct {
         self.proj.deinit();
     }
 };
+
+/// Stand in for config. Weft ships no languages, so a bare `Editor` has no
+/// grammars at all — production gets them from `config/defaults.js`, and the
+/// harness registers the same set here so tests that boot no config still
+/// highlight. That makes this a COPY of that file's grammar lines, checked
+/// against it by "e2e/languages: the harness registers exactly what
+/// config/defaults.js does" rather than by a comment asking for diligence.
+/// A harness that also boots config registers each grammar twice; `add`
+/// replaces by name, so that collapses instead of accumulating.
+fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".fnl", .grammar = "fennel", .symbol = "tree_sitter_fennel" });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
+    try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
+}

@@ -1,9 +1,28 @@
-//! core/membrane/qjs_contract.zig — the `weft.*` membrane's THIRD surface
-//! (doc/extensibility-native-surface.md, task W0a-D extension 3): the `qjs_*` import
-//! table `src/core/quickjs.zig` binds onto quickjs.wasm's Linker, today
-//! hand-listed at THREE call sites (`defineConfigFns`'s 13 config-plane
-//! imports, `evalConfig`'s 15 plugin-plane stubs, `JsPlugin.load`'s 15
-//! plugin-plane real handlers) that must all agree on every name's arity.
+//! core/membrane/qjs_contract.zig — the `qjs_*` import table
+//! `src/core/quickjs.zig` binds onto quickjs.wasm's Linker, walked at THREE
+//! registration sites (`defineConfigFns`'s config-plane imports, `evalConfig`'s
+//! plugin-plane stubs, `JsPlugin.load`'s plugin-plane real handlers) that must
+//! all agree on every name's arity.
+//!
+//! This is an IMPORT NAME TABLE, not a second membrane. It used to describe
+//! itself as the `weft.*` membrane's "third surface", and for the plugin plane
+//! that was a real problem, not a turn of phrase: `quickjs.wasm` IS a wasm
+//! plugin, so a JS plugin is code running inside a wasm guest and must not be
+//! able to do anything a wasm guest cannot — yet `qjs_proc_spawn` grew a `cwd`
+//! argument `wl_proc_spawn` never had, because there were two bodies to grow it
+//! in. There are not any more. The proc doors' four bodies live ONCE, in
+//! `wasm_host/proc.zig`, and both membranes are generated from its `doors`
+//! table (`e2e/demolition_test.zig` proves it by function pointer, doc/place.md
+//! §4.1a). What survives here for those names is the wasm-level import NAME and
+//! arity — which must stay distinct from `wl_*` only because quickjs.wasm's C
+//! shim bakes the name into the binary's import section.
+//!
+//! The `.config` group is a different matter and stays its own surface on
+//! purpose: config is a distinct ROLE with its own trust tier — it already
+//! chooses which plugins load — not a different kind of plugin. Several of its
+//! names collide with a `wl_*` door while meaning something else entirely
+//! (`qjs_semantic_action` DECLARES a command; `wl_semantic_action` INVOKES
+//! one). That is a naming problem, not a capability one.
 //!
 //! Same `Entry`-data shape as `contract_data.zig` (name/params/results/
 //! group/doc), deliberately NOT unified with it: this is a different
@@ -39,14 +58,27 @@ pub const ValType = enum { i32 };
 /// (`WEFT_DENIED` there; the two numbers must agree).
 pub const denied: i32 = -2;
 
-/// Which linker(s) an entry is bound on. `.config` — the 13 `weft.*` calls
-/// every config/plugin script can make (bind/run/echo/log/plugin/use/set/
-/// menu/action/provide/statusSegment/grant) — real handlers always.
-/// `.plugin` — the 15 calls only a RESIDENT JS plugin makes
-/// (register/proc/buffer/config/
-/// breakpoints/fileRead/fileWrite/lineText/pick/status); stubbed on the
-/// config-eval linker (present to satisfy quickjs.wasm's shared import
-/// list, never actually called there), real on a plugin's linker.
+/// Which linker(s) an entry is bound on. `.config` — the `weft.*` calls every
+/// config/plugin script can make (bind/run/echo/log/plugin/use/set/menu/action/
+/// provide/statusSegment/grant/viewport/present) — real handlers always, and
+/// the one group that is legitimately its own surface (see the module doc).
+/// `.plugin` — the calls only a RESIDENT JS plugin makes (register/proc/buffer/
+/// transcript/config/breakpoints/fileRead/fileWrite/lineText/activeBuffer/pick/
+/// status); stubbed on the config-eval linker (present to satisfy quickjs.wasm's
+/// shared import list, never actually called there), real on a plugin's linker.
+///
+/// A `.plugin` entry is NOT licence for a second implementation. Where a `wl_*`
+/// door of the same meaning exists, this name must reach that door's body:
+///   - `proc_spawn`/`proc_send`/`proc_read`/`proc_close` — DONE, one body each
+///     in `wasm_host/proc.zig`, gated by `e2e/demolition_test.zig`.
+///   - `file_read`/`file_write` — the fs POLICY half (possession + `.fs_root`
+///     confinement) is already `wasm_host/fs.zig`'s, shared verbatim; the
+///     effect half legitimately differs (these author a buffer edit as the
+///     agent peer, `wl_fs_*` touch the disk).
+///   - `register` — same name as `wl_register`, two different local id
+///     registries and two different command trampolines; see `cRegister`.
+/// The rest (buffer_*/transcript_*/config/breakpoints/line_text/
+/// active_buffer/pick/status) have no same-name `wl_*` door to collapse onto.
 pub const Group = enum { config, plugin };
 
 pub const Entry = struct {
@@ -96,7 +128,10 @@ pub const imports = [_]Entry{
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
-    e("qjs_proc_spawn", 4, 1, .plugin, "spawn a persistent subprocess; returns a handle"),
+    // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
+    // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
+    // transcription (doc/place.md §4.1a).
+    e("qjs_proc_spawn", 2, 1, .plugin, "spawn a persistent subprocess in the dispatching entry's place; returns a handle"),
     e("qjs_proc_send", 3, 0, .plugin, "write to a spawned subprocess's stdin"),
     e("qjs_proc_read", 3, 1, .plugin, "drain buffered stdout from a spawned subprocess"),
     e("qjs_proc_close", 1, 0, .plugin, "kill a spawned subprocess"),
@@ -108,7 +143,7 @@ pub const imports = [_]Entry{
     e("qjs_config", 4, 1, .plugin, "weft.config(key): this plugin's staged config value"),
     e("qjs_breakpoints", 4, 1, .plugin, "weft.breakpoints(path): the file's breakpoint lines as a CSV"),
     e("qjs_file_read", 4, 1, .plugin, "weft.fileRead(path): the file's live-buffer-or-disk content for an agent read"),
-    e("qjs_file_write", 6, 0, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer"),
+    e("qjs_file_write", 6, 1, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer (0 ok, `denied` refused)"),
     e("qjs_line_text", 2, 1, .plugin, "weft.lineText(): the active buffer's current line"),
     e("qjs_active_buffer", 2, 1, .plugin, "weft.activeBuffer(): the focused buffer's display name — how an instanced JS tool routes a command to the session you can see"),
     e("qjs_pick", 6, 0, .plugin, "weft.pick(prompt, options, token): open a pick bound to this JS plugin; onPick receives the candidate/input/cancelled outcome carrying `token` back — the continuation identity that answers ONE request, never \"the pending one\""),

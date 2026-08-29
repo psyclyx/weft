@@ -25,6 +25,7 @@ pub const task = @import("task.zig");
 pub const async_loop = @import("async.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const kv = @import("kv.zig");
+pub const kv_file = @import("kv_file.zig");
 pub const proc = @import("proc.zig");
 pub const repl_session = @import("repl_session.zig");
 pub const net_session = @import("net_session.zig");
@@ -84,9 +85,24 @@ pub const wire = @import("weft_wire");
 pub const secure = @import("secure.zig");
 pub const identity = @import("identity.zig");
 pub const known_peers = @import("known_peers.zig");
+pub const machinery = @import("machinery.zig");
+pub const grants = @import("grants.zig");
 pub const session = @import("session.zig");
 pub const hub = @import("hub.zig");
 pub const locus = @import("locus.zig");
+pub const place = @import("place.zig");
+pub const env = @import("env.zig");
+/// The membrane import tables, exported so a gate can compare the two
+/// surfaces as DATA rather than by scraping their source text.
+pub const membrane = struct {
+    pub const wl = @import("membrane/contract_data.zig");
+    pub const qjs = @import("membrane/qjs_contract.zig");
+    /// `wl`'s data table zipped with the handlers it binds — the gate that
+    /// proves the two planes share a door needs the function POINTER, not just
+    /// the arity (doc/place.md §4.1a).
+    pub const wl_bound = @import("membrane/contract.zig");
+};
+pub const Place = place.Place;
 pub const rooted_fs = @import("rooted_fs.zig");
 pub const peer_fs = @import("peer_fs.zig");
 pub const peer_lsp = @import("peer_lsp.zig");

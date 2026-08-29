@@ -4,25 +4,31 @@
 //! substrate a switch-file picker renders, expressed against the guest shim.
 //! Proves command args/result + path + kv all cross the membrane, and that a
 //! non-trivial pure computation (prepend/dedup/cap) ports unchanged.
+//!
+//! Declares NO capabilities. It used to hold `fs_read` for one reason — a
+//! VCS-marker climb up from the active buffer — and that climb was a second
+//! detector of a fact the host already establishes when a file is opened;
+//! `project-root` reads it through `weft.placeRoot()` now (`doc/place.md`
+//! §4.2). What remains is pure list arithmetic over the kv store.
 
 const std = @import("std");
 const weft = @import("weft");
 
 const recent_key = "recent";
-const root_key = "root"; // the current project's root (last detected)
+
+/// How many files "recently visited" means. This one IS policy, and it is the
+/// only bound here: a recents list is a UI affordance — the handful of files a
+/// picker offers you back — not a resource table, and nothing is refused when
+/// it is reached. The fifty-first entry falls off the end, which is what a
+/// recents list means. Every OTHER limit this file used to carry was an
+/// artifact of believing a freestanding guest had no allocator; it has one
+/// (`weft.allocator`), and a path that did not fit was silently recorded
+/// TRUNCATED, naming a different file than the one you visited.
 const max_recent = 50;
 
-/// Dominating markers that identify a project root, projectile/project.el-style:
-/// the VCS top. A worktree/submodule makes `.git` a file, so `fs.exists` (any
-/// kind) is the test, not "is a dir".
-const markers = [_][]const u8{ ".git", ".jj", ".hg", ".svn", ".bzr" };
-
-// Fixed guest buffers (no allocator in a freestanding guest): copy borrowed
-// reads out before the next call reuses the shim scratch.
-var path_buf: [4096]u8 = undefined;
-var existing_buf: [1 << 16]u8 = undefined;
-var list_buf: [1 << 16]u8 = undefined;
-var probe_buf: [4096]u8 = undefined; // "<dir>/<marker>" for the root probe
+/// The joined list being built. Growable, so `max_recent` alone decides how
+/// long a recents list is, rather than sharing that decision with a byte count.
+var list_buf: std.ArrayList(u8) = .empty;
 
 var id_remember: u32 = 0;
 var id_recent: u32 = 0;
@@ -32,7 +38,12 @@ export fn describe() void {
     weft.declareCommand("project-remember");
     weft.declareCommand("project-recent");
     weft.declareCommand("project-root");
-    weft.requestPerm(.fs_read); // probe for .git markers up the tree
+    // NO capabilities. The VCS-marker climb this plugin used to run — its only
+    // reason for `fs_read` — is gone: the host detects a project root when a
+    // file is opened, over exactly the same markers (`app/session.zig`'s
+    // `project_markers`), and `weft.placeRoot()` reads that answer
+    // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and
+    // the second cost a grant over the whole filesystem.
 }
 
 export fn init() void {
@@ -45,28 +56,29 @@ export fn on_command(id: u32) void {
     if (id == id_remember) remember() else if (id == id_recent) recent() else if (id == id_root) projectRoot();
 }
 
-/// Every buffer focus records the file AND updates the current project root —
-/// so `project-root` stays valid even after focusing a tool buffer with no
-/// path (grep/git output), which is exactly when an agent wants to know where
-/// "here" is. A tool buffer (no path) leaves both unchanged.
+/// Every buffer focus records the file. The root no longer needs recording:
+/// it is a property of WHERE the next command dispatches, read when asked
+/// (`projectRoot`), not a value this plugin has to keep chasing focus to hold
+/// current — and a tool buffer with no path of its own still answers, because
+/// it carries the place of the entry that produced it.
 export fn on_activate() void {
     _ = recordActive();
-    _ = updateRoot();
 }
 
 /// Push the active buffer's path onto the recent list (front, deduped, capped).
 /// Returns the new count, or -1 when the buffer has no path (a tool buffer).
 fn recordActive() i32 {
-    const pth = weft.path() orelse return -1;
-    const pn = @min(pth.len, path_buf.len);
-    @memcpy(path_buf[0..pn], pth[0..pn]);
-    const path = path_buf[0..pn];
+    const alloc = weft.allocator;
+    // Copy both borrowed reads out before the next call reuses the shim
+    // scratch. Owned, not copied into a fixed field: a truncated path names a
+    // DIFFERENT file, and a recents list that quietly offers you one is worse
+    // than a recents list that is short.
+    const path = alloc.dupe(u8, weft.path() orelse return -1) catch return -1;
+    defer alloc.free(path);
+    const existing = alloc.dupe(u8, weft.kvGet(recent_key) orelse "") catch return -1;
+    defer alloc.free(existing);
 
-    const ex = weft.kvGet(recent_key) orelse "";
-    const en = @min(ex.len, existing_buf.len);
-    @memcpy(existing_buf[0..en], ex[0..en]);
-
-    const list = prepend(existing_buf[0..en], path);
+    const list = prepend(existing, path) orelse return -1;
     weft.kvPut(recent_key, list);
     return @intCast(countLines(list));
 }
@@ -81,85 +93,46 @@ fn recent() void {
     weft.setResultStr(weft.kvGet(recent_key) orelse "");
 }
 
-/// `project-root` command: the current project's root directory. Detects from
-/// the active buffer's path (VCS top); if that's a tool buffer with no path,
-/// falls back to the last-detected root (kv) so grep/agent-in-project still
-/// resolve. Empty string when nothing has a root yet.
+/// `project-root` command: the project this command is in, absolute — which is
+/// WHERE it dispatches (`doc/place.md`). One door, no detection.
+///
+/// This used to be a climb: copy the active buffer's path, walk up probing
+/// each ancestor for `.git`/`.jj`/`.hg`/`.svn`/`.bzr`, remember the answer in
+/// kv so a tool buffer with no path of its own could still be answered. All
+/// three parts are now someone else's job and done better. The host runs that
+/// exact walk when a file is OPENED (`app/session.zig`'s `projectRootOf`, same
+/// marker list, with a floor this plugin never had) and hands the result to
+/// every entry, so a tool buffer inherits the place of whatever produced it —
+/// the case the kv cache existed for — and a working target pinned by the user
+/// overrides both, which no amount of climbing here could have discovered.
+///
+/// Empty means the place has no local directory (a peer, or a container that
+/// went away). It stays empty: substituting a remembered path would be acting
+/// in a directory that is not this one while reporting success, which is the
+/// entire bug the place model exists to remove.
 fn projectRoot() void {
-    const detected = updateRoot();
-    if (detected.len > 0) {
-        weft.setResultStr(detected);
-    } else {
-        weft.setResultStr(weft.kvGet(root_key) orelse "");
-    }
+    // `placeRoot` borrows the shim's shared read scratch; `setResultStr` hands
+    // the pointer straight to the host with nothing in between, so no copy.
+    weft.setResultStr(weft.placeRoot());
 }
 
-/// Detect + persist the active buffer's project root. Returns the detected
-/// root (borrowing `probe_buf`/`path_buf`), or "" for a buffer with no path
-/// (leaving the stored root untouched).
-fn updateRoot() []const u8 {
-    const pth = weft.path() orelse return "";
-    const pn = @min(pth.len, path_buf.len);
-    @memcpy(path_buf[0..pn], pth[0..pn]);
-    const root = detectRoot(path_buf[0..pn]);
-    if (root.len > 0) weft.kvPut(root_key, root);
-    return root;
-}
-
-/// Walk up from `path`'s directory to the nearest ancestor holding a VCS
-/// marker (the project root). Falls back to the file's own directory when no
-/// marker is found anywhere. `path` must be stable for the call (a copy in
-/// `path_buf`); the returned slice points into it.
-fn detectRoot(path: []const u8) []const u8 {
-    const first = std.mem.lastIndexOfScalar(u8, path, '/') orelse return ""; // no dir
-    var end = first;
-    while (true) {
-        const dir = if (end == 0) "/" else path[0..end];
-        for (markers) |m| {
-            if (weft.fsExists(joinMarker(dir, m)) != .none) return dir;
-        }
-        if (end == 0) break; // reached the filesystem root
-        end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
-    }
-    // No marker: the file's own directory is the sensible root.
-    return if (first == 0) "/" else path[0..first];
-}
-
-/// Build "<dir>/<marker>" into `probe_buf` (avoiding a double slash at root).
-fn joinMarker(dir: []const u8, marker: []const u8) []const u8 {
-    var w: usize = 0;
-    const base = if (std.mem.eql(u8, dir, "/")) "" else dir; // "/" + "/x" → "/x"
-    const bn = @min(base.len, probe_buf.len);
-    @memcpy(probe_buf[0..bn], base[0..bn]);
-    w = bn;
-    if (w < probe_buf.len) {
-        probe_buf[w] = '/';
-        w += 1;
-    }
-    const mn = @min(marker.len, probe_buf.len - w);
-    @memcpy(probe_buf[w .. w + mn], marker[0..mn]);
-    w += mn;
-    return probe_buf[0..w];
-}
-
-/// `path` newline-joined ahead of `list`, dropping any prior copy of `path`
-/// and capping at `max_recent`. Writes into `list_buf`.
-fn prepend(list: []const u8, path: []const u8) []const u8 {
-    @memcpy(list_buf[0..path.len], path);
-    var w: usize = path.len;
+/// `path` newline-joined ahead of `list`, dropping any prior copy of `path` and
+/// capping at `max_recent`. Builds into `list_buf`; null when the guest heap
+/// refuses, so the caller reports rather than writing back a half list.
+fn prepend(list: []const u8, path: []const u8) ?[]const u8 {
+    const alloc = weft.allocator;
+    list_buf.clearRetainingCapacity();
+    list_buf.appendSlice(alloc, path) catch return null;
     var kept: usize = 1;
     var it = std.mem.splitScalar(u8, list, '\n');
     while (it.next()) |line| {
         if (line.len == 0 or std.mem.eql(u8, line, path)) continue;
         if (kept >= max_recent) break;
-        if (w + 1 + line.len > list_buf.len) break;
-        list_buf[w] = '\n';
-        w += 1;
-        @memcpy(list_buf[w .. w + line.len], line);
-        w += line.len;
+        list_buf.append(alloc, '\n') catch return null;
+        list_buf.appendSlice(alloc, line) catch return null;
         kept += 1;
     }
-    return list_buf[0..w];
+    return list_buf.items;
 }
 
 fn countLines(list: []const u8) usize {

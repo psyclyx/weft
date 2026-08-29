@@ -1,7 +1,8 @@
 //! Syntax — incremental tree-sitter parsing + highlighting, driven by
 //! the commit log. The grammar is a pinned shared object opened at
-//! runtime (`build_options` carries the store paths); the highlight
-//! query is embedded at build time.
+//! runtime, and the highlight query is read from the grammar package.
+//! WHICH grammars exist is not this file's business: they arrive through
+//! `Runtime.add`, driven by config.
 //!
 //! Change flow: a `Mirror` drains commits; each patch becomes a
 //! `ts_tree_edit` (old coordinates from the pre-patch shadow, new-end
@@ -58,7 +59,6 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const stemma = @import("stemma");
-const build_options = @import("build_options");
 const Document = @import("Document.zig");
 const Mirror = @import("mirror.zig");
 const task = @import("task.zig");
@@ -78,65 +78,140 @@ pub const LanguageSpec = struct {
     parser_dir: []const u8,
     symbol: [:0]const u8,
     highlights: []const u8,
-    /// Node kinds that define document symbols (name = first identifier
-    /// child). Data, not code — a grammar registration supplies its own.
-    symbol_kinds: []const []const u8 = &.{},
+    /// Outline query source — what `collectSymbols` lists. Empty means this
+    /// grammar contributes no symbols. See `Compiled.outline` for the capture
+    /// contract; it is a QUERY rather than a list of node kinds because the
+    /// name of a definition is frequently not its first identifier (`function
+    /// M.g()` names the field, not the table) and depth alone cannot tell a
+    /// top-level binding from a local.
+    outline: []const u8 = &.{},
 };
 
-/// Built-in grammar registrations (pinned store paths via build
-/// options). Runtime additions go through `Runtime.add` — a config/data
-/// change, not code.
-pub const languages = [_]LanguageSpec{
-    .{
-        .name = "zig",
-        .extensions = &.{".zig"},
-        .parser_dir = build_options.ts_zig,
-        .symbol = "tree_sitter_zig",
-        .highlights = @embedFile("ts_zig_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "variable_declaration", "struct_declaration" },
-    },
-    .{
-        .name = "fennel",
-        .extensions = &.{".fnl"},
-        .parser_dir = build_options.ts_fennel,
-        .symbol = "tree_sitter_fennel",
-        .highlights = @embedFile("ts_fennel_highlights"),
-    },
-    .{
-        .name = "lua",
-        .extensions = &.{".lua"},
-        .parser_dir = build_options.ts_lua,
-        .symbol = "tree_sitter_lua",
-        .highlights = @embedFile("ts_lua_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "function_definition" },
-    },
-    .{
-        .name = "nix",
-        .extensions = &.{".nix"},
-        .parser_dir = build_options.ts_nix,
-        .symbol = "tree_sitter_nix",
-        .highlights = @embedFile("ts_nix_highlights"),
-    },
-    .{
-        .name = "javascript",
-        .extensions = &.{ ".js", ".jsx", ".mjs", ".cjs" },
-        .parser_dir = build_options.ts_javascript,
-        .symbol = "tree_sitter_javascript",
-        .highlights = @embedFile("ts_javascript_highlights"),
-        .symbol_kinds = &.{ "function_declaration", "class_declaration", "lexical_declaration" },
-    },
-    .{
-        .name = "html",
-        .extensions = &.{ ".html", ".htm" },
-        .parser_dir = build_options.ts_html,
-        .symbol = "tree_sitter_html",
-        .highlights = @embedFile("ts_html_highlights"),
-    },
+// There is deliberately no built-in language table here. Which languages
+// exist is not core's business: this file knows how to load A grammar and
+// highlight with it, and learns about specific ones only through
+// `Runtime.add`, which config drives. A compiled-in list would make "the
+// languages weft supports" a property of the binary — and would make the
+// built-in path strictly more expressive than the one everyone else has to
+// use, which is the shape that lets a second-class config path survive.
+
+/// Everything about a language whose cost depends on the GRAMMAR rather
+/// than on the buffer: the opened `.so`, the language, the compiled
+/// highlight query and the tables derived from it. All of it is immutable
+/// once built, so every buffer of a language shares one instance.
+///
+/// This exists because compiling the highlight query is not cheap and is
+/// not proportional to anything per-buffer: `ts_query_new` on zig's 3.3KB
+/// highlights costs ~18ms in ReleaseFast, which was previously paid on
+/// EVERY buffer open — an order of magnitude more than opening the file,
+/// reading it and building its CRDT put together. Compiling once per
+/// grammar is the whole point of the type; a `Syntax` cannot compile its
+/// own, so "accidentally recompile per buffer" is no longer expressible.
+pub const Compiled = struct {
+    lib: std.DynLib,
+    lang: *const c.TSLanguage,
+    query: *c.TSQuery,
+    /// capture id → class; pattern id → enabled.
+    classes: []Class,
+    enabled: []bool,
+    /// The compiled outline query, when the grammar has one. Contract: each
+    /// match captures `@item` (the whole definition — its range, and what two
+    /// matches are deduplicated by) and `@name` (the node whose text is the
+    /// symbol's name). `@context` is accepted and ignored, so a Zed
+    /// `outline.scm` can be used verbatim. Null when the grammar ships no
+    /// outline query, or when the query it ships fails to compile.
+    outline: ?*c.TSQuery = null,
+    outline_item: u32 = 0,
+    outline_name: u32 = 0,
+    /// Owned copies of the inputs that determined everything above, held
+    /// so the cache can recognise a spec by what it SAYS rather than by
+    /// where it lives — `Runtime.specs` is an ArrayList, so a spec's
+    /// address is not stable across `add`, and a config grammar may
+    /// replace a built-in under the same name.
+    key_parser_dir: []u8,
+    key_symbol: []u8,
+    key_highlights: []u8,
+    key_outline: []u8,
+
+    fn matches(self: *const Compiled, spec: *const LanguageSpec) bool {
+        return std.mem.eql(u8, self.key_parser_dir, spec.parser_dir) and
+            std.mem.eql(u8, self.key_symbol, spec.symbol) and
+            std.mem.eql(u8, self.key_highlights, spec.highlights) and
+            std.mem.eql(u8, self.key_outline, spec.outline);
+    }
+
+    fn destroy(self: *Compiled, gpa: Allocator) void {
+        c.ts_query_delete(self.query);
+        if (self.outline) |q| c.ts_query_delete(q);
+        gpa.free(self.classes);
+        gpa.free(self.enabled);
+        gpa.free(self.key_parser_dir);
+        gpa.free(self.key_symbol);
+        gpa.free(self.key_highlights);
+        gpa.free(self.key_outline);
+        self.lib.close();
+        gpa.destroy(self);
+    }
 };
 
-/// The runtime grammar registry: seeded with the built-ins, extended by
-/// config through the `grammar-add` command (extension, package dir,
-/// symbol — the highlight query is read from the package).
+/// Release an owned `LanguageSpec`'s strings (see `Runtime.Owned.owned`).
+fn freeSpec(gpa: Allocator, spec: LanguageSpec) void {
+    gpa.free(@constCast(spec.name));
+    for (spec.extensions) |e| gpa.free(@constCast(e));
+    gpa.free(@constCast(spec.extensions));
+    gpa.free(@constCast(spec.outline));
+    gpa.free(@constCast(spec.parser_dir));
+    gpa.free(@constCast(spec.symbol[0 .. spec.symbol.len + 1]));
+    gpa.free(@constCast(spec.highlights));
+}
+
+/// The index of `@name` in `query`, or null if it has no such capture.
+fn captureIndex(query: *c.TSQuery, name: []const u8) ?u32 {
+    const total = c.ts_query_capture_count(query);
+    for (0..total) |i| {
+        var len: u32 = 0;
+        const got = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
+        if (std.mem.eql(u8, got[0..len], name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Split a comma-separated list into owned pieces, dropping empties. A
+/// registration's lists arrive this way because commands carry strings, not
+/// lists (`command.Value` has no sequence variant).
+fn splitOwned(gpa: Allocator, csv: []const u8) Allocator.Error![][]const u8 {
+    var n: usize = 0;
+    var counter = std.mem.splitScalar(u8, csv, ',');
+    while (counter.next()) |piece| {
+        if (std.mem.trim(u8, piece, " \t").len != 0) n += 1;
+    }
+    const out = try gpa.alloc([]const u8, n);
+    var filled: usize = 0;
+    errdefer {
+        for (out[0..filled]) |p| gpa.free(@constCast(p));
+        gpa.free(out);
+    }
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |piece| {
+        const trimmed = std.mem.trim(u8, piece, " \t");
+        if (trimmed.len == 0) continue;
+        out[filled] = try gpa.dupe(u8, trimmed);
+        filled += 1;
+    }
+    return out;
+}
+
+fn freeOwned(gpa: Allocator, list: [][]const u8) void {
+    for (list) |p| gpa.free(@constCast(p));
+    gpa.free(list);
+}
+
+/// The grammar registry: empty until config fills it through `grammar-add`.
+/// There is no seeded set — every grammar arrives the same way, so there is
+/// no privileged one to be more capable than the rest. Also the owner of
+/// every `Compiled` grammar (see `compiledFor`): the registry of languages is
+/// the natural home for the artifacts of those languages, and it gives them a
+/// lifetime that outlives any one buffer.
 pub const Runtime = struct {
     const Owned = struct {
         spec: LanguageSpec,
@@ -144,59 +219,291 @@ pub const Runtime = struct {
     };
 
     specs: std.ArrayList(Owned) = .empty,
+    /// Colon-separated directories a grammar NAME resolves against — see
+    /// `setSearchPath`. Owned; empty means "absolute paths only".
+    search_path: []u8 = &.{},
+    /// Where a newly registered grammar's compile is queued (`warm`). Null —
+    /// the default, and what tests use — simply means grammars compile on
+    /// first use instead.
+    pool: ?*task.Pool = null,
+    /// Compiled grammars, built on first use and kept for the registry's
+    /// life. A handful of entries at most, so a linear scan beats the
+    /// ceremony of a keyed map.
+    compiled: std.ArrayList(*Compiled) = .empty,
+    /// `compiledFor` can be reached from more than one buffer attaching at
+    /// once; the list and the compile itself are what this guards.
+    compiled_mu: task.Mutex = .{},
 
     pub const empty: Runtime = .{};
 
-    pub fn initBuiltins(gpa: Allocator) !Runtime {
-        var self: Runtime = .empty;
-        errdefer self.deinit(gpa);
-        for (&languages) |*spec| {
-            try self.specs.append(gpa, .{ .spec = spec.*, .owned = false });
+    /// The compiled form of `spec`, built once and shared thereafter.
+    /// The result belongs to this `Runtime` and stays valid until it is
+    /// deinit'd — callers borrow, never free.
+    pub fn compiledFor(self: *Runtime, gpa: Allocator, spec: *const LanguageSpec) Error!*const Compiled {
+        self.compiled_mu.lock();
+        defer self.compiled_mu.unlock();
+        for (self.compiled.items) |ce| if (ce.matches(spec)) return ce;
+
+        const g = try loadGrammar(spec);
+        var lib = g.lib;
+        errdefer lib.close();
+        // The parser `loadGrammar` hands back is per-USE state, not part of
+        // the shared artifact — each `Syntax` makes its own from `lang`.
+        c.ts_parser_delete(g.parser);
+
+        var err_offset: u32 = 0;
+        var err_type: c.TSQueryError = c.TSQueryErrorNone;
+        const query = c.ts_query_new(
+            g.lang,
+            spec.highlights.ptr,
+            @intCast(spec.highlights.len),
+            &err_offset,
+            &err_type,
+        ) orelse {
+            std.log.err("syntax {s}: query error {d} at byte {d}", .{ spec.name, err_type, err_offset });
+            return error.QueryLoad;
+        };
+        errdefer c.ts_query_delete(query);
+
+        const classes, const enabled = try deriveQueryTables(gpa, query);
+        errdefer gpa.free(classes);
+        errdefer gpa.free(enabled);
+
+        const key_parser_dir = try gpa.dupe(u8, spec.parser_dir);
+        errdefer gpa.free(key_parser_dir);
+        const key_symbol = try gpa.dupe(u8, spec.symbol);
+        errdefer gpa.free(key_symbol);
+        const key_highlights = try gpa.dupe(u8, spec.highlights);
+        errdefer gpa.free(key_highlights);
+        const key_outline = try gpa.dupe(u8, spec.outline);
+        errdefer gpa.free(key_outline);
+
+        // The outline query is OPTIONAL and never fatal: a grammar with none,
+        // or with one that does not compile, simply contributes no symbols.
+        // Refusing the whole grammar — losing highlighting too — because its
+        // outline query has a typo would be wildly disproportionate.
+        var outline: ?*c.TSQuery = null;
+        var outline_item: u32 = 0;
+        var outline_name: u32 = 0;
+        if (spec.outline.len > 0) blk: {
+            var oerr_offset: u32 = 0;
+            var oerr_type: c.TSQueryError = c.TSQueryErrorNone;
+            const oq = c.ts_query_new(g.lang, spec.outline.ptr, @intCast(spec.outline.len), &oerr_offset, &oerr_type) orelse {
+                std.log.warn("syntax {s}: outline query error {d} at byte {d}; no symbols", .{ spec.name, oerr_type, oerr_offset });
+                break :blk;
+            };
+            const item = captureIndex(oq, "item");
+            const nm = captureIndex(oq, "name");
+            if (item == null or nm == null) {
+                std.log.warn("syntax {s}: outline query needs both @item and @name; no symbols", .{spec.name});
+                c.ts_query_delete(oq);
+                break :blk;
+            }
+            outline = oq;
+            outline_item = item.?;
+            outline_name = nm.?;
         }
-        return self;
+        errdefer if (outline) |q| c.ts_query_delete(q);
+
+        const entry = try gpa.create(Compiled);
+        errdefer gpa.destroy(entry);
+        entry.* = .{
+            .lib = lib,
+            .lang = g.lang,
+            .query = query,
+            .classes = classes,
+            .enabled = enabled,
+            .key_parser_dir = key_parser_dir,
+            .key_symbol = key_symbol,
+            .key_highlights = key_highlights,
+            .key_outline = key_outline,
+            .outline = outline,
+            .outline_item = outline_item,
+            .outline_name = outline_name,
+        };
+        try self.compiled.append(gpa, entry);
+        return entry;
+    }
+
+    /// How many grammars are registered. For tests and diagnostics.
+    pub fn specCount(self: *const Runtime) usize {
+        return self.specs.items.len;
+    }
+
+    /// How many grammars are compiled so far. For tests and diagnostics —
+    /// nothing about behaviour depends on it.
+    pub fn compiledCount(self: *Runtime) usize {
+        self.compiled_mu.lock();
+        defer self.compiled_mu.unlock();
+        return self.compiled.items.len;
+    }
+
+    const WarmJob = struct { rt: *Runtime, gpa: Allocator, spec: LanguageSpec };
+
+    fn warmWorker(job: *WarmJob) void {
+        defer job.gpa.destroy(job);
+        // Best effort by construction: a grammar that cannot be compiled is
+        // not this job's problem to report — the open that actually needs it
+        // will try again and log there, exactly as if no warm had run.
+        _ = job.rt.compiledFor(job.gpa, &job.spec) catch {};
+    }
+
+    /// Queue `spec`'s compile onto the long-lived pool. Registering a grammar
+    /// and paying for it are one act: there is no separate "warm everything"
+    /// step to remember to call, no ordering constraint against config load,
+    /// and a grammar added at any later moment gets the same treatment as one
+    /// added at startup — the asymmetry that a batch warm would reintroduce.
+    ///
+    /// tree-sitter cannot persist a compiled query across runs (its API has no
+    /// serialization entry point at all), so doing it here, off the frame
+    /// thread, is the only way the ~18ms avoids landing on the first open of a
+    /// language — see `Compiled`.
+    ///
+    /// The job holds a COPY of the spec: `specs` is an ArrayList whose backing
+    /// can move under a later `add`, while the strings it points at are owned
+    /// by this `Runtime` and outlive the job — the caller must join the pool
+    /// before `deinit`ing the registry, which `main.zig` gets from defer order.
+    fn warm(self: *Runtime, gpa: Allocator, spec: LanguageSpec) void {
+        const pool = self.pool orelse return;
+        const job = gpa.create(WarmJob) catch return;
+        job.* = .{ .rt = self, .gpa = gpa, .spec = spec };
+        var handle = pool.spawn(warmWorker, .{job}) catch {
+            gpa.destroy(job);
+            return;
+        };
+        // Nothing to poll it for: the result lands in `compiled`, not in the
+        // handle, and a warm that never runs is merely a slower first open.
+        handle.detach();
     }
 
     pub fn deinit(self: *Runtime, gpa: Allocator) void {
+        for (self.compiled.items) |ce| ce.destroy(gpa);
+        self.compiled.deinit(gpa);
         for (self.specs.items) |*o| {
-            if (o.owned) {
-                gpa.free(@constCast(o.spec.name));
-                gpa.free(@constCast(o.spec.extensions[0]));
-                gpa.free(@constCast(o.spec.extensions));
-                gpa.free(@constCast(o.spec.parser_dir));
-                gpa.free(@constCast(o.spec.symbol[0 .. o.spec.symbol.len + 1]));
-                gpa.free(@constCast(o.spec.highlights));
-            }
+            if (o.owned) freeSpec(gpa, o.spec);
         }
         self.specs.deinit(gpa);
+        gpa.free(self.search_path);
         self.* = .{};
     }
 
-    /// Register a grammar from a package directory laid out like the
-    /// nixpkgs tree-sitter grammars (`parser` + `queries/highlights.scm`).
-    pub fn add(self: *Runtime, gpa: Allocator, ext: []const u8, dir: []const u8, symbol: []const u8) !void {
+    /// Where a grammar NAME is looked up: each colon-separated entry is
+    /// tried as `<entry>/<name>`. Supplied by the application — core does
+    /// not read the environment, because where grammars live on a given
+    /// machine is a deployment question, not something this file should
+    /// have an opinion about.
+    pub fn setSearchPath(self: *Runtime, gpa: Allocator, path: []const u8) Allocator.Error!void {
+        const owned = try gpa.dupe(u8, path);
+        gpa.free(self.search_path);
+        self.search_path = owned;
+    }
+
+    /// Resolve `grammar` to a package directory. An absolute path is taken
+    /// verbatim; anything else is a name looked up along `search_path`,
+    /// accepting the first entry that actually has a `parser` in it. Caller
+    /// owns the result.
+    pub fn resolveDir(self: *const Runtime, gpa: Allocator, grammar: []const u8) !?[]u8 {
         const file = @import("file.zig");
-        var qpath_buf: [512]u8 = undefined;
-        const qpath = try std.fmt.bufPrint(&qpath_buf, "{s}/queries/highlights.scm", .{dir});
+        if (std.fs.path.isAbsolute(grammar)) return try gpa.dupe(u8, grammar);
+        var it = std.mem.splitScalar(u8, self.search_path, ':');
+        while (it.next()) |entry| {
+            if (entry.len == 0) continue;
+            const dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ entry, grammar });
+            errdefer gpa.free(dir);
+            const probe = try std.fmt.allocPrint(gpa, "{s}/parser", .{dir});
+            defer gpa.free(probe);
+            if (file.statKind(gpa, probe) == .file) return dir;
+            gpa.free(dir);
+        }
+        return null;
+    }
+
+    /// One grammar registration. `extensions` is comma-separated because
+    /// commands carry strings, not lists.
+    pub const Registration = struct {
+        /// e.g. ".js,.jsx,.mjs" — at least one.
+        extensions: []const u8,
+        /// A name resolved along `search_path`, or an absolute package dir.
+        grammar: []const u8,
+        symbol: []const u8,
+        /// Highlight query; defaults to `<dir>/queries/highlights.scm`, which
+        /// is how the nixpkgs grammar packages are laid out. Explicit because
+        /// some grammars ship no query and the one to use lives elsewhere.
+        query: ?[]const u8 = null,
+        /// Outline (document-symbol) query; defaults to
+        /// `<dir>/queries/outline.scm` when the package has one, and to no
+        /// symbols when it does not. See `Compiled.outline` for the captures.
+        outline: ?[]const u8 = null,
+    };
+
+    /// Register a grammar. Everything a grammar can BE is expressible here —
+    /// there is no second, richer way to describe one.
+    pub fn add(self: *Runtime, gpa: Allocator, reg: Registration) !void {
+        const file = @import("file.zig");
+        const dir = (try self.resolveDir(gpa, reg.grammar)) orelse return error.GrammarNotFound;
+        errdefer gpa.free(dir);
+
+        const qpath = if (reg.query) |q|
+            try gpa.dupe(u8, q)
+        else
+            try std.fmt.allocPrint(gpa, "{s}/queries/highlights.scm", .{dir});
+        defer gpa.free(qpath);
         const highlights = try file.readAlloc(gpa, qpath);
         errdefer gpa.free(highlights);
-        const name = try gpa.dupe(u8, std.mem.trimStart(u8, ext, "."));
+
+        // The outline query is optional in a way the highlight query is not: a
+        // package without one contributes no symbols rather than failing to
+        // register. An EXPLICIT path that cannot be read is still an error —
+        // config asked for that file by name.
+        const opath = if (reg.outline) |o|
+            try gpa.dupe(u8, o)
+        else
+            try std.fmt.allocPrint(gpa, "{s}/queries/outline.scm", .{dir});
+        defer gpa.free(opath);
+        const outline = if (reg.outline != null or file.statKind(gpa, opath) == .file)
+            try file.readAlloc(gpa, opath)
+        else
+            try gpa.dupe(u8, "");
+        errdefer gpa.free(outline);
+
+        const exts = try splitOwned(gpa, reg.extensions);
+        errdefer freeOwned(gpa, exts);
+        if (exts.len == 0) return error.GrammarNotFound;
+
+        const name = try gpa.dupe(u8, std.fs.path.basename(reg.grammar));
         errdefer gpa.free(name);
-        const ext_owned = try gpa.dupe(u8, ext);
-        errdefer gpa.free(ext_owned);
-        const exts = try gpa.alloc([]const u8, 1);
-        errdefer gpa.free(exts);
-        exts[0] = ext_owned;
-        const dir_owned = try gpa.dupe(u8, dir);
-        errdefer gpa.free(dir_owned);
-        const sym = try gpa.dupeZ(u8, symbol);
+        const sym = try gpa.dupeZ(u8, reg.symbol);
         errdefer gpa.free(sym[0 .. sym.len + 1]);
-        try self.specs.append(gpa, .{ .owned = true, .spec = .{
+        const spec: LanguageSpec = .{
             .name = name,
             .extensions = exts,
-            .parser_dir = dir_owned,
+            .parser_dir = dir,
             .symbol = sym,
             .highlights = highlights,
-        } });
+            .outline = outline,
+        };
+
+        // Registering a name again REPLACES it. `forPath` is last-wins, so a
+        // duplicate was already invisible — but `config-reload` re-runs every
+        // `grammar-add`, and appending would grow the list by the whole
+        // language set on every reload, forever. Replacing also keeps the
+        // shadowing intent: a config grammar supersedes an earlier one of the
+        // same name rather than piling up behind it.
+        for (self.specs.items) |*o| {
+            if (!std.mem.eql(u8, o.spec.name, spec.name)) continue;
+            if (o.owned) freeSpec(gpa, o.spec);
+            o.* = .{ .owned = true, .spec = spec };
+            self.warm(gpa, spec);
+            return;
+        }
+        try self.specs.append(gpa, .{ .owned = true, .spec = spec });
+        self.warm(gpa, spec);
+    }
+
+    /// Adopt the pool newly registered grammars compile on. Set once at
+    /// startup, before config runs.
+    pub fn setPool(self: *Runtime, pool: *task.Pool) void {
+        self.pool = pool;
     }
 
     pub fn forPath(self: *const Runtime, path: []const u8) ?*const LanguageSpec {
@@ -212,17 +519,6 @@ pub const Runtime = struct {
         return null;
     }
 };
-
-/// Test/embedding escape hatch for the compile-time catalog. Application code
-/// must resolve through `Runtime.forPath`, so config-added grammars participate.
-pub fn builtinForPath(path: []const u8) ?*const LanguageSpec {
-    for (&languages) |*spec| {
-        for (spec.extensions) |ext| {
-            if (std.mem.endsWith(u8, path, ext)) return spec;
-        }
-    }
-    return null;
-}
 
 fn classOf(name: []const u8) Class {
     const head = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
@@ -389,17 +685,58 @@ fn initialParseWorker(job: *InitialParseJob) void {
     }
 }
 
+/// capture id → class, and pattern id → enabled, read off a compiled
+/// query. Both depend only on the query, so they are built once with it
+/// and shared by every buffer of the language (see `Compiled`).
+fn deriveQueryTables(gpa: Allocator, query: *c.TSQuery) Allocator.Error!struct { []Class, []bool } {
+    const capture_count = c.ts_query_capture_count(query);
+    const classes = try gpa.alloc(Class, capture_count);
+    errdefer gpa.free(classes);
+    for (0..capture_count) |i| {
+        var len: u32 = 0;
+        const name = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
+        classes[i] = classOf(name[0..len]);
+    }
+    const pattern_count = c.ts_query_pattern_count(query);
+    const enabled = try gpa.alloc(bool, pattern_count);
+    errdefer gpa.free(enabled);
+    for (0..pattern_count) |i| {
+        var n: u32 = 0;
+        const steps = c.ts_query_predicates_for_pattern(query, @intCast(i), &n);
+        // Directives (`#set!`) are settings, not filters — patterns
+        // carrying only those stay enabled; real predicates
+        // (`#lua-match?`, `#eq?`, …) disable their pattern.
+        enabled[i] = ok: {
+            if (n == 0) break :ok true; // steps may be null
+            var at_group_head = true;
+            for (steps[0..n]) |step| {
+                if (step.type == c.TSQueryPredicateStepTypeDone) {
+                    at_group_head = true;
+                    continue;
+                }
+                if (at_group_head) {
+                    at_group_head = false;
+                    if (step.type != c.TSQueryPredicateStepTypeString) break :ok false;
+                    var len: u32 = 0;
+                    const name = c.ts_query_string_value_for_id(query, step.value_id, &len);
+                    if (!std.mem.eql(u8, name[0..len], "set!")) break :ok false;
+                }
+            }
+            break :ok true;
+        };
+    }
+    return .{ classes, enabled };
+}
+
 pub const Syntax = struct {
     gpa: Allocator,
-    lib: std.DynLib,
+    /// The shared per-grammar artifacts — borrowed from the `Runtime` that
+    /// owns them, never freed here.
+    compiled: *const Compiled,
     parser: *c.TSParser,
-    query: *c.TSQuery,
     qcursor: *c.TSQueryCursor,
     tree: ?*c.TSTree = null,
     mirror: Mirror = .empty,
-    /// capture id → class; pattern id → enabled.
-    classes: []Class,
-    enabled: []bool,
     spec: LanguageSpec,
     /// The document this instance mirrors (providers decline others;
     /// per-buffer instances race under the capability model).
@@ -413,82 +750,26 @@ pub const Syntax = struct {
     /// While set: `self.tree` is null. Never set by `create`.
     pending_initial: ?*InitialParseJob = null,
 
-    /// Shared setup for both constructors below: loads the grammar and
-    /// compiles the highlight query (cheap — proportional to the query
-    /// text, not the file), and positions the mirror at the document's
-    /// current commit. Does NOT parse; callers finish the job.
-    fn createUnparsed(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+    /// Shared setup for both constructors below: makes this buffer's own
+    /// parse-time state (parser, query cursor) over the already-`Compiled`
+    /// grammar, and positions the mirror at the document's current commit.
+    /// Does NOT parse, and does NOT compile — see `Compiled` for why that
+    /// distinction is the difference between a 18ms open and a free one.
+    fn createUnparsed(gpa: Allocator, compiled: *const Compiled, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
         const self = try gpa.create(Syntax);
         errdefer gpa.destroy(self);
 
-        const g = try loadGrammar(spec);
-        var lib = g.lib;
-        errdefer lib.close();
-        const parser = g.parser;
+        const parser = c.ts_parser_new() orelse return error.OutOfMemory;
         errdefer c.ts_parser_delete(parser);
-        const lang = g.lang;
-
-        var err_offset: u32 = 0;
-        var err_type: c.TSQueryError = c.TSQueryErrorNone;
-        const query = c.ts_query_new(
-            lang,
-            spec.highlights.ptr,
-            @intCast(spec.highlights.len),
-            &err_offset,
-            &err_type,
-        ) orelse {
-            std.log.err("syntax {s}: query error {d} at byte {d}", .{ spec.name, err_type, err_offset });
-            return error.QueryLoad;
-        };
-        errdefer c.ts_query_delete(query);
+        if (!c.ts_parser_set_language(parser, compiled.lang)) return error.GrammarLoad;
         const qcursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
         errdefer c.ts_query_cursor_delete(qcursor);
 
-        const capture_count = c.ts_query_capture_count(query);
-        const classes = try gpa.alloc(Class, capture_count);
-        errdefer gpa.free(classes);
-        for (0..capture_count) |i| {
-            var len: u32 = 0;
-            const name = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
-            classes[i] = classOf(name[0..len]);
-        }
-        const pattern_count = c.ts_query_pattern_count(query);
-        const enabled = try gpa.alloc(bool, pattern_count);
-        errdefer gpa.free(enabled);
-        for (0..pattern_count) |i| {
-            var n: u32 = 0;
-            const steps = c.ts_query_predicates_for_pattern(query, @intCast(i), &n);
-            // Directives (`#set!`) are settings, not filters — patterns
-            // carrying only those stay enabled; real predicates
-            // (`#lua-match?`, `#eq?`, …) disable their pattern.
-            enabled[i] = ok: {
-                if (n == 0) break :ok true; // steps may be null
-                var at_group_head = true;
-                for (steps[0..n]) |step| {
-                    if (step.type == c.TSQueryPredicateStepTypeDone) {
-                        at_group_head = true;
-                        continue;
-                    }
-                    if (at_group_head) {
-                        at_group_head = false;
-                        if (step.type != c.TSQueryPredicateStepTypeString) break :ok false;
-                        var len: u32 = 0;
-                        const name = c.ts_query_string_value_for_id(query, step.value_id, &len);
-                        if (!std.mem.eql(u8, name[0..len], "set!")) break :ok false;
-                    }
-                }
-                break :ok true;
-            };
-        }
-
         self.* = .{
             .gpa = gpa,
-            .lib = lib,
+            .compiled = compiled,
             .parser = parser,
-            .query = query,
             .qcursor = qcursor,
-            .classes = classes,
-            .enabled = enabled,
             .spec = spec.*,
             .doc = doc,
         };
@@ -504,8 +785,8 @@ pub const Syntax = struct {
     /// The interactive open path uses `createAsync` instead (see module
     /// doc): a full parse costs the whole file, and that must not run on
     /// the path that makes a buffer usable.
-    pub fn create(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
-        const self = try createUnparsed(gpa, spec, doc);
+    pub fn create(gpa: Allocator, rt: *Runtime, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, try rt.compiledFor(gpa, spec), spec, doc);
         self.tree = self.parse(doc.text(), null);
         return self;
     }
@@ -517,8 +798,8 @@ pub const Syntax = struct {
     /// immediately usable and paints unhighlighted until the worker's
     /// tree lands (see module doc for how `sync` adopts it and folds in
     /// edits that landed meanwhile).
-    pub fn createAsync(gpa: Allocator, pool: *task.Pool, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
-        const self = try createUnparsed(gpa, spec, doc);
+    pub fn createAsync(gpa: Allocator, pool: *task.Pool, rt: *Runtime, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, try rt.compiledFor(gpa, spec), spec, doc);
         // A second, independent snapshot for the job: `self.mirror.rope`
         // stays put (untouched — `sync` won't drain it until the tree
         // lands), but the job needs its own refcounted handle since it
@@ -580,12 +861,10 @@ pub const Syntax = struct {
         }
         if (self.tree) |t_| c.ts_tree_delete(t_);
         c.ts_query_cursor_delete(self.qcursor);
-        c.ts_query_delete(self.query);
         c.ts_parser_delete(self.parser);
         self.mirror.deinit(gpa);
-        gpa.free(self.classes);
-        gpa.free(self.enabled);
-        self.lib.close();
+        // `self.compiled` belongs to the `Runtime`, which outlives every
+        // buffer — nothing of it is freed here.
         gpa.destroy(self);
     }
 
@@ -708,57 +987,60 @@ pub const Syntax = struct {
 
     pub const Sym = struct { name: []u8, start: usize, end: usize };
 
-    /// Walk the tree for `symbol_kinds` nodes (depth ≤ 3); names are
-    /// gpa-owned by the caller.
+    /// Run the grammar's outline query and materialize what it captures;
+    /// names are gpa-owned by the caller. Empty when the grammar ships no
+    /// outline query (`Compiled.outline`).
+    ///
+    /// This used to be a depth-≤3 walk over a list of node kinds, taking each
+    /// definition's first identifier descendant as its name. Both halves were
+    /// wrong in practice: lua's `function M.g()` reported the TABLE (`M`,
+    /// the first identifier) rather than the field, and zig's `const Point =
+    /// struct { x: u8 }` reported the first FIELD (`x`) as the type's name.
+    /// A query says which node is the name, so neither is guessable.
     pub fn collectSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, out: *std.ArrayList(Sym)) !void {
         const tree = self.tree orelse return;
-        try self.walkSymbols(gpa, doc, c.ts_tree_root_node(tree), 0, out);
-    }
+        const query = self.compiled.outline orelse return;
+        const cursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
+        defer c.ts_query_cursor_delete(cursor);
+        c.ts_query_cursor_exec(cursor, query, c.ts_tree_root_node(tree));
 
-    fn walkSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, node: c.TSNode, depth: u8, out: *std.ArrayList(Sym)) !void {
-        if (depth > 3) return;
-        const count = c.ts_node_named_child_count(node);
-        for (0..count) |i| {
-            const child = c.ts_node_named_child(node, @intCast(i));
-            const kind = std.mem.span(c.ts_node_type(child));
-            var is_symbol = false;
-            for (self.spec.symbol_kinds) |k| {
-                if (std.mem.eql(u8, kind, k)) {
-                    is_symbol = true;
+        const doc_len = doc.text().byteLen();
+        var match: c.TSQueryMatch = undefined;
+        while (c.ts_query_cursor_next_match(cursor, &match)) {
+            var item: ?c.TSNode = null;
+            var name_node: ?c.TSNode = null;
+            for (match.captures[0..match.capture_count]) |cap| {
+                if (cap.index == self.compiled.outline_item) item = cap.node;
+                if (cap.index == self.compiled.outline_name) name_node = cap.node;
+            }
+            const it_node = item orelse continue;
+            const nm = name_node orelse continue;
+            const start = c.ts_node_start_byte(it_node);
+
+            // Patterns are allowed to overlap so a query can put specific
+            // cases before general ones; the first match for an item wins.
+            var seen = false;
+            for (out.items) |s| {
+                if (s.start == start) {
+                    seen = true;
                     break;
                 }
             }
-            if (is_symbol) {
-                if (identifierOf(child)) |id_node| {
-                    const s = c.ts_node_start_byte(id_node);
-                    const e = c.ts_node_end_byte(id_node);
-                    if (e > s and e - s <= 256 and e <= doc.text().byteLen()) {
-                        const name = try gpa.alloc(u8, e - s);
-                        errdefer gpa.free(name);
-                        var sr = doc.text().streamReader(.{ .start = s, .end = e }, &.{});
-                        sr.interface.readSliceAll(name) catch unreachable;
-                        try out.append(gpa, .{
-                            .name = name,
-                            .start = c.ts_node_start_byte(child),
-                            .end = c.ts_node_end_byte(child),
-                        });
-                    }
-                }
-            }
-            try self.walkSymbols(gpa, doc, child, depth + 1, out);
-        }
-    }
+            if (seen) continue;
 
-    fn identifierOf(node: c.TSNode) ?c.TSNode {
-        const count = c.ts_node_named_child_count(node);
-        for (0..count) |i| {
-            const child = c.ts_node_named_child(node, @intCast(i));
-            const kind = std.mem.span(c.ts_node_type(child));
-            if (std.mem.indexOf(u8, kind, "identifier") != null or std.mem.eql(u8, kind, "name")) {
-                return child;
-            }
+            const s = c.ts_node_start_byte(nm);
+            const e = c.ts_node_end_byte(nm);
+            if (e <= s or e - s > 256 or e > doc_len) continue;
+            const name = try gpa.alloc(u8, e - s);
+            errdefer gpa.free(name);
+            var sr = doc.text().streamReader(.{ .start = s, .end = e }, &.{});
+            sr.interface.readSliceAll(name) catch unreachable;
+            try out.append(gpa, .{
+                .name = name,
+                .start = start,
+                .end = c.ts_node_end_byte(it_node),
+            });
         }
-        return null;
     }
 
     // ── Tree queries (plan 02 P7) ───────────────────────────────
@@ -887,12 +1169,12 @@ pub const Syntax = struct {
         const tree = self.tree orelse return out;
         const root = c.ts_tree_root_node(tree);
         _ = c.ts_query_cursor_set_byte_range(self.qcursor, @intCast(range.start), @intCast(range.end));
-        c.ts_query_cursor_exec(self.qcursor, self.query, root);
+        c.ts_query_cursor_exec(self.qcursor, self.compiled.query, root);
         var match: c.TSQueryMatch = undefined;
         while (c.ts_query_cursor_next_match(self.qcursor, &match)) {
-            if (!self.enabled[match.pattern_index]) continue;
+            if (!self.compiled.enabled[match.pattern_index]) continue;
             for (match.captures[0..match.capture_count]) |cap| {
-                const class = self.classes[cap.index];
+                const class = self.compiled.classes[cap.index];
                 if (class == .none) continue;
                 const s = c.ts_node_start_byte(cap.node);
                 const e = c.ts_node_end_byte(cap.node);

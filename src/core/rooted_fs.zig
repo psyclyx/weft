@@ -24,6 +24,11 @@ const open_how = extern struct {
 
 pub const Error = error{ OpenRoot, Confined, NotFound, Io, Stale } || Allocator.Error;
 
+/// What a confined path IS, for `kind` below. Deliberately has no "absent"
+/// variant: absence is `error.NotFound`, the same signal `read` already
+/// gives, so a caller can never confuse "nothing there" with "refused".
+pub const Kind = enum { file, dir, other };
+
 pub const RootedFs = struct {
     root_fd: i32,
 
@@ -159,6 +164,41 @@ pub const RootedFs = struct {
             }
         }
         return out.toOwnedSlice(gpa);
+    }
+
+    /// What `rel` IS, resolved CONFINED — the stat counterpart to
+    /// `read`/`write`/`append`/`list`, so an existence probe can never
+    /// answer about something those four could not touch. Used by
+    /// `wasm_host/fs.zig`'s `fsExists` under an `.fs_root` limit.
+    ///
+    /// `O_PATH` is the whole trick: it opens ANYTHING that resolves — a
+    /// directory, a device, a fifo (without blocking on a writer), a file
+    /// the process cannot read — purely to name it, with no side effects.
+    /// `statx(AT_EMPTY_PATH, STATX_TYPE)` on that descriptor then reads the
+    /// type off the already-confined fd, which is why no path is ever
+    /// re-resolved outside the kernel's atomic `openat2` (no TOCTOU window,
+    /// no second lookup to get wrong).
+    ///
+    /// Deliberately NOT `O_NOFOLLOW`: with `RESOLVE_NO_SYMLINKS`, adding it
+    /// would let a TRAILING symlink open as the link itself and report
+    /// `.other`. Without it, a symlink anywhere in the chain is refused
+    /// (`ELOOP` → `error.Confined`) exactly as `read` refuses it — the
+    /// symlink policy stays ONE policy across all five doors.
+    pub fn kind(self: *const RootedFs, rel: [*:0]const u8) Error!Kind {
+        const fd = try self.openBeneath(rel, .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true }, 0);
+        defer _ = linux.close(fd);
+        var st: linux.Statx = undefined;
+        const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {},
+            .NOENT => return error.NotFound,
+            .ACCES, .PERM => return error.Confined,
+            else => return error.Io,
+        }
+        const file_type = st.mode & linux.S.IFMT;
+        if (file_type == linux.S.IFREG) return .file;
+        if (file_type == linux.S.IFDIR) return .dir;
+        return .other;
     }
 };
 

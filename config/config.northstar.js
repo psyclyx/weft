@@ -70,6 +70,12 @@ weft.plugin("console");     // grant bundle: proc
 weft.plugin("repl");        // grant bundle: proc (persistent subprocess)
 weft.plugin("net");         // grant bundle: net
 weft.plugin("which_key");   // menu-hint overlay over the surface door
+// An fs capability nobody narrows is confined to the dispatching place, so
+// `notes`/`snippets`/`lsp` above need no grant line at all. The browser is the
+// exception that has to say so: `root: "/"` is the written-down spelling of
+// unconfined, and its typed target doors accept nothing narrower.
+weft.grant("files", "fs_read", { root: "/" });
+weft.grant("files", "fs_write", { root: "/" });
 weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // grant bundle: proc + fs.read
 weft.plugin("debug");       // breakpoints (gutter markers)

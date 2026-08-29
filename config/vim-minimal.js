@@ -12,6 +12,10 @@
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "files", "which_key",
 ].forEach((p) => weft.plugin(p));
+// The browser browses anywhere you point it; `{root: "/"}` is how that is
+// said out loud, now that an unnarrowed fs grant means the dispatching place.
+weft.grant("files", "fs_read", { root: "/" });
+weft.grant("files", "fs_write", { root: "/" });
 weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
 // which-key: no delay here (show the flat leader map the moment you press SPC).

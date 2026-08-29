@@ -19,6 +19,13 @@ pub const Session = struct {
     buf: []u8, // the comint buffer name (found-or-created)
     entry: ?Buffers.Ref = null, // the sink, captured by identity on first delivery
     io_threaded: std.Io.Threaded, // frame-thread io (stdin writes)
+    /// The child's environment, retained because `io_threaded` uses it for the
+    /// child's whole life -- a merged per-place environment cannot be a borrow
+    /// that dies with the spawning call.
+    environ: std.process.Environ,
+    /// Whether `environ` is OURS to free. False for the borrowed process
+    /// environment; true once `adoptEnviron` takes a merged one over.
+    environ_owned: bool = false,
     child: std.process.Child,
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
@@ -43,6 +50,7 @@ pub const Session = struct {
             .plugin = try gpa.dupe(u8, plugin),
             .buf = try gpa.dupe(u8, buf),
             .io_threaded = .init(gpa, .{ .environ = environ }),
+            .environ = environ,
             .child = undefined,
             .reader = undefined,
         };
@@ -129,14 +137,22 @@ pub const Session = struct {
 
     /// Kill the child, JOIN the reader (so it can't touch freed state), reap,
     /// and free. The single owner of teardown.
+    /// Take ownership of the environment this session was started with (see
+    /// `proc_stream.ProcStream.adoptEnviron` for why a merged one cannot be a
+    /// borrow). Called only after a SUCCESSFUL `start`.
+    pub fn adoptEnviron(s: *Session) void {
+        s.environ_owned = true;
+    }
+
     pub fn deinit(s: *Session) void {
         const gpa = s.gpa;
         killChild(s);
-        while (!s.reader.residentExited()) std.atomic.spinLoopHint(); // join the reader
+        while (!s.reader.residentExited()) std.Thread.yield() catch {}; // join the reader
         _ = s.reader.poll();
         _ = s.child.wait(s.io_threaded.io()) catch {};
         s.out_buf.deinit(gpa);
         s.io_threaded.deinit();
+        if (s.environ_owned) s.environ.block.deinit(gpa);
         gpa.free(s.plugin);
         gpa.free(s.buf);
         gpa.destroy(s);

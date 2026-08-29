@@ -1997,3 +1997,221 @@ test "e2e/git: no verb reads a rendered byte range to choose its target" {
     try t.expectEqual(@as(usize, 2), std.mem.count(u8, src, "nodeAt("));
     try t.expect(std.mem.indexOf(u8, src, "nodeAt(weft.cursor())") == null);
 }
+
+// ── Places: two projects open at once (doc/place.md) ──────────────────
+
+test "e2e/place: grep searches the focused file's project, not the launch directory" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // Two sibling projects, each marked by a VCS top, each containing the same
+    // token in a differently-named file. The editor's own working directory is
+    // their PARENT — the launch directory — so a search that ignores places
+    // finds both files, and one that honours them finds exactly one.
+    for ([_][]const u8{
+        "mkdir -p proj-a/.git proj-b/.git",
+        "printf 'const SHARED = 1;\\n' > proj-a/alpha.js",
+        "printf 'const SHARED = 2;\\n' > proj-b/beta.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Open a file in A. Its place comes from its own path, not from focus.
+    ed.runStr("open", "proj-a/alpha.js");
+    ed.runStr("grep", "SHARED");
+    try t.expect(drainToolContains(&ed, "*grep*", "alpha.js"));
+    {
+        const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
+        defer gpa.free(results);
+        // THE GATE: project B's file is not in project A's results, even though
+        // it is a sibling of the directory weft was launched in.
+        try t.expect(std.mem.indexOf(u8, results, "beta.js") == null);
+    }
+
+    // Open a file in B and search again. The SAME `*grep*` entry is re-targeted
+    // at the new place — a reused tool entry is about where it was last run,
+    // not where it was created.
+    ed.runStr("open", "proj-b/beta.js");
+    ed.runStr("grep", "SHARED");
+    try t.expect(drainToolContains(&ed, "*grep*", "beta.js"));
+    {
+        const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
+        defer gpa.free(results);
+        try t.expect(std.mem.indexOf(u8, results, "alpha.js") == null);
+    }
+}
+
+/// The dispatching place's local directory, read the way the fs doors read it
+/// (`core.place.realize` through the session's own realizer) rather than
+/// reconstructed from the test's own idea of where things are. Caller frees.
+fn placeDirOf(ed: *Editor, gpa: std.mem.Allocator) ![]u8 {
+    return switch (core.place.realize(ed.ctx.place(), ed.ctx.realizer)) {
+        .path => |abs| try gpa.dupe(u8, abs),
+        .process, .elsewhere, .unavailable => error.NoLocalPlaceHere,
+    };
+}
+
+test "e2e/place: an ungranted fs capability reads the project it is in and refuses the one next door (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+    // The probe declares fs_read + fs_write in `describe()` and gets NO
+    // `weft.grant` line anywhere — the case the shipped config leaves alone,
+    // and the one that used to mean "the whole filesystem".
+    try h.loadFsLimit(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p place-a/.git place-b/.git",
+        "printf 'alpha secret\\n' > place-a/a.txt",
+        "printf 'beta secret\\n' > place-b/b.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Open a file in each project once, to learn what each place resolves to.
+    ed.runStr("open", "place-a/a.txt");
+    const dir_a = try placeDirOf(&ed, gpa);
+    defer gpa.free(dir_a);
+    ed.runStr("open", "place-b/b.txt");
+    const dir_b = try placeDirOf(&ed, gpa);
+    defer gpa.free(dir_b);
+    try t.expect(!std.mem.eql(u8, dir_a, dir_b)); // two projects, two places
+
+    const a_file = try std.fmt.allocPrint(gpa, "{s}/a.txt", .{dir_a});
+    defer gpa.free(a_file);
+    const b_file = try std.fmt.allocPrint(gpa, "{s}/b.txt", .{dir_b});
+    defer gpa.free(b_file);
+
+    // ── Acting in B (where focus is). ──
+    const in_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }});
+    try t.expect(std.mem.indexOf(u8, in_b.string, "beta secret") != null);
+    // A place-relative name means "in this project" — which is what makes one
+    // grant follow the user instead of naming a directory forever.
+    const rel_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = "b.txt" }});
+    try t.expect(std.mem.indexOf(u8, rel_b.string, "beta secret") != null);
+    // THE GATE: the sibling project is refused. Nothing in config changed, and
+    // nothing in config could have — the confinement is the dispatch's place.
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-exists", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
+
+    // ── The same plugin, the same grant, focus moved to A: the answers swap. ──
+    ed.runStr("open", "place-a/a.txt");
+    const in_a = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }});
+    try t.expect(std.mem.indexOf(u8, in_a.string, "alpha secret") != null);
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }}));
+
+    // B's bytes are untouched: the refused write above was refused, not
+    // silently redirected somewhere harmless.
+    const disk = try core.file.readAlloc(gpa, "place-a/a.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("alpha secret\n", disk);
+}
+
+test "e2e/place: a project's environment reaches the children run in it" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p env-a/.git env-b/.git",
+        "printf 'x\\n' > env-a/a.js",
+        "printf 'x\\n' > env-b/b.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Give project A an environment and leave B without one. An overlay is
+    // published FOR a place, so it follows the project rather than the process.
+    ed.runStr("open", "env-a/a.js");
+    const place_a = ed.session.system.buffers.active().place;
+    try t.expect(!place_a.isProcess()); // the file was detected into its project
+    _ = try ed.session.system.environments.publish(place_a, "e2e", "WEFT_PLACE_MARK=from-a\x00");
+
+    // A child run in A sees it...
+    ed.runStr("run-command", "printf 'mark=%s' \"$WEFT_PLACE_MARK\"");
+    try t.expect(drainToolContains(&ed, "*output*", "mark=from-a"));
+
+    // ...and a child run in B does not: the overlay belongs to A's place, not
+    // to the editor. Without per-place environments this could only ever have
+    // been one global set at startup, which is why direnv could not work.
+    ed.runStr("open", "env-b/b.js");
+    ed.runStr("run-command", "printf 'mark=[%s]' \"$WEFT_PLACE_MARK\"");
+    try t.expect(drainToolContains(&ed, "*output*", "mark=[]"));
+}
+
+test "e2e/place: a second project gets its own REPL, and neither captures the other" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    try loadSessions(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p rp-a/.git rp-b/.git",
+        "printf 'x\\n' > rp-a/a.js",
+        "printf 'x\\n' > rp-b/b.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // A shell read-loop is a persistent echo REPL that flushes each line.
+    const echo_loop = "while read l; do echo \"$l\"; done";
+
+    // A REPL per project, started from a file in each.
+    ed.runStr("open", "rp-a/a.js");
+    ed.runStr("repl-start", echo_loop);
+    ed.runStr("open", "rp-b/b.js");
+    ed.runStr("repl-start", echo_loop);
+    try t.expect(ed.buffers.findByName("*repl*") != null);
+    try t.expect(ed.buffers.findByName("*repl:2*") != null);
+
+    // Back in project A, with B's REPL the MOST RECENT one. Before instances
+    // were linked to a place, "most recent" won and this line went to B.
+    ed.runStr("open", "rp-a/a.js");
+    ed.runStr("repl-send", "from-a\n");
+    try t.expect(drainToolContains(&ed, "*repl*", "from-a"));
+    {
+        const other = h.toolText(&ed, "*repl:2*") orelse return error.NoSecondRepl;
+        defer gpa.free(other);
+        try t.expect(std.mem.indexOf(u8, other, "from-a") == null);
+    }
+
+    // And project B still drives its own.
+    ed.runStr("open", "rp-b/b.js");
+    ed.runStr("repl-send", "from-b\n");
+    try t.expect(drainToolContains(&ed, "*repl:2*", "from-b"));
+    {
+        const first = h.toolText(&ed, "*repl*") orelse return error.NoFirstRepl;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "from-b") == null);
+    }
+}

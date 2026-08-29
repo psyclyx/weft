@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const core = @import("core/core.zig");
+const build_options = @import("build_options");
 const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
 const window_layout = @import("gfx/window_layout.zig");
@@ -121,7 +122,22 @@ pub fn main(init: std.process.Init) !void {
     try providers_state.initRegistries(gpa);
     defer providers_state.deinit(gpa);
     var pool = try core.task.Pool.init(gpa, .{});
+    // Ordering matters and is load-bearing: this defer is registered AFTER
+    // the registry's, so the pool joins first and a queued grammar compile
+    // can never outlive the `Runtime` it writes into (see `Runtime.warm`).
     defer pool.deinit();
+    // Where `grammar-add` resolves a grammar NAME. The environment wins so a
+    // user can point at their own tree; the build-time value is the fallback
+    // that makes a nix build work unwrapped. Weft supplies the PATH and knows
+    // nothing about what is on it.
+    try providers_state.grammars.setSearchPath(
+        gpa,
+        std.process.Environ.getPosix(init.minimal.environ, "WEFT_GRAMMAR_PATH") orelse
+            build_options.grammar_path,
+    );
+    // Registering a grammar queues its compile here instead of paying ~18ms
+    // on the frame thread at the first open of that language.
+    providers_state.grammars.setPool(pool);
 
     // ── Core editing state ──
     // `Session` owns the buffers, the command/keymap/pick surfaces, the caps
@@ -210,6 +226,20 @@ pub fn main(init: std.process.Init) !void {
     // is currently attached to (agent-ux never gets its own).
     try session.system.initPlugins(pool);
     const plug = &session.system.plugins.?;
+    // Make `kv.zig`'s "state that outlives a run" literally true: restore the
+    // plugin store from disk now, and write it back on clean shutdown. `open`
+    // loads and `close` saves, so the two halves cannot be armed separately;
+    // the `defer` is registered AFTER `defer session.deinit(gpa)` above, so it
+    // runs BEFORE it — the store is still alive when it is written.
+    //
+    // ONLY `plug.kv` is persisted, never `session.system.config_kv`: config
+    // values come from the config script on every run and the config script is
+    // the source of truth, so a persisted blob could only ever shadow an edited
+    // config with a stale value. Plugin kv is the opposite — runtime state
+    // (project-recent, frecency, the kill/mark rings) that nothing else can
+    // reproduce, so losing it at exit loses information.
+    var plugin_kv_file = core.kv_file.Binding.open(gpa, &plug.kv);
+    defer plugin_kv_file.close();
     // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
     core.wasm_host.setEnviron(init.minimal.environ);
     const plugin_dir = config_load.pluginDir(gpa);
@@ -342,6 +372,7 @@ pub fn main(init: std.process.Init) !void {
         .directories = .{
             .context = &session,
             .open = Session.openLocalDirectoryOpaque,
+            .place_for = Session.placeForFileOpaque,
         },
     };
     try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);

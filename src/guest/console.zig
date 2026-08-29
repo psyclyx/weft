@@ -13,7 +13,7 @@ const weft = @import("weft");
 
 /// Each open console, keyed by the log buffer it appends to; a console holds
 /// no other state (each line is an independent command).
-var consoles: weft.Instances(void, 8) = .{};
+var consoles: weft.Instances(void) = .{};
 var cmd_buf: [1 << 12]u8 = undefined;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
@@ -36,7 +36,7 @@ export fn on_command(id: u32) void {
 
 /// Open a console of its own.
 fn open() void {
-    _ = consoles.open("console") orelse weft.echo("console: too many consoles");
+    _ = consoles.open("console") orelse weft.echo("console: out of memory — could not open another console");
 }
 
 /// Run the current line as a command; its output appends to that console.

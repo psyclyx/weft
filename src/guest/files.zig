@@ -28,9 +28,11 @@ export fn init() void {
 
 export fn on_command(id: u32) void {
     if (id != 0) return;
-    const directory = weft.cwd();
+    // The browser opens WHERE the dispatch is (`doc/place.md`): the project the
+    // focused file belongs to, not the directory the editor was launched in.
+    const directory = weft.placeRoot();
     if (directory.len == 0) {
-        weft.echo("files: current directory unavailable");
+        weft.echo("files: this place has no local directory to browse");
         return;
     }
     weft.runStr("open", directory);

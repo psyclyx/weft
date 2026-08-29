@@ -55,7 +55,7 @@ pub const SyntaxResolver = *const fn (buf: *Buffers.Buffer) ?*syntax.Syntax;
 /// The guest-side `Perm` enum order (weft.zig): fs_read, fs_write, net, proc,
 /// timer. Kept in lockstep with abi.Perm so a wasm plugin's declaration means
 /// the same thing as an in-process one's.
-pub const perm_count = 5;
+pub const perm_count = 6;
 
 pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 
@@ -618,6 +618,36 @@ pub fn queryCapsClear(self: *WasmPlugin) void {
 /// default. See the `active_ctx` field doc.
 pub fn activeCtx(self: *WasmPlugin) *command.Context {
     return self.active_ctx;
+}
+
+// ── The plugin-plane proc door's duck type (doc/place.md §4.1a) ──────
+//
+// `wasm_host/proc.zig`'s `spawnBody`/`sendBody`/`readBody`/`closeBody` are ONE
+// implementation reached by two transports — the `.wasm` guest membrane and
+// the resident JS one (`quickjs.zig`'s `JsPlugin`, which declares the same
+// three names). The bodies name a plugin's proc state through these accessors
+// rather than through a field, so neither plane has to be spelled into the
+// other's layout; the same `anytype`-over-named-methods contract `hasPerm`
+// established a few files over.
+
+/// The task pool a spawned stream's reader runs on, or null when this plugin
+/// was built without one (a bare unit-test fixture) — the door answers -1.
+pub fn procPool(self: *WasmPlugin) ?*Pool {
+    return self.pool;
+}
+
+/// This plugin's handle-indexed proc streams.
+pub fn procStreams(self: *WasmPlugin) *std.ArrayList(?*proc_stream.ProcStream) {
+    return &self.proc_streams;
+}
+
+/// What a spawned child inherits absent a place overlay: the parent process's
+/// environment, set once at startup (`wasm_host.setEnviron`). The JS plane
+/// holds the SAME value in a field, handed to it by `config_load.zig` as
+/// `wasm_host.hostEnviron()`.
+pub fn baseEnviron(self: *WasmPlugin) std.process.Environ {
+    _ = self;
+    return wasm_host.hostEnviron();
 }
 
 pub const SemanticScope = struct {

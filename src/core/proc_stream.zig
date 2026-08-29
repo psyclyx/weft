@@ -57,6 +57,13 @@ pub const ProcStream = struct {
     argv_cmd: []u8, // owned copy: the caller's `cmd` may not outlive `start()`
     cwd_copy: ?[]u8,
     environ: std.process.Environ,
+    /// Whether `environ` is OURS to free. False for the shared process
+    /// environment (`g_environ`, borrowed); true once a caller hands us a
+    /// merged per-place environment via `adoptEnviron`. The stream uses its
+    /// environ for the child's whole lifetime, so a merged one cannot be a
+    /// borrow that dies with the spawning call -- the same reason `cwd_copy`
+    /// above is a copy.
+    environ_owned: bool = false,
     spawn_mutex: task.Mutex = .{},
     spawned: bool = false,
     spawn_failed: bool = false,
@@ -338,6 +345,13 @@ pub const ProcStream = struct {
     /// nothing after this point can race the still-running reader. Loud
     /// (`log.warn`) because a leak that never surfaces is worse than one that
     /// does.
+    /// Take ownership of the environment this stream was started with, so it
+    /// is freed when the stream is. Called only after a SUCCESSFUL `start`; if
+    /// the start failed the caller still holds it and frees it itself.
+    pub fn adoptEnviron(s: *ProcStream) void {
+        s.environ_owned = true;
+    }
+
     pub fn deinit(s: *ProcStream) void {
         const gpa = s.gpa;
         s.canceled.store(true, .release);
@@ -356,10 +370,15 @@ pub const ProcStream = struct {
             if (task.nowNs() >= deadline) {
                 std.log.warn("proc_stream: deinit gave up after {d}ms waiting for a saturated pool (no free worker ever ran this stream's spawn) — leaking it; it self-reaps its child once the pool finally schedules it", .{s.deinit_deadline_ns / std.time.ns_per_ms});
                 s.reader.detach();
+                // The environment is deliberately NOT freed here: the detached
+                // reader still holds this stream and uses it for the child it
+                // will eventually reap. Leaking it is the point of this branch.
                 return; // deliberate leak — see the doc above; nothing past here
             }
-            std.atomic.spinLoopHint();
+            std.Thread.yield() catch {};
         }
+        // The reader is gone, so nothing can touch the environment any more.
+        if (s.environ_owned) s.environ.block.deinit(gpa);
         _ = s.reader.poll(); // the reader is gone; reclaim its task node
         s.spawn_mutex.lock();
         const spawned = s.spawned;
@@ -395,7 +414,7 @@ test "proc_stream: duplex — write stdin, read stdout back" {
     while (got < 6 and task.nowNs() < deadline) {
         const n = s.read(out[got..]);
         got += n;
-        if (n == 0) std.atomic.spinLoopHint();
+        if (n == 0) std.Thread.yield() catch {};
     }
     try t.expectEqualStrings("hello\n", out[0..got]);
     try t.expectEqual(@as(usize, 0), s.pending());
@@ -408,7 +427,7 @@ test "proc_stream: duplex — write stdin, read stdout back" {
 // can't leave a stale `true` behind.
 var gate_deferred_spawn: std.atomic.Value(bool) = .init(false);
 fn hookDeferredSpawn() void {
-    while (!gate_deferred_spawn.load(.acquire)) std.atomic.spinLoopHint();
+    while (!gate_deferred_spawn.load(.acquire)) std.Thread.yield() catch {};
 }
 
 test "proc_stream: start() defers the fork+exec — a seam, not a wall-clock race" {
@@ -442,7 +461,7 @@ test "proc_stream: start() defers the fork+exec — a seam, not a wall-clock rac
     // flushes the queued bytes to its stdin.
     gate_deferred_spawn.store(true, .release);
     const deadline = task.nowNs() + 5 * std.time.ns_per_s;
-    while (!s.isSpawned() and task.nowNs() < deadline) std.atomic.spinLoopHint();
+    while (!s.isSpawned() and task.nowNs() < deadline) std.Thread.yield() catch {};
     try t.expect(s.isSpawned());
     try t.expectEqual(@as(usize, 0), s.pendingSendBytes());
 
@@ -454,14 +473,14 @@ test "proc_stream: start() defers the fork+exec — a seam, not a wall-clock rac
     while (got < 6 and task.nowNs() < deadline) {
         const n = s.read(out[got..]);
         got += n;
-        if (n == 0) std.atomic.spinLoopHint();
+        if (n == 0) std.Thread.yield() catch {};
     }
     try t.expectEqualStrings("hello\n", out[0..got]);
 }
 
 var gate_cancel_race: std.atomic.Value(bool) = .init(false);
 fn hookCancelRace() void {
-    while (!gate_cancel_race.load(.acquire)) std.atomic.spinLoopHint();
+    while (!gate_cancel_race.load(.acquire)) std.Thread.yield() catch {};
 }
 
 test "proc_stream: canceled before the spawn lands reaps its own child — no hang, no touching undefined `child`" {
@@ -500,7 +519,7 @@ var gate_mid_flush: std.atomic.Value(bool) = .init(false);
 var reached_mid_flush: std.atomic.Value(bool) = .init(false);
 fn hookMidFlush() void {
     reached_mid_flush.store(true, .release);
-    while (!gate_mid_flush.load(.acquire)) std.atomic.spinLoopHint();
+    while (!gate_mid_flush.load(.acquire)) std.Thread.yield() catch {};
 }
 
 test "proc_stream: the queued flush happens under spawn_mutex — a concurrent send() can't race ahead of it" {
@@ -538,7 +557,7 @@ test "proc_stream: the queued flush happens under spawn_mutex — a concurrent s
     gate_deferred_spawn.store(true, .release);
     {
         const deadline = task.nowNs() + 5 * std.time.ns_per_s;
-        while (!reached_mid_flush.load(.acquire) and task.nowNs() < deadline) std.atomic.spinLoopHint();
+        while (!reached_mid_flush.load(.acquire) and task.nowNs() < deadline) std.Thread.yield() catch {};
         try t.expect(reached_mid_flush.load(.acquire));
     }
 
@@ -557,7 +576,7 @@ test "proc_stream: the queued flush happens under spawn_mutex — a concurrent s
     const th = try std.Thread.spawn(.{}, Ctx.run, .{Ctx{ .s = s, .started = &send_started, .done = &send_done }});
 
     const start_deadline = task.nowNs() + 5 * std.time.ns_per_s;
-    while (!send_started.load(.acquire) and task.nowNs() < start_deadline) std.atomic.spinLoopHint();
+    while (!send_started.load(.acquire) and task.nowNs() < start_deadline) std.Thread.yield() catch {};
     try t.expect(send_started.load(.acquire));
     // Proof of mutual exclusion, not luck: give the scheduler every
     // reasonable chance to have run the concurrent send to completion if
@@ -580,7 +599,7 @@ test "proc_stream: the queued flush happens under spawn_mutex — a concurrent s
     while (got < 2 and task.nowNs() < deadline) {
         const n = s.read(out[got..]);
         got += n;
-        if (n == 0) std.atomic.spinLoopHint();
+        if (n == 0) std.Thread.yield() catch {};
     }
     try t.expectEqualStrings("AB", out[0..got]);
 }
@@ -616,7 +635,7 @@ test "proc_stream: live peers outnumber the pool's workers — none starves, and
         const answered = task.nowNs() + 5 * std.time.ns_per_s;
         while (got < 2 and task.nowNs() < answered) {
             got += p.read(out[got..]);
-            if (got < 2) std.atomic.spinLoopHint();
+            if (got < 2) std.Thread.yield() catch {};
         }
         var want: [4]u8 = undefined;
         try t.expectEqualStrings(std.fmt.bufPrint(&want, "p{d}", .{i}) catch unreachable, out[0..got]);
@@ -631,7 +650,7 @@ test "proc_stream: live peers outnumber the pool's workers — none starves, and
             try t.expectEqual(@as(u64, 49), value);
             return;
         }
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     return error.PoolNeverRanBoundedWork;
 }

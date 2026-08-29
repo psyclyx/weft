@@ -203,7 +203,7 @@ pub const Proc = struct {
                 } else |_| {}
                 break;
             }
-            std.atomic.spinLoopHint();
+            std.Thread.yield() catch {};
         }
         self.done = true;
     }

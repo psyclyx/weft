@@ -1,6 +1,58 @@
 {
   pkgs ? import (import ./npins).nixpkgs { },
 }:
+let
+  # The grammar tree weft searches at runtime: one directory per grammar
+  # NAME, each laid out the way the nixpkgs packages are (`parser` plus
+  # `queries/highlights.scm`). Which languages exist is decided HERE and in
+  # config — weft itself has no list, and adding one is a change to this
+  # attrset, not to any Zig source.
+  grammarNames = [
+    "zig"
+    "fennel"
+    "lua"
+    "nix"
+    "javascript"
+    "html"
+  ];
+  # Upstream grammar packages carry the queries their authors wrote, which is
+  # not the same set an editor needs: none ship an `outline.scm` (that shape is
+  # Zed's, and every editor curates its own — see doc), and tree-sitter-fennel
+  # ships no highlight query at all. So each entry is the upstream package with
+  # weft's queries laid over it. This is the NORM, not a workaround for one bad
+  # package: curating queries beside the parser, pinned to the same nixpkgs
+  # revision, is exactly what nvim-treesitter's `parser.json` machinery exists
+  # to achieve.
+  overlayFor =
+    name:
+    let
+      overrides = builtins.filter (o: builtins.pathExists o.src) [
+        {
+          src = ./assets + "/${name}-highlights.scm";
+          dst = "highlights.scm";
+        }
+        {
+          src = ./assets + "/${name}-outline.scm";
+          dst = "outline.scm";
+        }
+      ];
+    in
+    if overrides == [ ] then
+      pkgs.tree-sitter-grammars."tree-sitter-${name}"
+    else
+      pkgs.runCommand "weft-grammar-${name}" { } ''
+        mkdir -p $out/queries
+        cp -r ${pkgs.tree-sitter-grammars."tree-sitter-${name}"}/* $out/
+        chmod -R u+w $out
+        ${builtins.concatStringsSep "\n" (map (o: "cp ${o.src} $out/queries/${o.dst}") overrides)}
+      '';
+  grammarDir = pkgs.linkFarm "weft-grammars" (
+    map (n: {
+      name = n;
+      path = overlayFor n;
+    }) grammarNames
+  );
+in
 pkgs.mkShell {
   packages = with pkgs; [
     zig_0_16
@@ -80,15 +132,10 @@ pkgs.mkShell {
   # the module. Pinned store path, same env-var idiom as the grammars.
   WEFT_QUICKJS_NG_SRC = "${pkgs.srcOnly pkgs.quickjs-ng}";
 
-  # Grammar packages (parser shared object + queries/highlights.scm).
-  # The parser paths are baked in for runtime dlopen; the queries are
-  # embedded at build time. Pinned store paths, not ambient state.
-  WEFT_TS_ZIG = "${pkgs.tree-sitter-grammars.tree-sitter-zig}";
-  WEFT_TS_FENNEL = "${pkgs.tree-sitter-grammars.tree-sitter-fennel}";
-  WEFT_TS_LUA = "${pkgs.tree-sitter-grammars.tree-sitter-lua}";
-  WEFT_TS_NIX = "${pkgs.tree-sitter-grammars.tree-sitter-nix}";
-  WEFT_TS_JAVASCRIPT = "${pkgs.tree-sitter-grammars.tree-sitter-javascript}";
-  WEFT_TS_HTML = "${pkgs.tree-sitter-grammars.tree-sitter-html}";
+  # Where weft looks up a grammar BY NAME (colon-separated, like PATH). One
+  # variable, not one per language: weft ships no list of languages, so the
+  # set that exists is whatever this directory holds and config asks for.
+  WEFT_GRAMMAR_PATH = "${grammarDir}";
 
   # Let the Vulkan loader find the host ICDs on NixOS.
   XDG_DATA_DIRS = "/run/opengl-driver/share";

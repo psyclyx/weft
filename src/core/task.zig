@@ -246,7 +246,13 @@ pub const Pool = struct {
         for (self.residents.items) |r| {
             while (!r.exited.load(.acquire)) {
                 if (nowNs() >= deadline) break;
-                std.atomic.spinLoopHint();
+                // YIELD, never `spinLoopHint`. This wait is bounded by
+                // `join_deadline_ns` — two seconds in production — so spinning
+                // here burns a whole core for as long as a peer ignores
+                // shutdown, on the exact path where the rest of the process is
+                // trying to make progress. A spin hint is for waits measured in
+                // cache lines, not seconds.
+                std.Thread.yield() catch {};
             }
             if (!r.exited.load(.acquire)) {
                 stuck += 1;
@@ -569,15 +575,23 @@ test "hot-section fence flags" {
 
 /// A resident that parks until someone releases its gate — the test stand-in
 /// for a reader blocked on a peer's fd.
+/// It BLOCKS rather than spins, for two reasons. It is standing in for a
+/// reader parked on a peer's fd, and a blocked reader does not consume a core —
+/// a spinning stand-in models the wrong thing. And these residents are alive
+/// while OTHER test binaries run: `zig build` schedules jobs across every core,
+/// so a busy-wait here is measured by whatever timing-sensitive test happens to
+/// be running in the sibling binary. That is not hypothetical — it is what made
+/// `e2e/latency`'s p95 intermittently triple.
 const Parked = struct {
-    gate: std.atomic.Value(bool) = .init(false),
+    gate: std.atomic.Value(u32) = .init(0),
 
     fn park(self: *Parked) void {
-        while (!self.gate.load(.acquire)) std.atomic.spinLoopHint();
+        while (self.gate.load(.acquire) == 0) futexWait(&self.gate, 0);
     }
 
     fn release(self: *Parked) void {
-        self.gate.store(true, .release);
+        self.gate.store(1, .release);
+        futexWake(&self.gate, 1);
     }
 };
 
@@ -600,7 +614,7 @@ test "pool: a spawn reaps a record only once no handle can still read it" {
     var parked: Parked = .{};
     var h = try pool.spawnResident(.{ .name = "test exited" }, Parked.park, .{&parked});
     parked.release();
-    while (!h.residentExited()) std.atomic.spinLoopHint();
+    while (!h.residentExited()) std.Thread.yield() catch {};
 
     // Exited, but `h` still answers FROM the record, so a later spawn may not
     // free it — the join a session runs at its own teardown reads it.
@@ -637,7 +651,7 @@ test "pool: a resident that ignores its signal is named, and the pool leaks inst
     h.detach();
     pool.deinit(); // bounded: returns despite the resident still running
     parked.release();
-    while (!pool.residents.items[0].exited.load(.acquire)) std.atomic.spinLoopHint();
+    while (!pool.residents.items[0].exited.load(.acquire)) std.Thread.yield() catch {};
 }
 
 /// Monotonic clock: a RAW syscall (`linux.clock_gettime` — no libc, so no

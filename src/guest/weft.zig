@@ -260,12 +260,17 @@ extern "weft" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
 extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
-extern "weft" fn wl_cwd(out: u32, cap: u32) i32;
+extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
+extern "weft" fn wl_place_id() i32;
+extern "weft" fn wl_place_has(rel: u32, rel_len: u32) i32;
+extern "weft" fn wl_env_publish(ptr: u32, len: u32) i32;
+extern "weft" fn wl_env_retract() i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
 extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
+extern "weft" fn wl_proc_spool(cmd: u32, cmd_len: u32, input: u32, input_len: u32, name: u32, name_len: u32, token: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
@@ -344,7 +349,7 @@ fn p(x: anytype) u32 {
 pub const Range = struct { start: usize, end: usize };
 pub const Level = enum(u32) { debug = 0, info = 1, warn = 2, err = 3 };
 /// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer).
-pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4 };
+pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5 };
 
 // ── Group A: core ────────────────────────────────────────────────────
 pub fn log(level: Level, msg: []const u8) void {
@@ -1108,24 +1113,34 @@ pub fn instanceName(base: []const u8, n: u32, out: []u8) ?[]const u8 {
 }
 
 /// The lowest instance ordinal of `base` no buffer holds — the identity a new
-/// instance takes. Null when the tool is saturated.
+/// instance takes. The scan needs no ceiling: an ordinal is occupied only by a
+/// buffer holding its name, buffers are finite, so by pigeonhole one of the
+/// first `bufferCount() + 1` ordinals is always free. Null only when the name
+/// itself does not fit, which is a property of `base`, not of how many
+/// instances are running.
 pub fn instanceOrdinal(base: []const u8) ?u32 {
     var name_buf: [128]u8 = undefined;
     var n: u32 = 1;
-    while (n <= max_instances) : (n += 1) {
+    while (true) : (n += 1) {
         const name = instanceName(base, n, &name_buf) orelse return null;
         if (!bufferNamed(name)) return n;
     }
-    return null;
 }
 
-const max_instances = 64;
-
 /// A tool's live instances: `T` is what one instance must remember (a REPL
-/// handle, a socket, a log), `cap` bounds how many run at once. Every
-/// instantiable tool shares this table rather than growing its own, so
-/// "which instance is this command about" has one answer everywhere.
-pub fn Instances(comptime T: type, comptime cap: usize) type {
+/// handle, a socket, a log). Every instantiable tool shares this table rather
+/// than growing its own, so "which instance is this command about" has one
+/// answer everywhere.
+///
+/// The table is a list of POINTERS with one heap allocation per instance, the
+/// shape `core/Buffers.zig` settled on for the same reason: callers hold a
+/// `*Slot` across calls (a draft names the entry it commits to, an http request
+/// its connection), so an instance must keep its address while the table around
+/// it grows. There is no cap — how many interpreters or repositories you may
+/// have open at once was never a decision anybody made, and the guest heap
+/// (`weft.allocator`, a real `@wasmMemoryGrow` heap) is what actually bounds it.
+/// `open` is null ONLY when that heap refuses, and every caller says so.
+pub fn Instances(comptime T: type) type {
     return struct {
         const Self = @This();
         const name_cap = 64;
@@ -1134,6 +1149,11 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
             name_buf: [name_cap]u8,
             name_len: usize,
             opened: usize, // ordering, for `oldest`
+            /// The place this instance was opened in (`weft.placeId`). A session
+            /// is a NAMED thing LINKED to a place, not a thing keyed BY one --
+            /// so two interpreters can share a project and one server can
+            /// serve two. Compared, never interpreted.
+            place: i32,
             value: T,
 
             pub fn name(self: *const Slot) []const u8 {
@@ -1141,31 +1161,35 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
             }
         };
 
-        slots: [cap]?Slot = @splat(null),
-        recent: ?usize = null,
+        slots: std.ArrayList(*Slot) = .empty,
+        /// The instance a command falls back to — a POINTER, so it survives the
+        /// list growing under it, which an index would not.
+        recent: ?*Slot = null,
         opens: usize = 0,
 
         /// Mint the next instance of `base` (`*base*`, `*base:2*`, …) and open
         /// its buffer. `value` is uninitialized: the caller fills it from
         /// `slot.name()` (a session must be started against its own buffer),
-        /// and `close`s the slot if that fails. Null when the tool is
-        /// saturated.
+        /// and `close`s the slot if that fails. Null when the guest heap cannot
+        /// hold another instance, or when the instance name does not fit.
         pub fn open(self: *Self, base: []const u8) ?*Slot {
-            const i = self.free() orelse return null;
             var name_buf: [name_cap]u8 = undefined;
             const ordinal = instanceOrdinal(base) orelse return null;
             const name = instanceName(base, ordinal, &name_buf) orelse return null;
+            self.slots.ensureUnusedCapacity(allocator, 1) catch return null;
+            const slot = allocator.create(Slot) catch return null;
             runStr("buffer-create", name);
             self.opens += 1;
-            self.slots[i] = .{
+            slot.* = .{
                 .name_buf = undefined,
                 .name_len = name.len,
                 .opened = self.opens,
+                .place = placeId(),
                 .value = undefined,
             };
-            const slot = &self.slots[i].?;
             @memcpy(slot.name_buf[0..name.len], name);
-            self.recent = i;
+            self.slots.appendAssumeCapacity(slot);
+            self.recent = slot;
             return slot;
         }
 
@@ -1173,30 +1197,44 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
         /// when its instances are one-shot (a request, not a session).
         pub fn oldest(self: *Self) ?*Slot {
             var found: ?*Slot = null;
-            for (&self.slots) |*maybe| {
-                const slot = if (maybe.*) |*s| s else continue;
+            for (self.slots.items) |slot| {
                 if (found == null or slot.opened < found.?.opened) found = slot;
             }
             return found;
         }
 
-        /// The instance this command is about: the one owning the focused
-        /// buffer, else the most recent — echoed as `label: *name*`, so a
-        /// command run from elsewhere never silently drives an instance the
-        /// user cannot see.
+        /// The instance this command is about, most-specific link first: the
+        /// one owning the focused buffer, else one opened in THIS PLACE, else
+        /// the most recent — echoed as `label: *name*`, so a command run from
+        /// elsewhere never silently drives an instance the user cannot see.
+        ///
+        /// The middle rung is what makes instances project-aware. Without it,
+        /// running a tool from a file in one project drove whichever instance
+        /// happened to be most recent — routinely another project's, since
+        /// "most recent" tracks the last thing you touched anywhere. With it, a
+        /// second project gets its own instance and keeps it, and neither
+        /// captures the other. Emacs learned this the same way: `sesman`
+        /// exists because CIDER and friends each grew a session table keyed the
+        /// wrong way first.
         pub fn current(self: *Self, label: []const u8) ?*Slot {
             var name_buf: [name_cap]u8 = undefined;
             if (activeBufferName(&name_buf)) |active| {
-                for (&self.slots, 0..) |*maybe, i| {
-                    const slot = if (maybe.*) |*s| s else continue;
+                for (self.slots.items) |slot| {
                     if (std.mem.eql(u8, slot.name(), active)) {
-                        self.recent = i;
+                        self.recent = slot;
                         return slot;
                     }
                 }
             }
-            const i = self.recent orelse return null;
-            const slot = if (self.slots[i]) |*s| s else return null;
+            const here = placeId();
+            for (self.slots.items) |slot| {
+                if (slot.place != here) continue;
+                self.recent = slot;
+                var place_msg: [name_cap + 32]u8 = undefined;
+                echo(std.fmt.bufPrint(&place_msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
+                return slot;
+            }
+            const slot = self.recent orelse return null;
             var msg: [name_cap + 32]u8 = undefined;
             echo(std.fmt.bufPrint(&msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
             return slot;
@@ -1204,23 +1242,13 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
 
         /// Retire an instance. Its buffer outlives it — the log stays readable.
         pub fn close(self: *Self, slot: *Slot) void {
-            for (&self.slots, 0..) |*maybe, i| {
-                const live = if (maybe.*) |*s| s else continue;
+            for (self.slots.items, 0..) |live, i| {
                 if (live != slot) continue;
-                maybe.* = null;
-                if (self.recent == i) self.recent = self.any();
+                _ = self.slots.orderedRemove(i);
+                if (self.recent == slot) self.recent = if (self.slots.items.len > 0) self.slots.items[0] else null;
+                allocator.destroy(slot);
                 return;
             }
-        }
-
-        fn free(self: *const Self) ?usize {
-            for (self.slots, 0..) |s, i| if (s == null) return i;
-            return null;
-        }
-
-        fn any(self: *const Self) ?usize {
-            for (self.slots, 0..) |s, i| if (s != null) return i;
-            return null;
         }
     };
 }
@@ -2189,11 +2217,95 @@ pub fn procRead(handle: u32, out: []u8) []u8 {
 pub fn procClose(handle: u32) void {
     wl_proc_close(handle);
 }
-/// The process working directory (for absolute `file://` uris). Uses the shared
-/// scratch — copy it before the next read call.
-pub fn cwd() []const u8 {
-    const n = wl_cwd(p(&scratch), scratch.len);
+/// WHERE this dispatch runs, as an absolute directory (`doc/place.md`) — the
+/// project a file belongs to, the pinned working target, or the editor's own
+/// directory when the dispatch is about nothing more specific.
+///
+/// **EMPTY means the place has no local directory** (a peer or a container that
+/// went away), and a caller that needs one must DECLINE rather than substitute
+/// the editor's launch directory: acting in the wrong project while reporting
+/// success is the bug the retired process-directory shim used to cause.
+///
+/// Uses the shared scratch — copy it before the next read call.
+/// A dense opaque id for the place this dispatch is in. Compare it with
+/// another `placeId()`; never interpret the number, and never persist it (it
+/// is stable for this run only).
+pub fn placeId() i32 {
+    return wl_place_id();
+}
+
+/// Publish this plugin's environment overlay for the place this dispatch is
+/// in: NUL-separated `KEY=VALUE` records. Returns the new revision, or -1.
+/// Perm: env -- distinct from proc, because an overlay governs every
+/// subprocess ANY plugin runs at that place, not just your own.
+pub fn envPublish(vars: []const u8) i32 {
+    return wl_env_publish(p(vars.ptr), @intCast(vars.len));
+}
+
+/// Withdraw this plugin's overlay for this place. Owner-scoped.
+pub fn envRetract() bool {
+    return wl_env_retract() == 1;
+}
+
+pub fn placeRoot() []const u8 {
+    const n = wl_place_root(p(&scratch), scratch.len);
     return if (n <= 0) "" else scratch[0..@intCast(n)];
+}
+
+/// What `rel` IS *inside* this dispatch's place — the marker query
+/// (`doc/place.md` §4.2). Same four answers as `fsExists`, and NO permission:
+/// it reveals strictly less than `placeRoot`, which already hands you the
+/// directory, and it cannot escape the place (the host resolves it beneath the
+/// place root with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`).
+///
+/// This is what "is this project a git repository", "is there an `.envrc`
+/// here", "is a rebase mid-flight" ask, and it is the reason neither `git` nor
+/// `project` holds `fs_read` any more: probing for machinery inside your own
+/// content never needed a grant over the whole filesystem.
+///
+/// An absolute `rel`, a `..` that leaves the place, a symlink pointing out of
+/// it, and a place with no local directory all answer `.none` — the door
+/// describes what the place contains, and nothing else. Touches no scratch, so
+/// a borrowed `path()`/`placeRoot()` slice stays valid across a call.
+pub fn placeHas(rel: []const u8) FsKind {
+    return switch (wl_place_has(p(rel.ptr), @intCast(rel.len))) {
+        1 => .file,
+        2 => .dir,
+        3 => .other,
+        else => .none,
+    };
+}
+
+/// A buffer path named absolutely within its place, into `out`.
+///
+/// The two doors answer different spellings of the same file. `wl_path` gives
+/// the path AS SPELLED — absolute, or relative to the directory the editor was
+/// launched in — while `placeRoot` gives a directory the file is INSIDE. Join
+/// them naively and the components both spellings share get counted twice:
+/// `weft proj/x.zig`, launched above `proj`, is `<…>/proj` + `proj/x.zig`.
+///
+/// So the join drops the leading components of `spelled` that `root` already
+/// ends with, longest overlap first — the file is inside the root by
+/// construction, so the deepest shared spelling is the one the launch directory
+/// produced. Absolute paths pass through untouched; an empty `root` yields ""
+/// so a caller DECLINES rather than inventing a base.
+///
+/// Pure, and here rather than in each plugin: this shim is the one party that
+/// knows the contract of both doors, and two guests open-coding the same join
+/// is exactly how they drift apart.
+pub fn placePath(root: []const u8, spelled: []const u8, out: []u8) []const u8 {
+    if (spelled.len > 0 and spelled[0] == '/') return std.fmt.bufPrint(out, "{s}", .{spelled}) catch "";
+    if (root.len == 0) return "";
+    var start: usize = 0;
+    var cut: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, spelled, start, '/')) |slash| {
+        const head = spelled[0..slash];
+        if (root.len > head.len and
+            root[root.len - head.len - 1] == '/' and
+            std.mem.eql(u8, root[root.len - head.len ..], head)) cut = slash + 1;
+        start = slash + 1;
+    }
+    return std.fmt.bufPrint(out, "{s}/{s}", .{ root, spelled[cut..] }) catch "";
 }
 
 // ── net.connect (TCP / TLS) — perm net ───────────────────────────────
@@ -2227,6 +2339,23 @@ pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
     wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
 }
 
+/// `procToBuffer` for a command that needs its input as a FILE. The host
+/// writes `input` to a temp path IT chooses, substitutes that path for every
+/// `{}` in `cmd`, runs it, fills `name` with stdout (token → `on_fill_token`,
+/// exactly as `procToBuffer`), and deletes the temp whether the command
+/// succeeded or failed.
+///
+/// The path is never spelled here, so a plugin that only needs to hand a
+/// subprocess bytes on disk — `git apply {}`, `git commit -F '{}'`,
+/// `llm < {}` — needs NO `fs_write`: it cannot choose where the bytes land and
+/// cannot leave them there. Perms: proc + timer, the same as `procToBuffer`.
+///
+/// `cmd` is yours to compose, so keep `{}` reserved: any other `{}` in the
+/// string (a path with braces in it, say) is substituted too.
+pub fn procSpool(cmd: []const u8, input: []const u8, name: []const u8, token: u32) void {
+    wl_proc_spool(p(cmd.ptr), @intCast(cmd.len), p(input.ptr), @intCast(input.len), p(name.ptr), @intCast(name.len), token);
+}
+
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file
 /// the range is written to, transformed in place, and read back) and replace
 /// the range with the result — formatters and vim `!`-filters. Async, CRDT-
@@ -2247,8 +2376,12 @@ pub fn fsRead(fpath: []const u8) ?[]const u8 {
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
-/// What `fpath` is, without reading it. Perm: fs_read. Cheap enough to climb a
-/// directory chain probing for a marker (e.g. `.git`) — project-root detection.
+/// What `fpath` is, without reading it. Perm: fs_read.
+///
+/// NOT the door for "is there a `.git` here": that is `placeHas`, which needs
+/// no grant and cannot leave the place. This one takes a path anywhere the
+/// grant reaches, which is why the two plugins that used to climb with it
+/// (`git`, `project`) no longer hold `fs_read` at all (`doc/place.md` §4.2).
 pub const FsKind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 pub fn fsExists(fpath: []const u8) FsKind {
     const k = wl_fs_exists(p(fpath.ptr), @intCast(fpath.len));

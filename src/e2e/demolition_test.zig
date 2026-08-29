@@ -42,6 +42,22 @@ const Buffers = h.core.Buffers;
 /// gate, not a one-time sweep).
 const banned_terms = [_][]const u8{ "dired", "magit" };
 
+/// Spellings of the retired process-directory door, with the reason each is
+/// gone (`doc/place.md`). `wl_cwd` answered `getcwd()` — one value fixed at
+/// launch, revealed unconditionally to every guest — so a plugin's effects
+/// landed where the EDITOR was started rather than where the interaction was.
+/// `wl_place_root` replaced it: the dispatching place's directory, and zero
+/// bytes when that place has none locally, so a guest declines instead of
+/// silently acting in the launch directory.
+///
+/// Both the door and its shim wrapper are named, because either one growing
+/// back would restore the whole class. `std.Io.Dir.cwd()` — a directory
+/// HANDLE, host-side — is untouched and deliberately not matched here.
+const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8 }{
+    .{ .spelling = "wl_cwd", .reason = "the process-directory membrane door is retired — use wl_place_root (doc/place.md)" },
+    .{ .spelling = "weft.cwd(", .reason = "the process-directory guest shim is retired — use weft.placeRoot() (doc/place.md)" },
+};
+
 const Violation = struct {
     path: []const u8,
     line: usize,
@@ -131,6 +147,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
         for (banned_terms) |term| {
             if (containsIgnoreCase(line, term))
                 try scan.record(rel_path, line_no, "persisted dired/magit terminology (doc §19)");
+        }
+
+        for (retired_process_cwd) |gone| {
+            if (std.mem.indexOf(u8, line, gone.spelling) != null)
+                try scan.record(rel_path, line_no, gone.reason);
         }
 
         if (std.mem.indexOf(u8, line, "fn semanticActive") != null) {
@@ -236,5 +257,140 @@ test "demolition: §19 checklist absences hold over src/" {
     inline for (@typeInfo(Buffers.Buffer).@"struct".fields) |field| {
         if (std.mem.eql(u8, field.name, "editor"))
             try t.expect(@typeInfo(field.type) == .optional);
+    }
+}
+
+// ── A JS plugin is not a different kind of plugin (doc/place.md §4.1a) ──
+
+// `quickjs.wasm` IS a wasm plugin, so a JS plugin is code running inside a
+// wasm guest and must not be able to do anything a wasm guest cannot. Today
+// that is not structural: `membrane/qjs_contract.zig` is a self-described
+// THIRD surface, its own imports bound onto quickjs.wasm's linker beside the
+// `wl_*` doors, with its own handlers and gates.
+//
+// Two hand-maintained membranes drift, and the drift is not hypothetical:
+// `qjs_proc_spawn` carried a `cwd` argument `wl_proc_spawn` never had, which
+// is exactly the local-first spelling `doc/place.md` exists to remove. This
+// gate is what would have caught it.
+//
+// The rule, and why it is scoped the way it is: a `qjs_*` door in the
+// **plugin** group that shares a name with a `wl_*` door is the SAME door
+// reached two ways, so it must have the same arity. The **config** group is
+// a genuinely different surface — the config DSL, a distinct role with its
+// own trust tier — and several of its names collide with `wl_*` doors while
+// meaning something else entirely (`qjs_semantic_action` DECLARES a command;
+// `wl_semantic_action` INVOKES one). Those are exempt, and the collisions are
+// recorded here rather than silently tolerated.
+test "demolition: plugin-plane JS doors match their wasm twins exactly" {
+    const qjs = h.core.membrane.qjs;
+    const wl = h.core.membrane.wl;
+
+    var twins_checked: usize = 0;
+    for (qjs.imports) |q| {
+        if (q.group != .plugin) continue;
+        // `qjs_foo` is the twin of `wl_foo`.
+        for (wl.imports) |w| {
+            if (!std.mem.eql(u8, w.name[3..], q.name[4..])) continue;
+            twins_checked += 1;
+            if (w.params.len != q.params.len or w.results.len != q.results.len) {
+                std.debug.print(
+                    "\nplugin-plane door '{s}' differs between the two membranes: " ++
+                        "wl_{s} takes {d}->{d}, qjs_{s} takes {d}->{d}.\n" ++
+                        "A JS plugin runs inside quickjs.wasm; it must not reach a door " ++
+                        "shaped differently from the one every other guest gets. " ++
+                        "Resolve toward the NARROWER door (doc/place.md §4.1a).\n",
+                    .{
+                        q.name,      w.name[3..],  w.params.len,  w.results.len,
+                        q.name[4..], q.params.len, q.results.len,
+                    },
+                );
+                return error.JsPlaneDivergedFromWasmPlane;
+            }
+            break;
+        }
+    }
+
+    // If this drops to zero the gate has stopped checking anything — a rename
+    // on either side would otherwise silently disable it.
+    try t.expect(twins_checked >= 5);
+}
+
+// Matching arity is a tripwire, not the property. The property is that the two
+// planes reach ONE implementation, so a difference between them has nowhere to
+// live. For the proc surface — the door the `cwd` drift actually happened on —
+// that is now true by construction: `wasm_host/proc.zig` holds four bodies,
+// `contract.zig` binds them as `wl_proc_*` through `wasmDoor`, `quickjs.zig`
+// binds the SAME bodies as `qjs_proc_*` through `jsDoor`, and neither
+// trampoline generator does anything but cast `data` and spell a denial.
+//
+// This gate proves that by FUNCTION POINTER, against the tables each membrane
+// actually binds from — so replacing one plane's handler with a hand-written
+// body of the right shape fails here, which is exactly what a divergence looks
+// like on its first commit.
+test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
+    const proc_doors = h.core.wasm_host.proc_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+
+    inline for (proc_doors.doors) |d| {
+        const HostFn = @TypeOf(d.wl);
+
+        // 1. The `wl_*` handler is the trampoline generated from THIS door's
+        //    shared body and gate — nothing hand-written can sit here.
+        try t.expectEqual(proc_doors.wasmDoor(d.body, d.wl_gate), d.wl);
+
+        // 2. …and it is what the wasm membrane actually binds for `wl_<name>`.
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ d.name)) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, d.wl), wl_handler);
+
+        // 3. The `qjs_*` handler the JS membrane binds runs the SAME body,
+        //    through the resident plane's own trampoline. If someone gives the
+        //    JS plane its own `proc_spawn` again — with a `cwd` argument, say —
+        //    this is the assertion that fails.
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ d.name)) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, d.qjs_gate)), qjs_handler);
+
+        // 4. The two transports' possession checks agree — except where the
+        //    table says otherwise, and it may only say otherwise for the two
+        //    doors whose remainder is named in `proc.zig`'s `doors` doc
+        //    (`qjs_proc_send`/`qjs_proc_read` re-check `proc` on every call;
+        //    their `wl_*` twins can't until `contract_data.zig`, which is under
+        //    concurrent edit, gets `.perm = .proc`). A NEW asymmetry has to
+        //    add itself to this list to compile past here.
+        const named_remainder = comptime std.mem.eql(u8, d.name, "proc_send") or
+            std.mem.eql(u8, d.name, "proc_read");
+        if (d.wl_gate != d.qjs_gate and !named_remainder) {
+            std.debug.print(
+                "\nplugin-plane door '{s}' is gated differently on the two planes " ++
+                    "(wl {s}, qjs {s}) and is not one of the two recorded remainders.\n" ++
+                    "A JS plugin runs inside quickjs.wasm; resolve toward the NARROWER " ++
+                    "gate, or record the blocker (doc/place.md §4.1a).\n",
+                .{
+                    d.name,
+                    if (d.wl_gate) |p| p.label() else "ungated",
+                    if (d.qjs_gate) |p| p.label() else "ungated",
+                },
+            );
+            return error.JsPlaneDivergedFromWasmPlane;
+        }
+        // …and the other direction, the way `contract.zig`'s `perm_gated` does
+        // it: a remainder that has been CLOSED must stop being excused here,
+        // or the next real divergence on that door slips through the
+        // exception someone forgot to delete.
+        if (named_remainder and d.wl_gate == d.qjs_gate) {
+            std.debug.print(
+                "\nplugin-plane door '{s}' is now gated identically on both planes — " ++
+                    "delete it from this test's `named_remainder` list and from the " ++
+                    "remainder note on `wasm_host/proc.zig`'s `doors` (doc/place.md §4.1a).\n",
+                .{d.name},
+            );
+            return error.StaleDivergenceException;
+        }
     }
 }

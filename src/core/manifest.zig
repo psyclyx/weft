@@ -181,9 +181,13 @@ pub const StatusSegmentDecl = struct {
 ///
 /// `root` is `opts.root` flattened to a plain string by the qjs shim before
 /// it ever reaches `manifest.zig` (`quickjs.zig`'s `cGrant`) — `""` (the
-/// default; `opts` itself is optional at the JS call site) means
-/// `Limit.none` (unrestricted within the capability); a non-empty string
-/// narrows to `Limit.fs_root`.
+/// default; `opts` itself is optional at the JS call site) takes
+/// `grants.defaultLimit`, which for the two path-shaped capabilities is
+/// `Limit.place`: CONFINED to whatever place the dispatch is in (doc/place.md
+/// §4.1). A non-empty string narrows to `Limit.fs_root`, with ONE spelling
+/// reserved — `root: "/"` is the written-down way to say UNCONFINED
+/// (`grants.unconfined_root`), which is the only route to the whole
+/// filesystem now that omitting `opts` no longer is.
 ///
 /// **Why `opts` carries no `region`/`.doc_region` field, on purpose**: a
 /// `Limit.doc_region` is keyed by stemma `EventAnchor`s — identities
@@ -1080,7 +1084,12 @@ pub const Manifest = struct {
                 std.log.warn("config: weft.grant('{s}', '{s}') declared but no grant table is wired for this apply; dropped", .{ nd.plugin, nd.capability });
                 continue;
             };
-            const limit: grants_mod.Limit = if (nd.root.len > 0) .{ .fs_root = nd.root } else .none;
+            // `grants.limitForRoot` owns the whole "absent vs written down"
+            // rule (doc/place.md §4.1), so config and the describe() baseline
+            // cannot drift apart on what saying nothing means: no root →
+            // confined to the dispatching place; `"/"` → deliberately
+            // unconfined; anything else → that literal subtree.
+            const limit = grants_mod.limitForRoot(nd.capability, nd.root);
             _ = table.grant(.{ .capability = nd.capability, .limit = limit }, nd.plugin, null) catch |e|
                 std.log.warn("config: weft.grant('{s}', '{s}') failed to mint ({t})", .{ nd.plugin, nd.capability, e });
         }

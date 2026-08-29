@@ -12,28 +12,59 @@ const std = @import("std");
 const core = @import("../core/core.zig");
 const collab = @import("collab.zig");
 
-/// `grammar-add <ext> <package-dir> <symbol>` — grammars as data.
+/// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as
+/// data. `exts` is comma-separated; `grammar` is a name resolved along the
+/// registry's search path, or an absolute package directory; `query` and
+/// `outline` are query-file paths that default to the package's own
+/// `queries/highlights.scm` and `queries/outline.scm`. Every field of a
+/// `Registration` is reachable from here: there is no richer way to describe
+/// a grammar that config cannot say.
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
         .name = "grammar-add",
-        .summary = "Register a tree-sitter grammar package for an extension.",
+        .summary = "Register a tree-sitter grammar for one or more extensions.",
         .args = &.{
-            .{ .name = "ext", .type = .string },
-            .{ .name = "dir", .type = .string },
+            .{ .name = "exts", .type = .string },
+            .{ .name = "grammar", .type = .string },
             .{ .name = "symbol", .type = .string },
+            .{ .name = "query", .type = .string },
+            .{ .name = "outline", .type = .string },
         },
         .handler = grammarAddHandler,
         .data = runtime,
     };
 }
 
+/// The FEWEST arguments `grammar-add` will act on. This — not the declared
+/// arity, which is larger because query and outline are optional — is the
+/// number that has to stay out of guest reach: it is what it takes to get to
+/// `std.DynLib.open` on a caller-named directory. The gate below reads this,
+/// so the two cannot drift apart.
+pub const grammar_add_min_args = 3;
+
 fn grammarAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const runtime: *core.syntax.Runtime = @ptrCast(@alignCast(data.?));
-    if (args.len != 3) return error.ArityMismatch;
+    if (args.len < grammar_add_min_args or args.len > 5) return error.ArityMismatch;
     for (args) |a| {
         if (a != .string) return error.TypeMismatch;
     }
-    try runtime.add(ctx.gpa, args[0].string, args[1].string, args[2].string);
+    // An empty trailing string means "not given" — config writing '' for a
+    // query it does not want to override should mean the default, not a read
+    // of the empty path.
+    const optional = struct {
+        fn at(list: []const core.command.Value, i: usize) ?[]const u8 {
+            if (i >= list.len) return null;
+            const s = list[i].string;
+            return if (s.len == 0) null else s;
+        }
+    };
+    try runtime.add(ctx.gpa, .{
+        .extensions = args[0].string,
+        .grammar = args[1].string,
+        .symbol = args[2].string,
+        .query = optional.at(args, 3),
+        .outline = optional.at(args, 4),
+    });
     return .nil;
 }
 
@@ -126,7 +157,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
         // tree-sitter does that part for free), so it runs on the
         // buffer's own pool worker instead of blocking `open`. See
         // src/core/syntax.zig's module doc for how the tree lands.
-        at.syntax = core.syntax.Syntax.createAsync(gpa, editor.pool, spec, doc) catch |err| blk: {
+        at.syntax = core.syntax.Syntax.createAsync(gpa, editor.pool, deps.grammars, spec, doc) catch |err| blk: {
             std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
             break :blk null;
         };
@@ -172,8 +203,11 @@ pub const Providers = struct {
     attached: bool,
 
     /// Phase one: the config-extended registries, built before the session.
+    /// The grammar registry starts EMPTY — weft ships no languages. Config
+    /// fills it through `grammar-add`; the search path names are resolved
+    /// against is supplied by `main`.
     pub fn initRegistries(self: *Providers, gpa: std.mem.Allocator) !void {
-        self.grammars = try core.syntax.Runtime.initBuiltins(gpa);
+        self.grammars = .empty;
         errdefer self.grammars.deinit(gpa);
         self.attached = false;
     }
@@ -204,3 +238,144 @@ pub const Providers = struct {
         if (self.attached) self.attach_deps.deinitShells();
     }
 };
+
+// ── `grammar-add` is held shut by ARITY. Keep it that way. ───────────
+//
+// `grammar-add` hands a caller-supplied directory to `std.DynLib.open`
+// (`core/syntax.zig`'s `loadGrammar`) — arbitrary NATIVE code into this
+// process — and it is an ordinary bound command with no permission gate.
+// For its one real caller that is fine and deliberate: config JS is a
+// trusted tier that can already load arbitrary wasm through `weft.plugin`,
+// so refusing it a `.so` would be theatre (doc/place.md §4).
+//
+// For a WASM GUEST it would not be fine, and today a guest cannot reach it
+// — but only by accident. The membrane's command runners top out at TWO
+// arguments (`wl_run_str2`); `grammar-add` declares three, so every guest
+// call dies on `error.ArityMismatch` before `loadGrammar` is reached. That
+// is a sandbox escape held shut by a coincidence of signatures.
+//
+// The census below turns the coincidence into a property, and the test
+// under it fails the moment either side moves: a runner gaining the arity
+// to pass three arguments, or `grammar-add` shrinking to a shape a runner
+// can already call. Whichever fires, the answer is the same — put a real
+// gate on the door BEFORE it becomes reachable, not after.
+
+const contract_data = @import("../core/membrane/contract_data.zig");
+
+/// The census: every wasm-membrane import that could plausibly run a
+/// command (see `mustBeCensused`), and the number of arguments it hands
+/// `command.run` under a GUEST-SUPPLIED NAME. `0` covers both "runs a
+/// command with no arguments" and "never calls `command.run` at all" —
+/// either way it can pass none, which is all this gate asks.
+///
+/// Derived by grepping `command.run(` across `src/core/wasm_host/`:
+/// `commands.zig`'s four and `edit.zig`'s two are the whole set.
+///
+/// `wl_intent_invoke` is deliberately absent: it resolves a dotted
+/// INTENTION name through the catalog and calls a registered endpoint, so
+/// it can neither name a bare command nor forward guest arguments to one.
+const guest_command_runners = [_]struct { name: []const u8, args: usize }{
+    // The runners.
+    .{ .name = "wl_run", .args = 0 },
+    .{ .name = "wl_run_int", .args = 1 },
+    .{ .name = "wl_run_str", .args = 1 },
+    .{ .name = "wl_run_str2", .args = 2 },
+    .{ .name = "wl_run_range", .args = 0 },
+    .{ .name = "wl_run_range_arg", .args = 1 },
+    // In the `.commands` group, but they only intern a name or read the
+    // registry — no `command.run` at all.
+    .{ .name = "wl_register", .args = 0 },
+    .{ .name = "wl_command_count", .args = 0 },
+    .{ .name = "wl_command_name", .args = 0 },
+    .{ .name = "wl_command_summary", .args = 0 },
+};
+
+/// Entries the census must account for, so a new runner cannot slip past
+/// it unnoticed. Two independent nets, because a runner could plausibly be
+/// added under either convention: everything in the `.commands` group
+/// (whose whole purpose is running commands), and everything anywhere in
+/// the contract whose name says "run". A door that is neither — a runner
+/// in some other group under some other name — would still escape this,
+/// which is why the census above records how it was derived.
+fn mustBeCensused(entry: contract_data.Entry) bool {
+    return entry.group == .commands or std.mem.indexOf(u8, entry.name, "run") != null;
+}
+
+const t = std.testing;
+
+test "providers: no guest command runner can reach grammar-add's arity (it DynLib.opens a caller-named directory)" {
+    const gpa = t.allocator;
+
+    // 1. The census is COMPLETE: every import that could plausibly be a
+    //    runner is accounted for. A new `wl_run_str3` lands here first.
+    for (contract_data.imports) |entry| {
+        if (!mustBeCensused(entry)) continue;
+        var listed = false;
+        for (guest_command_runners) |r| {
+            if (std.mem.eql(u8, r.name, entry.name)) listed = true;
+        }
+        if (!listed) {
+            std.debug.print(
+                "\nsrc/app/providers.zig: '{s}' is a new membrane import that may run a command.\n" ++
+                    "Add it to `guest_command_runners` with the number of arguments it\n" ++
+                    "passes to `command.run` (0 if it never calls it) — and if that number\n" ++
+                    "reaches 3, `grammar-add` just became reachable from a wasm guest, which\n" ++
+                    "means `std.DynLib.open` on a guest-named directory did too.\n" ++
+                    "Gate the door before landing the runner, not after.\n",
+                .{entry.name},
+            );
+            return error.UncensusedCommandRunner;
+        }
+    }
+
+    // 2. The census is CURRENT: nothing in it has been renamed away, which
+    //    would leave a stale row silently guarding nothing.
+    for (guest_command_runners) |r| {
+        var found = false;
+        for (contract_data.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, r.name)) found = true;
+        }
+        if (!found) {
+            std.debug.print("\nsrc/app/providers.zig: `guest_command_runners` names '{s}', which is no longer a membrane import.\n", .{r.name});
+            return error.StaleCommandRunnerCensus;
+        }
+    }
+
+    // 3. The property itself: `grammar-add` takes more arguments than any
+    //    guest can pass, so a guest call cannot survive `command.run`'s
+    //    arity check to reach `std.DynLib.open`.
+    var max_guest_args: usize = 0;
+    for (guest_command_runners) |r| max_guest_args = @max(max_guest_args, r.args);
+
+    var runtime: core.syntax.Runtime = .empty;
+    defer runtime.deinit(gpa);
+    const grammar_add = grammarAddCommand(&runtime);
+    // Deliberately the MINIMUM the handler acts on, not `grammar_add.args.len`.
+    // Those were the same number until query and outline became optional;
+    // comparing the declared count now would overstate the barrier and let a
+    // three-argument guest runner through while still reporting green.
+    if (grammar_add_min_args <= max_guest_args) {
+        std.debug.print(
+            "\nsrc/app/providers.zig: a wasm guest can now pass {d} argument(s) to a command\n" ++
+                "by name, and `grammar-add` acts on {d} — so a guest can reach\n" ++
+                "`std.DynLib.open` on a directory it chose. The arity coincidence that held\n" ++
+                "this shut is gone; `grammar-add` needs a real permission gate now.\n",
+            .{ max_guest_args, grammar_add_min_args },
+        );
+        return error.GrammarAddIsGuestReachable;
+    }
+    // Today's numbers, pinned so the margin itself is visible when either side
+    // moves: two arguments reachable, three required to do anything.
+    try t.expectEqual(@as(usize, 2), max_guest_args);
+    try t.expectEqual(@as(usize, 3), grammar_add_min_args);
+    try t.expectEqual(@as(usize, 5), grammar_add.args.len);
+
+    // And the handler agrees with the declaration — the arity check that
+    // does the actual refusing reads `args.len`, not the `.args` table.
+    var ctx: core.command.Context = undefined; // never reached: arity fails first
+    try t.expectError(error.ArityMismatch, grammar_add.handler(
+        &ctx,
+        grammar_add.data,
+        &.{ .{ .string = ".fixture" }, .{ .string = "/tmp/anywhere" } },
+    ));
+}

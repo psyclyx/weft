@@ -679,7 +679,7 @@ fn gatherGrantRoots(self: *GraphCollab, gpa: Allocator) !GrantContext {
     for (table.rows.items) |r| {
         const gs = switch (r.limit) {
             .graph_subtree => |g| g,
-            .none, .fs_root, .doc_region => continue,
+            .none, .place, .fs_root, .doc_region => continue,
         };
         if (!std.mem.eql(u8, gs.doc_id, self.name)) continue;
         ctx.doc_has_grants = true;

@@ -33,6 +33,11 @@ const perm_gate = @import("wasm_host/plugin.zig");
 /// The fs semantic bodies, shared with the wasm plane so `.fs_root`
 /// confinement has ONE implementation (`cFileRead`).
 const fs_gate = @import("wasm_host/fs.zig");
+/// The plugin-plane PROC bodies, shared with the wasm plane for the same
+/// reason one layer over: a JS plugin runs inside `quickjs.wasm`, so it must
+/// not be able to reach a proc door shaped differently from the one every
+/// other guest gets (doc/place.md §4.1a).
+const proc_doors = @import("wasm_host/proc.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -109,7 +114,7 @@ const Bridge = struct {
     /// (init'd to the load ctx): the null here MEANS something — config-eval
     /// mode never sets it, so `orelse ctx` doubles as the "not a live
     /// dispatch" marker. Same concept, two representations, both deliberate.
-    fn activeCtx(self: *Bridge) *command.Context {
+    pub fn activeCtx(self: *Bridge) *command.Context {
         return self.active_ctx orelse self.ctx;
     }
 
@@ -205,8 +210,10 @@ const config_handlers = .{
 };
 
 /// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
-/// `defineStubs` above covers the config linker's stand-ins).
-const plugin_handlers = .{
+/// `defineStubs` above covers the config linker's stand-ins). Public so the
+/// §4.1a gate (`e2e/demolition_test.zig`) can read the handler this plane
+/// ACTUALLY binds for a door, not a const that merely exists beside it.
+pub const plugin_handlers = .{
     .{ .name = "qjs_register", .handler = cRegister },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
@@ -360,7 +367,12 @@ pub const JsPlugin = struct {
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
     /// Handles whose child's exit has already been announced — an exit is an
     /// EDGE, reported exactly once, never a level the plugin re-reads every
-    /// frame.
+    /// frame. Grown by `tick`, not by the spawn door: spawning is
+    /// `wasm_host/proc.zig`'s shared body now (doc/place.md §4.1a), and a side
+    /// table only one plane keeps is exactly the kind of thing that makes one
+    /// plane's door different from the other's. A short list means "not yet
+    /// reported", which is the correct answer for a handle `tick` has not
+    /// reached.
     exits_reported: std.ArrayList(bool) = .empty,
     /// This plugin's live transcripts, one per projected buffer name (W6
     /// check-in producer seam, doc/contextual-workspace-architecture.md §12)
@@ -404,6 +416,38 @@ pub const JsPlugin = struct {
             gpa.destroy(self);
         }
     };
+
+    // ── The plugin-plane proc door's duck type (doc/place.md §4.1a) ──
+    //
+    // `wasm_host/proc.zig`'s four bodies ARE this plane's proc doors; these
+    // are the four names they reach a plugin's proc state by, declared here
+    // under exactly the names `WasmPlugin` declares them, so neither type has
+    // to be spelled into the other. Same contract as `hasPerm`'s duck type a
+    // few fields up — one implementation, two transports.
+
+    /// The DISPATCHING entry's context, where a spawned child's place and
+    /// environment are read from. The bridge's optional-with-fallback is the
+    /// JS plane's spelling of `WasmPlugin.active_ctx`.
+    pub fn activeCtx(self: *JsPlugin) *command.Context {
+        return self.bridge.activeCtx();
+    }
+
+    /// A JS plugin always has a pool (`load` takes one) — the optional is the
+    /// wasm plane's, whose bare test fixtures may have none.
+    pub fn procPool(self: *JsPlugin) ?*task.Pool {
+        return self.pool;
+    }
+
+    pub fn procStreams(self: *JsPlugin) *std.ArrayList(?*proc_stream.ProcStream) {
+        return &self.streams;
+    }
+
+    /// The environment a spawned child inherits absent a place overlay. Held
+    /// in a field here rather than read from `wasm_host`'s global, but it is
+    /// the same value: `config_load.zig` passes `wasm_host.hostEnviron()`.
+    pub fn baseEnviron(self: *JsPlugin) std.process.Environ {
+        return self.environ;
+    }
 
     /// The conversation projecting into `name`, or null if none was opened.
     pub fn conversation(self: *JsPlugin, name: []const u8) ?*Conversation {
@@ -537,6 +581,14 @@ pub const JsPlugin = struct {
             // pending, free the slot), not a silence it has to poll for. Once
             // per stream, so an exit is an edge and not a level.
             if (!s.ended() or s.pending() > 0) continue;
+            // Grown HERE, not at spawn: the spawn door is `wasm_host/proc.zig`'s
+            // shared body now (doc/place.md §4.1a), and a per-plane side table
+            // it would have to know about is exactly the kind of thing that
+            // makes one plane's door different from the other's. An
+            // unallocatable slot just defers the edge to the next tick.
+            while (self.exits_reported.items.len <= h) {
+                self.exits_reported.append(self.gpa, false) catch break;
+            }
             if (h >= self.exits_reported.items.len or self.exits_reported.items[h]) continue;
             self.exits_reported.items[h] = true;
             self.instance.callVoid("weft_on_exit", &.{@intCast(h)}) catch {};
@@ -567,15 +619,49 @@ pub const JsPlugin = struct {
         std.log.warn("js plugin '{s}': denied capability '{s}' — declare it in your config with weft.grant(\"{s}\", \"{s}\")", .{ self.name, perm.label(), self.name, perm.label() });
     }
 
-    /// The other denial: the capability IS possessed, but its `.fs_root`
-    /// limit doesn't reach `path`. Names both, like the wasm plane's
-    /// `trapOutOfLimit`, so a narrowed grant is diagnosable.
+    /// The other denial: the capability IS possessed, but its limit doesn't
+    /// reach `path`. Names both, like the wasm plane's `trapOutOfLimit`, so a
+    /// narrowed grant is diagnosable — including the `.place` case, where the
+    /// confinement is the dispatching place and the fix is a config grant
+    /// rather than a root string nobody ever wrote (doc/place.md §4.1).
     fn denyOutOfLimit(self: *JsPlugin, comptime perm: Perm, path: []const u8) void {
+        if (perm_gate.limitFor(self, perm) == .place) {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const dir = perm_gate.placeRootFor(self, &buf);
+            if (dir.len == 0) {
+                std.log.warn("js plugin '{s}': '{s}' — this place has no local directory, so path '{s}' is outside it", .{ self.name, perm.label(), path });
+            } else {
+                std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside this dispatch's place '{s}' — widen it with weft.grant(\"{s}\", \"{s}\", {{ root: \"/\" }})", .{ self.name, perm.label(), path, dir, self.name, perm.label() });
+            }
+            return;
+        }
         const root: []const u8 = switch (perm_gate.limitFor(self, perm)) {
             .fs_root => |r| r,
-            .none, .doc_region, .graph_subtree => "?",
+            .none, .place, .doc_region, .graph_subtree => "?",
         };
         std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside the granted root '{s}'", .{ self.name, perm.label(), path, root });
+    }
+
+    /// The third: `path` is the editor's own machinery, which no grant
+    /// reaches (doc/place.md §4.1). The wasm plane's `trapMachinery`, in the
+    /// register this plane denies in — a log plus `qjs_contract.denied`, not
+    /// a trap, for the reason `requirePerm` gives above.
+    fn denyMachinery(self: *JsPlugin, comptime perm: Perm, path: []const u8) void {
+        const what = if (@import("machinery.zig").locationOf(path)) |loc| loc.label() else "the editor's own state";
+        std.log.warn("js plugin '{s}': '{s}' — {s} is editor machinery, no grant reaches it (path '{s}')", .{ self.name, perm.label(), what, path });
+    }
+
+    /// Report whichever of the three `fs_gate.pathAllowed` returned. One
+    /// dispatch, so neither `cFileRead` nor `cAgentWrite` can report a
+    /// machinery refusal as an out-of-root one — and adding a fourth reason
+    /// to `PermError` is a compile error here rather than a silent
+    /// mis-labelling.
+    fn denyPath(self: *JsPlugin, comptime perm: Perm, path: []const u8, e: fs_gate.PermError) void {
+        switch (e) {
+            error.PermissionDenied => self.denyPerm(perm),
+            error.OutOfLimit => self.denyOutOfLimit(perm, path),
+            error.Machinery => self.denyMachinery(perm, path),
+        }
     }
 
     pub fn deinit(self: *JsPlugin) void {
@@ -599,98 +685,51 @@ pub const JsPlugin = struct {
 };
 
 // ── The proc-stream membrane (plugin plane): spawn/send/read/close a duplex
-// child, handles indexing the plugin's `streams`. Every one that reaches the
-// child is `proc`-gated: spawn is where the authority is MINTED into a
-// handle, send/read where it keeps being exercised — so a revoked `proc`
-// grant stops an already-running agent on its next call, not merely its next
-// spawn. `cProcClose` is deliberately ungated: it only RELEASES authority,
-// and denying it would strand a live subprocess with no way to reap it. ──
+// child, handles indexing the plugin's `streams`.
+//
+// There is no JS proc door any more — only the wasm one, reached from JS
+// (doc/place.md §4.1a). `wasm_host/proc.zig` holds the four bodies; `jsDoor`
+// below is the whole of what this plane adds: the `*JsPlugin` cast and a
+// denial that LOGS and answers `qjs_contract.denied` instead of trapping,
+// because this instance is RESIDENT and a trap would tear down a live QuickJS
+// runtime the next command still needs. A divergence like the `cwd` argument
+// this door once carried and `wl_proc_spawn` never had is now unrepresentable:
+// there is no second body to grow one in.
+//
+// Every door that reaches the child is `proc`-gated: spawn is where the
+// authority is MINTED into a handle, send/read where the JS plane keeps
+// exercising it — so a revoked `proc` grant stops an already-running agent on
+// its next call, not merely its next spawn. That last part is the ONE
+// remaining asymmetry with the wasm plane, recorded as data (not as a
+// difference in behaviour anyone has to read two bodies to find) in
+// `proc_doors.doors`'s `wl_gate`/`qjs_gate` — see its doc for the exact
+// two-file edit that closes it. `procClose` is ungated on both planes: it only
+// RELEASES authority.
 
-fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) {
-        results[0] = qjs_contract.denied;
-        return;
-    }
-    const gpa = self.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(cmd);
-    const cwd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(cwd);
-    const s = proc_stream.ProcStream.start(gpa, self.pool, cmd, if (cwd.len > 0) cwd else null, self.environ) catch {
-        results[0] = -1;
-        return;
-    };
-    const h: i32 = @intCast(self.streams.items.len);
-    self.streams.append(gpa, s) catch {
-        s.deinit();
-        results[0] = -1;
-        return;
-    };
-    self.exits_reported.append(gpa, false) catch {
-        s.deinit();
-        self.streams.items[@intCast(h)] = null;
-        results[0] = -1;
-        return;
-    };
-    results[0] = h;
+/// Bind one shared `wasm_host/proc.zig` body onto the resident JS membrane.
+/// `gate`'s possession check runs first when the door has one; denial is a
+/// host log plus `qjs_contract.denied` in the result (thrown as a JS exception
+/// by `weft_qjs.c`), never a success-shaped answer and never silence.
+pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+            if (gate) |perm| {
+                if (!perm_gate.hasPerm(self, perm)) {
+                    self.denyPerm(perm);
+                    if (results.len > 0) results[0] = qjs_contract.denied;
+                    return;
+                }
+            }
+            body(self, caller, args, results);
+        }
+    }.f;
 }
 
-fn streamAt(self: *JsPlugin, h: i32) ?*proc_stream.ProcStream {
-    if (h < 0 or @as(usize, @intCast(h)) >= self.streams.items.len) return null;
-    return self.streams.items[@intCast(h)];
-}
-
-/// Denial here has no result channel to carry it (the import returns
-/// nothing), so the host log `requirePerm` writes is the whole signal — it
-/// is only reachable by REVOKING `proc` out from under a plugin that already
-/// spawned, never by an ungranted plugin, which can hold no handle at all.
-fn cProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) return;
-    const s = streamAt(self, args[0]) orelse return;
-    const bytes = caller.readMemory(self.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer self.gpa.free(bytes);
-    s.send(bytes);
-}
-
-fn cProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) {
-        results[0] = qjs_contract.denied;
-        return;
-    }
-    const s = streamAt(self, args[0]) orelse {
-        results[0] = 0;
-        return;
-    };
-    const cap: usize = @intCast(args[2]);
-    const buf = self.gpa.alloc(u8, cap) catch {
-        results[0] = 0;
-        return;
-    };
-    defer self.gpa.free(buf);
-    const n = s.read(buf);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
-}
-
-fn cProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const h = args[0];
-    if (streamAt(self, h)) |s| {
-        s.deinit();
-        self.streams.items[@intCast(h)] = null; // slot kept null so handles stay stable
-    }
-}
+const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
+const cProcSend = jsDoor(proc_doors.sendBody, .proc);
+const cProcRead = jsDoor(proc_doors.readBody, .proc);
+const cProcClose = jsDoor(proc_doors.closeBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";
@@ -964,12 +1003,13 @@ fn cBreakpoints(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// receive buffer for now.
 ///
 /// ONE `fs_read` grant, two sources, the same confinement on both: the DISK
-/// half is `wasm_host/fs.zig`'s semantic body verbatim (possession,
-/// `.fs_root` root-relativity, and the rooted open that stops a symlink
-/// escape), so the JS plane never re-derives fs policy; the BUFFER half has
-/// no descriptor to root against, so it takes that file's lexical layer
-/// (`pathWithinLimit`) — otherwise merely OPENING a file would launder it
-/// past a narrowed grant.
+/// half is `wasm_host/fs.zig`'s semantic body verbatim (the machinery
+/// carve-out, possession, `.fs_root` root-relativity, and the rooted open
+/// that stops a symlink escape), so the JS plane never re-derives fs policy;
+/// the BUFFER half has no descriptor to root against, so it takes that file's
+/// descriptor-free gate (`pathAllowed` — the same carve-out and the same
+/// lexical layer) — otherwise merely OPENING a file would launder it past a
+/// narrowed grant, or past the carve-out.
 fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
@@ -985,11 +1025,11 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
             results[0] = qjs_contract.denied;
             return;
         }
-        if (!fs_gate.pathWithinLimit(self, .fs_read, path)) {
-            self.denyOutOfLimit(.fs_read, path);
+        fs_gate.pathAllowed(self, .fs_read, path) catch |e| {
+            self.denyPath(.fs_read, path, e);
             results[0] = qjs_contract.denied;
             return;
-        }
+        };
         const b = ctx.buffers.get(id) orelse break :open;
         const text = (b.textEditor() orelse break :open).text().toOwnedSlice(gpa) catch break :open;
         defer gpa.free(text);
@@ -998,10 +1038,7 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     }
 
     const bytes = fs_gate.fsRead(gpa, self, path) catch |e| {
-        switch (e) {
-            error.PermissionDenied => self.denyPerm(.fs_read),
-            error.OutOfLimit => self.denyOutOfLimit(.fs_read, path),
-        }
+        self.denyPath(.fs_read, path, e);
         results[0] = qjs_contract.denied;
         return;
     } orelse {
@@ -1211,16 +1248,36 @@ const agent_peer = "agent";
 /// attributed, selectively-undoable edit (the harness payoff), not a raw disk
 /// write. Opens (binds) the path if it isn't already a buffer; the user saves.
 /// A whole-file write, so the buffer's whole content is replaced.
+///
+/// `cFileRead`'s WRITE twin, gated identically: possession first
+/// (`fs_write`), then `pathAllowed` — the carve-out plus the lexical layer,
+/// because like `cFileRead`'s buffer half this door has no descriptor to root
+/// against (it never touches the filesystem; the user's later save does).
+/// Without both, `weft.grant("acp", "fs_write", {root: …})` confined NOTHING here:
+/// an agent could bind and fill a buffer at any absolute path outside its
+/// granted root. The `command.renderInto` call below is NOT that gate —
+/// its `gradeMin(doc.my_grant, .edit)` is a COLLAB authority check, and
+/// `Document.my_grant` defaults to `.own`, so it passes trivially for
+/// every local buffer.
 fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
+    results[0] = 0;
     const path = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(path);
     const content = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(content);
     const agent = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(agent);
+    if (!self.requirePerm(.fs_write)) {
+        results[0] = qjs_contract.denied;
+        return;
+    }
+    fs_gate.pathAllowed(self, .fs_write, path) catch |e| {
+        self.denyPath(.fs_write, path, e);
+        results[0] = qjs_contract.denied;
+        return;
+    };
     const peer = if (agent.len > 0) agent else agent_peer;
     const bufs = self.bridge.activeCtx().buffers;
     const id = bufs.findByPath(path) orelse blk: {
@@ -1258,6 +1315,24 @@ fn jsCmdTramp(ctx: *command.Context, data: ?*anyopaque, args: []const command.Va
 /// qjs_register(name) for the plugin plane: bind a command whose handler
 /// dispatches to the JS plugin, and return its id (the array index the JS side
 /// keys its handler by, and the host passes to weft_on_command).
+///
+/// WHY THIS ONE DOES NOT COLLAPSE onto `wl_register` (doc/place.md §4.1a),
+/// stated so the next reader doesn't have to rediscover it: the two doors
+/// share a name and a shape, but almost nothing of a body. `hRegister` mints a
+/// `WasmCmd` into `WasmPlugin.commands` bound to `wpCmdTrampoline`; this mints
+/// a `JsPlugin.Cmd` into `JsPlugin.cmds` bound to `jsCmdTramp` — two id
+/// registries whose entries are the identity the host dispatches by, so there
+/// is no shared state for one body to operate on, and the ~6 lines that would
+/// be common (read a name, append, bind, answer the index) are smaller than
+/// the seam it would take to share them.
+///
+/// The REAL divergence here is not the body, and it is not fixable by sharing
+/// one: `hRegister` cross-checks `p.declaresCommand(cname)` — an undeclared
+/// command FAILS THE LOAD — and this door cannot, because a `.js` plugin has
+/// no `describe()` handshake to populate a declaration from. A JS plugin can
+/// therefore register any command name; a `.wasm` plugin only the ones it
+/// declared. Closing that means giving the JS plane a manifest of its own, not
+/// giving it this function.
 fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
@@ -2121,7 +2196,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
     while (std.mem.indexOf(u8, env.head.echo.items, "ping") == null and task.nowNs() < deadline) {
         _ = plugin.tick();
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "ping") != null);
 }
@@ -2189,7 +2264,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
             defer gpa.free(txt);
             if (std.mem.indexOf(u8, txt, "hello from agent") != null) found = true;
         }
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     try t.expect(found);
 }
@@ -2442,6 +2517,153 @@ test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/f
     try t.expectEqualStrings("threw", env.head.echo.items);
 }
 
+// ── doc/place.md §4.1a: a JS plugin is not a different KIND of plugin ─────
+// The wasm-plane gate for this lives in `wasm_abi/tests.zig`. Its twin here
+// is the point: both planes go through `wasm_host/fs.zig`'s ONE gate, so the
+// carve-out cannot hold on one surface and not the other — which is exactly
+// how `cAgentWrite` came to have no perm check at all while `wl_fs_write`
+// had two.
+
+test "quickjs: no grant, however broad, reaches the editor's own machinery (guest gate's JS twin)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const machinery = @import("machinery.zig");
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    const cached = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{cache});
+    defer gpa.free(cached);
+    const kv_dir = @import("kv_file.zig").stateDir(gpa).?;
+    defer gpa.free(kv_dir);
+    const kv_blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("kv_file.zig").store_file });
+    defer gpa.free(kv_blob);
+    var ibuf: [512]u8 = undefined;
+    const id_path = @import("identity.zig").configPath(&ibuf, machinery.Posix{});
+    var kbuf: [512]u8 = undefined;
+    const peers_path = @import("known_peers.zig").configPath(&kbuf, machinery.Posix{});
+
+    // Ordinary content the unconfined grant DOES reach, so the refusals below
+    // are about the carve-out and not about a broken door.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const content = try std.fmt.allocPrint(gpa, "{s}/user-content.txt", .{dir});
+    defer gpa.free(content);
+    try @import("file.zig").writeBytesMakingDirs(gpa, dir, content, "ordinary");
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\function reader(name, path) {{
+        \\  weft.command(name, () => {{
+        \\    try {{ weft.echo("read:" + weft.fileRead(path)); }}
+        \\    catch (e) {{ weft.echo("threw"); }}
+        \\  }});
+        \\}}
+        \\reader("content", "{s}");
+        \\reader("cache", "{s}");
+        \\reader("kv", "{s}");
+        \\reader("identity", "{s}");
+        \\reader("peers", "{s}");
+    , .{ content, cached, kv_blob, id_path orelse content, peers_path orelse content });
+    defer gpa.free(src);
+
+    // The BROADEST grant the config plane can spell: no root, no scope.
+    try env.grant("broad", "fs_read");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "content", &.{});
+    try t.expectEqualStrings("read:ordinary", env.head.echo.items);
+
+    _ = try command.run(&env.commands, &env.ctx, "cache", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "kv", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    if (id_path != null) {
+        _ = try command.run(&env.commands, &env.ctx, "identity", &.{});
+        try t.expectEqualStrings("threw", env.head.echo.items);
+    }
+    if (peers_path != null) {
+        _ = try command.run(&env.commands, &env.ctx, "peers", &.{});
+        try t.expectEqualStrings("threw", env.head.echo.items);
+    }
+}
+
+test "quickjs: an OPEN buffer doesn't launder the machinery carve-out either" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cFileRead`'s LIVE-BUFFER half — the branch with no descriptor to root
+    // against, and the one that used to be gated only by the limit. Opening
+    // a machinery file (which the HOST may legitimately do) must not make it
+    // readable by a plugin holding an unconfined grant.
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    const cached = try std.fmt.allocPrint(gpa, "{s}/opened.cwasm", .{cache});
+    defer gpa.free(cached);
+    try @import("file.zig").writeBytesMakingDirs(gpa, cache, cached, "compiled image bytes");
+    defer @import("file.zig").deleteFile(gpa, cached);
+
+    const bid = try env.buffers.create(gpa, "opened.cwasm");
+    try env.buffers.get(bid).?.textEditor().?.openFile(gpa, cached);
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\weft.command("go", () => {{
+        \\  try {{ weft.echo("read:" + weft.fileRead("{s}")); }}
+        \\  catch (e) {{ weft.echo("threw"); }}
+        \\}});
+    , .{cached});
+    defer gpa.free(src);
+
+    try env.grant("broad", "fs_read");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+}
+
+test "quickjs: an agent's fileWrite cannot bind a buffer onto the editor's machinery" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cAgentWrite` never touches the filesystem — it binds a buffer the USER
+    // later saves. That is still a write to machinery, one save away, so the
+    // same carve-out has to hold here: refused, and NO buffer bound.
+    const kv_dir = @import("kv_file.zig").stateDir(gpa).?;
+    defer gpa.free(kv_dir);
+    const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("kv_file.zig").store_file });
+    defer gpa.free(blob);
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\weft.command("w", () => {{
+        \\  try {{ weft.fileWrite("{s}", "clobbered", "a1"); weft.echo("wrote"); }}
+        \\  catch (e) {{ weft.echo("threw"); }}
+        \\}});
+    , .{blob});
+    defer gpa.free(src);
+
+    try env.grant("broad", "fs_write");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    try t.expect(env.buffers.findByPath(blob) == null);
+}
+
 test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -2494,6 +2716,10 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     const src =
         \\weft.command("w", () => weft.fileWrite("/tmp/weft-agent-out.zig", "const x = 1;"));
     ;
+    // `fs_write`, declared: this door is possession-gated like every other
+    // effect door (it was not always — see the confinement test below), so
+    // the fixture has to hold the capability it exercises.
+    try env.grant("test", "fs_write");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
     _ = try command.run(&env.commands, &env.ctx, "w", &.{});
@@ -2506,6 +2732,157 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     // Authored by a non-user peer — the agent, not the user's undo history.
     const doc = &b.textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
+}
+
+test "quickjs: an agent's fileWrite outside a narrowed fs_write root is refused — and binds no buffer" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cFileRead`'s confinement, on the WRITE door. `command.renderInto`'s
+    // grade gate is not this check: it caps `.agent` at `gradeMin(doc.my_grant,
+    // .edit)`, and `Document.my_grant` defaults to `.own`, so it passes for
+    // every local buffer. Only `fs_write`'s own limit says where an agent may
+    // write.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const root = try std.fmt.allocPrint(gpa, "{s}/allowed", .{dir});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/note.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, "{s}/secret.txt", .{dir});
+    defer gpa.free(outside);
+    try @import("file.zig").writeBytesMakingDirs(gpa, root, inside, "");
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\function writer(name, path) {{
+        \\  weft.command(name, () => {{
+        \\    try {{ weft.fileWrite(path, "written", "a1"); weft.echo("wrote"); }}
+        \\    catch (e) {{ weft.echo("threw"); }}
+        \\  }});
+        \\}}
+        \\writer("in", "{s}");
+        \\writer("out", "{s}");
+        \\writer("abs", "/tmp/weft-agent-escape.zig");
+    , .{ inside, outside });
+    defer gpa.free(src);
+
+    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "confined", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
+    defer plugin.deinit();
+
+    // In root: the agent edit lands, exactly as before the gate.
+    _ = try command.run(&env.commands, &env.ctx, "in", &.{});
+    try t.expectEqualStrings("wrote", env.head.echo.items);
+    try t.expect(env.buffers.findByPath(inside) != null);
+
+    // Out of root, and an absolute path with nothing to do with the grant:
+    // both REFUSED — a thrown denial, never a write the agent thinks landed.
+    _ = try command.run(&env.commands, &env.ctx, "out", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "abs", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+
+    // And refusal means NO buffer was bound to either path — the door's own
+    // side effect (create + adoptPath) must not run ahead of its gate.
+    try t.expect(env.buffers.findByPath(outside) == null);
+    try t.expect(env.buffers.findByPath("/tmp/weft-agent-escape.zig") == null);
+}
+
+test "quickjs: an ungranted JS plugin cannot fileWrite at all — possession, not just its limit" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const src =
+        \\weft.command("w", () => {
+        \\  try { weft.fileWrite("/tmp/weft-agent-ungranted.zig", "x"); weft.echo("wrote"); }
+        \\  catch (e) { weft.echo("threw"); }
+        \\});
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ungranted", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    try t.expect(env.buffers.findByPath("/tmp/weft-agent-ungranted.zig") == null);
+}
+
+test "quickjs: a refused agent write is ANSWERED, not swallowed — the rest of the batch still streams" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // Gating `weft.fileWrite` made refusal REACHABLE from the shipped ACP
+    // reactor, which parses a whole `procRead` batch in one loop: a throw
+    // escaping `onMessage` would drop every line after it, and those lines
+    // are already out of the plugin's inbox — gone for good. So a narrowed
+    // `fs_write` grant could silently swallow whatever the agent said next,
+    // up to and including a permission request. The refusal has to be an
+    // ANSWER to that one request and nothing more.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const root = try std.fmt.allocPrint(gpa, "{s}/allowed", .{dir});
+    defer gpa.free(root);
+    const keep = try std.fmt.allocPrint(gpa, "{s}/keep.txt", .{root});
+    defer gpa.free(keep);
+    try @import("file.zig").writeBytesMakingDirs(gpa, root, keep, "");
+    const outside = try std.fmt.allocPrint(gpa, "{s}/secret.txt", .{dir});
+    defer gpa.free(outside);
+
+    // One batch: handshake, a write the grant cannot reach, then a message.
+    const mock_path = try std.fmt.allocPrint(gpa, "{s}/mock.sh", .{dir});
+    defer gpa.free(mock_path);
+    const mock = try std.fmt.allocPrint(gpa,
+        \\printf '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"s1"}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","id":8,"method":"fs/write_text_file","params":{{"path":"{s}","content":"escaped"}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"after the refusal"}}}}}}}}\n'
+    , .{outside});
+    defer gpa.free(mock);
+    try @import("file.zig").writeBytes(gpa, mock_path, mock);
+
+    const acp = try @import("file.zig").readAlloc(gpa, "config/plugins/acp.js");
+    defer gpa.free(acp);
+    const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
+    defer gpa.free(src);
+
+    try env.grant("test", "proc");
+    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "test", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    const deadline = task.nowNs() + 3 * std.time.ns_per_s;
+    var streamed = false;
+    while (!streamed and task.nowNs() < deadline) {
+        _ = plugin.tick();
+        var it = env.buffers.iterator();
+        while (it.next()) |b| {
+            if (!std.mem.eql(u8, b.name, "*agent*")) continue;
+            const txt = try b.textEditor().?.text().toOwnedSlice(gpa);
+            defer gpa.free(txt);
+            if (std.mem.indexOf(u8, txt, "after the refusal") != null) streamed = true;
+        }
+        std.Thread.yield() catch {};
+    }
+    // The message AFTER the refused write arrived: one denial, one dropped
+    // request, and the stream carried on.
+    try t.expect(streamed);
+    // ...and the write really was refused — no buffer bound out of root.
+    try t.expect(env.buffers.findByPath(outside) == null);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
@@ -3009,7 +3386,7 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     try t.expect(env.grants.check(h));
     switch (env.grants.limitFor(h)) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
-        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
 
     // Reload WITHOUT the grant decl at all — reconcile tears it down.
@@ -3206,6 +3583,10 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     defer gpa.free(src);
 
     try env.grant("test", "proc");
+    // …and `fs_write`, which the mocks' `fs/write_text_file` step needs: the
+    // shared-file assertion below (both sub-peers authored it) is only
+    // reachable through that door, and the door is possession-gated.
+    try env.grant("test", "fs_write");
     // Two live agents pin two reader tasks (each mock BLOCKS on stdin waiting
     // for its own answer), so the shared fixture's single-thread pool would
     // starve the second spawn — concurrency here is the subject, not scenery.
@@ -3238,7 +3619,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
                     defer gpa2.free(txt);
                     if (std.mem.indexOf(u8, txt, needle) != null) return true;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return false;
         }
@@ -3249,7 +3630,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
             while (task.nowNs() < deadline) {
                 if (e.head.pick.active) return true;
                 _ = p.tick();
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return false;
         }
@@ -3262,7 +3643,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
                     defer gpa2.free(txt);
                     if (std.mem.indexOf(u8, txt, needle) != null) return false;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return true;
         }

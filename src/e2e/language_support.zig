@@ -55,9 +55,25 @@ pub const Peer = struct {
     command: []u8,
 
     pub fn init(gpa: std.mem.Allocator, tag: []const u8) !Peer {
-        // JSON::PP is part of Perl's core distribution, not a language server
-        // or project tool. The peer parses Content-Length framing and answers
-        // the request's actual id, so a test cannot accidentally pass by
+        return build(gpa, tag, "my $where = \"\";");
+    }
+
+    /// A peer whose completion item NAMES the directory it is running in.
+    ///
+    /// The two-language gate tells its servers apart by tag, because a
+    /// different language means a different configured command. Two servers of
+    /// the SAME language in two projects share every part of their identity
+    /// except the place — so the only honest way to prove which one answered is
+    /// to make each say where it is. `resolveSpawnAt` puts the child in its
+    /// place's directory, so `getcwd` here IS the project the session serves.
+    pub fn initRooted(gpa: std.mem.Allocator, tag: []const u8) !Peer {
+        return build(gpa, tag, "my $where = Cwd::getcwd(); $where =~ s{^.*/}{}; $where = \"_$where\";");
+    }
+
+    fn build(gpa: std.mem.Allocator, tag: []const u8, where_init: []const u8) !Peer {
+        // JSON::PP and Cwd are part of Perl's core distribution, not a language
+        // server or project tool. The peer parses Content-Length framing and
+        // answers the request's actual id, so a test cannot accidentally pass by
         // consuming a response emitted before the request that needs it.
         const script =
             \\$|=1;
@@ -85,25 +101,32 @@ pub const Peer = struct {
             \\    }
             \\    last unless length($body) == $n;
             \\    my $msg = decode_json($body);
-            \\    next unless defined $msg->{id};
             \\    my $method = $msg->{method} // "";
-            \\    if ($method eq "initialize") { open(my $init, ">>", ".lsp-$tag-init") or die; print $init "x"; close $init; }
+            \\    if ($method eq "textDocument/didOpen") { open(my $od, ">>", ".lsp-$tag-didopen") or die; print $od ($msg->{params}{textDocument}{uri} // "null"), "\n"; close $od; }
+            \\    next unless defined $msg->{id};
+            \\    if ($method eq "initialize") { open(my $init, ">>", ".lsp-$tag-init") or die; print $init ($msg->{params}{rootUri} // "null"), "\n"; close $init; }
             \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-$tag-completion") or die; print $comp "x"; close $comp; }
             \\    my $result = {};
             \\    if ($method eq "initialize") {
             \\        $result = { capabilities => { completionProvider => {} } };
             \\    } elsif ($method eq "textDocument/completion") {
-            \\        $result = { items => [{ label => "hermetic_${tag}_completion", insertText => "hermetic_${tag}_completion" }] };
+            \\        my $item = "hermetic_${tag}${where}_completion";
+            \\        $result = { items => [{ label => $item, insertText => $item }] };
             \\    }
             \\    my $reply = encode_json({ jsonrpc => "2.0", id => $msg->{id}, result => $result });
             \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;
             \\}
         ;
-        // Only the tag is interpolated by Zig; the script is verbatim perl,
-        // single-quoted so the shell expands none of its `$` variables.
+        // Only the tag and the `$where` preamble are interpolated by Zig; the
+        // script is verbatim perl, single-quoted so the shell expands none of
+        // its `$` variables.
         return .{
             .tag = tag,
-            .command = try std.fmt.allocPrint(gpa, "perl -MJSON::PP -e 'my $tag = \"{s}\";{s}'", .{ tag, script }),
+            .command = try std.fmt.allocPrint(
+                gpa,
+                "perl -MJSON::PP -MCwd -e 'my $tag = \"{s}\";{s}{s}'",
+                .{ tag, where_init, script },
+            ),
         };
     }
 
@@ -111,7 +134,8 @@ pub const Peer = struct {
         gpa.free(self.command);
     }
 
-    /// This peer's `<leaf>` marker path (`started`, `init`, `completion`, `pid`).
+    /// This peer's `<leaf>` marker path (`started`, `init`, `didopen`,
+    /// `completion`, `pid`).
     pub fn marker(self: Peer, buf: []u8, leaf: []const u8) []const u8 {
         return std.fmt.bufPrint(buf, ".lsp-{s}-{s}", .{ self.tag, leaf }) catch unreachable;
     }
@@ -119,6 +143,12 @@ pub const Peer = struct {
     /// The completion item only THIS peer ever answers with.
     pub fn item(self: Peer, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "hermetic_{s}_completion", .{self.tag}) catch unreachable;
+    }
+
+    /// What an `initRooted` peer answers with while running in `dir` — the
+    /// identity of the SERVER INSTANCE, not merely of the configured command.
+    pub fn itemIn(self: Peer, buf: []u8, dir: []const u8) []const u8 {
+        return std.fmt.bufPrint(buf, "hermetic_{s}_{s}_completion", .{ self.tag, dir }) catch unreachable;
     }
 };
 
@@ -137,13 +167,19 @@ pub fn hasResultItem(ed: *h.Editor, id: u64, text: []const u8) bool {
 /// Fire completion at the ACTIVE buffer and wait for `peer`'s own item, proving
 /// the answer came from the session serving this buffer's language.
 pub fn awaitPeerCompletion(ed: *h.Editor, peer: Peer) !void {
+    var buf: [64]u8 = undefined;
+    return awaitCompletionItem(ed, peer.item(&buf));
+}
+
+/// Fire completion at the ACTIVE buffer and wait for one exact item — the
+/// general form, so a gate can name the server INSTANCE it expects
+/// (`Peer.itemIn`) rather than only the configured command (`Peer.item`).
+pub fn awaitCompletionItem(ed: *h.Editor, want: []const u8) !void {
     const editor = ed.buffers.active().textEditor().?;
     const path = editor.backingPath() orelse "";
     const id = (try ed.caps.fire(.completion, &editor.doc, path, .{})) orelse
         return error.NoLspCapabilityProvider;
     defer ed.caps.finish(id);
-    var buf: [64]u8 = undefined;
-    const want = peer.item(&buf);
     const deadline = h.core.task.nowNs() + 5 * std.time.ns_per_s;
     while (h.core.task.nowNs() < deadline) {
         ed.settle(4);

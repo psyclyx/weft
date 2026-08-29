@@ -107,15 +107,19 @@ const Diags = struct {
 /// was spawned FOR, so a config change re-keys onto a new session rather than
 /// quietly repurposing the running one.
 const Session = struct {
-    used: bool = false,
     conn: rpc.Conn = .{},
 
-    lang_buf: [16]u8 = undefined,
-    lang_len: usize = 0,
-    cmd_buf: [1 << 12]u8 = undefined,
-    cmd_len: usize = 0,
-    root_buf: [512]u8 = undefined,
-    root_len: usize = 0,
+    /// The triple this server was spawned for, OWNED. A workspace root is as
+    /// long as the user's directories are, and while these were fixed fields a
+    /// root that did not fit made the whole key unbuildable — so LSP silently
+    /// did nothing for that project, indistinguishable from "not configured".
+    /// Owning them means a key is always the WHOLE identity, which is what the
+    /// refusal-on-truncation used to be protecting: half a root names a
+    /// different workspace, and routing onto a neighbour's server is worse than
+    /// any refusal.
+    lang: []u8,
+    cmd: []u8,
+    root: []u8,
 
     init_id: i64 = 0,
     ready: bool = false, // initialize answered + initialized sent
@@ -128,76 +132,84 @@ const Session = struct {
     synced: ?u32 = null,
     /// The `file://` uri this session currently has open (one document per
     /// server; focusing another file of the same language re-opens under it).
-    uri_buf: [1200]u8 = undefined,
-    uri_len: usize = 0,
+    /// Owned, for the same reason `root` is: it is BUILT from that root.
+    uri: []u8 = &.{},
 
     diag: Diags = .{},
-    /// The new name typed into the rename prompt, sent once the server is ready.
-    rename_buf: [256]u8 = undefined,
-    rename_len: usize = 0,
-    /// Last time this session was asked for — the retirement order.
-    touched: usize = 0,
+    /// The new name typed into the rename prompt, sent once the server is
+    /// ready. Owned: a truncated new name renames the symbol to the wrong
+    /// thing, and a silent wrong edit is the worst answer available.
+    rename: []u8 = &.{},
 
-    fn lang(self: *const Session) []const u8 {
-        return self.lang_buf[0..self.lang_len];
-    }
-    fn cmd(self: *const Session) []const u8 {
-        return self.cmd_buf[0..self.cmd_len];
-    }
-    fn root(self: *const Session) []const u8 {
-        return self.root_buf[0..self.root_len];
-    }
-    fn uri(self: *const Session) []const u8 {
-        return self.uri_buf[0..self.uri_len];
-    }
+    /// One slot per kind: concurrency between kinds is structural, and a second
+    /// ask of one kind can only ever supersede its own predecessor. It lives
+    /// HERE, on the session, because that is what it is — per-(session, kind)
+    /// state. It used to be a parallel static array indexed by pointer
+    /// arithmetic back into the session table, which is why that table could
+    /// not move.
+    pending: [kind_count]Pending = @splat(.{}),
 };
 
-const MAX_SESSIONS = 8;
-var sessions: [MAX_SESSIONS]Session = undefined;
+/// Every live session, each individually allocated so a `*Session` handed out
+/// earlier survives the table growing (`core/Buffers.zig`'s shape, and its
+/// reason). There is no cap: how many `(language, project)` pairs you may work
+/// on at once was never a decision anybody made, and a session costs a
+/// handshake plus a re-index to re-establish — so the only honest bound is the
+/// guest heap, which says so when it refuses.
+///
+/// A session is never retired. It was, once, but only to make room in a fixed
+/// table; nothing else ever wanted a running server gone, and with the table
+/// unbounded there is no room left to make.
+var sessions: std.ArrayList(*Session) = .empty;
 
-fn sessionIndex(s: *const Session) usize {
-    return (@intFromPtr(s) - @intFromPtr(&sessions[0])) / @sizeOf(Session);
-}
-
-/// The identity of the server the ACTIVE buffer needs. Every part is copied out
-/// of host scratch — `path`/`cwd` share one buffer and `config` another, so the
-/// three cannot be held at once.
+/// The identity of the server the ACTIVE buffer needs, freshly read and OWNED —
+/// `path`/`cwd` share one host scratch buffer and `config` another, so the three
+/// parts cannot be borrowed at once. A session that keeps this key TAKES these
+/// slices rather than copying them into fields of its own.
 const Key = struct {
-    lang_buf: [16]u8 = undefined,
-    lang_len: usize = 0,
-    cmd_buf: [1 << 12]u8 = undefined,
-    cmd_len: usize = 0,
-    root_buf: [512]u8 = undefined,
-    root_len: usize = 0,
+    lang: []u8,
+    cmd: []u8,
+    root: []u8,
 
-    fn lang(self: *const Key) []const u8 {
-        return self.lang_buf[0..self.lang_len];
-    }
-    fn cmd(self: *const Key) []const u8 {
-        return self.cmd_buf[0..self.cmd_len];
-    }
-    fn root(self: *const Key) []const u8 {
-        return self.root_buf[0..self.root_len];
+    fn deinit(self: Key) void {
+        const alloc = weft.allocator;
+        alloc.free(self.lang);
+        alloc.free(self.cmd);
+        alloc.free(self.root);
     }
 };
 
-/// Copy `src` into a fixed field, reporting whether it fit whole. A key that
-/// was truncated is a DIFFERENT key, so the callers that build one refuse
-/// rather than route onto a neighbouring server.
-fn copyInto(out: []u8, len: *usize, src: []const u8) bool {
-    len.* = @min(src.len, out.len);
-    @memcpy(out[0..len.*], src[0..len.*]);
-    return len.* == src.len;
+/// Why this buffer has no session. `unserved` is the common no-op every plain
+/// file takes and says nothing; the other two are REFUSALS, and a capability
+/// that refuses silently is one the user cannot tell from an unconfigured one.
+const Refusal = enum { none, no_place, out_of_memory };
+
+/// What was last said about a refusal, so it is echoed when it STARTS rather
+/// than on every keystroke that re-asks. Cleared the moment a key resolves, so
+/// the next occasion speaks again.
+var announced: Refusal = .none;
+
+fn announce(why: Refusal) void {
+    if (announced == why) return;
+    announced = why;
+    switch (why) {
+        .none => {},
+        .no_place => weft.echo("lsp: this place has no local directory — no server started"),
+        .out_of_memory => weft.echo("lsp: out of memory — could not start a server here"),
+    }
 }
+
+/// Why building a key did not produce one. `Unserved` is the no-op; the other
+/// two are the refusals `announce` speaks.
+const KeyError = error{ Unserved, NoPlace, OutOfMemory };
 
 /// The active file's language id (its extension), copied out of scratch.
-fn activeLang(out: *[16]u8) []const u8 {
-    const path = weft.path() orelse return "";
-    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "";
+fn activeLang() KeyError![]u8 {
+    const path = weft.path() orelse return error.Unserved;
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return error.Unserved;
     const ext = path[dot + 1 ..];
-    const n = @min(ext.len, out.len);
-    @memcpy(out[0..n], ext[0..n]);
-    return out[0..n];
+    if (ext.len == 0) return error.Unserved;
+    return weft.allocator.dupe(u8, ext);
 }
 
 /// The server command for `lang`: config (`weft.set("lsp","<lang>","<cmd>")`), or
@@ -209,99 +221,140 @@ fn serverCmd(lang: []const u8) []const u8 {
     return "";
 }
 
-/// The server identity the active buffer needs, or null when no server is
-/// configured for its language (the common no-op every plain file takes).
-fn activeKey(key: *Key) ?void {
-    key.lang_len = activeLang(&key.lang_buf).len; // written in place
-    if (key.lang_len == 0) return null;
-    const cmd = serverCmd(key.lang());
-    if (cmd.len == 0) return null;
-    if (!copyInto(&key.cmd_buf, &key.cmd_len, cmd)) return null;
-    if (!copyInto(&key.root_buf, &key.root_len, weft.cwd())) return null;
-    return {};
+/// The server identity the active buffer needs.
+fn activeKey() KeyError!Key {
+    const alloc = weft.allocator;
+    const lang = try activeLang();
+    errdefer alloc.free(lang);
+    const configured = serverCmd(lang);
+    if (configured.len == 0) return error.Unserved;
+    const cmd = try alloc.dupe(u8, configured);
+    errdefer alloc.free(cmd);
+    // WHERE, not the process's launch directory (`doc/place.md`). This field
+    // has always been part of the key; filling it from a process-wide constant
+    // is what made every project share one server. A place with no local
+    // directory has no root to serve, and it SAYS so: a configured language
+    // that quietly starts nothing is indistinguishable from an unconfigured one.
+    const here = weft.placeRoot();
+    if (here.len == 0) return error.NoPlace;
+    const root = try alloc.dupe(u8, here);
+    return .{ .lang = lang, .cmd = cmd, .root = root };
 }
 
-fn matches(s: *const Session, key: *const Key) bool {
-    return std.mem.eql(u8, s.lang(), key.lang()) and
-        std.mem.eql(u8, s.cmd(), key.cmd()) and
-        std.mem.eql(u8, s.root(), key.root());
+/// The key for the active buffer, with any refusal spoken once. Null covers
+/// both the no-op (nothing configured) and the refusals, which have already
+/// said their piece by the time this returns.
+///
+/// Deliberately does NOT clear `announced` on success: only actually HAVING a
+/// session ends the condition that was reported, and the mint after this can
+/// still fail. The two callers clear it where they hand one back.
+fn keyForActive() ?Key {
+    return activeKey() catch |err| switch (err) {
+        error.Unserved => null, // not a refusal: this file has no server
+        error.NoPlace => {
+            announce(.no_place);
+            return null;
+        },
+        error.OutOfMemory => {
+            announce(.out_of_memory);
+            return null;
+        },
+    };
+}
+
+fn matches(s: *const Session, key: Key) bool {
+    return std.mem.eql(u8, s.lang, key.lang) and
+        std.mem.eql(u8, s.cmd, key.cmd) and
+        std.mem.eql(u8, s.root, key.root);
 }
 
 /// The session serving the active buffer, WITHOUT starting one. The honest test
 /// for "does this server's document sit in front of us right now" — a poll-time
 /// delivery asks it before touching any coordinate, anchor or layer.
 fn lookupActive() ?*Session {
-    var key: Key = .{};
-    _ = activeKey(&key) orelse return null;
-    for (&sessions) |*s| {
-        if (s.used and matches(s, &key)) return touch(s);
+    const key = keyForActive() orelse return null;
+    defer key.deinit();
+    for (sessions.items) |s| {
+        if (matches(s, key)) {
+            announce(.none);
+            return s;
+        }
     }
     return null;
 }
 
 /// The session serving the active buffer, started if this is the first file of
-/// its language. A slot whose spawn failed stays occupied and dead, so a missing
-/// server binary is reported once per language rather than once per keystroke.
+/// its language in this place. A session whose spawn failed stays in the table
+/// and dead, so a missing server binary is reported once per language rather
+/// than once per keystroke.
 fn ensureActive() ?*Session {
-    var key: Key = .{};
-    _ = activeKey(&key) orelse return null;
-    for (&sessions) |*s| {
-        if (s.used and matches(s, &key)) return touch(s);
+    const key = keyForActive() orelse return null;
+    for (sessions.items) |s| {
+        if (matches(s, key)) {
+            key.deinit();
+            announce(.none);
+            return s;
+        }
     }
-    const s = freeSession() orelse coldest();
-    closeSession(s);
-    s.* = .{ .used = true };
-    _ = touch(s);
-    _ = copyInto(&s.lang_buf, &s.lang_len, key.lang());
-    _ = copyInto(&s.cmd_buf, &s.cmd_len, key.cmd());
-    _ = copyInto(&s.root_buf, &s.root_len, key.root());
-    if (!s.conn.start(s.cmd())) {
+    const alloc = weft.allocator;
+    const s = mint(key) orelse {
+        key.deinit();
+        announce(.out_of_memory);
+        return null;
+    };
+    announce(.none); // there IS a session here now, whatever happens to it next
+    if (!s.conn.start(s.cmd)) {
         weft.echo("lsp: could not start server");
         return s;
     }
-    s.init_id = s.conn.request("initialize",
-        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}}
-    );
+    const params = initializeParams(s) orelse {
+        // Naming the workspace is not optional: `rootUri: null` would tell the
+        // server it is rooted nowhere, which is the silent wrong answer this
+        // whole key exists to prevent.
+        weft.echo("lsp: out of memory — could not name the workspace");
+        return s;
+    };
+    defer alloc.free(params);
+    s.init_id = s.conn.request("initialize", params);
     return s;
 }
 
-fn freeSession() ?*Session {
-    for (&sessions) |*s| {
-        if (!s.used) return s;
-    }
-    return null;
-}
-
-/// Recency, so a saturated table sheds the server nobody is editing against
-/// rather than refusing the file in front of the user. A session owns no buffer
-/// the user can see, so retiring one costs a handshake, not state.
-var touches: usize = 0;
-
-fn touch(s: *Session) *Session {
-    touches += 1;
-    s.touched = touches;
+/// Allocate a session that TAKES `key`'s slices (nothing is copied twice) and
+/// add it to the table. Null when the guest heap refuses; `key` is the caller's
+/// to free in that case.
+fn mint(key: Key) ?*Session {
+    const alloc = weft.allocator;
+    sessions.ensureUnusedCapacity(alloc, 1) catch return null;
+    const s = alloc.create(Session) catch return null;
+    s.* = .{ .lang = key.lang, .cmd = key.cmd, .root = key.root };
+    sessions.appendAssumeCapacity(s);
     return s;
 }
 
-fn coldest() *Session {
-    var found = &sessions[0];
-    for (&sessions) |*s| {
-        if (s.touched < found.touched) found = s;
-    }
-    return found;
-}
-
-/// Shut a session down: its server, its document witnesses, and every ask still
-/// outstanding against it (a completion among them declines, so no merge waits
-/// on a server that is gone).
-fn closeSession(s: *Session) void {
-    if (!s.used) return;
-    if (prompting == sessionIndex(s)) prompting = null;
-    for (&pending[sessionIndex(s)]) |*p| retire(s, p);
-    releaseDiagnostics(s);
-    releaseSynced(s);
-    s.conn.close();
-    s.used = false;
+/// `initialize`'s params, naming the workspace this server is FOR.
+///
+/// `rootUri` was the literal `null` while every session shared the process's
+/// launch directory — there was no honest answer to give. A session is keyed
+/// by its place now, so the root it was minted for is the root it serves, and
+/// a server that resolves configuration, indexes, or cross-file references
+/// against a workspace gets the right one.
+///
+/// `workspaceFolders` is deliberately NOT sent (`doc/place.md` §9): multi-root
+/// is its own protocol with its own lifecycle notification, and one honest
+/// root beats a half-implemented list of them.
+/// Allocated, because the root it names is as long as the user's directories
+/// are. Caller frees.
+fn initializeParams(s: *const Session) ?[]u8 {
+    const caps =
+        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
+    ;
+    if (s.root.len == 0 or s.root[0] != '/')
+        return weft.allocator.dupe(u8, "{\"processId\":null,\"rootUri\":null," ++ caps ++ "}") catch null;
+    return std.fmt.allocPrint(
+        weft.allocator,
+        "{{\"processId\":null,\"rootUri\":\"file://{s}\",{s}}}",
+        .{ s.root, caps },
+    ) catch null;
 }
 
 fn releaseDiagnostics(s: *Session) void {
@@ -335,19 +388,15 @@ const Pending = struct {
     caps: u32 = 0,
 };
 
-/// One slot per (session, kind): concurrency between kinds is structural, and a
-/// second ask of one kind can only ever supersede its own predecessor.
-var pending: [MAX_SESSIONS][kind_count]Pending = @splat(@splat(.{}));
-
-fn slotOf(s: *const Session, kind: Kind) *Pending {
-    return &pending[sessionIndex(s)][@intFromEnum(kind)];
+fn slotOf(s: *Session, kind: Kind) *Pending {
+    return &s.pending[@intFromEnum(kind)];
 }
 
 /// The ask `id` belongs to, if it is still ours to answer. A superseded or
 /// abandoned ask has already given its slot back, so its late reply finds
 /// nothing here and is dropped.
-fn findPending(s: *const Session, id: i64) ?struct { *Pending, Kind } {
-    for (&pending[sessionIndex(s)], 0..) |*p, k| {
+fn findPending(s: *Session, id: i64) ?struct { *Pending, Kind } {
+    for (&s.pending, 0..) |*p, k| {
         if (p.used and p.id == id) return .{ p, @enumFromInt(k) };
     }
     return null;
@@ -424,10 +473,10 @@ fn send(s: *Session, p: *Pending, kind: Kind) bool {
 /// handshake lands and when the session's document takes focus — the two moments
 /// a deferred ask becomes sendable.
 fn flushArmed(s: *Session) void {
-    for (&pending[sessionIndex(s)], 0..) |*p, k| {
+    for (&s.pending, 0..) |*p, k| {
         if (!p.used or p.id != 0) continue;
         const kind: Kind = @enumFromInt(k);
-        if (kind == .rename and s.rename_len == 0) continue; // still prompting
+        if (kind == .rename and s.rename.len == 0) continue; // still prompting
         _ = send(s, p, kind);
     }
 }
@@ -435,54 +484,47 @@ fn flushArmed(s: *Session) void {
 /// Build and fire the wire request for `kind`. -1 when the parameters or the
 /// envelope don't fit.
 fn requestOf(s: *Session, kind: Kind, pos: Pos) i64 {
-    const uri = s.uri();
+    const uri = s.uri;
     return switch (kind) {
         .hover => posRequest(s, "textDocument/hover", pos, ""),
         .definition => posRequest(s, "textDocument/definition", pos, ""),
         .references => posRequest(s, "textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
         .signature => posRequest(s, "textDocument/signatureHelp", pos, ""),
         .completion => posRequest(s, "textDocument/completion", pos, ""),
-        .symbols => s.conn.request("textDocument/documentSymbol", std.fmt.bufPrint(
-            &parambuf,
+        .symbols => s.conn.request("textDocument/documentSymbol", reqParams(
             "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
             .{uri},
-        ) catch return -1),
-        .format => s.conn.request("textDocument/formatting", std.fmt.bufPrint(
-            &parambuf,
+        ) orelse return -1),
+        .format => s.conn.request("textDocument/formatting", reqParams(
             "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":4,\"insertSpaces\":true}}}}",
             .{uri},
-        ) catch return -1),
-        .rename => s.conn.request("textDocument/rename", std.fmt.bufPrint(
-            &parambuf,
+        ) orelse return -1),
+        .rename => s.conn.request("textDocument/rename", reqParams(
             "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"{s}\"}}",
-            .{ uri, pos.line, pos.col, s.rename_buf[0..s.rename_len] },
-        ) catch return -1),
+            .{ uri, pos.line, pos.col, s.rename },
+        ) orelse return -1),
         .inlay => blk: {
             const last = posOf(weft.byteLen());
-            break :blk s.conn.request("textDocument/inlayHint", std.fmt.bufPrint(
-                &parambuf,
+            break :blk s.conn.request("textDocument/inlayHint", reqParams(
                 "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}}}}",
                 .{ uri, last.line + 1 },
-            ) catch return -1);
+            ) orelse return -1);
         },
         // Actions for the cursor's line, passing any diagnostics on it as
         // context (so quick-fixes surface).
-        .codeaction => s.conn.request("textDocument/codeAction", std.fmt.bufPrint(
-            &parambuf,
+        .codeaction => s.conn.request("textDocument/codeAction", reqParams(
             "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":{d},\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}},\"context\":{{\"diagnostics\":[]}}}}",
             .{ uri, pos.line, pos.line + 1 },
-        ) catch return -1),
+        ) orelse return -1),
     };
 }
 
 /// A position-based request: `{textDocument, position[, extra]}`.
 fn posRequest(s: *Session, method: []const u8, pos: Pos, extra: []const u8) i64 {
-    const params = std.fmt.bufPrint(
-        &parambuf,
+    return s.conn.request(method, reqParams(
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}{s}}}",
-        .{ s.uri(), pos.line, pos.col, extra },
-    ) catch return -1;
-    return s.conn.request(method, params);
+        .{ s.uri, pos.line, pos.col, extra },
+    ) orelse return -1);
 }
 
 // Hover popup: capped row count (mirrors the view's `Hud.max_hover_rows` —
@@ -490,7 +532,17 @@ fn posRequest(s: *Session, method: []const u8, pos: Pos, extra: []const u8) i64 
 // plain constant, not imported).
 const max_hover_rows = 16;
 
-var parambuf: [4096]u8 = undefined; // small position/range params (bounded)
+/// Scratch for one request's params, reused across calls and grown as needed.
+/// Every one of these carries a `file://` uri built from the workspace root, and
+/// how long that is is the user's directories' business, not ours. Valid until
+/// the next `reqParams` call — each caller writes it straight to the wire.
+var param_buf: std.ArrayList(u8) = .empty;
+
+fn reqParams(comptime fmt: []const u8, args: anytype) ?[]const u8 {
+    param_buf.clearRetainingCapacity();
+    param_buf.print(weft.allocator, fmt, args) catch return null;
+    return param_buf.items;
+}
 
 // ── Plugin surface ───────────────────────────────────────────────────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
@@ -519,7 +571,6 @@ export fn describe() void {
     weft.requestPerm(.timer);
 }
 export fn init() void {
-    for (&sessions) |*s| s.* = .{};
     for (cmds) |c| _ = weft.register(c.name);
     weft.provideCompletion();
 }
@@ -561,19 +612,26 @@ export fn on_command(id: u32) void {
 /// nested call (nothing re-parses that session's buffer until the NEXT loop
 /// iteration's `conn.next()`).
 export fn on_poll() void {
-    for (&sessions) |*s| {
-        while (s.used and s.conn.live) {
+    // Indexed, and re-reading `sessions.items` each step: the nested `weft.run`
+    // below is a real dispatching entry, so what it drives may mint a session
+    // and grow the table under us. A session is never removed, so index `i`
+    // keeps naming the same one; only the array of POINTERS can move, and
+    // re-reading it each iteration is what makes that harmless.
+    var i: usize = 0;
+    while (i < sessions.items.len) : (i += 1) {
+        const s = sessions.items[i];
+        while (s.conn.live) {
             pending_msg = s.conn.next() orelse break;
-            pending_session = sessionIndex(s);
+            pending_session = s;
             weft.run("lsp-deliver-internal");
         }
     }
 }
 
 var pending_msg: rpc.Value = undefined;
-var pending_session: usize = 0;
+var pending_session: ?*Session = null;
 fn lspDeliverInternal() void {
-    dispatch(&sessions[pending_session], pending_msg);
+    dispatch(pending_session orelse return, pending_msg);
 }
 
 /// A buffer took focus: ensure its language's server is up and its document is
@@ -607,7 +665,7 @@ export fn on_pick_accept(pick_id: u32) void {
         return;
     }
     if (pick_id != pick_id_rename) return;
-    const s = &sessions[prompting orelse return];
+    const s = prompting orelse return;
     prompting = null;
     const p = slotOf(s, .rename);
     if (!p.used or p.id != 0) return;
@@ -623,13 +681,26 @@ export fn on_pick_accept(pick_id: u32) void {
         retire(s, p);
         return;
     }
-    _ = copyInto(&s.rename_buf, &s.rename_len, name);
+    if (!setRename(s, name)) {
+        weft.echo("lsp: out of memory — rename not sent");
+        retire(s, p);
+        return;
+    }
     if (s.ready) _ = send(s, p, .rename);
+}
+
+/// Hold the new name this session will rename to. False when the guest heap
+/// refuses, so the caller refuses out loud rather than sending a half name.
+fn setRename(s: *Session, name: []const u8) bool {
+    const owned = weft.allocator.dupe(u8, name) catch return false;
+    weft.allocator.free(s.rename);
+    s.rename = owned;
+    return true;
 }
 
 /// The session whose rename prompt is open. The Head owns one picker, so at most
 /// one rename is ever being typed.
-var prompting: ?usize = null;
+var prompting: ?*Session = null;
 
 // ── Commands ─────────────────────────────────────────────────────────
 fn cmdHover() void {
@@ -676,16 +747,21 @@ fn cmdRename() void {
     const s = ensureActive() orelse return;
     if (!s.conn.live) return;
     const p = arm(s, .rename) orelse return;
-    s.rename_len = 0;
+    weft.allocator.free(s.rename);
+    s.rename = &.{};
     if (weft.argStr(0)) |name| {
         if (name.len > 0) {
-            _ = copyInto(&s.rename_buf, &s.rename_len, name);
+            if (!setRename(s, name)) {
+                weft.echo("lsp: out of memory — rename not sent");
+                retire(s, p);
+                return;
+            }
             if (s.ready) _ = send(s, p, .rename);
             return;
         }
     }
     resetPickTargets();
-    prompting = sessionIndex(s);
+    prompting = s;
     weft.pickBegin("rename to", pick_id_rename);
     weft.pickEnd(); // no items — the typed query is the new name
 }
@@ -766,21 +842,21 @@ fn staleDiagnostics(s: *Session) void {
 /// price of not materializing it — bounded by the server's appetite, not us.
 fn syncDoc(s: *Session) bool {
     if (!s.conn.live) return false;
-    retargetDoc(s);
+    if (!retargetDoc(s)) return false;
     if (s.opened) {
         if (s.synced) |snapshot| {
             if (weft.docSnapshotIsCurrent(snapshot)) return true;
         }
     }
     const alloc = weft.allocator;
-    const uri = s.uri();
+    const uri = s.uri;
     const total = weft.byteLen();
 
     // The JSON-RPC envelope around the (streamed) document text. `params` is the
     // {textDocument…text:"} … "} object; the envelope wraps it.
     const prefix = if (!s.opened) blk: {
         s.doc_version = 1;
-        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"", .{ uri, s.lang() }) catch return false;
+        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"", .{ uri, s.lang }) catch return false;
     } else blk: {
         s.doc_version += 1;
         break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":{d}}},\"contentChanges\":[{{\"text\":\"", .{ uri, s.doc_version }) catch return false;
@@ -826,38 +902,49 @@ fn syncDoc(s: *Session) bool {
 
 /// Point `s` at the active buffer's document, closing whatever it held before.
 /// Diagnostics belong to a uri, so the old set goes with the old document.
-fn retargetDoc(s: *Session) void {
-    var buf: [1200]u8 = undefined;
-    const uri = buildUri(&buf);
-    if (s.opened and std.mem.eql(u8, uri, s.uri())) return;
+///
+/// False when the active buffer has no uri to name it by. The caller must NOT
+/// go on: streaming this buffer's text under the previous document's uri is a
+/// silent wrong answer, and refusing to sync is one the user is told about.
+fn retargetDoc(s: *Session) bool {
+    const uri = buildUri() orelse return false;
+    if (s.opened and std.mem.eql(u8, uri, s.uri)) {
+        weft.allocator.free(uri);
+        return true;
+    }
     if (s.opened) {
-        var params: [1300]u8 = undefined;
-        if (std.fmt.bufPrint(&params, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{s.uri()})) |body|
-            s.conn.notify("textDocument/didClose", body)
-        else |_| {}
+        if (reqParams("{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{s.uri})) |body|
+            s.conn.notify("textDocument/didClose", body);
     }
     releaseDiagnostics(s);
     releaseSynced(s);
     s.opened = false;
-    _ = copyInto(&s.uri_buf, &s.uri_len, uri);
+    weft.allocator.free(s.uri);
+    s.uri = uri;
+    return true;
 }
 
-/// The active buffer's `file://` uri, into `out`. Absolute paths pass through;
-/// relative ones get the cwd prefix, so the uri matches the absolute uris a
-/// server returns in its locations.
-fn buildUri(out: []u8) []const u8 {
-    // Copy the (possibly scratch-backed) path out before calling cwd (also
-    // scratch).
-    var pbuf: [1024]u8 = undefined;
-    const path = weft.path() orelse "untitled";
-    const pn = @min(path.len, pbuf.len);
-    @memcpy(pbuf[0..pn], path[0..pn]);
-    const pc = pbuf[0..pn];
-    const s = if (pn > 0 and pc[0] == '/')
-        std.fmt.bufPrint(out, "file://{s}", .{pc}) catch return ""
-    else
-        std.fmt.bufPrint(out, "file://{s}/{s}", .{ weft.cwd(), pc }) catch return "";
-    return s;
+/// The active buffer's `file://` uri, allocated (caller owns). Absolute paths
+/// pass through; relative ones are resolved INSIDE the place they belong to, so
+/// the uri matches the absolute uris a server rooted at that place returns in
+/// its locations.
+///
+/// `weft.placePath` is what reconciles the two spellings — see its doc for why
+/// a naive `<root>/<path>` double-counts what they share.
+fn buildUri() ?[]u8 {
+    const alloc = weft.allocator;
+    // Copy the (possibly scratch-backed) path out before calling placeRoot
+    // (also scratch).
+    const spelled = alloc.dupe(u8, weft.path() orelse "untitled") catch return null;
+    defer alloc.free(spelled);
+    const root = weft.placeRoot();
+    // The widest a join of the two can be: root, a separator, and the whole
+    // spelling — `placePath` only ever drops from the spelling, never adds.
+    const joined = alloc.alloc(u8, root.len + 1 + spelled.len) catch return null;
+    defer alloc.free(joined);
+    const abs = weft.placePath(root, spelled, joined);
+    if (abs.len == 0) return null;
+    return std.fmt.allocPrint(alloc, "file://{s}", .{abs}) catch null;
 }
 
 // ── Response dispatch ────────────────────────────────────────────────
@@ -1280,7 +1367,7 @@ fn posInRange(rng: rpc.Value) ?Pos {
 }
 
 fn sameUri(s: *const Session, uri: []const u8) bool {
-    return uri.len == 0 or std.mem.eql(u8, uri, s.uri());
+    return uri.len == 0 or std.mem.eql(u8, uri, s.uri);
 }
 
 fn presentSignature(result: rpc.Value) void {

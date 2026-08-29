@@ -226,6 +226,10 @@ const guests = [_]Guest{
     // intentions (doc/configuration.md §5.1).
     .{ .src = "src/guest/gramtest.zig", .import = "guest_gramtest_wasm", .install = false },
     .{ .src = "src/guest/fs_limit.zig", .import = "guest_fs_limit_wasm", .install = false },
+    // The `wl_proc_spool` gate's guest: proc+timer only, so the door's promise
+    // ("a subprocess gets a real file, the guest gets no fs perm") is proven by
+    // a guest that genuinely holds none. Never shipped.
+    .{ .src = "src/guest/spool.zig", .import = "guest_spool_wasm", .install = false },
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end; never shipped.
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
@@ -468,6 +472,17 @@ pub fn build(b: *std.Build) void {
     // `instrument_mod` below, a separate module the `test` step never builds.
     const compare_only_opts = b.addOptions();
     compare_only_opts.addOption(bool, "record", false);
+    // `test_mod` runs this instrument in a process that has already executed
+    // ~159 other e2e tests, so what it measures there is that process's
+    // accumulated allocator and cache state, not dispatch: the SAME code that
+    // measures ~37us in a fresh process measures ~176us of real CPU work after
+    // the suite has run. Comparing that against a baseline recorded by the
+    // FILTERED `e2e-latency` binary (fresh process, this test only) is a
+    // category error, and it is where this gate's intermittent failures came
+    // from. The measurement still runs here -- the code path stays exercised --
+    // but only the isolated binary may hold it to the baseline. `test_step`
+    // depends on `e2e-latency`, so `zig build test` still gates it, honestly.
+    compare_only_opts.addOption(bool, "isolated", false);
     test_mod.addOptions("latency_options", compare_only_opts);
 
     // The same record/compare doctrine for the popup-layout golden gate
@@ -737,6 +752,7 @@ pub fn build(b: *std.Build) void {
     configureTestModule(b, instrument_mod, stemma_dep, weft_mod);
     const latency_opts = b.addOptions();
     latency_opts.addOption(bool, "record", record_latency);
+    latency_opts.addOption(bool, "isolated", true);
     instrument_mod.addOptions("latency_options", latency_opts);
     const popup_layout_opts = b.addOptions();
     popup_layout_opts.addOption(bool, "record_popup_layout", record_popup_layout);
@@ -791,6 +807,19 @@ pub fn build(b: *std.Build) void {
 
     // LAST in `build()` so it sees every sibling `test_step` will ever have.
     runAlone(test_step, &run_tests.step);
+
+    // The real latency gate, ordered AFTER `runAlone` on purpose: the copy of
+    // the instrument inside the big e2e binary measures without asserting (see
+    // `compare_only_opts`), because by then that process has run ~159 other
+    // tests and is measuring its own accumulated allocator and cache state --
+    // the same code costs ~37us in a fresh process and ~176us there. The
+    // isolated binary is the one held to the baseline, and it runs dead last,
+    // after even `run_tests`, so it has the box to itself the way `runAlone`
+    // already gives `run_tests`. Adding this BEFORE `runAlone` would instead
+    // make `run_tests` wait on it, which is the wrong order and, once
+    // `latency_step` also depends on `run_tests`, a cycle.
+    latency_step.dependOn(&run_tests.step);
+    test_step.dependOn(latency_step);
 }
 
 /// Order `last` after every OTHER direct dependency of `step`, so it has the
@@ -1037,6 +1066,14 @@ fn addQuickjs(b: *std.Build, host_mod: *std.Build.Module) void {
 /// Wasmtime ships no pkg-config, so — like the grammar packages — we take
 /// the dev (headers) and lib (libwasmtime.so) store paths from the nix shell
 /// and wire them explicitly, then link the library.
+///
+/// Also the single place the two BUILD-BAKED HOST DIRECTORIES are wired
+/// (`addHostTestDirs` below). They live here, not at their own call sites,
+/// because this function is already called on exactly — and only — the
+/// module set that compiles `src/core/` (`exe_mod`, `weft_mod`, and
+/// `configureTestModule`'s `test_mod`/`instrument_mod`). One call site
+/// cannot drift out of sync with another the way three hand-copied ones
+/// eventually would.
 fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     const dev = b.graph.environ_map.get("WEFT_WASMTIME_DEV") orelse
         @panic("WEFT_WASMTIME_DEV not set — build inside the nix shell");
@@ -1045,12 +1082,33 @@ fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ dev, "include" }) });
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ lib, "lib" }) });
     mod.linkSystemLibrary("wasmtime", .{});
-    // Test artifacts cache compiled modules HERE, comptime-baked — they never
-    // consult the user environment (Engine.cacheDir prunes that branch).
-    const cache_path = b.cache_root.join(b.allocator, &.{"weft-cwasm"}) catch @panic("OOM");
-    const cache_opts = b.addOptions();
-    cache_opts.addOption([]const u8, "test_dir", if (std.fs.path.isAbsolute(cache_path)) cache_path else b.pathFromRoot(cache_path));
-    mod.addOptions("module_cache_options", cache_opts);
+    addHostTestDirs(b, mod);
+}
+
+/// The directories a TEST BUILD is allowed to touch, comptime-baked under the
+/// project cache root so a bare-run test binary provably cannot reach the
+/// user's real cache or state. Each consumer prunes its user-environment
+/// branch behind `if (builtin.is_test)`, so these options are the only paths
+/// a test artifact can resolve:
+///
+///   - `module_cache_options.test_dir` — compiled `.cwasm` images
+///     (`core/wasm.zig`'s `Engine.cacheDir`).
+///   - `kv_state_options.test_dir` — the persisted plugin kv store
+///     (`core/kv_file.zig`'s `stateDir`).
+///
+/// Both are made ABSOLUTE here: the e2e Project harness chdirs into a tmpdir
+/// mid-suite, so a cwd-relative path would scatter and vanish with it.
+fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
+    const dirs = .{
+        .{ .import = "module_cache_options", .sub = "weft-cwasm" },
+        .{ .import = "kv_state_options", .sub = "weft-kv" },
+    };
+    inline for (dirs) |d| {
+        const path = b.cache_root.join(b.allocator, &.{d.sub}) catch @panic("OOM");
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "test_dir", if (std.fs.path.isAbsolute(path)) path else b.pathFromRoot(path));
+        mod.addOptions(d.import, opts);
+    }
 }
 
 /// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with
@@ -1083,39 +1141,36 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
     mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
+/// Built once and shared by every module `addSyntax` touches. It must be ONE
+/// object: `b.addOptions()` content-addresses its emitted file, so three
+/// separate-but-identical option sets are three names for one physical file,
+/// and Zig refuses to let one file root two named modules ("file exists in
+/// modules 'build_options' and 'build_options0'"). The same hazard the
+/// `popup_layout_options` comment above describes, reached from the other
+/// direction — there the fix was to make the content differ, here it is to
+/// stop duplicating it.
+var syntax_options: ?*std.Build.Module = null;
+
 fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("tree-sitter", .{});
-    const opts = b.addOptions();
-    const grammars = [_]struct {
-        env: []const u8,
-        opt: []const u8,
-        import: []const u8,
-        /// In-repo query for grammar packages that ship none.
-        local_query: ?[]const u8 = null,
-    }{
-        .{ .env = "WEFT_TS_ZIG", .opt = "ts_zig", .import = "ts_zig_highlights" },
-        .{
-            .env = "WEFT_TS_FENNEL",
-            .opt = "ts_fennel",
-            .import = "ts_fennel_highlights",
-            .local_query = "assets/fennel-highlights.scm",
-        },
-        .{ .env = "WEFT_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
-        .{ .env = "WEFT_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
-        .{ .env = "WEFT_TS_JAVASCRIPT", .opt = "ts_javascript", .import = "ts_javascript_highlights" },
-        .{ .env = "WEFT_TS_HTML", .opt = "ts_html", .import = "ts_html_highlights" },
+    const opts = syntax_options orelse blk: {
+        const o = b.addOptions();
+        // The DEFAULT grammar search path, and nothing else about grammars.
+        // The build does not know which languages exist — that set lives in
+        // the directory this points at and in the config that asks for them,
+        // so adding a language never touches Zig source or this file. `main`
+        // still prefers `WEFT_GRAMMAR_PATH` from the environment at runtime;
+        // this is only what a build inside the nix shell falls back to.
+        o.addOption([]const u8, "grammar_path", b.graph.environ_map.get("WEFT_GRAMMAR_PATH") orelse
+            @panic("WEFT_GRAMMAR_PATH not set — build inside the nix shell"));
+        // `createModule` once, not `addOptions` per module: `addOptions` wraps
+        // the options in a FRESH module every call, which is what puts two
+        // module names on one content-addressed file.
+        const m = o.createModule();
+        syntax_options = m;
+        break :blk m;
     };
-    inline for (grammars) |g| {
-        const dir = b.graph.environ_map.get(g.env) orelse
-            @panic(g.env ++ " not set — build inside the nix shell");
-        opts.addOption([]const u8, g.opt, dir);
-        const query: std.Build.LazyPath = if (g.local_query) |lq|
-            b.path(lq)
-        else
-            .{ .cwd_relative = b.pathJoin(&.{ dir, "queries", "highlights.scm" }) };
-        mod.addAnonymousImport(g.import, .{ .root_source_file = query });
-    }
-    mod.addOptions("build_options", opts);
+    mod.addImport("build_options", opts);
 }
 
 /// Generate the xdg-shell client glue with wayland-scanner and add it to

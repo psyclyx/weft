@@ -146,7 +146,13 @@ pub const Engine = struct {
     /// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null
     /// = caching off; the editor still runs and just recompiles each start.
     /// Caller (this engine) owns the result.
-    fn cacheDir(gpa: Allocator) ?[]u8 {
+    ///
+    /// Public because it is also the ANSWER to "where is the module cache" for
+    /// `core/machinery.zig`'s carve-out (doc/place.md §4.1: no plugin grant
+    /// reaches bucket 1). That refusal asks THIS function rather than
+    /// re-deriving the `WEFT_CACHE_DIR` → XDG → HOME chain, so moving the
+    /// cache moves the refusal in the same edit and the two cannot drift.
+    pub fn cacheDir(gpa: Allocator) ?[]u8 {
         if (@import("builtin").is_test)
             return gpa.dupe(u8, @import("module_cache_options").test_dir) catch null;
         if (std.c.getenv("WEFT_CACHE_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;

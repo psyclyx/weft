@@ -116,9 +116,23 @@ fn sameNode(a: fs.contract.NodeRef, b: fs.contract.NodeRef) bool {
     };
 }
 
+/// The typed-target doors need an UNCONFINED capability, and that is now
+/// something the config has to say out loud.
+///
+/// A typed target names a provider root, never a path, so there is nothing to
+/// compare a path-shaped limit against — including `.place`, which since
+/// doc/place.md §4.1's confined-by-default change is what a plugin holds when
+/// nobody narrowed it. A browser that must follow the user anywhere therefore
+/// carries `weft.grant("files", "fs_read", { root: "/" })` in the shipped
+/// config: the breadth it always had, now written down and in the approval
+/// diff instead of inherited from an omission.
 pub fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime perm: shared.Perm) bool {
     switch (shared.limitFor(plugin, perm)) {
         .none => return true,
+        .place => {
+            caller.trap("plugin '{s}' denied capability '{s}': typed filesystem targets need an unconfined grant — add weft.grant('{s}', '{s}', {{ root: \"/\" }})", .{ plugin.name, perm.label(), plugin.name, perm.label() });
+            return false;
+        },
         .fs_root, .doc_region, .graph_subtree => {
             caller.trap("plugin '{s}' denied capability '{s}': typed filesystem targets cannot be proven against a path-limited grant", .{ plugin.name, perm.label() });
             return false;

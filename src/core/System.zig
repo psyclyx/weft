@@ -74,6 +74,8 @@ const capability = @import("capability.zig");
 const Caps = capability.Caps;
 const Actions = @import("action.zig");
 const kv = @import("kv.zig");
+const env_mod = @import("env.zig");
+const place_mod = @import("place.zig");
 const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
@@ -142,6 +144,13 @@ actions: Actions,
 /// versa (mirrors `main.zig`'s `config_kv`/`plugin_kv` split, one level
 /// up: per-SYSTEM now, not just per-store-kind).
 config_kv: kv.Store = .empty,
+/// Per-place environment overlays (`env.zig`) — the sibling of the working
+/// directory: WHERE an effect runs and WITH WHAT it runs are the same
+/// question asked twice, and both are resolved at the spawn door.
+environments: env_mod.Environments = undefined,
+/// Dense opaque ids for the places this run has seen (`place.Ids`), so a
+/// guest can key a session table on "which place" without being handed one.
+place_ids: place_mod.Ids = undefined,
 /// This system's headless/background head: what `command.run` dispatches
 /// against when no OTHER head is specified, and (once plugins are wired
 /// per-system — see the module doc) what a background wasm entry
@@ -225,6 +234,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .grants = grants_mod.HandleTable.init(gpa),
         .semantic = .init(.here),
         .filesystems = .init(gpa),
+        .environments = .init(gpa),
+        .place_ids = try place_mod.Ids.init(gpa),
     };
     errdefer self.buffers.deinit(gpa);
     errdefer self.semantic.deinit(gpa);
@@ -273,6 +284,8 @@ pub fn destroy(self: *System) void {
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
+    self.place_ids.deinit();
+    self.environments.deinit();
     self.config_kv.deinit(gpa);
     self.grants.deinit();
     gpa.free(self.name);
@@ -298,6 +311,8 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .filesystems = &self.filesystems,
         .intent = &self.intent,
         .viewports = &self.viewports,
+        .environments = &self.environments,
+        .place_ids = &self.place_ids,
     };
 }
 
@@ -629,6 +644,11 @@ pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system
 fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
     return switch (limit) {
         .none => "none",
+        // Deliberately NOT rendered as a directory: the row does not hold one.
+        // `place` is resolved per dispatch, so printing today's answer beside
+        // a grant that means "wherever you are" would read as a promise the
+        // row never made (doc/place.md §4.1).
+        .place => "place",
         .fs_root => |root| std.fmt.bufPrint(buf, "fs_root({s})", .{root}) catch buf,
         .doc_region => |dr| std.fmt.bufPrint(buf, "doc_region({s})", .{dr.doc_id}) catch buf,
         .graph_subtree => |gs| std.fmt.bufPrint(buf, "graph_subtree({s})", .{gs.doc_id}) catch buf,

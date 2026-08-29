@@ -428,3 +428,21 @@ than edited in place, so the review stays a record of what it saw.
 7. **Wave I landed.** The first two §11.8 embedding depths — render-embed
    and editable field, compositing through the annotation seam — are in, on
    `main` as of `fd8b032` (2026-08-27).
+8. **Correction 3 was itself wrong; `cAgentWrite` is now gated.** The claim
+   that `command.renderInto` already authorized `qjs_file_write` does not
+   survive reading the gate: it computes `gradeMin(doc.my_grant, .edit)`, and
+   `Document.my_grant` defaults to `.own` (`src/core/Document.zig:131`), so
+   the check passes trivially for every local buffer. It is a COLLAB
+   authority check — what grade this peer holds on a shared document — not
+   path confinement, and it says nothing at all about *which* path an agent
+   may bind and fill. The original ungated-effect finding therefore did
+   stand for `cAgentWrite`: with no `requirePerm(.fs_write)` and no
+   `pathWithinLimit`, `weft.grant("acp", "fs_write", {root: …})` confined
+   nothing at that door, and an ACP agent's `fs/write_text_file` could bind a
+   buffer at any absolute path outside its granted root. (Not silent disk
+   corruption — the write lands in a buffer, and only a user save reaches
+   disk — but a confinement gap all the same.) `cAgentWrite` now takes
+   `cFileRead`'s two checks, possession then limit, and `qjs_file_write`
+   returns `denied` so `weft_qjs.c` throws at the JS call site instead of
+   refusing silently. Correction 3 is left above as written, per this
+   section's own convention.

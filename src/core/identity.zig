@@ -216,7 +216,12 @@ pub fn loadOrGenerate(gpa: std.mem.Allocator, environ: anytype) LoadError!Identi
     return id;
 }
 
-fn configPath(buf: []u8, environ: anytype) ?[:0]const u8 {
+/// Where this machine's secret key lives. Public because
+/// `core/machinery.zig` asks it — the carve-out that makes the keystore
+/// unreachable across the plugin membrane (doc/place.md §4.1) must name the
+/// same path `loadOrGenerate` writes, and asking the owner is how it stays
+/// that way.
+pub fn configPath(buf: []u8, environ: anytype) ?[:0]const u8 {
     if (environ.getPosix("XDG_CONFIG_HOME")) |x| {
         if (x.len > 0) return std.fmt.bufPrintZ(buf, "{s}/weft/identity", .{x}) catch null;
     }

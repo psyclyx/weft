@@ -65,7 +65,7 @@ extern int host_register(const char *name, int name_len);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
-extern int host_proc_spawn(const char *cmd, int cmd_len, const char *cwd, int cwd_len);
+extern int host_proc_spawn(const char *cmd, int cmd_len);
 __attribute__((import_module("weft"), import_name("qjs_proc_send")))
 extern void host_proc_send(int handle, const char *ptr, int len);
 __attribute__((import_module("weft"), import_name("qjs_proc_read")))
@@ -109,8 +109,10 @@ __attribute__((import_module("weft"), import_name("qjs_file_read")))
 extern int host_file_read(const char *path, int path_len, char *out, int cap);
 // Write a file's content as an attributed AGENT peer edit to its buffer (opened
 // if needed) — the agent's fs/write_text_file, so the edit is gated + undoable.
+// Returns 0, or WEFT_DENIED when `fs_write` is unheld or the path falls
+// outside the grant's root — a refusal must never look like a write.
 __attribute__((import_module("weft"), import_name("qjs_file_write")))
-extern void host_file_write(const char *path, int path_len, const char *content, int content_len, const char *agent, int agent_len);
+extern int host_file_write(const char *path, int path_len, const char *content, int content_len, const char *agent, int agent_len);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -670,20 +672,23 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.procSpawn(cmd[, cwd]) -> handle (or -1): a persistent duplex child.
+// weft.procSpawn(cmd) -> handle (or -1): a persistent duplex child, run in the
+// dispatching entry's PLACE (doc/place.md).
+//
+// There is deliberately no cwd argument. A JS plugin is not a different kind of
+// plugin, and the wasm door (wl_proc_spawn) has none either. A raw directory
+// string is also exactly the local-first spelling this design removes: it
+// cannot name a peer or a synthetic container, so it could only ever have meant
+// "somewhere on this machine", which is the assumption being retired.
 // Throws when the plugin holds no `proc` grant.
 static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd[, cwd])");
-    size_t cl, wl = 0;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd)");
+    size_t cl;
     const char *cmd = JS_ToCStringLen(ctx, &cl, argv[0]);
-    const char *cwd = NULL;
-    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
-        cwd = JS_ToCStringLen(ctx, &wl, argv[1]);
     int h = -1;
-    if (cmd) h = host_proc_spawn(cmd, (int)cl, cwd ? cwd : "", (int)wl);
+    if (cmd) h = host_proc_spawn(cmd, (int)cl);
     JS_FreeCString(ctx, cmd);
-    if (cwd) JS_FreeCString(ctx, cwd);
     if (h == WEFT_DENIED) return weft_throw_denied(ctx, "procSpawn");
     return JS_NewInt32(ctx, h);
 }
@@ -851,10 +856,12 @@ static JSValue js_file_write(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCStringLen(ctx, &pl, argv[0]);
     const char *content = JS_ToCStringLen(ctx, &cl, argv[1]);
     const char *agent = (argc >= 3) ? JS_ToCStringLen(ctx, &al, argv[2]) : NULL;
-    if (path && content) host_file_write(path, (int)pl, content, (int)cl, agent ? agent : "", (int)al);
+    int n = 0;
+    if (path && content) n = host_file_write(path, (int)pl, content, (int)cl, agent ? agent : "", (int)al);
     JS_FreeCString(ctx, path);
     JS_FreeCString(ctx, content);
     if (agent) JS_FreeCString(ctx, agent);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "fileWrite");
     return JS_UNDEFINED;
 }
 
@@ -970,7 +977,7 @@ int weft_plugin_init(const char *src, int len) {
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
     JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
-    JS_SetPropertyStr(g_ctx, weft, "procSpawn", JS_NewCFunction(g_ctx, js_proc_spawn, "procSpawn", 2));
+    JS_SetPropertyStr(g_ctx, weft, "procSpawn", JS_NewCFunction(g_ctx, js_proc_spawn, "procSpawn", 1));
     JS_SetPropertyStr(g_ctx, weft, "procSend", JS_NewCFunction(g_ctx, js_proc_send, "procSend", 2));
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));

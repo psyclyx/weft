@@ -91,8 +91,65 @@ pub const Baseline = struct {
     host: []const u8 = "",
     /// Free-text provenance (when + how it was recorded), informational only.
     note: []const u8 = "",
+    /// `calibrate()` at record time — how fast this box was executing a fixed
+    /// pure-CPU loop when the numbers below were taken.
+    ///
+    /// The third provenance check, and the one the other two implied but could
+    /// not express: `build_mode` catches a different program and `host` catches
+    /// different hardware, but the SAME program on the SAME hardware is still
+    /// not comparable when the machine is busy. Thread CPU time removes
+    /// descheduling, not SMT contention, cache pressure, or frequency scaling —
+    /// a busy sibling core makes identical instructions take measurably longer
+    /// ON cpu. Measured at compare time and used to SKIP, never to scale a
+    /// threshold: a number nobody can reproduce is not a gate.
+    ///
+    /// Zero means a baseline recorded before this existed; the check is then
+    /// skipped rather than guessed at.
+    calibration_ns: u64 = 0,
     categories: []const CategoryBaseline,
 };
+
+/// A fixed, deterministic, pure-CPU workload — the yardstick `calibration_ns`
+/// records. Deliberately touches no allocator, no syscall, and no memory beyond
+/// a register: it has to measure how fast this box executes instructions right
+/// now, not how fast anything in weft is.
+pub fn calibrate() u64 {
+    // MEMORY-bound, not register-bound, and that distinction is the whole
+    // point. A pure-arithmetic loop runs at full speed on a machine whose
+    // caches and memory bus are saturated — it under-reports exactly the
+    // contention that perturbs dispatch, which is itself full of maps, trees,
+    // and allocations. Measured that way it happily reported a healthy box
+    // while the samples it was vouching for ran 3x slow.
+    //
+    // A dependent pointer chase over a working set well past L2 defeats the
+    // prefetcher, so each step waits on the previous one's load and the loop
+    // feels the same pressure the code under test does.
+    const n = chase.len;
+    if (chase[1] == 0) { // build once; index 1 is 0 only before the fill
+        for (&chase, 0..) |*slot, i| slot.* = @intCast((i + 65_521) % n);
+    }
+    const start = threadCpuNs();
+    var cur: u32 = 0;
+    var i: usize = 0;
+    while (i < 400_000) : (i += 1) cur = chase[cur];
+    std.mem.doNotOptimizeAway(cur);
+    return threadCpuNs() -| start;
+}
+
+/// 4 MiB — past any L2, so the chase above actually reaches memory. The stride
+/// is odd and the length a power of two, so successive steps are coprime and
+/// the walk is a single cycle covering every slot rather than a short orbit.
+var chase: [1 << 20]u32 = @splat(0);
+
+/// This thread's CPU time. Same clock the samples use, so the calibration and
+/// the measurement inflate together under load — which is exactly what makes
+/// their ratio meaningful.
+pub fn threadCpuNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 
 /// The running binary's optimize mode name ("Debug", "ReleaseFast", …).
 pub fn buildModeName() []const u8 {

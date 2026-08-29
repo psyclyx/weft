@@ -124,6 +124,23 @@ pub const Context = struct {
     /// System-scoped semantic identity and provider registries. Optional for
     /// small/headless embeddings that expose only the text command surface.
     semantic: ?*@import("semantic.zig").Services = null,
+    /// WHERE the outermost dispatch in flight was invoked from
+    /// (`doc/place.md`), or null between dispatches. Set and cleared by `run`.
+    /// Not a user-settable field: it is a bracket, like `principal`.
+    dispatch_place: ?@import("place.zig").Place = null,
+    /// Per-place environment overlays (`env.zig`). Null in embeddings without
+    /// a `System`, where every place simply has the base environment.
+    environments: ?*@import("env.zig").Environments = null,
+    /// Dense opaque ids for places (`place.Ids`). Null in embeddings without a
+    /// `System`; every place then reads as the degenerate one, which is what an
+    /// embedding with no places should see.
+    place_ids: ?*@import("place.zig").Ids = null,
+    /// Turns a `Place` into an OS directory for a local effect
+    /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
+    /// opened; `null` in headless embeddings, where only the degenerate
+    /// `.process` place resolves and every other place is honestly
+    /// unavailable rather than silently local.
+    realizer: ?@import("place.zig").Realizer = null,
     /// The system's intention plane (`intent.zig`): the offer catalog, the
     /// endpoint-token invoker registry, and core's own editing provider —
     /// one value, so a half-wired pair is unrepresentable. `null` in
@@ -168,6 +185,72 @@ pub const Context = struct {
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.entry() orelse self.buffers.active();
+    }
+
+    /// WHERE this dispatch's effects run (`doc/place.md`).
+    ///
+    /// Read through `entry()`, which is the whole point: a background fill
+    /// delivered into an entry captured at spawn is about THAT entry's place,
+    /// not wherever focus has wandered since. The ambient-read-at-the-door
+    /// shape means no guest passes a place and no guest can pass the wrong
+    /// one.
+    ///
+    /// A closed bound entry yields the degenerate `.process` place rather than
+    /// borrowing whoever is active now — an effect whose subject is gone must
+    /// not silently retarget at someone else's project.
+    ///
+    /// Precedence, outermost first:
+    ///
+    ///  1. **A bound entry.** A background delivery is ABOUT the entry it
+    ///     captured at spawn, so that entry's place wins over anything the user
+    ///     has done since — including a pin. Without this, a fill landing after
+    ///     the user typed `cd` would resolve against the new pin and act on the
+    ///     wrong project.
+    ///  2. **The head's pin** (`workspace.set-working-target`, the
+    ///     target-oriented `cd`). Validated through `Services`, which clears a
+    ///     retired or republished pin lazily rather than reinterpreting it.
+    ///  3. **The focused entry's own place.**
+    pub fn place(self: *Context) Buffers.Place {
+        if (self.bound_entry) |ref| {
+            const bound = self.buffers.resolve(ref) orelse return .process;
+            return bound.place;
+        }
+        // Set for the duration of a dispatch by `run`, so a producer that
+        // focuses its own output entry mid-command cannot move the ground under
+        // an effect the user asked for somewhere else.
+        if (self.dispatch_place) |pinned| return pinned;
+        return self.placeNow();
+    }
+
+    /// A dense opaque id for WHERE this dispatch is (`place.Ids`) — what a
+    /// guest keys a session table on. Compare it; never interpret it.
+    pub fn placeId(self: *Context) u32 {
+        const ids = self.place_ids orelse return @import("place.zig").Ids.process_id;
+        return ids.idOf(self.place());
+    }
+
+    /// `place` without the dispatch pin — the live reading, which is what the
+    /// pin is taken FROM. Separate so `run` can take it exactly once.
+    fn placeNow(self: *Context) Buffers.Place {
+        if (self.semantic) |services| {
+            if (services.workingTarget(self.head)) |maybe_pin| {
+                if (maybe_pin) |pin| return .{
+                    .container = .{
+                        // `.here` until a remote-attach head carries a real locus
+                        // (`Ctx.locus`, W6). Named rather than assumed: when that
+                        // lands, this is the line that reads it.
+                        .locus = .here,
+                        .ref = pin.target,
+                        .revision = pin.revision,
+                    },
+                };
+            } else |_| {
+                // A stale pin has already been cleared by the validator; fall
+                // through to the entry rather than refusing the whole effect.
+            }
+        }
+        const e = self.entry() orelse return .process;
+        return e.place;
     }
 
     /// How the entry this dispatch addresses RESTS under input (§10.4) — the
@@ -307,7 +390,10 @@ pub const Context = struct {
                 // comment: enforcement lives at `GraphCollab.admitRegions`
                 // instead). Same "not this chokepoint's business" skip as
                 // `.fs_root`.
-                .none, .fs_root, .graph_subtree => continue,
+                // `.place` is likewise fs-path-shaped (doc/place.md §4.1) —
+                // it confines WHERE a file door reaches, and has nothing to
+                // say about a text region.
+                .none, .place, .fs_root, .graph_subtree => continue,
             };
             if (!std.mem.eql(u8, region.doc_id, self.buffer().name)) continue;
             var out: [2]usize = undefined;
@@ -614,6 +700,17 @@ pub const RunError = error{UnknownCommand} || anyerror;
 /// runs.
 pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) RunError!Value {
     const cmd = commands.resolve(name) orelse return error.UnknownCommand;
+    // Pin WHERE this interaction came from for the whole nesting
+    // (`doc/place.md`). Only the OUTERMOST dispatch takes the reading: a
+    // producer routinely focuses its own output entry before spawning — the
+    // `*grep*` entry, say — and without this the spawn would inherit the place
+    // of the last thing that ran there instead of the place the user invoked it
+    // from. Nested `run` calls see it already set and leave it alone.
+    const outermost = ctx.dispatch_place == null;
+    if (outermost) ctx.dispatch_place = ctx.placeNow();
+    defer if (outermost) {
+        ctx.dispatch_place = null;
+    };
     return cmd.handler(ctx, cmd.data, args);
 }
 
@@ -1570,4 +1667,64 @@ test "command: a refused background render is observable (log + status chip)" {
     try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
     try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
     status_feed.set("");
+}
+
+// ── place: the ambient answer to "where does this run" (doc/place.md) ──
+
+test "command: place follows the entry, and a bound entry outranks the active one" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+
+    const project_a: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    const project_b: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+        .revision = 1,
+    } };
+
+    // With nothing placed, the degenerate instance — not a null, not a branch.
+    try t.expect(ctx.place().isProcess());
+
+    ctx.buffers.setPlace(ctx.buffers.active_id, project_a);
+    try t.expect(ctx.place().eql(project_a));
+
+    // A background delivery is ABOUT the entry it captured at spawn. Binding
+    // that entry must retarget `place` too, or a fill landing while the user
+    // looks at another project would act on the wrong one.
+    const other = try ctx.buffers.create(gpa, "*grep*");
+    ctx.buffers.setPlace(other, project_b);
+    const prev = ctx.bindEntry(ctx.buffers.get(other).?.ref());
+    try t.expect(ctx.place().eql(project_b));
+    _ = ctx.bindEntry(prev);
+    try t.expect(ctx.place().eql(project_a));
+}
+
+test "command: a bound entry that has closed places nowhere, not on whoever is active" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+
+    const project: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    ctx.buffers.setPlace(ctx.buffers.active_id, project);
+
+    const doomed = try ctx.buffers.create(gpa, "*doomed*");
+    const ref = ctx.buffers.get(doomed).?.ref();
+    try ctx.buffers.close(gpa, doomed, ctx.head, ctx.keymap);
+
+    _ = ctx.bindEntry(ref);
+    // NOT `project`: an effect whose subject is gone must refuse to act
+    // somewhere, rather than quietly adopting the focused project.
+    try t.expect(ctx.place().isProcess());
+    _ = ctx.bindEntry(null);
 }

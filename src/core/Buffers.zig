@@ -27,6 +27,7 @@ const Posture = @import("input.zig").Posture;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const task = @import("task.zig");
+pub const Place = @import("place.zig").Place;
 
 const Buffers = @This();
 
@@ -97,6 +98,17 @@ pub const Buffer = struct {
     /// The posture this entry's presentation owner DECLARED (§10.4), or null
     /// to take the derivation. Set through `declarePosture`.
     declared_posture: ?Posture = null,
+    /// WHERE this entry's effects run (`doc/place.md`). Buffer-local for the
+    /// same reason `mode` and `semantic_focus` are, and for the reason Emacs
+    /// makes `default-directory` buffer-local: a tool entry produced inside a
+    /// project belongs to that project for its whole life, not to whatever the
+    /// user happens to be looking at when its output lands.
+    ///
+    /// Set at creation by `insert` (see its inheritance rule) and replaceable
+    /// through `setPlace`. Defaults to the degenerate `.process` instance, so
+    /// an entry that nobody has placed behaves exactly as everything did
+    /// before this field existed.
+    place: Place = .process,
     /// The declaration a `capture` declaration displaced — what break-out
     /// restores. Meaningless unless `declared_posture == .capture`, which is
     /// why capture can never be a one-way door.
@@ -243,6 +255,17 @@ pub fn get(self: *const Buffers, id: Id) ?*Buffer {
     return self.slots.items[id];
 }
 
+/// Re-place an entry (`doc/place.md` §2.1). Creation-time inheritance is right
+/// only until something re-targets the entry: a tool entry reused for a second
+/// project — `*grep*` run again from elsewhere — is about the new place from
+/// that moment on, and the producer filling it is the only party that knows.
+/// A no-op for an id that is not live, so a late producer cannot resurrect a
+/// closed entry's state.
+pub fn setPlace(self: *Buffers, id: Id, p: Place) void {
+    const b = self.get(id) orelse return;
+    b.place = p;
+}
+
 /// Resolve a stable identity captured earlier. A closed buffer and a new
 /// buffer occupying its old slot are deliberately different identities.
 pub fn resolve(self: *const Buffers, ref: Ref) ?*Buffer {
@@ -309,12 +332,29 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
     const generation = self.next_generation;
     self.next_generation +%= 1;
     if (self.next_generation == 0) self.next_generation = 1;
+    // A new entry starts where the entry that produced it is (`doc/place.md`
+    // §2.1) — so `*grep*` belongs to the project grep was run in, and keeps
+    // belonging to it after focus moves on.
+    //
+    // This deliberately does NOT repeat `default_mode`'s mistake one field up.
+    // Inheriting the MODE let a tool's interaction state leak into a file
+    // opened from it, because a mode means something different in the entry it
+    // came from. A place does not: an effect produced inside a project is
+    // about that project wherever it is displayed. The two fields differ in
+    // kind, so they differ in policy.
+    //
+    // PROVISIONAL for path-backed entries: once the detection provider lands
+    // (doc/place.md wave 5), an entry with a backing path takes its place FROM
+    // THAT PATH and this inherited value is replaced via `setPlace`. Until
+    // then nothing reads `place`, so the provisional value is inert.
+    const inherited: Place = if (self.get(self.active_id)) |cur| cur.place else .process;
     b.* = .{
         .id = id,
         .generation = generation,
         .editor = editor,
         .name = owned_name,
         .tool = owned_tool,
+        .place = inherited,
     };
     self.slots.items[id] = b;
     return id;
@@ -624,4 +664,71 @@ test "buffers: Ref rejects a closed generation when its slot is reused" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "buffers: a new entry starts where the entry that produced it is" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user"); // one scratch (id 0)
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    // A fresh set has nothing placed: the degenerate instance, not a null.
+    try t.expect(bufs.active().place.isProcess());
+
+    const project: Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 7, .generation = 1 },
+        .revision = 1,
+    } };
+    const code = try bufs.create(gpa, "code.zig");
+    bufs.setPlace(code, project);
+    try bufs.switchTo(gpa, code, &head, &km);
+
+    // The tool entry this entry produces is about the SAME place...
+    const grep = try bufs.create(gpa, "*grep*");
+    try t.expect(bufs.get(grep).?.place.eql(project));
+
+    // ...and stays about it after focus moves somewhere else entirely. This is
+    // the property that retires the "last detected root" global: a tool entry
+    // never has to ask what is focused now.
+    try bufs.switchTo(gpa, 0, &head, &km);
+    try t.expect(bufs.get(grep).?.place.eql(project));
+    try t.expect(bufs.active().place.isProcess());
+}
+
+test "buffers: setPlace re-targets a reused tool entry, and ignores a dead id" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+
+    const a: Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    const b: Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+        .revision = 1,
+    } };
+
+    const grep = try bufs.create(gpa, "*grep*");
+    bufs.setPlace(grep, a);
+    try t.expect(bufs.get(grep).?.place.eql(a));
+    // Re-running the tool from another project re-targets the same entry.
+    bufs.setPlace(grep, b);
+    try t.expect(bufs.get(grep).?.place.eql(b));
+
+    // A producer landing after the entry is gone must not resurrect anything.
+    const dead: Id = @intCast(bufs.slots.items.len + 5);
+    bufs.setPlace(dead, a); // no panic, no effect
 }

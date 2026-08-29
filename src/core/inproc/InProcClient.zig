@@ -109,6 +109,15 @@ pub const InProcClient = struct {
     /// `canDispatch` doc) sets this around that window, same discipline.
     loading: bool = false,
 
+    /// The ctx this client's calls route through — the in-process spelling of
+    /// `WasmPlugin.activeCtx()`, and part of the same duck-typed contract:
+    /// `wasm_host/plugin.zig`'s `placeRootFor` asks a principal WHERE it is
+    /// acting, because a `.place` limit is resolved at the door rather than
+    /// baked at grant time (doc/place.md §4.1).
+    pub fn activeCtx(self: *InProcClient) *command.Context {
+        return self.active_ctx;
+    }
+
     /// This client as an edit principal — mirrors `WasmPlugin.principal()`.
     /// `role = .plugin` names it as the SAME authority CLASS a wasm plugin
     /// gets (first-party in-process code is not a second, unnamed tier of

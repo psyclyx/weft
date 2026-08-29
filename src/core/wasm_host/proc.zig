@@ -1,8 +1,15 @@
 //! Perm-gated off-thread process effects (proc + timer): shell-insert at the
-//! cursor, proc-to/append-buffer (tool output → a scratch buffer), and the
-//! in-place range filter (formatters). Each schedules on the async loop and
+//! cursor, proc-to/append/spool-buffer (tool output → a scratch buffer), and
+//! the in-place range filter (formatters). Each schedules on the async loop and
 //! lands its result on the frame thread at CRDT identity anchors, authored as
 //! the plugin peer.
+//!
+//! Two of these doors hand a child bytes ON DISK without the guest ever naming
+//! a path: the filter (`{}` = a temp the range is written to and read back)
+//! and the SPOOL (`{}` = a temp the guest's input payload is written to). Both
+//! compose the path host-side and delete it on every terminal path, so
+//! "a subprocess needs a real file" stops being a reason to grant `fs_write`
+//! (`doc/place.md` §4.2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -13,6 +20,9 @@ const proc = @import("../proc.zig");
 const Document = @import("../Document.zig");
 const file = @import("../file.zig");
 const contract = @import("../membrane/contract.zig");
+const place_mod = @import("../place.zig");
+const rooted_fs = @import("../rooted_fs.zig");
+const machinery = @import("../machinery.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -35,42 +45,108 @@ const ShellJob = struct {
     name: []u8,
     target: Document.EventAnchor,
     cmd: []u8, // the shell command line
+    /// Where the child runs, captured at spawn (`doc/place.md`). Null is the
+    /// `.process` place: inherit the editor's own directory. Owned; freed with
+    /// the rest of the job.
+    cwd: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
 };
 
-// ── Raw persistent proc (wl_proc_spawn/send/read/close) ──────────────
+// ── Raw persistent proc (proc_spawn/send/read/close) ─────────────────
 // A bidirectional stdio channel whose stdout comes BACK to the guest (unlike
 // the buffer-streaming repl sessions), so an in-guest protocol client — the
-// `lsp` plugin — can deframe Content-Length messages. Mirrors the JS proc
-// surface (quickjs cProc*) over the same proc_stream backend; handles index
-// `plugin.proc_streams` and stay stable (a closed slot is nulled, not removed).
+// `lsp` plugin — can deframe Content-Length messages. Handles index the
+// plugin's own stream list and stay stable (a closed slot is nulled, not
+// removed).
+//
+// ONE DOOR, TWO TRANSPORTS (doc/place.md §4.1a). `quickjs.wasm` IS a wasm
+// plugin, so a JS plugin is code running inside a wasm guest and must not be
+// able to reach a proc door shaped differently from the one every other guest
+// gets. It no longer can: the four bodies below are the WHOLE door, and both
+// membranes are generated from the `doors` table at the bottom of this
+// section — `membrane/contract.zig` binds them as `wl_proc_*`, `quickjs.zig`
+// binds the SAME bodies as `qjs_proc_*`. The `cwd` argument `qjs_proc_spawn`
+// once carried and `wl_proc_spawn` never had is not merely removed, it is
+// unrepresentable: there is no second body to grow one in.
+//
+// Each body is duck-typed over the plugin exactly the way `plugin.zig`'s
+// `hasPerm` is ("one contract, two transports"), and needs only what BOTH
+// planes can supply:
+//
+//   gpa            the plugin's allocator
+//   name           the principal, for a refusal message
+//   activeCtx()    the DISPATCHING entry's context — where the child runs and
+//                  with what (`resolveSpawnAtCtx`/`resolveSpawnEnvCtx`)
+//   procPool()     the task pool the stream's reader runs on, or null
+//   procStreams()  the handle-indexed stream list
+//   baseEnviron()  the environment a child inherits absent a place overlay
+//
+// What is genuinely per-transport stays in the trampoline generators
+// (`wasmDoor` here, `jsDoor` in quickjs.zig): how `data` is cast, and how a
+// denial is spelled — a trap for a `.wasm` guest, a logged `qjs_contract.
+// denied` for the RESIDENT JS runtime, which a trap would tear down.
 const proc_stream = @import("../proc_stream.zig");
 
-fn streamAt(p: *WasmPlugin, h: i32) ?*proc_stream.ProcStream {
-    if (h < 0 or h >= p.proc_streams.items.len) return null;
-    return p.proc_streams.items[@intCast(h)];
+const Perm = shared.Perm;
+
+/// A handle's live stream, or null for an out-of-range/closed slot.
+fn streamAt(p: anytype, h: i32) ?*proc_stream.ProcStream {
+    const streams = p.procStreams();
+    if (h < 0 or @as(usize, @intCast(h)) >= streams.items.len) return null;
+    return streams.items[@intCast(h)];
 }
 
-/// `procSpawn(cmd) -> handle` (perm proc, trap on deny) (or -1 if unavailable).
-/// Spawns a persistent subprocess inheriting the host environ + cwd; its
-/// stdout is buffered for `wl_proc_read`.
-pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!requirePerm(p, caller, .proc)) return;
-    const pool = p.pool orelse {
+/// `procSpawn(cmd) -> handle` (or -1 if unavailable). Spawns a persistent
+/// subprocess in the dispatching entry's PLACE, with that place's environment
+/// (`resolveSpawnAtCtx`/`resolveSpawnEnvCtx`); its stdout is buffered for
+/// `procRead`. Returns -1 when the place cannot host a local child, rather
+/// than falling back to the editor's own directory — the whole point of
+/// asking the place instead of taking a directory from the guest.
+pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const gpa = p.gpa;
+    const pool = p.procPool() orelse {
         results[0] = -1;
         return;
     };
-    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
     };
-    defer p.gpa.free(cmd);
-    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, null, shared.g_environ) catch {
+    defer gpa.free(cmd);
+    const ctx = p.activeCtx();
+    // `ProcStream.start` dups the cwd it is given, so this one is ours to free.
+    const at = shared.resolveSpawnAtCtx(ctx, gpa);
+    defer switch (at) {
+        .at => |dir| gpa.free(dir),
+        else => {},
+    };
+    const cwd: ?[]const u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            results[0] = -1;
+            return;
+        },
+    };
+    const spawn_env = shared.resolveSpawnEnvCtx(ctx, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
+    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse p.baseEnviron()) catch {
         results[0] = -1;
         return;
     };
-    const h: i32 = @intCast(p.proc_streams.items.len);
-    p.proc_streams.append(p.gpa, s) catch {
+    // A persistent child uses its environment for its whole life, so the stream
+    // takes the merged one over from us.
+    if (spawn_env != null) {
+        s.adoptEnviron();
+        env_owned = false;
+    }
+    const streams = p.procStreams();
+    const h: i32 = @intCast(streams.items.len);
+    streams.append(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
@@ -79,9 +155,8 @@ pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 }
 
 /// `procSend(handle, bytes)`: write to the subprocess's stdin.
-pub fn hProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn sendBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const s = streamAt(p, args[0]) orelse return;
     const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(bytes);
@@ -89,8 +164,7 @@ pub fn hProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 }
 
 /// `procRead(handle, out, cap) -> n`: drain up to `cap` buffered stdout bytes.
-pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+pub fn readBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const s = streamAt(p, args[0]) orelse {
         results[0] = 0;
         return;
@@ -105,31 +179,188 @@ pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
 }
 
-/// `cwd(out, cap) -> n`: the process working directory, for building absolute
-/// `file://` uris (a language server resolves relative uris to absolute, so a
-/// client must speak absolute to match returned locations).
-pub fn hCwd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = data;
-    var buf: [4096]u8 = undefined;
-    const rc = std.os.linux.getcwd(&buf, buf.len);
-    if (@as(isize, @bitCast(rc)) < 0) {
-        results[0] = 0;
-        return;
-    }
-    const path = std.mem.sliceTo(buf[0..rc], 0);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), path) catch 0);
-}
-
 /// `procClose(handle)`: kill the subprocess; the slot stays null for stability.
-pub fn hProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// Deliberately ungated on BOTH planes: it only RELEASES authority, and
+/// denying it would strand a live subprocess with no way to reap it.
+pub fn closeBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const h = args[0];
     if (streamAt(p, h)) |s| {
         s.deinit();
-        p.proc_streams.items[@intCast(h)] = null;
+        p.procStreams().items[@intCast(h)] = null;
     }
+}
+
+/// Bind one shared body onto the `.wasm` guest membrane: cast `data` to the
+/// plugin, run `gate`'s possession check if the door has one (trapping the
+/// guest's call on denial — `requirePerm`'s discipline, unchanged), then the
+/// body. There is no other way to spell a `wl_proc_*` handler, so a hand-
+/// written one would fail the `doors` gate in `e2e/demolition_test.zig`.
+pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+            if (gate) |perm| {
+                if (!requirePerm(p, caller, perm)) return;
+            }
+            body(p, caller, args, results);
+        }
+    }.f;
+}
+
+pub const hProcSpawn = wasmDoor(spawnBody, .proc);
+pub const hProcSend = wasmDoor(sendBody, null);
+pub const hProcRead = wasmDoor(readBody, null);
+pub const hProcClose = wasmDoor(closeBody, null);
+
+/// The plugin-plane proc surface as DATA: per door, the ONE body both
+/// membranes run, the handler `contract.zig` binds as `wl_<name>`, and the
+/// possession check each transport wraps it in. Exported so a gate can assert
+/// the two surfaces agree by comparing function POINTERS rather than by
+/// trusting a comment (`e2e/demolition_test.zig`, doc/place.md §4.1a).
+///
+/// `wl_gate`/`qjs_gate` are separate fields for ONE honest reason, and the
+/// gate records it as an exception rather than tolerating it silently:
+/// `qjs_proc_send`/`qjs_proc_read` re-check `proc` possession on every call
+/// (so revoking the grant stops an already-running agent on its next call,
+/// not merely its next spawn) and their `wl_*` twins do not. Making the wasm
+/// twins match means adding `.perm = .proc` to two `contract_data.zig` rows
+/// and two lines to `contract.zig`'s `perm_gated` list — that file is under
+/// concurrent edit, so the remainder is NAMED here instead of forced. Every
+/// other difference between the two planes is now unrepresentable: same body,
+/// same table.
+pub const doors = .{
+    .{ .name = "proc_spawn", .body = spawnBody, .wl = hProcSpawn, .wl_gate = @as(?Perm, .proc), .qjs_gate = @as(?Perm, .proc) },
+    .{ .name = "proc_send", .body = sendBody, .wl = hProcSend, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
+    .{ .name = "proc_read", .body = readBody, .wl = hProcRead, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
+    .{ .name = "proc_close", .body = closeBody, .wl = hProcClose, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
+};
+
+/// `placeRoot(out, cap) -> n`: the absolute directory of the DISPATCHING PLACE
+/// (`doc/place.md`), or ZERO BYTES when that place has no local directory.
+///
+/// The place-shaped replacement for the deleted process-directory door, and
+/// strictly NARROWER than it: that one revealed the editor's launch directory
+/// unconditionally, to every guest, regardless of what the dispatch was about.
+/// This reveals only where the dispatch already runs — the same value
+/// `resolveSpawnAt` chdir's this plugin's children into a few declarations
+/// above — so it needs no permission of its own: a guest that can spawn here
+/// already acts here.
+///
+/// The four answers are `place.Realized`'s four, unflattened:
+///  - `.process` — the editor's own directory. The DEGENERATE INSTANCE, not a
+///    fallback: that place IS the process's directory, so naming it is exactly
+///    right.
+///  - `.path` — the container's absolute directory, borrowed from the
+///    authority that opened it (never retained; it is copied into guest memory
+///    within this call).
+///  - `.elsewhere`/`.unavailable` — no local directory exists to name. Zero
+///    bytes, so a guest DECLINES rather than silently acting in the editor's
+///    launch directory, which is the whole bug this door exists to retire.
+/// `placeId() -> id`: a dense opaque id for the dispatching place.
+///
+/// What a session table keys on. Deliberately NOT the place's directory: a
+/// plugin keeping sessions per project needs to tell two places apart, not to
+/// know where either one is, and a path could not name a peer or synthetic
+/// container anyway. Same contract `Locus` states for itself -- compare for
+/// equality, never interpret.
+pub fn hPlaceId(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.activeCtx().placeId());
+}
+
+pub fn hPlaceRoot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    var buf: [4096]u8 = undefined;
+    const dir = placeDirectory(ctx, &buf);
+    if (dir.len == 0) {
+        results[0] = 0;
+        return;
+    }
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), dir) catch 0);
+}
+
+/// The dispatching place's local directory — `shared.placeDirectory`, which
+/// lives in the shared leaf precisely because `hPlaceRoot`, `hPlaceHas` AND
+/// `wasm_host/fs.zig`'s `.place` confinement must not be able to disagree
+/// about which directory a guest is asking about versus being held inside.
+const placeDirectory = shared.placeDirectory;
+
+/// `placeHas(rel) -> kind`: what `<the dispatching place>/<rel>` IS — 0 absent,
+/// 1 file, 2 dir, 3 other, the same `file.Kind` ordinals `wl_fs_exists`
+/// answers in (`doc/place.md` §4.2's "marker/ancestor query against a place").
+///
+/// **No permission, and the reason is containment rather than convenience.**
+/// Three things have to hold for an ungated door, and each is structural here:
+///
+///  1. **It reveals strictly less than `wl_place_root`, right beside it.**
+///     That door hands the guest the place's absolute directory outright. A
+///     guest holding a directory and a guest able to ask "is `.git` in it"
+///     are not different tiers of authority; the second is a projection of
+///     the first onto a single bit.
+///  2. **It reveals strictly less than `proc`.** Any holder of `proc` runs a
+///     child AT this place already (`shared.resolveSpawnAtCtx`, above) and can
+///     `test -e` anything it likes there. A door that answers one `statx`
+///     cannot be the line where that becomes reachable.
+///  3. **It cannot escape the place.** `placeKind` resolves through
+///     `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an
+///     absolute `rel`, a `..` component, and a symlink planted inside the
+///     place all fail IN THE KERNEL, atomically. There is no lexical check to
+///     get wrong and no TOCTOU window to race.
+///
+/// So this is a question about the place a dispatch is already in, not
+/// filesystem access, and it is the primitive that let `git` and `project`
+/// hand back `fs_read` — a grant that reached the WHOLE filesystem so two
+/// plugins could probe for `.git` inside their own project.
+pub fn hPlaceHas(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(file.Kind.none);
+    const rel = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(rel);
+    const ctx = p.activeCtx();
+    var buf: [4096]u8 = undefined;
+    results[0] = @intFromEnum(placeKind(p.gpa, placeDirectory(ctx, &buf), rel));
+}
+
+/// What `<dir>/<rel>` is, resolved CONFINED beneath `dir`. The semantic body
+/// behind `hPlaceHas`, split out so the escape gates can be stated against it
+/// directly (no wasm instance, no live place).
+///
+/// Every refusal answers `.none` — absent. That is deliberate for a door with
+/// no permission behind it: `wl_fs_exists` distinguishes "refused" from
+/// "absent" so a GRANTED plugin gets a loud message instead of a confusing
+/// miss, but here there is no grant to diagnose, and a distinguishable refusal
+/// would itself be a signal ("something is there, you may not see it"). Absent
+/// is the answer that reveals nothing.
+///
+/// The machinery carve-out (`doc/place.md` §4.1) applies unconditionally, as
+/// it does at every fs door: a place CAN be an ancestor of the editor's own
+/// state — a version-controlled home directory is the case the design names —
+/// and no door, gated or not, may confirm that the module cache or a keystore
+/// is there.
+pub fn placeKind(gpa: Allocator, dir: []const u8, rel: []const u8) file.Kind {
+    // No local directory (a peer place, or a container that went away), or
+    // nothing named inside it: nothing to answer about.
+    if (dir.len == 0 or rel.len == 0) return .none;
+    const joined = std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, rel }) catch return .none;
+    defer gpa.free(joined);
+    if (machinery.denies(joined)) return .none;
+
+    const rootz = gpa.dupeZ(u8, dir) catch return .none;
+    defer gpa.free(rootz);
+    var rfs = rooted_fs.RootedFs.open(rootz.ptr) catch return .none;
+    defer rfs.close();
+    const relz = gpa.dupeZ(u8, rel) catch return .none;
+    defer gpa.free(relz);
+    return switch (rfs.kind(relz.ptr) catch return .none) {
+        .file => .file,
+        .dir => .dir,
+        .other => .other,
+    };
 }
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and insert its
@@ -155,6 +386,21 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const target = doc.exportAnchor(gpa, editor.cursorOffset(), .before) catch return;
     var target_owned = true;
     defer if (target_owned) gpa.free(target.agent);
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |e| e.block.deinit(gpa);
     const job = gpa.create(ShellJob) catch {
         return;
     };
@@ -168,7 +414,11 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .name = name,
         .target = target,
         .cmd = cmd,
+        .cwd = cwd,
+        .environ = spawn_env,
     };
+    cwd_owned = false;
+    env_owned = false;
     cmd_owned = false;
     target_owned = false;
     job_owned = false;
@@ -182,7 +432,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -205,6 +455,8 @@ fn shellFree(ctx: ?*anyopaque) void {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.name);
+    if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.target.agent);
     gpa.free(job.cmd);
     gpa.destroy(job);
@@ -230,6 +482,32 @@ const ProcJob = struct {
     token: u32, // the guest's opaque fill tag
     cmd: []u8,
     append: bool = false, // append the output (a console) vs replace (a view)
+    /// Where the child runs, captured at spawn. Null = the `.process` place.
+    /// Owned; freed with the job.
+    cwd: ?[]u8 = null,
+    /// A spool's input payload — the bytes the child reads from `{}`. Null for
+    /// the plain fill doors, which hand the child nothing. Owned.
+    input: ?[]u8 = null,
+    /// A spool's host-composed temp path. The guest never sees it, cannot name
+    /// it, and cannot keep it: `spoolWork` deletes it before returning, on
+    /// every path. Null for the plain fill doors. Owned.
+    tmp: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
+};
+
+/// Which fill door a job came through. The three share one spawn body because
+/// they differ only in what happens to the output (replace/append) and whether
+/// the child is handed an input file.
+const Fill = enum {
+    /// `wl_proc_to_buffer`: stdout replaces the entry.
+    replace,
+    /// `wl_proc_append_buffer`: stdout is appended (a console log).
+    append,
+    /// `wl_proc_spool`: an input payload is written to a host-composed temp,
+    /// substituted for `{}`, and deleted afterwards; stdout replaces the entry.
+    spool,
 };
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
@@ -238,19 +516,39 @@ const ProcJob = struct {
 /// The name is resolved HERE, once; `args[4]` is the fill token echoed back.
 pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, false);
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .replace);
 }
 
 /// Like `wl_proc_to_buffer` but APPENDS the output (a console/comint log) rather
 /// than replacing the buffer.
 pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, true);
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .append);
 }
 
-/// The shared spawn for both fill doors: gate, resolve the target ONCE, and
-/// hand the job a ref plus the guest's token.
-fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bool) void {
+/// `wl_proc_spool(cmd, input, name, token)`: `wl_proc_to_buffer` plus an input
+/// payload. The host writes `input` to a temp file IT names, substitutes that
+/// path for `{}` in `cmd`, runs the command in the dispatching entry's place,
+/// fills `<name>` with stdout, and deletes the temp — whether the command
+/// succeeded or not.
+///
+/// This is the door a plugin uses when a subprocess needs its input as a real
+/// file (`git apply {}`, `git commit -F {}`, `llm < {}`). Perms are `proc +
+/// timer`, the same set the sibling fill doors take, and deliberately NOT
+/// `fs_write`: the guest supplies bytes and a command, never a path, so it
+/// gains no ability to write anywhere it chooses (`doc/place.md` §4.2).
+pub fn hProcSpool(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .spool);
+}
+
+/// A monotonic tag so two spools in flight never share a path; the pid keeps
+/// two editors on one machine apart.
+var spool_counter: usize = 0;
+
+/// The shared spawn for all three fill doors: gate, resolve the target ONCE,
+/// and hand the job a ref plus the guest's token.
+fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill) void {
     if (!requirePerm(p, caller, .proc)) return;
     if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
@@ -258,10 +556,51 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     var cmd_owned = true;
     defer if (cmd_owned) gpa.free(cmd);
-    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    // A spool's input payload sits between the command and the buffer name, so
+    // the shared tail — `(name, name_len, token)` — starts one pair later.
+    const input: ?[]u8 = if (kind == .spool)
+        (caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return)
+    else
+        null;
+    var input_owned = true;
+    defer if (input_owned) if (input) |b| gpa.free(b);
+    const tail: usize = if (kind == .spool) 4 else 2;
+    const name = caller.readMemory(gpa, @intCast(args[tail]), @intCast(args[tail + 1])) catch return;
     defer gpa.free(name);
+    // The guest names the COMMAND; the host names the FILE. Composed here, on
+    // the frame thread, so the path exists nowhere the guest can reach it.
+    const tmp: ?[]u8 = if (kind == .spool) blk: {
+        spool_counter += 1;
+        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-spool-{d}-{d}", .{ std.os.linux.getpid(), spool_counter }) catch return;
+    } else null;
+    var tmp_owned = true;
+    defer if (tmp_owned) if (tmp) |b| gpa.free(b);
     const buffers = p.activeCtx().buffers;
+    // ONE reading of "where", used for two things that must not disagree: the
+    // directory the child runs in, and the place the output entry is ABOUT.
+    // Read before the target exists, so it is the DISPATCHING entry's place and
+    // not the tool entry's own inherited copy.
+    const spawn_place = p.activeCtx().place();
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |e| e.block.deinit(gpa);
     const target = ensureFillTarget(gpa, buffers, name) orelse return;
+    // Re-target a REUSED tool entry: running grep again from another project
+    // makes `*grep*` about the new place from this moment on. A fresh entry
+    // already inherited the same value; saying it explicitly covers both.
+    buffers.setPlace(target.id, spawn_place);
     const plugin = gpa.dupe(u8, p.name) catch return;
     var plugin_owned = true;
     defer if (plugin_owned) gpa.free(plugin);
@@ -272,12 +611,20 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
         .styler = p,
         .plugin = plugin,
         .entry = target,
-        .token = @bitCast(args[4]),
+        .token = @bitCast(args[tail + 2]),
         .cmd = cmd,
-        .append = append,
+        .append = kind == .append,
+        .cwd = cwd,
+        .environ = spawn_env,
+        .input = input,
+        .tmp = tmp,
     };
     cmd_owned = false;
     plugin_owned = false;
+    cwd_owned = false;
+    env_owned = false;
+    input_owned = false;
+    tmp_owned = false;
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
 }
 
@@ -295,7 +642,29 @@ fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.R
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ }) catch return gpa.alloc(u8, 0);
+    if (job.tmp) |tmp| return spoolWork(gpa, job, tmp);
+    return runCapture(gpa, job.cmd, job.cwd, job.environ);
+}
+
+/// A spool's off-thread body: land the input in the host-composed temp, hand
+/// the child its path through `{}`, and DELETE IT ON EVERY WAY OUT — the write
+/// failing, the substitution failing, the spawn failing, the command exiting
+/// non-zero, and the ordinary success. The `defer` is the whole point: there is
+/// no early return that can leave the file behind, so a failed effect never
+/// litters and never leaves stale bytes for the next run to pick up.
+fn spoolWork(gpa: Allocator, job: *ProcJob, tmp: []const u8) anyerror![]u8 {
+    defer file.deleteFile(gpa, tmp);
+    file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return gpa.alloc(u8, 0);
+    const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", tmp) catch return gpa.alloc(u8, 0);
+    defer gpa.free(cmd);
+    return runCapture(gpa, cmd, job.cwd, job.environ);
+}
+
+/// Run `cmd` through the shell in `cwd` and return its stdout, trimmed of a
+/// trailing newline. A spawn failure yields empty rather than erroring — the
+/// fill lands as "the command said nothing", which is what a missing tool is.
+fn runCapture(gpa: Allocator, cmd: []const u8, cwd: ?[]const u8, environ: ?std.process.Environ) anyerror![]u8 {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = environ orelse shared.g_environ, .cwd = cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -343,6 +712,12 @@ fn procFree(ctx: ?*anyopaque) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.plugin);
+    if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
+    if (job.input) |b| gpa.free(b);
+    // The FILE is `spoolWork`'s to remove; this frees only the path string.
+    // A job torn down before it ever ran never created the file at all.
+    if (job.tmp) |b| gpa.free(b);
     gpa.free(job.cmd);
     gpa.destroy(job);
 }
@@ -361,6 +736,13 @@ const FilterJob = struct {
     cmd: []u8, // contains "{}" → the temp path
     content: []u8, // the captured input (owned)
     tmp: []u8,
+    /// Where the filter command runs. A formatter finds its config by walking
+    /// up from its working directory, so a filter run in the wrong project is
+    /// formatted by the wrong rules. Null = the `.process` place. Owned.
+    cwd: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
 };
 
 var filter_counter: usize = 0;
@@ -404,6 +786,21 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const tmp = std.fmt.allocPrint(gpa, "/tmp/weft-filter-{d}-{d}", .{ filter_counter, s }) catch return;
     var tmp_owned = true;
     defer if (tmp_owned) gpa.free(tmp);
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
     const job = gpa.create(FilterJob) catch return;
     var job_owned = true;
     defer if (job_owned) gpa.destroy(job);
@@ -418,7 +815,11 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         .cmd = cmd,
         .content = content,
         .tmp = tmp,
+        .cwd = cwd,
+        .environ = spawn_env,
     };
+    cwd_owned = false;
+    env_owned = false;
     cmd_owned = false;
     content_owned = false;
     start_owned = false;
@@ -436,7 +837,7 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
     const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
     defer gpa.free(cmd);
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ }) catch {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch {
         file.deleteFile(gpa, job.tmp);
         return gpa.dupe(u8, job.content);
     };
@@ -463,10 +864,100 @@ fn filterFree(ctx: ?*anyopaque) void {
     const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.plugin);
+    if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.start.agent);
     gpa.free(job.end.agent);
     gpa.free(job.cmd);
     gpa.free(job.content);
     gpa.free(job.tmp);
     gpa.destroy(job);
+}
+
+// ── tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+/// `link_path` → `target`, best effort. False if the platform refused (nothing
+/// here depends on symlinks being creatable).
+fn makeSymlink(target: [*:0]const u8, link_path: [*:0]const u8) bool {
+    return std.os.linux.errno(std.os.linux.symlinkat(target, std.os.linux.AT.FDCWD, link_path)) == .SUCCESS;
+}
+
+test "placeKind: a place-relative probe cannot escape the place" {
+    const gpa = t.allocator;
+
+    // <tmp>/place        — the place's directory
+    // <tmp>/secret.txt   — outside it
+    // <tmp>/place/leak   — a symlink inside the place, pointing out of it
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const place = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/place", .{tmp.sub_path});
+    defer gpa.free(place);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/ok.txt", .{place});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    try file.writeBytesMakingDirs(gpa, place, inside, "in place");
+    try file.writeBytes(gpa, outside, "out of place");
+    const marker = try std.fmt.allocPrint(gpa, "{s}/.git", .{place});
+    defer gpa.free(marker);
+    try file.writeBytes(gpa, marker, "gitdir: elsewhere\n"); // a worktree's `.git` is a FILE
+
+    // The shape both migrated plugins actually ask: a marker INSIDE the place.
+    // Any kind counts, which is why a worktree/submodule `.git` file answers.
+    try t.expectEqual(file.Kind.file, placeKind(gpa, place, ".git"));
+    try t.expectEqual(file.Kind.file, placeKind(gpa, place, "ok.txt"));
+    try t.expectEqual(file.Kind.dir, placeKind(gpa, place, "."));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "nope.txt"));
+    // git's rebase probe: a path with a separator in it still resolves, and
+    // still resolves only beneath the place.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ".git/rebase-merge"));
+
+    // ── The three escapes, each refused IN THE KERNEL (RESOLVE_BENEATH /
+    // RESOLVE_NO_SYMLINKS), and each answering `.none` rather than describing
+    // something the place does not contain. ──
+    // 1. An absolute `rel` is not a path out: it is EXDEV under BENEATH.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "/etc"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "/etc/hostname"));
+    // 2. Traversal, at the front and buried mid-path.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ".."));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "../secret.txt"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "../../etc"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "sub/../../secret.txt"));
+    // 3. A symlink planted INSIDE the place, pointing out of it — the hole a
+    // realpath-then-compare check leaves open, and the one `fsExists` was
+    // recently fixed for. The target exists; the answer is still `.none`.
+    const leak = try std.fmt.allocPrintSentinel(gpa, "{s}/leak", .{place}, 0);
+    defer gpa.free(leak);
+    if (makeSymlink("../secret.txt", leak.ptr)) {
+        try t.expect(file.statKind(gpa, leak) == .file); // a plain stat FOLLOWS it out
+        try t.expectEqual(file.Kind.none, placeKind(gpa, place, "leak"));
+    }
+
+    // A place with no local directory answers about nothing at all — the
+    // `.elsewhere`/`.unavailable` arms of `placeDirectory` (and a `.process`
+    // place whose cwd was deleted) hand "" straight through.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, "", ".git"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ""));
+}
+
+test "placeKind: the machinery carve-out holds for an ungated door too" {
+    // A place CAN be an ancestor of the editor's own state (doc/place.md §4.1
+    // names the version-controlled home directory). `wl_place_has` carries no
+    // permission, so it is precisely the door a plugin with NO capabilities
+    // would reach for to confirm the module cache is there. It answers `.none`.
+    const gpa = t.allocator;
+    const cache = wasm.Engine.cacheDir(gpa) orelse return error.SkipZigTest;
+    defer gpa.free(cache);
+    if (file.statKind(gpa, cache) != .dir) return error.SkipZigTest;
+    const slash = std.mem.lastIndexOfScalar(u8, cache, '/') orelse return error.SkipZigTest;
+    if (slash == 0) return error.SkipZigTest;
+    const parent = cache[0..slash];
+    const leaf = cache[slash + 1 ..];
+    // Not vacuous: the parent is an ordinary directory, the cache really is
+    // inside it, and an unconfined stat says so.
+    try t.expectEqual(file.Kind.dir, file.statKind(gpa, cache));
+    try t.expect(machinery.denies(cache));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, parent, leaf));
 }

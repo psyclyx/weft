@@ -160,7 +160,7 @@ pub const Session = struct {
     /// Shut the socket so the reader's recv returns EOF, JOIN it, then close.
     pub fn deinit(s: *Session) void {
         shutdownConn(s);
-        while (!s.reader.residentExited()) std.atomic.spinLoopHint(); // join
+        while (!s.reader.residentExited()) std.Thread.yield() catch {}; // join
         _ = s.reader.poll();
         s.conn.close();
         s.out_buf.deinit(s.gpa);

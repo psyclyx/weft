@@ -1305,6 +1305,13 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
     const plugin = try loadPlugin(&engine, &env.ctx, "project", @embedFile("guest_project_wasm"), .{ .kv = &store });
     defer plugin.deinit();
 
+    // `project` declares NO filesystem capability. Its one use of `fs_read`
+    // was a VCS-marker climb duplicating the root the host already detects at
+    // open time; `project-root` reads that place instead (doc/place.md §4.2).
+    // Asserted here so a regrant of either fs capability is loud.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+
     // Seed the recent list host-side (namespaced to the plugin); the guest
     // reads it back through kv and returns it as a string result.
     try store.put(gpa, "project", "recent", "a.zig\nb.zig");
@@ -1465,7 +1472,11 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, src);
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
+    var rt: sx.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    const syn = try sx.Syntax.create(gpa, &rt, rt.forPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {
@@ -1554,7 +1565,11 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     // Attach a real zig grammar via the buffer's frontend slot; a resolver hands
     // it to the membrane (the host owns that slot).
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
+    var rt: sx.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    const syn = try sx.Syntax.create(gpa, &rt, rt.forPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {
@@ -1594,7 +1609,11 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
     try ed.insertText(gpa, src);
 
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
+    var rt: sx.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    const syn = try sx.Syntax.create(gpa, &rt, rt.forPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {
@@ -1716,6 +1735,17 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    // git holds NO FILESYSTEM AUTHORITY AT ALL — the payoff doc/place.md §4.2
+    // predicted, landed. `fs_write` went first: the patch, each draft's
+    // message, and the rebase plan all go out through `wl_proc_spool`, which
+    // names and removes their temps host-side. `fs_read` followed it: finding
+    // the repository root is now reading the place the dispatch is already in
+    // (`wl_place_root`), and detecting an in-progress rebase is two
+    // `wl_place_has` probes that cannot leave that place. Each grant went away
+    // because its REASON was removed, so re-introducing either — for any
+    // reason — must be a loud, deliberate change, not a quiet regrant.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
 
     // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
     // keymap state, but each terminal action is a real command).
@@ -2561,6 +2591,269 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
 }
 
+// ── doc/place.md §4.1: an ABSENT limit means the PLACE, not the machine ──
+// The last item of the place arc. A plugin that declares `fs_read` and is
+// granted it, with nothing in config narrowing it, used to reach every
+// absolute path on the machine. It now reaches the place its dispatch is in
+// — here the degenerate `.process` place, i.e. the repo the suite runs in —
+// and the reach it used to have is still available, spelled out.
+
+test "wasm plugin: a declared-but-ungranted fs capability is confined to the DISPATCHING PLACE (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const grants_mod = @import("../grants.zig");
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    // No `weft.grant` for this plugin anywhere — the whole point. `describe()`
+    // asks for fs_read + fs_write; `mintGrantHandles` answers with the
+    // confined-by-default baseline.
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+    try t.expectEqual(grants_mod.Limit.place, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(grants_mod.Limit.place, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // This Env has no pin and no bound entry, so the dispatching place is the
+    // degenerate one: the process directory. That is an ORDINARY place, not a
+    // bypass — the confinement below is the same code path a container place
+    // takes (see e2e/project_test.zig for the two-project half of this gate).
+    var cwd_buf: [4096]u8 = undefined;
+    const here = file.processDirectory(&cwd_buf).?;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/in-place.txt", .{tmp.sub_path});
+    defer gpa.free(rel);
+    const abs = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ here, rel });
+    defer gpa.free(abs);
+
+    // INSIDE the place, spelled relatively — the ordinary case, and
+    // byte-identical to what a cwd-relative path always meant.
+    try t.expectEqual(
+        command.Value{ .integer = 1 },
+        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
+    );
+    const got = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = rel }});
+    try t.expectEqualStrings("in place", got.string);
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.file) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = rel }}),
+    );
+
+    // INSIDE the place, spelled ABSOLUTELY — the same file, still allowed. A
+    // place confinement is about WHERE, not about how the guest spelled it.
+    const got_abs = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = abs }});
+    try t.expectEqualStrings("in place", got_abs.string);
+
+    // OUTSIDE the place: refused. Not a `<absent>` the guest could keep
+    // running past — a trap, the same discipline `.fs_root` already has.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    // And a climb out of it, relative or absolute, is refused too.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "../etc/hostname" }}));
+    const climb = try std.fmt.allocPrint(gpa, "{s}/../../etc/hostname", .{here});
+    defer gpa.free(climb);
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = climb }}));
+
+    // THE ESCAPE HATCH, and it is a sentence someone had to write:
+    // `weft.grant("fs_limit", "fs_read", { root: "/" })`. Applied to the SAME
+    // row the plugin already possesses, exactly as a live re-grant would be.
+    table.rows.items[plugin.grant_handles[wasm_host.perm_fs_read].idx].limit =
+        grants_mod.limitForRoot("fs_read", grants_mod.unconfined_root);
+    try t.expectEqual(grants_mod.Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+    );
+    const outside = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }});
+    try t.expect(outside.string.len > 0 or std.mem.eql(u8, outside.string, "<absent>"));
+    // fs_WRITE was not widened, so it is still confined — the two capabilities
+    // are separate rows and a widening of one is not a widening of both.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+}
+
+// ── doc/place.md §4.1: bucket 1 is carved out UNCONDITIONALLY ────────────
+// The editor's own state on disk — module cache, plugin kv store, identity
+// and known-peers keystores — is reachable by no grant, however broad. The
+// gate below holds the BROADEST grant the system can mint — which since the
+// confined-by-default change is the WRITTEN-DOWN one, `weft.grant(who, cap,
+// { root: "/" })`, minted here the way `reconcileGrants` mints it — and is
+// refused each location BY NAME. Every path is asked of the module that OWNS
+// the file, not re-derived here: if `core/machinery.zig`'s list ever drifts
+// from where a store actually lives, this test is what notices.
+
+/// The config-authored unconfined grant, minted the way a real config apply
+/// mints it: through `grants.limitForRoot(cap, "/")`, and BEFORE the plugin
+/// loads, so `mintGrantHandles`'s composition rule adopts it instead of the
+/// confined-by-default `.place` baseline. This is the escape hatch §4.1
+/// deliberately keeps — reachable, but only by writing it down.
+fn grantUnconfined(table: *@import("../grants.zig").HandleTable, principal: []const u8) !void {
+    const grants_mod = @import("../grants.zig");
+    for ([_][]const u8{ "fs_read", "fs_write" }) |cap| {
+        _ = try table.grant(.{ .capability = cap, .limit = grants_mod.limitForRoot(cap, grants_mod.unconfined_root) }, principal, null);
+    }
+}
+
+test "wasm plugin: no grant, however broad, reaches the editor's own machinery (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+    try grantUnconfined(&table, "fs_limit");
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+
+    // The grant is UNCONFINED — `.none`, which `{ root: "/" }` normalizes to.
+    // Proven, not assumed: without this the refusals below would be
+    // indistinguishable from a narrow grant doing its ordinary job (and, since
+    // the default is now `.place`, indistinguishable from the baseline too).
+    try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // ...and it really does reach ordinary content — a round trip through
+    // the write and read doors, plus a probe by ABSOLUTE path, which is the
+    // reach an unconfined grant is supposed to have. The carve-out is a
+    // carve-out, not a general denial.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const content_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/user-content.txt", .{tmp.sub_path});
+    defer gpa.free(content_path);
+    try t.expectEqual(
+        command.Value{ .integer = 1 },
+        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
+    );
+    const ord = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = content_path }});
+    try t.expectEqualStrings("ordinary", ord.string);
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+    );
+    // A mundane miss is a 0, NOT a trap — the answer every refusal below has
+    // to stay distinguishable from.
+    const absent = try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
+    try t.expectEqual(command.Value{ .integer = @intFromEnum(file.Kind.none) }, absent);
+
+    // 1. The wasm module cache (`wasm.Engine.cacheDir`). Read, probe, and
+    //    WRITE all refuse: a plugin that could drop a `.cwasm` here would be
+    //    choosing the code every other plugin runs next launch.
+    {
+        const dir = wasm.Engine.cacheDir(gpa).?;
+        defer gpa.free(dir);
+        const inside = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{dir});
+        defer gpa.free(inside);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = dir }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = inside }, .{ .string = "x" } }));
+        // The `..` spelling doesn't walk in either — the comparison is on the
+        // normalized path, not the string the guest typed.
+        const traversal = try std.fmt.allocPrint(gpa, "{s}/sub/../deadbeef.cwasm", .{dir});
+        defer gpa.free(traversal);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = traversal }}));
+    }
+
+    // 2. The plugin kv store (`kv_file.stateDir`) — one plugin's private
+    //    state, which is every plugin's if this door opens.
+    {
+        const dir = @import("../kv_file.zig").stateDir(gpa).?;
+        defer gpa.free(dir);
+        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").store_file });
+        defer gpa.free(blob);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = blob }, .{ .string = "x" } }));
+    }
+
+    // 3/4. The two keystores. READ and PROBE only, deliberately: unlike the
+    //      two above (build-baked under the project cache in a test build —
+    //      see build.zig's `addHostTestDirs`), these resolve to the
+    //      DEVELOPER'S REAL `$XDG_CONFIG_HOME/weft/…`, and a test that
+    //      exercised the write door here would destroy a real identity key
+    //      the day the carve-out regressed. Reading it is the whole attack
+    //      anyway: the key is the secret, and the peer list is the trust.
+    const machinery = @import("../machinery.zig");
+    var pbuf: [512]u8 = undefined;
+    if (@import("../identity.zig").configPath(&pbuf, machinery.Posix{})) |p| {
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+    }
+    var kbuf: [512]u8 = undefined;
+    if (@import("../known_peers.zig").configPath(&kbuf, machinery.Posix{})) |p| {
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+    }
+}
+
+test "wasm plugin: a symlink cannot walk into the machinery a plugin may not name" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+    // Same written-down unconfined grant as the gate above: the symlink is
+    // what must be refused, not the absence of breadth.
+    try grantUnconfined(&table, "fs_limit");
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+
+    // A link the guest could plausibly arrange (via `proc`, or by a file it
+    // was handed) pointing straight at the module cache. Lexically it says
+    // nothing about the cache at all; the kernel form is what refuses it.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    // The cache dir must EXIST for a symlink to it to resolve — this test
+    // build has already compiled quickjs.wasm through it, but create it
+    // defensively so the gate never passes for the wrong reason.
+    {
+        const marker = try std.fmt.allocPrint(gpa, "{s}/.gate-marker", .{cache});
+        defer gpa.free(marker);
+        file.writeBytesMakingDirs(gpa, cache, marker, "") catch {};
+        defer file.deleteFile(gpa, marker);
+    }
+
+    const targetz = try gpa.dupeZ(u8, cache);
+    defer gpa.free(targetz);
+    const linkz = try std.fmt.allocPrintSentinel(gpa, "{s}/looks-innocent", .{dir}, 0);
+    defer gpa.free(linkz);
+    if (std.os.linux.errno(std.os.linux.symlinkat(targetz.ptr, std.os.linux.AT.FDCWD, linkz.ptr)) != .SUCCESS)
+        return error.SkipZigTest;
+
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = linkz }}));
+    const through = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{linkz});
+    defer gpa.free(through);
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = through }, .{ .string = "x" } }));
+
+    // The same tmp directory, NOT through the link, is ordinary content the
+    // unconfined grant still reaches — the symlink is what was refused, not
+    // the neighbourhood.
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = dir }}),
+    );
+}
+
 test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinct, correct message" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -2627,6 +2920,28 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
         const msg = caller.trap_msg.?;
         try t.expect(std.mem.indexOf(u8, msg, "elsewhere/secret.txt") != null);
         try t.expect(std.mem.indexOf(u8, msg, "vault") != null);
+    }
+
+    // machinery: NAMES the location and says no grant reaches it — the one
+    // refusal that must not send an author off to add a capability, because
+    // there isn't one that would help (doc/place.md §4.1).
+    {
+        const cache = wasm.Engine.cacheDir(gpa).?;
+        defer gpa.free(cache);
+        const inside = try std.fmt.allocPrint(gpa, "{s}/x.cwasm", .{cache});
+        defer gpa.free(inside);
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapMachinery(plugin, &caller, .fs_read, inside);
+        const msg = caller.trap_msg.?;
+        try t.expect(std.mem.indexOf(u8, msg, "wasm module cache") != null);
+        try t.expect(std.mem.indexOf(u8, msg, "no grant reaches") != null);
+        try t.expect(std.mem.indexOf(u8, msg, "granted root") == null); // distinct from out_of_limit
+        // The path is last and `Caller.trap`'s buffer is 160 bytes, so an
+        // absolute machinery path may be cut off — whatever DID fit must be a
+        // prefix of the real one, and the diagnosis above must be intact.
+        const at = std.mem.indexOf(u8, msg, "(path '").? + "(path '".len;
+        try t.expect(std.mem.startsWith(u8, inside, msg[at..]));
+        try t.expect(msg.len > at); // some of it survived
     }
 }
 
@@ -2790,6 +3105,87 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
     try t.expectEqual(@as(usize, 0), env.buffers.active().textEditor().?.text().byteLen());
 }
 
+// ── The spool: a real file for the child, no fs perm for the guest ─────────
+// doc/place.md §4.2. `wl_proc_spool` exists so "a subprocess needs a real
+// path" stops being a reason to grant fs_write. Two things must hold for that
+// trade to be honest: the child really does read the guest's bytes off disk,
+// and the guest cannot keep — or even usefully learn — where they were.
+
+/// The path the spool guest's command reported (`at=<path>`, last field).
+fn spooledPath(out: []const u8) ?[]const u8 {
+    const i = std.mem.indexOf(u8, out, "at=") orelse return null;
+    return out[i + 3 ..];
+}
+
+test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs perm at all" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "spool", @embedFile("guest_spool_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // The trade, stated as a declaration: proc+timer, and NO filesystem
+    // authority whatsoever. Everything below is done by a guest that could not
+    // open a file if it tried.
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+
+    _ = try command.run(&env.commands, &env.ctx, "spool-ok", &.{});
+    drainJobs(&loop);
+    const ok_buf = namedBuffer(&env.buffers, "*spool*") orelse return error.TestExpectedEqual;
+    const ok_out = try ok_buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(ok_out);
+
+    // The child read the spooled bytes back off a real file.
+    try t.expect(std.mem.indexOf(u8, ok_out, "in=hello spool") != null);
+    // At a path the HOST chose. The guest passed a command and bytes — never a
+    // path, and never a directory to put one in.
+    const ok_at = spooledPath(ok_out) orelse return error.TestExpectedEqual;
+    try t.expect(std.mem.startsWith(u8, ok_at, "/tmp/weft-spool-"));
+    // And it is gone. The guest deliberately leaked the path through its own
+    // command's stdout — the strongest thing a guest can do to hold on to it —
+    // and the name it now has refers to nothing.
+    try t.expectEqual(file.Kind.none, file.statKind(gpa, ok_at));
+
+    // Same on the FAILURE path, which is where the old in-plugin temps used to
+    // survive: git's `rm -f` rode on the command it was appended to, so an
+    // apply or commit that died took the cleanup with it.
+    _ = try command.run(&env.commands, &env.ctx, "spool-fail", &.{});
+    drainJobs(&loop);
+    const fail_buf = namedBuffer(&env.buffers, "*spool-fail*") orelse return error.TestExpectedEqual;
+    const fail_out = try fail_buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(fail_out);
+    try t.expect(std.mem.indexOf(u8, fail_out, "in=goodbye spool") != null);
+    const fail_at = spooledPath(fail_out) orelse return error.TestExpectedEqual;
+    try t.expect(std.mem.startsWith(u8, fail_at, "/tmp/weft-spool-"));
+    try t.expectEqual(file.Kind.none, file.statKind(gpa, fail_at));
+
+    // Two spools never share a path, so one in flight cannot eat another's
+    // input — the property git's per-draft message files used to hand-roll.
+    try t.expect(!std.mem.eql(u8, ok_at, fail_at));
+}
+
+test "membrane: wl_proc_spool returns nothing to the guest" {
+    // The other half of "a guest cannot name the temp": the door has no result
+    // and no out-pointer, so there is no channel on which the host could hand
+    // the path back. Read off the contract table rather than asserted about the
+    // handler, because the table is what the guest's extern is checked against.
+    const spool = for (contract.imports) |e| {
+        if (std.mem.eql(u8, e.name, "wl_proc_spool")) break e;
+    } else return error.TestExpectedEqual;
+    try t.expectEqual(@as(usize, 0), spool.results.len);
+    try t.expectEqual(@as(usize, 7), spool.params.len); // (cmd, input, name) pairs + token
+    try t.expectEqual(contract.Perm.proc_timer, spool.perm orelse return error.TestExpectedEqual);
+}
+
 // ── A tool's instances are addressed by buffer, never by a module global ───
 // doc/contextual-workspace-architecture.md §2.6: a second use of a stateful
 // tool must not evict the first. Without a pool no dial can succeed, so these
@@ -2832,6 +3228,71 @@ test "wasm plugin: a second http-get takes its own response buffer" {
 
     try t.expect(env.buffers.findByName("*http*") != null);
     try t.expect(env.buffers.findByName("*http:2*") != null);
+}
+
+// ── The instance table has no ceiling, and it does not move its instances ──
+// `weft.Instances` used to be `slots: [cap]?Slot` — a fixed row of VALUES, so
+// eight was the answer to "how many interpreters may I run", and nobody ever
+// decided eight. It is a list of individually allocated slots now (the shape
+// `core/Buffers.zig` settled on, and its reason), which is worth having only if
+// BOTH halves hold: past the old ceiling nothing is refused, and a `*Slot`
+// handed out before the table grew still names its own instance afterwards.
+//
+// The second half is what needs a process to prove. Each REPL echoes a tag only
+// IT knows, and the slot's value is the host session handle the send routes
+// through — so a send to the first instance, made after eleven more were
+// allocated, can only come back tagged `r1` if that first slot survived the
+// growth intact.
+
+test "wasm plugin: twelve REPLs run at once, and the first one still answers for itself" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "repl", @embedFile("guest_repl_wasm"), .{ .loop = &loop, .pool = env.pool });
+    defer plugin.deinit(); // kills every child + JOINS the readers
+
+    // Twelve is past the old cap of eight, and each interpreter answers with a
+    // tag only it was started with.
+    const count = 12;
+    for (1..count + 1) |n| {
+        var cmd_buf: [96]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "while read l; do echo \"r{d} $l\"; done", .{n});
+        _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = cmd }});
+    }
+
+    // Every one of them is live at once, in its own buffer.
+    for (1..count + 1) |n| {
+        var name_buf: [32]u8 = undefined;
+        const name = if (n == 1) "*repl*" else try std.fmt.bufPrint(&name_buf, "*repl:{d}*", .{n});
+        try t.expect(env.buffers.findByName(name) != null);
+    }
+
+    // Address the FIRST instance — the one whose slot was allocated before the
+    // other eleven — by focusing its buffer, which is how a command names an
+    // instance at all.
+    const first = env.buffers.findByName("*repl*") orelse return error.TestExpectedEqual;
+    try env.buffers.switchTo(gpa, first, &env.head, &env.keymap);
+    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+
+    const buf = env.buffers.get(first) orelse return error.TestExpectedEqual;
+    var rounds: usize = 0;
+    while (rounds < 5_000_000 and buf.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
+        _ = wasm_host.drainReplSessions(plugin);
+        std.Thread.yield() catch {};
+    }
+    const answer = try buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(answer);
+    // `r1` and nothing else: a slot that had moved under the growth would route
+    // this send through a neighbour's session handle and answer with its tag.
+    try t.expect(std.mem.indexOf(u8, answer, "r1 ping") != null);
+    try t.expect(std.mem.indexOf(u8, answer, "r12 ") == null);
 }
 
 // ── A picker's accept names its target, never a row or a label ────────────
@@ -2975,4 +3436,35 @@ test "annotations: a decorator cannot take over a builtin feed, or outlive its e
     try env.buffers.close(gpa, target, &env.head, &env.keymap);
     try t.expect(plugin.annotationDoc(handle) == null);
     try t.expect(plugin.annotationLayer(handle) == null);
+}
+
+test "wasm plugin: direnv holds the env capability, and nothing wider" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "direnv", @embedFile("guest_direnv_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // Publishing an environment for a place governs every subprocess ANY
+    // plugin runs there, so it is its own capability rather than something
+    // `proc` implies. If this ever starts riding on `proc`, that escalation
+    // should be loud.
+    try t.expect(plugin.perms[wasm_host.perm_env]);
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+
+    // It reads no files and writes none: `direnv` itself does that, behind its
+    // own TOFU-shaped `allow`.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_net]);
+
+    for ([_][]const u8{ "direnv-status", "direnv-allow", "direnv-reload", "direnv-apply" }) |name| {
+        try t.expect(env.commands.find(name) != null);
+    }
 }

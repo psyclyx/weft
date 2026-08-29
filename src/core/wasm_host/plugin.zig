@@ -9,6 +9,8 @@ const std = @import("std");
 const Document = @import("../Document.zig");
 const wasm = @import("../wasm.zig");
 const grants_mod = @import("../grants.zig");
+const place_mod = @import("../place.zig");
+const status_feed = @import("../status_feed.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -21,6 +23,7 @@ pub const perm_fs_write = 1;
 pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
+pub const perm_env = 5;
 
 /// The membrane's one grant-gate vocabulary
 /// (doc/contextual-workspace-architecture.md §13.5), enum-closed so a
@@ -31,6 +34,12 @@ pub const Perm = enum(u32) {
     net = perm_net,
     proc = perm_proc,
     timer = perm_timer,
+    /// Publish an environment overlay for a place (`env.zig`). SEPARATE from
+    /// `proc` on purpose: spawning a child affects only your own children,
+    /// while setting PATH for a place owns every subprocess ANY plugin runs
+    /// there. That is an escalation `proc` does not imply, so it is its own
+    /// capability, config-visible in the approval diff.
+    env = perm_env,
 
     pub fn label(self: Perm) []const u8 {
         return switch (self) {
@@ -39,6 +48,7 @@ pub const Perm = enum(u32) {
             .net => "net",
             .proc => "proc",
             .timer => "timer",
+            .env => "env",
         };
     }
 };
@@ -65,11 +75,19 @@ pub const Perm = enum(u32) {
 /// NARROWS/REPLACES the describe() baseline for that pair, never sits
 /// alongside it as a second, unrestricted row a confused deputy could
 /// reach for instead. If not found (the ordinary case — no `weft.grant`
-/// named this plugin+capability), a fresh unrestricted (`.none`-limit) row
-/// is minted exactly as before this slice. A `grant` failure (OOM)
+/// named this plugin+capability), a fresh row is minted at
+/// `grants.defaultLimit` — CONFINED for the path-shaped capabilities, see
+/// below. A `grant` failure (OOM)
 /// degrades to `CapHandle.none` for that one perm — logged, not fatal: the
 /// plugin loses that capability rather than the whole load failing on an
 /// allocator hiccup unrelated to the wasm module itself.
+///
+/// **The baseline is CONFINED, not unconfined (doc/place.md §4.1)**: a fresh
+/// row's limit is `grants.defaultLimit(capability)`, which is `.place` for the
+/// two path-shaped capabilities. Declaring `fs_read` in `describe()` and being
+/// granted it therefore reaches the place the dispatch is in, not the whole
+/// machine; a plugin that genuinely needs more says so in config, where it is
+/// visible (`weft.grant(who, cap, { root: … })`, `"/"` for unconfined).
 pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
     inline for (0..WasmPlugin.perm_count) |i| {
         if (perms[i]) {
@@ -77,7 +95,10 @@ pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, p
             if (table.findLive(principal, p.label())) |existing| {
                 out[i] = existing;
             } else {
-                out[i] = table.grant(.{ .capability = p.label() }, principal, null) catch blk: {
+                out[i] = table.grant(.{
+                    .capability = p.label(),
+                    .limit = grants_mod.defaultLimit(p.label()),
+                }, principal, null) catch blk: {
                     std.log.warn("wasm_host: plugin '{s}' — minting a grant-table row for '{s}' failed (OOM); that capability is UNAVAILABLE", .{ principal, p.label() });
                     break :blk grants_mod.CapHandle.none;
                 };
@@ -137,15 +158,22 @@ pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
 
 /// `id`'s currently-possessed `Limit` for `perm` (W4 slice 2, task #8) — the
 /// read side `wasm_host/fs.zig`'s split bodies consult AFTER `hasPerm`
-/// already confirmed possession. Same duck-typed `anytype`/degrade story as
-/// `hasPerm`: no table wired (`id.grant_table == null`, every pre-W4
-/// construction and every test that doesn't opt in) → `.none` — the fs
-/// bodies' existing cwd-relative, unconfined behavior, byte-identical to
-/// before this slice (mintGrantHandles never sets anything but `.none` for a
-/// boolean-derived grant either, so a real System degrades the same way
-/// until something actually mints a limited row). Deliberately does NOT
-/// re-check possession itself — a caller that hasn't already gated on
-/// `hasPerm` shouldn't be asking "what's the limit" at all.
+/// already confirmed possession. Deliberately does NOT re-check possession
+/// itself — a caller that hasn't already gated on `hasPerm` shouldn't be
+/// asking "what's the limit" at all.
+///
+/// **The table-less degrade, stated plainly.** No table wired
+/// (`id.grant_table == null`) → `.none`, i.e. UNCONFINED — which is the one
+/// place doc/place.md §4.1's confined-by-default rule does not reach, and it
+/// is deliberate rather than an oversight. Such a principal is outside the
+/// grant machinery ENTIRELY: `hasPerm` a line up degrades to the same
+/// booleans, so there is no row to carry a limit and no revocation either.
+/// The only constructions in that state are bare unit-test fixtures and the
+/// two first-party `InProcClient`s (`app/window_head.zig`, e2e's TestHead),
+/// which self-grant under their own named identity. Every plugin a `System`
+/// loads — every `.wasm` and every `.js` — has a table, and gets
+/// `grants.defaultLimit`. Wiring a table is what turns the machinery on; it
+/// is not a widening switch.
 pub fn limitFor(id: anytype, comptime perm: Perm) grants_mod.Limit {
     if (id.grant_table) |table| {
         return table.limitFor(id.grant_handles[@intFromEnum(perm)]);
@@ -194,11 +222,43 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
 /// whose CURRENT limit isn't `.fs_root` — defensive, not reachable through
 /// `fs.zig`'s own call sites today.
 pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
+    // A `.place` limit names no root at grant time, so the message re-resolves
+    // the same directory the door just confined against — and says PLACE, not
+    // "granted root": the author's fix is a config grant or a different place,
+    // not hunting for a root string that was never written anywhere.
+    if (limitFor(p, perm) == .place) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir = placeRootFor(p, &buf);
+        if (dir.len == 0) {
+            caller.trap("plugin '{s}' denied capability '{s}': this place has no local directory, so path '{s}' is outside it", .{ p.name, perm.label(), path });
+        } else {
+            caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside this dispatch's place '{s}'", .{ p.name, perm.label(), path, dir });
+        }
+        return;
+    }
     const root: []const u8 = switch (limitFor(p, perm)) {
         .fs_root => |r| r,
-        .none, .doc_region, .graph_subtree => "?", // this trap is fs-path-shaped; neither reaches it (see this fn's doc)
+        .none, .place, .doc_region, .graph_subtree => "?", // this trap is fs-path-shaped; none reaches it (see this fn's doc)
     };
     caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside the granted root '{s}'", .{ p.name, perm.label(), path, root });
+}
+
+/// The membrane's FOURTH deny path (doc/place.md §4.1), and the only one that
+/// owes nothing to the grant table: `path` is the editor's OWN state — the
+/// module cache, the plugin kv store, or one of the two keystores
+/// (`core/machinery.zig`) — which no grant reaches, however broad. Fires from
+/// `fs.zig`'s `gate` BEFORE possession is even checked, so the message
+/// deliberately does not mention the grant: there is no grant that would have
+/// made this call work, and a plugin author sent to "declare the capability"
+/// would be sent somewhere with no answer at the end of it.
+///
+/// The path comes LAST, unlike `trapOutOfLimit`: `Caller.trap` formats into a
+/// fixed 160-byte buffer and truncates, and an absolute machinery path can eat
+/// all of it on its own. What the author needs — which store, and that no
+/// grant helps — is what survives the truncation this way.
+pub fn trapMachinery(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
+    const what = if (@import("../machinery.zig").locationOf(path)) |loc| loc.label() else "the editor's own state";
+    caller.trap("plugin '{s}' denied capability '{s}': {s} is editor machinery — no grant reaches it (path '{s}')", .{ p.name, perm.label(), what, path });
 }
 
 /// The membrane's ONE deny path: every perm-gated host import NOT YET split
@@ -279,6 +339,120 @@ pub fn setEnviron(env: std.process.Environ) void {
     g_environ = env;
 }
 
+// ── Where a spawn runs (doc/place.md) ────────────────────────────────
+//
+// The sibling of `g_environ` above, and deliberately next to it: WHERE a child
+// runs and WITH WHAT it runs are the same question asked twice, read
+// host-side at the same five spawn sites, so that no guest passes either and
+// no guest can pass the wrong one. The difference is that an environment has a
+// sensible process-wide default and a working directory does not — which is
+// why this one is resolved per dispatch rather than set once at startup.
+
+/// Where a spawn must run.
+pub const SpawnAt = union(enum) {
+    /// The editor's own directory. Passing no cwd is not a fallback here — it
+    /// is exactly what the `.process` place means.
+    inherit,
+    /// An OWNED absolute directory the child is chdir'd into. The job that
+    /// takes it frees it.
+    at: []u8,
+    /// The place cannot host a local child. The spawn does NOT happen, and the
+    /// reason is shown rather than swallowed — because the alternative, running
+    /// in the launch directory and reporting success, is the bug this whole
+    /// mechanism exists to make unrepresentable.
+    refused: []const u8,
+};
+
+/// Resolve the dispatching entry's place into a working directory.
+///
+/// Takes the `Context` rather than a plugin so BOTH planes share one
+/// resolution — the wasm handlers below and the resident JS plane, which
+/// reaches it through its own `activeCtx`. One contract, two transports, the
+/// same rule `hasPerm` follows a few declarations up.
+pub fn resolveSpawnAtCtx(ctx: *@import("../command.zig").Context, gpa: std.mem.Allocator) SpawnAt {
+    return switch (place_mod.realize(ctx.place(), ctx.realizer)) {
+        .process => .inherit,
+        .path => |abs| .{ .at = gpa.dupe(u8, abs) catch
+            return .{ .refused = "out of memory resolving its working directory" } },
+        .elsewhere => .{ .refused = "that place is not on this machine" },
+        .unavailable => .{ .refused = "that place is no longer available" },
+    };
+}
+
+/// `resolveSpawnAtCtx` for a wasm plugin's current dispatch.
+pub fn resolveSpawnAt(p: *WasmPlugin, gpa: std.mem.Allocator) SpawnAt {
+    return resolveSpawnAtCtx(p.activeCtx(), gpa);
+}
+
+/// The dispatching place's LOCAL DIRECTORY, or `""` when it has none.
+///
+/// ONE reading, shared by everything that needs the place as bytes:
+/// `wl_place_root` and `wl_place_has` (`wasm_host/proc.zig`), and the `.place`
+/// limit's confinement root (`wasm_host/fs.zig`'s `gate`). Two readings could
+/// disagree about which directory a guest is being confined to versus told
+/// about, and that disagreement is exactly the kind of hole this design exists
+/// to remove.
+///
+/// Borrowed: `.path` points into the authority that opened the container,
+/// `.process` into `buf`. Nothing may retain it past the call.
+pub fn placeDirectory(ctx: *@import("../command.zig").Context, buf: []u8) []const u8 {
+    return switch (place_mod.realize(ctx.place(), ctx.realizer)) {
+        // Only the degenerate place asks the OS where this process is; every
+        // other place is named by the authority that opened it.
+        .process => @import("../file.zig").processDirectory(buf) orelse "",
+        .path => |abs| abs,
+        .elsewhere, .unavailable => "",
+    };
+}
+
+/// `placeDirectory` for a PRINCIPAL — the root a `Limit.place` resolves to at
+/// the door (doc/place.md §4.1).
+///
+/// Duck-typed on `activeCtx()`, the same one-contract-two-transports rule
+/// `hasPerm` follows a few declarations up: `WasmPlugin`, `JsPlugin` and
+/// `InProcClient` all answer it. A principal WITHOUT one — a bare unit-test
+/// fixture that pokes `perms` directly and never dispatches — has no place to
+/// be confined to, and answers `""`. That is FAIL CLOSED by design: a `.place`
+/// limit whose root cannot be named admits nothing. It never degrades to "the
+/// whole filesystem", which is the degrade this whole change exists to delete.
+pub fn placeRootFor(id: anytype, buf: []u8) []const u8 {
+    const Id = @typeInfo(@TypeOf(id)).pointer.child;
+    if (!@hasDecl(Id, "activeCtx")) return "";
+    return placeDirectory(id.activeCtx(), buf);
+}
+
+/// The environment a spawn runs WITH: `g_environ` plus every overlay published
+/// for the dispatching place (`env.zig`). Returns an OWNED environment the
+/// caller must free, or null when no overlay applies — which is the ordinary
+/// case and stays allocation-free.
+///
+/// The sibling of `resolveSpawnAtCtx`, read at the same door from the same
+/// place, because "where does this run" and "with what" are one question. A
+/// failure to build the merged block degrades to the base environment rather
+/// than failing the spawn: losing a project's PATH is bad, refusing to run
+/// anything is worse, and the difference is visible in the log.
+pub fn resolveSpawnEnvCtx(ctx: *@import("../command.zig").Context, gpa: std.mem.Allocator) ?std.process.Environ {
+    const envs = ctx.environments orelse return null;
+    return envs.merged(gpa, g_environ, ctx.place()) catch |err| {
+        std.log.warn("env: could not build the environment for this place ({t}); using the base environment", .{err});
+        return null;
+    };
+}
+
+/// `resolveSpawnEnvCtx` for a wasm plugin's current dispatch.
+pub fn resolveSpawnEnv(p: *WasmPlugin, gpa: std.mem.Allocator) ?std.process.Environ {
+    return resolveSpawnEnvCtx(p.activeCtx(), gpa);
+}
+
+/// Surface a refusal the way a denied render already is: a host log line
+/// always, plus the status chip the status line renders, so a background
+/// refusal is visible without inventing a UI for it.
+pub fn noteSpawnRefusal(plugin: []const u8, why: []const u8) void {
+    std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
+    var buf: [128]u8 = undefined;
+    status_feed.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
+}
+
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {
     const p: *WasmPlugin = @ptrCast(@alignCast(ctx));
     // Author as the overridden agent identity when one is set (a wl_edit_as
@@ -316,7 +490,7 @@ test "mintGrantHandles: the composition rule — a pre-existing config-authored 
     try t.expectEqual(configured.gen, handles[perm_fs_write].gen);
     switch (table.limitFor(handles[perm_fs_write])) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
-        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
     // Exactly ONE live row exists for (git, fs_write) — the boolean baseline
     // was never separately minted.
@@ -326,10 +500,12 @@ test "mintGrantHandles: the composition rule — a pre-existing config-authored 
     }
     try t.expectEqual(@as(usize, 1), live_fs_write);
 
-    // fs_read: config never granted it — the ordinary unrestricted
-    // boolean-derived row is minted, exactly as before this slice.
+    // fs_read: config never granted it — the boolean-derived row is minted,
+    // and doc/place.md §4.1's confined-by-default rule means that row is
+    // `.place`, not `.none`. Saying nothing in config is no longer a way to
+    // hand a plugin the whole filesystem.
     try t.expect(table.check(handles[perm_fs_read]));
-    try t.expectEqual(grants_mod.Limit.none, table.limitFor(handles[perm_fs_read]));
+    try t.expectEqual(grants_mod.Limit.place, table.limitFor(handles[perm_fs_read]));
 
     // Revoking the config grant leaves fs_write with nothing to fall back
     // to (the composition rule's honest consequence — see grants.zig's

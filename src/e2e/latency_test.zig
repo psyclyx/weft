@@ -342,9 +342,36 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     // the measurement loop below — a build-mode mismatch fails regardless,
     // and a foreign-host baseline skips regardless, so there's nothing to
     // gate on either way.
+    // Taken HERE, before either branch and before any measurement, so record
+    // and compare probe the machine in the SAME state. Recording it after the
+    // measurement loops — which is where it naturally wanted to go, next to the
+    // numbers it ships with — read a box whose caches those loops had just
+    // dirtied: 2.16ms recorded against 1.10ms compared, on an idle machine, for
+    // no reason but call position. A yardstick measured differently in the two
+    // modes silently biases every comparison it is used for.
+    const calibration_ns = latency.calibrate();
+
     var loaded: ?latency.Baseline = null;
     defer if (loaded) |b| std.zon.parse.free(gpa, b);
     if (!latency_options.record) {
+        // Same doctrine as the host and build-mode checks below: a measurement
+        // taken under conditions the baseline was not recorded under is not a
+        // regression, and reporting it as one trains everyone to ignore this
+        // gate.
+        //
+        // The `test` step runs this instrument in a process that has already
+        // executed ~159 other e2e tests; the baseline is recorded by the
+        // FILTERED `e2e-latency` binary, which runs this test and nothing else
+        // in a fresh process. That difference is not small and it is not
+        // scheduling noise: the same code measures ~37us of thread CPU alone
+        // and ~176us after the suite has run, because it is then measuring that
+        // process's accumulated allocator and cache state. `zig build test`
+        // depends on the isolated step, so the gate still runs on every `test`
+        // — it just runs where its numbers mean something.
+        if (!latency_options.isolated) {
+            log.info("measured, not gated: this binary ran the whole e2e suite first, and the baseline is recorded by the isolated `e2e-latency` binary — `zig build test` gates it there", .{});
+            return error.SkipZigTest;
+        }
         const baseline = latency.loadBaseline(gpa, baseline_path) catch |err| {
             log.warn("no baseline at {s} ({t}) — run `zig build e2e-latency -Drecord-latency=true` to record one", .{ baseline_path, err });
             return error.SkipZigTest;
@@ -361,6 +388,26 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
             log.warn("baseline recorded on '{s}', running on '{s}' — skipping (different hardware, not a regression); re-record on this host for a real gate here", .{ baseline.host, my_host });
             std.zon.parse.free(gpa, baseline);
             return error.SkipZigTest;
+        }
+        // The same host, in a different STATE, is not the same measurement
+        // either — see `Baseline.calibration_ns`. A developer box shares cores
+        // with a browser; CI shares them with whatever else the runner packed
+        // on. Skip rather than report someone else's load as this code's
+        // regression, which is the failure that teaches people to ignore a gate.
+        if (baseline.calibration_ns != 0) {
+            const now = calibration_ns;
+            log.warn("calibration: {d}ns now vs {d}ns at record time", .{ now, baseline.calibration_ns });
+            // 1.2x, not something looser: this gate errs toward SKIPPING. A skip
+            // says "not measured here" and costs nothing; a false failure costs
+            // the gate its credibility, which is the only thing it has.
+            if (now > baseline.calibration_ns * 6 / 5) {
+                log.warn(
+                    "this box is currently {d}% of the speed it was when the baseline was recorded ({d}ns vs {d}ns on a fixed CPU loop) — skipping; that is load, not a regression",
+                    .{ baseline.calibration_ns * 100 / @max(now, 1), baseline.calibration_ns, now },
+                );
+                std.zon.parse.free(gpa, baseline);
+                return error.SkipZigTest;
+            }
         }
         loaded = baseline;
     }
@@ -434,6 +481,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
             .build_mode = latency.buildModeName(),
             .host = latency.hostName(&host_buf),
             .note = note,
+            .calibration_ns = calibration_ns,
             .categories = &categories,
         });
         log.info("recorded {s}", .{baseline_path});

@@ -62,6 +62,14 @@ function respond(c, id, result) {
   weft.procSend(c.proc, JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 }
 
+// The other half of answering: a refusal. Every `weft.*` effect door throws
+// when the grant is missing or its `fs_root` doesn't reach the path — denial
+// is never success-shaped. The agent asked a QUESTION, so it gets an answer
+// it can act on rather than a request that hangs forever.
+function respondError(c, id, message) {
+  weft.procSend(c.proc, JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\n");
+}
+
 // The status-line chip — visible even when the transcript isn't focused.
 function setStatus(c, dot, state) {
   weft.status(dot + " " + c.peer + " · " + state);
@@ -260,17 +268,28 @@ function onMessage(c, msg) {
   // Client-side requests the agent makes back into the editor.
   if (msg.method === "fs/read_text_file") {
     // Answer from the live buffer (or disk) — weft is the harness, so the agent
-    // sees the honest current state, not stale bytes.
-    respond(c, msg.id, { content: weft.fileRead((msg.params && msg.params.path) || "") });
+    // sees the honest current state, not stale bytes. A narrowed `fs_read`
+    // grant refuses instead: that is an ANSWER, not a dropped request.
+    const rp = (msg.params && msg.params.path) || "";
+    try {
+      respond(c, msg.id, { content: weft.fileRead(rp) });
+    } catch (e) {
+      respondError(c, msg.id, "read refused: " + rp);
+    }
     return;
   }
   if (msg.method === "fs/write_text_file") {
     // Apply as an attributed edit by THIS conversation's sub-peer (gated +
     // undoable) — not a raw disk write, and never confusable with another
-    // agent's edits: selective undo separates claude#1 from codex#2.
+    // agent's edits: selective undo separates claude#1 from codex#2. Same
+    // deal as the read above when `fs_write`'s root doesn't reach the path.
     const p = msg.params || {};
-    weft.fileWrite(p.path || "", p.content || "", c.peer);
-    respond(c, msg.id, {});
+    try {
+      weft.fileWrite(p.path || "", p.content || "", c.peer);
+      respond(c, msg.id, {});
+    } catch (e) {
+      respondError(c, msg.id, "write refused: " + (p.path || ""));
+    }
     return;
   }
   if (msg.method === "session/request_permission") {
@@ -309,7 +328,15 @@ weft.onOutput((h) => {
     } catch (e) {
       continue; // ignore non-JSON (an adapter's stray stderr-on-stdout)
     }
-    onMessage(c, msg);
+    // One message must never eat the rest of the batch. The lines after
+    // this one are already out of `c.inbox`; a throw escaping here loses
+    // them for good — which is how a single refused effect could silently
+    // swallow a following permission request.
+    try {
+      onMessage(c, msg);
+    } catch (e) {
+      weft.log("acp: dropped a message — " + (e && e.message ? e.message : e));
+    }
   }
 });
 

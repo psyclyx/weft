@@ -116,6 +116,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const facts_mod = @import("facts.zig");
+const Buffers = @import("Buffers.zig");
 const authority = @import("authority.zig");
 const locus_mod = @import("locus.zig");
 const action_mod = @import("action.zig");
@@ -288,6 +289,21 @@ pub const Ctx = struct {
     /// `transient` scopes are NOT captured here — they come from the LIVE
     /// `Head.transient_stack` a `pushTransient` call built, appended after
     /// `mode` in declaration order (innermost transient last).
+    /// WHERE this entry's bytes live, in `Facts`' own vocabulary.
+    ///
+    /// Declared since the fact set was written -- "first-class so predicates can
+    /// gate on it (an LSP activates only where files are real; a remote viewer
+    /// consumes results instead)" -- and, until places existed, unanswerable: with
+    /// one process-wide directory every entry was trivially local, so the field
+    /// sat at `.none` and the predicate axis was decoration. A place answers it.
+    ///
+    /// A tool entry is `.tool` first: its content is a projection its owner
+    /// produced, so where the FILES are is not a question about it.
+    fn localityOf(buf: *const Buffers.Buffer) facts_mod.Locality {
+        if (buf.tool.len > 0) return .tool;
+        return if (buf.place.isHere()) .local else .remote;
+    }
+
     pub fn capture(ctx: *command.Context) Ctx {
         var self: Ctx = .{ .host = ctx, .principal = ctx.principal, .epoch = ctx.actions.container.epoch };
         self.scopes.append(.{ .kind = .workspace });
@@ -299,6 +315,7 @@ pub const Ctx = struct {
             .name = buf.name,
             .lang = action_mod.langOfName(buf.name),
             .tool = buf.tool,
+            .locality = localityOf(buf),
         } });
         self.scopes.append(.{ .kind = .subbuffer });
         self.scopes.append(.{ .kind = .mode, .facts = .{ .mode = ctx.head.currentMode() } });
@@ -769,4 +786,31 @@ test "ctx: W4 slice 1 — CAPTURE-TIME grant resolution + SCOPE-LIFETIME: a tran
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "ctx: locality answers where an entry's bytes live, now that a place can say" {
+    const gpa = t.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+
+    // An ordinary local entry. Before places, EVERY entry was trivially this,
+    // which is why the axis sat unpopulated and the predicate was decoration.
+    try t.expectEqual(facts_mod.Locality.local, Ctx.capture(&env.ctx).mergedFacts().locality);
+
+    // A tool entry is `.tool` first: its content is a projection its owner
+    // produced, so "are the files real here" is not a question about it.
+    env.ctx.buffers.active().tool = @constCast("git");
+    try t.expectEqual(facts_mod.Locality.tool, Ctx.capture(&env.ctx).mergedFacts().locality);
+    env.ctx.buffers.active().tool = &.{};
+
+    // An entry whose container is on another locus is `.remote` — the case the
+    // field was declared for ("an LSP activates only where files are real; a
+    // remote viewer consumes results instead") and could not previously reach.
+    const elsewhere: @import("locus.zig").Locus = @enumFromInt(1);
+    env.ctx.buffers.active().place = .{ .container = .{
+        .locus = elsewhere,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    try t.expectEqual(facts_mod.Locality.remote, Ctx.capture(&env.ctx).mergedFacts().locality);
 }

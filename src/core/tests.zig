@@ -31,8 +31,22 @@ fn ownedText(gpa: Allocator, doc: *const Document) ![]u8 {
     return doc.text().toOwnedSlice(gpa);
 }
 
+/// A registry holding the grammars these tests highlight with, registered the
+/// SAME way config does it — there is no built-in set to fall back on, so a
+/// test that wants zig has to ask for zig, exactly like a user's config. The
+/// search path comes from the build (the nix shell's `WEFT_GRAMMAR_PATH`),
+/// which is the only thing the test knows that a user wouldn't.
+fn testRuntime(gpa: Allocator) !core.syntax.Runtime {
+    var rt: core.syntax.Runtime = .empty;
+    errdefer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    return rt;
+}
+
 test "syntax: application lookup goes through the runtime grammar registry" {
-    var runtime = try core.syntax.Runtime.initBuiltins(t.allocator);
+    var runtime = try testRuntime(t.allocator);
     defer runtime.deinit(t.allocator);
     try t.expect(runtime.forPath("demo.zig") != null);
     try t.expect(runtime.forPath("demo.unknown") == null);
@@ -570,8 +584,10 @@ test "syntax: incremental highlight tracks edits and peer merges" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     const whole: stemma.Range = .{ .start = 0, .end = doc.text().byteLen() };
@@ -612,8 +628,10 @@ test "syntax: tree queries — node-at-offset, ancestors, and captures" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42;\n");
 
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // node-at-offset: the "42" literal is a number node.
@@ -676,8 +694,10 @@ test "syntax: createAsync returns before the initial parse runs" {
     }
     try doc.insert(gpa, 0, src.items);
 
-    const spec = core.syntax.builtinForPath("big.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("big.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // No one but `sync`/`destroy` ever clears `pending_initial` or sets
@@ -705,8 +725,10 @@ test "syntax: highlights arrive and paint once the background parse lands" {
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 42; // note\n");
 
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     try t.expectEqual(@as(?*core.syntax.c.TSTree, null), syn.tree);
 
@@ -731,8 +753,10 @@ test "syntax: an edit during the pending initial parse lands coherently, not tor
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
 
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     defer syn.destroy();
     // Guaranteed still pending here (see the test above) — no `sync`
     // call has happened yet to adopt anything.
@@ -783,8 +807,10 @@ test "syntax: destroy while pending on a saturated pool returns promptly, no lea
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "const x = 1;\n");
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, &spec_rt, spec, &doc);
     // Queued behind the hog — cannot have started.
     try t.expect(syn.pending_initial != null);
 
@@ -913,8 +939,10 @@ test "syntax: instant-tier definition + symbols providers race through registry"
         \\}
     );
 
-    const spec = core.syntax.builtinForPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     try core.syntax.registerProviders(&host.caps, syn);
 
@@ -965,16 +993,20 @@ test "capability: two languages' tree-sitter providers bind without collision an
     var doc_zig = try Document.init(gpa, "user");
     defer doc_zig.deinit(gpa);
     try doc_zig.insert(gpa, 0, "fn f() void {}\n");
-    const zig_spec = core.syntax.builtinForPath("a.zig").?;
-    const zig_syn = try core.syntax.Syntax.create(gpa, zig_spec, &doc_zig);
+    var zig_spec_rt = try testRuntime(gpa);
+    defer zig_spec_rt.deinit(gpa);
+    const zig_spec = zig_spec_rt.forPath("a.zig").?;
+    const zig_syn = try core.syntax.Syntax.create(gpa, &zig_spec_rt, zig_spec, &doc_zig);
     defer zig_syn.destroy();
     try core.syntax.registerProviders(&host.caps, zig_syn);
 
     var doc_nix = try Document.init(gpa, "user");
     defer doc_nix.deinit(gpa);
     try doc_nix.insert(gpa, 0, "{ x = 1; }\n");
-    const nix_spec = core.syntax.builtinForPath("b.nix").?;
-    const nix_syn = try core.syntax.Syntax.create(gpa, nix_spec, &doc_nix);
+    var nix_spec_rt = try testRuntime(gpa);
+    defer nix_spec_rt.deinit(gpa);
+    const nix_spec = nix_spec_rt.forPath("b.nix").?;
+    const nix_syn = try core.syntax.Syntax.create(gpa, &nix_spec_rt, nix_spec, &doc_nix);
     defer nix_syn.destroy();
     // Must NOT error — the exact call that used to trap with SlotCollision.
     try core.syntax.registerProviders(&host.caps, nix_syn);
@@ -1005,8 +1037,10 @@ test "syntax: highlight feed publishes stamped bulk into its layer" {
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "const x = 1;\n");
 
-    const spec = core.syntax.builtinForPath("a.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("a.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &host.editor().doc);
     defer syn.destroy();
     const layer = try host.caps.registerFeed(&host.editor().doc, "edit/highlight", "highlight", .local, "treesitter");
     try syn.publishHighlight(gpa, &host.editor().doc, layer, .{ .start = 0, .end = host.editor().text().byteLen() });
@@ -1023,8 +1057,10 @@ test "syntax: holey document parses the realized prefix, never crashes" {
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "fn seed() void {}\n");
-    const spec = core.syntax.builtinForPath("h.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const spec = spec_rt.forPath("h.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec, &doc);
     defer syn.destroy();
 
     // A synthetic partially-materialized rope: realized prefix, hole tail.
@@ -1193,7 +1229,10 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/big.txt", .{tmp_dir.sub_path});
     defer gpa.free(path);
     {
-        const big = try gpa.alloc(u8, core.Editor.bulk_load_bytes + 4096);
+        // A megabyte is no longer a threshold — every load takes this path
+        // now — but a size that used to be "big" still makes the O(1)-events
+        // assertion below mean something a small file could fake.
+        const big = try gpa.alloc(u8, (1 << 20) + 4096);
         defer gpa.free(big);
         for (big, 0..) |*b, i| b.* = if (i % 64 == 63) '\n' else 'x';
         var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -1222,6 +1261,43 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(!try ed.isDirty(gpa));
+}
+
+test "editor: loaded content is anchorable — every open, not just small ones" {
+    // The gate on the bulk load path having no size threshold. A region
+    // grant, a shared cursor and a shell insertion all name a character in
+    // the file rather than an offset into it, so a load whose content could
+    // not be anchored would break every one of them the moment it became
+    // the only load path.
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/small.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = "hello world\n" });
+    }
+
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.openFile(gpa, path);
+
+    // Anchor the 'w' of "world" — content that came from the file, not typed.
+    const anchor = try ed.doc.exportAnchor(gpa, 6, .before);
+    defer gpa.free(anchor.agent);
+    var out: [1]usize = undefined;
+    try ed.doc.resolveAnchors(gpa, &.{anchor}, &out);
+    try t.expectEqual(@as(usize, 6), out[0]);
+
+    // It tracks the character across an edit ahead of it, which is the whole
+    // reason to hold an anchor instead of an offset.
+    try ed.insertText(gpa, "say: ");
+    try ed.doc.resolveAnchors(gpa, &.{anchor}, &out);
+    try t.expectEqual(@as(usize, 11), out[0]);
 }
 
 test "completion UI: source-driven fold into the pick; accept replaces the prefix" {
@@ -1322,4 +1398,280 @@ test "editor: compactNow keeps the backing mirror and saves working" {
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(ed.save_state == .idle);
     try t.expect(!try ed.isDirty(gpa));
+}
+
+test "syntax: a grammar compiles once per runtime, not once per buffer" {
+    // Compiling a highlight query costs ~18ms in ReleaseFast — an order of
+    // magnitude more than opening the file it highlights, reading it and
+    // building its CRDT put together. Two buffers of the same language must
+    // therefore share one compiled grammar; a regression to per-buffer
+    // compilation would put that cost back on every single open, which is
+    // exactly where it used to be.
+    const gpa = t.allocator;
+    var rt = try testRuntime(gpa);
+    defer rt.deinit(gpa);
+    var doc_a = try Document.init(gpa, "user");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "const a = 1;\n");
+    var doc_b = try Document.init(gpa, "user");
+    defer doc_b.deinit(gpa);
+    try doc_b.insert(gpa, 0, "const b = 2;\n");
+
+    const spec = rt.forPath("a.zig").?;
+    const a = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_a);
+    defer a.destroy();
+    const b = try core.syntax.Syntax.create(gpa, &rt, spec, &doc_b);
+    defer b.destroy();
+    try t.expectEqual(a.compiled, b.compiled);
+
+    // Shared does not mean entangled: the parse-time state each buffer
+    // mutates stays its own, which is what makes sharing the query safe.
+    try t.expect(a.parser != b.parser);
+    try t.expect(a.qcursor != b.qcursor);
+
+    // A different language is a different entry, not a clobbered one.
+    const nix_spec = rt.forPath("b.nix").?;
+    const n = try core.syntax.Syntax.create(gpa, &rt, nix_spec, &doc_a);
+    defer n.destroy();
+    try t.expect(a.compiled != n.compiled);
+
+    // Both still highlight — sharing the query did not break painting.
+    try t.expect(a.tree != null);
+    try t.expect(b.tree != null);
+}
+
+test "syntax: registering a grammar queues its compile off the frame thread" {
+    // tree-sitter cannot persist a compiled query between runs, so the only
+    // caching available is to precompute within the session — and the moment
+    // to do it is registration, which is why there is no separate warm step to
+    // forget. Asserted without a clock and without a sleep: `Pool.deinit`
+    // joins its threads and drains whatever is still queued, so once the block
+    // exits the job has run however the OS chose to schedule it.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try t.expectEqual(@as(usize, 0), rt.compiledCount());
+    {
+        var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+        defer pool.deinit();
+        rt.setPool(pool);
+        try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+        try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+        // A grammar registered LATE is not second class — this one is queued
+        // by the same act, with no batch pass to have missed it.
+        try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
+    }
+    // The pool is gone; nothing may be queued against it afterwards.
+    rt.pool = null;
+    try t.expectEqual(rt.specCount(), rt.compiledCount());
+
+    // A warmed grammar is the SAME entry a buffer then gets — a warm that
+    // built a second, parallel copy would pay the compile twice and defeat the
+    // point entirely.
+    const before = rt.compiledCount();
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 1;\n");
+    const spec = rt.forPath("a.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &rt, spec, &doc);
+    defer syn.destroy();
+    try t.expectEqual(before, rt.compiledCount());
+}
+
+test "syntax: an external registration can say everything a built-in can" {
+    // The point of the registry is that a grammar declared from config is not
+    // a second-class version of a compiled-in one. Anything the built-in table
+    // could express — several extensions, document-symbol kinds, a query that
+    // does not live at the package's default path — has to be expressible
+    // here too, or "grammars as data" is only half true and the privileged
+    // path stays the easier one to use.
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/gram", .{tmp_dir.sub_path});
+    defer gpa.free(root);
+
+    // A grammar package laid out the way the nixpkgs ones are. `add` only
+    // registers — the `.so` is not opened until something compiles it — so a
+    // placeholder parser file is enough to exercise registration.
+    const pkg = try std.fmt.allocPrint(gpa, "{s}/mylang", .{root});
+    defer gpa.free(pkg);
+    const parser_path = try std.fmt.allocPrint(gpa, "{s}/parser", .{pkg});
+    defer gpa.free(parser_path);
+    try core.file.writeBytesMakingDirs(gpa, pkg, parser_path, "not-really-a-so");
+    const qdir = try std.fmt.allocPrint(gpa, "{s}/queries", .{pkg});
+    defer gpa.free(qdir);
+    const qpath = try std.fmt.allocPrint(gpa, "{s}/highlights.scm", .{qdir});
+    defer gpa.free(qpath);
+    try core.file.writeBytesMakingDirs(gpa, qdir, qpath, "(identifier) @variable");
+
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, root);
+
+    // An outline query where the package keeps one, picked up without config
+    // naming it.
+    const opath = try std.fmt.allocPrint(gpa, "{s}/outline.scm", .{qdir});
+    defer gpa.free(opath);
+    try core.file.writeBytesMakingDirs(gpa, qdir, opath, "(x) @item (y) @name");
+
+    try rt.add(gpa, .{
+        .extensions = ".ml,.mli, .mll",
+        .grammar = "mylang",
+        .symbol = "tree_sitter_mylang",
+    });
+
+    // Every declared extension resolves, including the space-padded one.
+    for ([_][]const u8{ "a.ml", "a.mli", "a.mll" }) |p| {
+        const spec = rt.forPath(p) orelse return error.TestUnexpectedResult;
+        try t.expectEqualStrings("mylang", spec.name);
+        try t.expectEqualStrings("tree_sitter_mylang", spec.symbol);
+        try t.expectEqualStrings("(identifier) @variable", spec.highlights);
+        try t.expectEqualStrings("(x) @item (y) @name", spec.outline);
+    }
+    try t.expect(rt.forPath("a.rs") == null);
+
+    // A name that is not on the search path is a refusal, not a silent
+    // registration that fails later at dlopen time.
+    try t.expectError(error.GrammarNotFound, rt.add(gpa, .{
+        .extensions = ".nope",
+        .grammar = "absent",
+        .symbol = "tree_sitter_absent",
+    }));
+
+    // A query somewhere other than the package default, which is what a
+    // grammar shipping no query of its own needs.
+    const alt = try std.fmt.allocPrint(gpa, "{s}/alt.scm", .{root});
+    defer gpa.free(alt);
+    try core.file.writeBytesMakingDirs(gpa, root, alt, "(comment) @comment");
+    // An ABSOLUTE package path bypasses the search path entirely, which is
+    // what a grammar built somewhere the path doesn't cover needs.
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = core.file.processDirectory(&cwd_buf).?;
+    const abs_pkg = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ cwd, pkg });
+    defer gpa.free(abs_pkg);
+    try rt.add(gpa, .{
+        .extensions = ".other",
+        .grammar = abs_pkg,
+        .symbol = "tree_sitter_mylang",
+        .query = alt,
+    });
+    const other = rt.forPath("x.other").?;
+    try t.expectEqualStrings("(comment) @comment", other.highlights);
+    try t.expectEqualStrings(abs_pkg, other.parser_dir);
+}
+
+test "syntax: outline queries name what a first-identifier walk got wrong" {
+    // The two concrete defects the old depth-≤3 walk had. It took a
+    // definition's first identifier DESCENDANT as its name, which is not the
+    // name in either of these cases — and no list of node kinds can express
+    // the difference, which is why this is a query.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
+    try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
+
+    const Case = struct { path: []const u8, src: []const u8, want: []const []const u8 };
+    const cases = [_]Case{
+        // `Point`, not `x`: the struct's first identifier descendant is its
+        // first FIELD. And a `const` inside a function body is a local, which
+        // a depth cap only accidentally excluded.
+        .{
+            .path = "a.zig",
+            .src =
+            \\const Point = struct { x: u8, y: u8 };
+            \\pub fn area(p: Point) u8 {
+            \\    const scratch = 1;
+            \\    return scratch;
+            \\}
+            \\test "it works" {}
+            ,
+            .want = &.{ "Point", "area", "it works" },
+        },
+        // `g` and `h`, not `M` twice: the table is the first identifier in
+        // both `M.g` and `M:h`.
+        .{
+            .path = "a.lua",
+            .src =
+            \\local function f() end
+            \\function M.g() end
+            \\function M:h() end
+            ,
+            .want = &.{ "f", "g", "h" },
+        },
+        // A binding earns an entry by holding a function, not by existing —
+        // the old rule listed every `lexical_declaration`.
+        .{
+            .path = "a.js",
+            .src =
+            \\function f() {}
+            \\class C { m() {} }
+            \\const g = () => {};
+            \\let plain = 1;
+            ,
+            .want = &.{ "f", "C", "m", "g" },
+        },
+    };
+
+    inline for (cases) |case| {
+        var doc = try Document.init(gpa, "user");
+        defer doc.deinit(gpa);
+        try doc.insert(gpa, 0, case.src);
+        const spec = rt.forPath(case.path).?;
+        const syn = try core.syntax.Syntax.create(gpa, &rt, spec, &doc);
+        defer syn.destroy();
+
+        var syms: std.ArrayList(core.syntax.Syntax.Sym) = .empty;
+        defer {
+            for (syms.items) |s| gpa.free(s.name);
+            syms.deinit(gpa);
+        }
+        try syn.collectSymbols(gpa, &doc, &syms);
+
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        for (syms.items, 0..) |s, i| {
+            if (i > 0) try got.appendSlice(gpa, ",");
+            try got.appendSlice(gpa, s.name);
+        }
+        var want: std.ArrayList(u8) = .empty;
+        defer want.deinit(gpa);
+        for (case.want, 0..) |w, i| {
+            if (i > 0) try want.appendSlice(gpa, ",");
+            try want.appendSlice(gpa, w);
+        }
+        try t.expectEqualStrings(want.items, got.items);
+    }
+}
+
+test "syntax: re-registering a grammar replaces it instead of piling up" {
+    // `config-reload` re-runs every `grammar-add`. Appending would grow the
+    // registry by the whole language set on each reload — invisible, because
+    // `forPath` is last-wins, until the list is enormous.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+
+    for (0..3) |_| {
+        try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+        try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    }
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+
+    // And the LAST registration is the one that answers, so a reload that
+    // changes a grammar's extensions takes effect rather than being shadowed
+    // by the copy underneath it.
+    try rt.add(gpa, .{ .extensions = ".zg2", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+    try t.expect(rt.forPath("a.zg2") != null);
+    try t.expect(rt.forPath("a.zig") == null);
 }
