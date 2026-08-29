@@ -12,28 +12,57 @@ const std = @import("std");
 const core = @import("../core/core.zig");
 const collab = @import("collab.zig");
 
-/// `grammar-add <ext> <package-dir> <symbol>` — grammars as data.
+/// `grammar-add <exts> <grammar> <symbol> [query] [symbol-kinds]` — grammars
+/// as data. `exts` and `symbol-kinds` are comma-separated; `grammar` is a name
+/// resolved along the registry's search path, or an absolute package
+/// directory. Every field of a `Registration` is reachable from here: there is
+/// no richer way to describe a grammar that config cannot say.
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
         .name = "grammar-add",
-        .summary = "Register a tree-sitter grammar package for an extension.",
+        .summary = "Register a tree-sitter grammar for one or more extensions.",
         .args = &.{
-            .{ .name = "ext", .type = .string },
-            .{ .name = "dir", .type = .string },
+            .{ .name = "exts", .type = .string },
+            .{ .name = "grammar", .type = .string },
             .{ .name = "symbol", .type = .string },
+            .{ .name = "query", .type = .string },
+            .{ .name = "symbol-kinds", .type = .string },
         },
         .handler = grammarAddHandler,
         .data = runtime,
     };
 }
 
+/// The FEWEST arguments `grammar-add` will act on. This — not the declared
+/// arity, which is larger because query and symbol-kinds are optional — is the
+/// number that has to stay out of guest reach: it is what it takes to get to
+/// `std.DynLib.open` on a caller-named directory. The gate below reads this,
+/// so the two cannot drift apart.
+pub const grammar_add_min_args = 3;
+
 fn grammarAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const runtime: *core.syntax.Runtime = @ptrCast(@alignCast(data.?));
-    if (args.len != 3) return error.ArityMismatch;
+    if (args.len < grammar_add_min_args or args.len > 5) return error.ArityMismatch;
     for (args) |a| {
         if (a != .string) return error.TypeMismatch;
     }
-    try runtime.add(ctx.gpa, args[0].string, args[1].string, args[2].string);
+    // An empty trailing string means "not given" — config writing '' for a
+    // query it does not want to override should mean the default, not a read
+    // of the empty path.
+    const optional = struct {
+        fn at(list: []const core.command.Value, i: usize) ?[]const u8 {
+            if (i >= list.len) return null;
+            const s = list[i].string;
+            return if (s.len == 0) null else s;
+        }
+    };
+    try runtime.add(ctx.gpa, .{
+        .extensions = args[0].string,
+        .grammar = args[1].string,
+        .symbol = args[2].string,
+        .query = optional.at(args, 3),
+        .symbol_kinds = optional.at(args, 4),
+    });
     return .nil;
 }
 
@@ -316,20 +345,25 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
     var runtime: core.syntax.Runtime = .empty;
     defer runtime.deinit(gpa);
     const grammar_add = grammarAddCommand(&runtime);
-    if (grammar_add.args.len <= max_guest_args) {
+    // Deliberately the MINIMUM the handler acts on, not `grammar_add.args.len`.
+    // Those were the same number until query and symbol-kinds became optional;
+    // comparing the declared count now would overstate the barrier and let a
+    // three-argument guest runner through while still reporting green.
+    if (grammar_add_min_args <= max_guest_args) {
         std.debug.print(
             "\nsrc/app/providers.zig: a wasm guest can now pass {d} argument(s) to a command\n" ++
-                "by name, and `grammar-add` takes {d} — so a guest can reach\n" ++
+                "by name, and `grammar-add` acts on {d} — so a guest can reach\n" ++
                 "`std.DynLib.open` on a directory it chose. The arity coincidence that held\n" ++
                 "this shut is gone; `grammar-add` needs a real permission gate now.\n",
-            .{ max_guest_args, grammar_add.args.len },
+            .{ max_guest_args, grammar_add_min_args },
         );
         return error.GrammarAddIsGuestReachable;
     }
-    // Today's numbers, pinned so the margin itself is visible when either
-    // side moves: two arguments reachable, three required.
+    // Today's numbers, pinned so the margin itself is visible when either side
+    // moves: two arguments reachable, three required to do anything.
     try t.expectEqual(@as(usize, 2), max_guest_args);
-    try t.expectEqual(@as(usize, 3), grammar_add.args.len);
+    try t.expectEqual(@as(usize, 3), grammar_add_min_args);
+    try t.expectEqual(@as(usize, 5), grammar_add.args.len);
 
     // And the handler agrees with the declaration — the arity check that
     // does the actual refusing reads `args.len`, not the `.args` table.

@@ -1455,3 +1455,82 @@ test "syntax: warming compiles the built-ins off the frame thread" {
     defer syn.destroy();
     try t.expectEqual(core.syntax.languages.len, rt.compiledCount());
 }
+
+test "syntax: an external registration can say everything a built-in can" {
+    // The point of the registry is that a grammar declared from config is not
+    // a second-class version of a compiled-in one. Anything the built-in table
+    // could express — several extensions, document-symbol kinds, a query that
+    // does not live at the package's default path — has to be expressible
+    // here too, or "grammars as data" is only half true and the privileged
+    // path stays the easier one to use.
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/gram", .{tmp_dir.sub_path});
+    defer gpa.free(root);
+
+    // A grammar package laid out the way the nixpkgs ones are. `add` only
+    // registers — the `.so` is not opened until something compiles it — so a
+    // placeholder parser file is enough to exercise registration.
+    const pkg = try std.fmt.allocPrint(gpa, "{s}/mylang", .{root});
+    defer gpa.free(pkg);
+    const parser_path = try std.fmt.allocPrint(gpa, "{s}/parser", .{pkg});
+    defer gpa.free(parser_path);
+    try core.file.writeBytesMakingDirs(gpa, pkg, parser_path, "not-really-a-so");
+    const qdir = try std.fmt.allocPrint(gpa, "{s}/queries", .{pkg});
+    defer gpa.free(qdir);
+    const qpath = try std.fmt.allocPrint(gpa, "{s}/highlights.scm", .{qdir});
+    defer gpa.free(qpath);
+    try core.file.writeBytesMakingDirs(gpa, qdir, qpath, "(identifier) @variable");
+
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, root);
+
+    try rt.add(gpa, .{
+        .extensions = ".ml,.mli, .mll",
+        .grammar = "mylang",
+        .symbol = "tree_sitter_mylang",
+        .symbol_kinds = "function_declaration,type_declaration",
+    });
+
+    // Every declared extension resolves, including the space-padded one.
+    for ([_][]const u8{ "a.ml", "a.mli", "a.mll" }) |p| {
+        const spec = rt.forPath(p) orelse return error.TestUnexpectedResult;
+        try t.expectEqualStrings("mylang", spec.name);
+        try t.expectEqualStrings("tree_sitter_mylang", spec.symbol);
+        try t.expectEqualStrings("(identifier) @variable", spec.highlights);
+        try t.expectEqual(@as(usize, 2), spec.symbol_kinds.len);
+        try t.expectEqualStrings("function_declaration", spec.symbol_kinds[0]);
+    }
+    try t.expect(rt.forPath("a.rs") == null);
+
+    // A name that is not on the search path is a refusal, not a silent
+    // registration that fails later at dlopen time.
+    try t.expectError(error.GrammarNotFound, rt.add(gpa, .{
+        .extensions = ".nope",
+        .grammar = "absent",
+        .symbol = "tree_sitter_absent",
+    }));
+
+    // A query somewhere other than the package default, which is what a
+    // grammar shipping no query of its own needs.
+    const alt = try std.fmt.allocPrint(gpa, "{s}/alt.scm", .{root});
+    defer gpa.free(alt);
+    try core.file.writeBytesMakingDirs(gpa, root, alt, "(comment) @comment");
+    // An ABSOLUTE package path bypasses the search path entirely, which is
+    // what a grammar built somewhere the path doesn't cover needs.
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = core.file.processDirectory(&cwd_buf).?;
+    const abs_pkg = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ cwd, pkg });
+    defer gpa.free(abs_pkg);
+    try rt.add(gpa, .{
+        .extensions = ".other",
+        .grammar = abs_pkg,
+        .symbol = "tree_sitter_mylang",
+        .query = alt,
+    });
+    const other = rt.forPath("x.other").?;
+    try t.expectEqualStrings("(comment) @comment", other.highlights);
+    try t.expectEqualStrings(abs_pkg, other.parser_dir);
+}

@@ -186,6 +186,36 @@ pub const Compiled = struct {
 /// of every `Compiled` grammar (see `compiledFor`) — the registry of
 /// languages is the natural home for the artifacts of those languages,
 /// and it gives them a lifetime that outlives any one buffer.
+/// Split a comma-separated list into owned pieces, dropping empties. A
+/// registration's lists arrive this way because commands carry strings, not
+/// lists (`command.Value` has no sequence variant).
+fn splitOwned(gpa: Allocator, csv: []const u8) Allocator.Error![][]const u8 {
+    var n: usize = 0;
+    var counter = std.mem.splitScalar(u8, csv, ',');
+    while (counter.next()) |piece| {
+        if (std.mem.trim(u8, piece, " \t").len != 0) n += 1;
+    }
+    const out = try gpa.alloc([]const u8, n);
+    var filled: usize = 0;
+    errdefer {
+        for (out[0..filled]) |p| gpa.free(@constCast(p));
+        gpa.free(out);
+    }
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |piece| {
+        const trimmed = std.mem.trim(u8, piece, " \t");
+        if (trimmed.len == 0) continue;
+        out[filled] = try gpa.dupe(u8, trimmed);
+        filled += 1;
+    }
+    return out;
+}
+
+fn freeOwned(gpa: Allocator, list: [][]const u8) void {
+    for (list) |p| gpa.free(@constCast(p));
+    gpa.free(list);
+}
+
 pub const Runtime = struct {
     const Owned = struct {
         spec: LanguageSpec,
@@ -193,6 +223,9 @@ pub const Runtime = struct {
     };
 
     specs: std.ArrayList(Owned) = .empty,
+    /// Colon-separated directories a grammar NAME resolves against — see
+    /// `setSearchPath`. Owned; empty means "absolute paths only".
+    search_path: []u8 = &.{},
     /// Compiled grammars, built on first use and kept for the registry's
     /// life. A handful of entries at most, so a linear scan beats the
     /// ceremony of a keyed map.
@@ -317,42 +350,99 @@ pub const Runtime = struct {
         for (self.specs.items) |*o| {
             if (o.owned) {
                 gpa.free(@constCast(o.spec.name));
-                gpa.free(@constCast(o.spec.extensions[0]));
+                for (o.spec.extensions) |e| gpa.free(@constCast(e));
                 gpa.free(@constCast(o.spec.extensions));
+                for (o.spec.symbol_kinds) |k| gpa.free(@constCast(k));
+                gpa.free(@constCast(o.spec.symbol_kinds));
                 gpa.free(@constCast(o.spec.parser_dir));
                 gpa.free(@constCast(o.spec.symbol[0 .. o.spec.symbol.len + 1]));
                 gpa.free(@constCast(o.spec.highlights));
             }
         }
         self.specs.deinit(gpa);
+        gpa.free(self.search_path);
         self.* = .{};
     }
 
-    /// Register a grammar from a package directory laid out like the
-    /// nixpkgs tree-sitter grammars (`parser` + `queries/highlights.scm`).
-    pub fn add(self: *Runtime, gpa: Allocator, ext: []const u8, dir: []const u8, symbol: []const u8) !void {
+    /// Where a grammar NAME is looked up: each colon-separated entry is
+    /// tried as `<entry>/<name>`. Supplied by the application — core does
+    /// not read the environment, because where grammars live on a given
+    /// machine is a deployment question, not something this file should
+    /// have an opinion about.
+    pub fn setSearchPath(self: *Runtime, gpa: Allocator, path: []const u8) Allocator.Error!void {
+        const owned = try gpa.dupe(u8, path);
+        gpa.free(self.search_path);
+        self.search_path = owned;
+    }
+
+    /// Resolve `grammar` to a package directory. An absolute path is taken
+    /// verbatim; anything else is a name looked up along `search_path`,
+    /// accepting the first entry that actually has a `parser` in it. Caller
+    /// owns the result.
+    pub fn resolveDir(self: *const Runtime, gpa: Allocator, grammar: []const u8) !?[]u8 {
         const file = @import("file.zig");
-        var qpath_buf: [512]u8 = undefined;
-        const qpath = try std.fmt.bufPrint(&qpath_buf, "{s}/queries/highlights.scm", .{dir});
+        if (std.fs.path.isAbsolute(grammar)) return try gpa.dupe(u8, grammar);
+        var it = std.mem.splitScalar(u8, self.search_path, ':');
+        while (it.next()) |entry| {
+            if (entry.len == 0) continue;
+            const dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ entry, grammar });
+            errdefer gpa.free(dir);
+            const probe = try std.fmt.allocPrint(gpa, "{s}/parser", .{dir});
+            defer gpa.free(probe);
+            if (file.statKind(gpa, probe) == .file) return dir;
+            gpa.free(dir);
+        }
+        return null;
+    }
+
+    /// One grammar registration. `extensions` and `symbol_kinds` are
+    /// comma-separated because commands carry strings, not lists.
+    pub const Registration = struct {
+        /// e.g. ".js,.jsx,.mjs" — at least one.
+        extensions: []const u8,
+        /// A name resolved along `search_path`, or an absolute package dir.
+        grammar: []const u8,
+        symbol: []const u8,
+        /// Highlight query; defaults to `<dir>/queries/highlights.scm`, which
+        /// is how the nixpkgs grammar packages are laid out. Explicit because
+        /// some grammars ship no query and the one to use lives elsewhere.
+        query: ?[]const u8 = null,
+        /// Node kinds that define document symbols, comma-separated.
+        symbol_kinds: ?[]const u8 = null,
+    };
+
+    /// Register a grammar. Everything a grammar can BE is expressible here —
+    /// there is no second, richer way to describe one.
+    pub fn add(self: *Runtime, gpa: Allocator, reg: Registration) !void {
+        const file = @import("file.zig");
+        const dir = (try self.resolveDir(gpa, reg.grammar)) orelse return error.GrammarNotFound;
+        errdefer gpa.free(dir);
+
+        const qpath = if (reg.query) |q|
+            try gpa.dupe(u8, q)
+        else
+            try std.fmt.allocPrint(gpa, "{s}/queries/highlights.scm", .{dir});
+        defer gpa.free(qpath);
         const highlights = try file.readAlloc(gpa, qpath);
         errdefer gpa.free(highlights);
-        const name = try gpa.dupe(u8, std.mem.trimStart(u8, ext, "."));
+
+        const exts = try splitOwned(gpa, reg.extensions);
+        errdefer freeOwned(gpa, exts);
+        if (exts.len == 0) return error.GrammarNotFound;
+        const kinds = try splitOwned(gpa, reg.symbol_kinds orelse "");
+        errdefer freeOwned(gpa, kinds);
+
+        const name = try gpa.dupe(u8, std.fs.path.basename(reg.grammar));
         errdefer gpa.free(name);
-        const ext_owned = try gpa.dupe(u8, ext);
-        errdefer gpa.free(ext_owned);
-        const exts = try gpa.alloc([]const u8, 1);
-        errdefer gpa.free(exts);
-        exts[0] = ext_owned;
-        const dir_owned = try gpa.dupe(u8, dir);
-        errdefer gpa.free(dir_owned);
-        const sym = try gpa.dupeZ(u8, symbol);
+        const sym = try gpa.dupeZ(u8, reg.symbol);
         errdefer gpa.free(sym[0 .. sym.len + 1]);
         try self.specs.append(gpa, .{ .owned = true, .spec = .{
             .name = name,
             .extensions = exts,
-            .parser_dir = dir_owned,
+            .parser_dir = dir,
             .symbol = sym,
             .highlights = highlights,
+            .symbol_kinds = kinds,
         } });
     }
 
