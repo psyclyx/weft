@@ -2463,8 +2463,11 @@ pub const App = struct {
 /// Stand in for config. Weft ships no languages, so a bare `Editor` has no
 /// grammars at all — production gets them from `config/defaults.js`, and the
 /// harness registers the same set here so tests that boot no config still
-/// highlight. Kept deliberately in step with that file: a language added there
-/// and not here is a language the e2e suite silently stops covering.
+/// highlight. That makes this a COPY of that file's grammar lines, checked
+/// against it by "e2e/languages: the harness registers exactly what
+/// config/defaults.js does" rather than by a comment asking for diligence.
+/// A harness that also boots config registers each grammar twice; `add`
+/// replaces by name, so that collapses instead of accumulating.
 fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
     try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });

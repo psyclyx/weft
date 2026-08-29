@@ -1647,3 +1647,31 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
         try t.expectEqualStrings(want.items, got.items);
     }
 }
+
+test "syntax: re-registering a grammar replaces it instead of piling up" {
+    // `config-reload` re-runs every `grammar-add`. Appending would grow the
+    // registry by the whole language set on each reload — invisible, because
+    // `forPath` is last-wins, until the list is enormous.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+
+    for (0..3) |_| {
+        try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+        try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
+    }
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+
+    // And the LAST registration is the one that answers, so a reload that
+    // changes a grammar's extensions takes effect rather than being shadowed
+    // by the copy underneath it.
+    try rt.add(gpa, .{ .extensions = ".zg2", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try t.expectEqual(@as(usize, 2), rt.specCount());
+    try t.expect(rt.forPath("a.zg2") != null);
+    try t.expect(rt.forPath("a.zig") == null);
+}

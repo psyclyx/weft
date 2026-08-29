@@ -306,3 +306,62 @@ test "e2e/places: two projects, ONE language — two servers, each rooted in and
         try t.expect(std.mem.indexOf(u8, uri, try std.fmt.bufPrint(&doubled, "/{s}/{s}/", .{ project, project })) == null);
     }
 }
+
+test "e2e/languages: the harness registers exactly what config/defaults.js does" {
+    // The harness stands in for config, because most e2e tests boot none — so
+    // its grammar list is a copy of the one in `config/defaults.js`. A copy
+    // that drifts is a language the suite silently stops covering, which a
+    // comment asking someone to keep two lists in step does not prevent. Check
+    // it against the real file instead.
+    const gpa = t.allocator;
+    // Read BEFORE the app boots: the harness moves into a temp project, so a
+    // repo-relative path stops resolving once it has.
+    const src = try h.core.file.readAlloc(gpa, "config/defaults.js");
+    defer gpa.free(src);
+
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+
+    var declared: usize = 0;
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    while (lines.next()) |line| {
+        const marker = "weft.run(\"grammar-add\", ";
+        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        // `"<exts>", "<grammar>", …` — the first two quoted strings.
+        var rest = line[at + marker.len ..];
+        const exts = nextQuoted(&rest) orelse return error.TestUnexpectedResult;
+        const grammar = nextQuoted(&rest) orelse return error.TestUnexpectedResult;
+        declared += 1;
+
+        // Every extension config declares must resolve in the harness, to the
+        // grammar config named.
+        var ext_it = std.mem.splitScalar(u8, exts, ',');
+        while (ext_it.next()) |ext| {
+            const path = try std.fmt.allocPrint(gpa, "probe{s}", .{ext});
+            defer gpa.free(path);
+            const spec = app.ed.prov.grammars.forPath(path) orelse {
+                std.debug.print(
+                    "\nconfig/defaults.js registers '{s}' for '{s}', which src/e2e/harness.zig's" ++
+                        " registerGrammars does not — the e2e suite is not covering it.\n",
+                    .{ grammar, ext },
+                );
+                return error.HarnessGrammarsDrifted;
+            };
+            try t.expectEqualStrings(grammar, spec.name);
+        }
+    }
+    try t.expect(declared > 0);
+    // …and nothing extra on the harness side either, so the two lists are the
+    // same list in both directions.
+    try t.expectEqual(declared, app.ed.prov.grammars.specCount());
+}
+
+/// The next `"…"` in `rest`, advancing it past the closing quote.
+fn nextQuoted(rest: *[]const u8) ?[]const u8 {
+    const open = std.mem.indexOfScalar(u8, rest.*, '"') orelse return null;
+    const after = rest.*[open + 1 ..];
+    const close = std.mem.indexOfScalar(u8, after, '"') orelse return null;
+    rest.* = after[close + 1 ..];
+    return after[0..close];
+}

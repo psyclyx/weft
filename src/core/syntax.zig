@@ -154,6 +154,17 @@ pub const Compiled = struct {
     }
 };
 
+/// Release an owned `LanguageSpec`'s strings (see `Runtime.Owned.owned`).
+fn freeSpec(gpa: Allocator, spec: LanguageSpec) void {
+    gpa.free(@constCast(spec.name));
+    for (spec.extensions) |e| gpa.free(@constCast(e));
+    gpa.free(@constCast(spec.extensions));
+    gpa.free(@constCast(spec.outline));
+    gpa.free(@constCast(spec.parser_dir));
+    gpa.free(@constCast(spec.symbol[0 .. spec.symbol.len + 1]));
+    gpa.free(@constCast(spec.highlights));
+}
+
 /// The index of `@name` in `query`, or null if it has no such capture.
 fn captureIndex(query: *c.TSQuery, name: []const u8) ?u32 {
     const total = c.ts_query_capture_count(query);
@@ -369,15 +380,7 @@ pub const Runtime = struct {
         for (self.compiled.items) |ce| ce.destroy(gpa);
         self.compiled.deinit(gpa);
         for (self.specs.items) |*o| {
-            if (o.owned) {
-                gpa.free(@constCast(o.spec.name));
-                for (o.spec.extensions) |e| gpa.free(@constCast(e));
-                gpa.free(@constCast(o.spec.extensions));
-                gpa.free(@constCast(o.spec.outline));
-                gpa.free(@constCast(o.spec.parser_dir));
-                gpa.free(@constCast(o.spec.symbol[0 .. o.spec.symbol.len + 1]));
-                gpa.free(@constCast(o.spec.highlights));
-            }
+            if (o.owned) freeSpec(gpa, o.spec);
         }
         self.specs.deinit(gpa);
         gpa.free(self.search_path);
@@ -471,15 +474,30 @@ pub const Runtime = struct {
         errdefer gpa.free(name);
         const sym = try gpa.dupeZ(u8, reg.symbol);
         errdefer gpa.free(sym[0 .. sym.len + 1]);
-        try self.specs.append(gpa, .{ .owned = true, .spec = .{
+        const spec: LanguageSpec = .{
             .name = name,
             .extensions = exts,
             .parser_dir = dir,
             .symbol = sym,
             .highlights = highlights,
             .outline = outline,
-        } });
-        self.warm(gpa, self.specs.items[self.specs.items.len - 1].spec);
+        };
+
+        // Registering a name again REPLACES it. `forPath` is last-wins, so a
+        // duplicate was already invisible — but `config-reload` re-runs every
+        // `grammar-add`, and appending would grow the list by the whole
+        // language set on every reload, forever. Replacing also keeps the
+        // shadowing intent: a config grammar supersedes an earlier one of the
+        // same name rather than piling up behind it.
+        for (self.specs.items) |*o| {
+            if (!std.mem.eql(u8, o.spec.name, spec.name)) continue;
+            if (o.owned) freeSpec(gpa, o.spec);
+            o.* = .{ .owned = true, .spec = spec };
+            self.warm(gpa, spec);
+            return;
+        }
+        try self.specs.append(gpa, .{ .owned = true, .spec = spec });
+        self.warm(gpa, spec);
     }
 
     /// Adopt the pool newly registered grammars compile on. Set once at
