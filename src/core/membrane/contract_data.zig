@@ -423,6 +423,21 @@ pub const imports = [_]Entry{
     .{ .name = "wl_slot_bind", .params = &.{ .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .slot, .doc = "bind a provider for an already-declared slot, gated by a predicate blob, at priority" },
     .{ .name = "wl_payload_push", .params = &.{ .i32, .u32, .u32, .u32 }, .results = &.{}, .group = .slot, .doc = "push one schema-encoded payload (SchemaRef version + bytes) for a fired slot session" },
     .{ .name = "wl_payload_read", .params = &.{ .i32, .u32, .u32 }, .results = &.{.i32}, .group = .slot, .doc = "host->guest: fill a guest scratch buffer with a fired session's schema-encoded request payload" },
+    // The CONSUMER half. Until these existed a guest could declare, bind and
+    // push — it could PROVIDE a typed capability and never ASK for one, so
+    // plugin-to-plugin composition had to be spelled as an untyped
+    // `wl_run` command string with `wl_arg_str`/`wl_set_result_str` on
+    // either side. Firing is the same door the host uses
+    // (`SlotHost.fire`), with the facts and version derived from the
+    // dispatching context rather than claimed by the caller: a guest
+    // cannot fire "as" some other context, and every observation locator
+    // in every answer is restamped against the version the host stamped.
+    .{ .name = "wl_slot_fire", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .slot, .doc = "fire a declared slot at every eligible provider with a schema-encoded request; returns a session handle, or -1" },
+    .{ .name = "wl_slot_result_count", .params = &.{.i32}, .results = &.{.i32}, .group = .slot, .doc = "how many results have landed for a fired session (-1 if unknown/finished)" },
+    .{ .name = "wl_slot_done", .params = &.{.i32}, .results = &.{.i32}, .group = .slot, .doc = "1 when every matched provider of a fired session has answered or declined (-1 if unknown)" },
+    .{ .name = "wl_slot_result", .params = &.{ .i32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .slot, .doc = "host->guest: fill a scratch buffer with one result's schema-encoded payload; returns its length, or -1" },
+    .{ .name = "wl_slot_result_provider", .params = &.{ .i32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .slot, .doc = "host->guest: fill a scratch buffer with the name of the provider that answered result i; returns its length, or -1" },
+    .{ .name = "wl_slot_finish", .params = &.{.i32}, .results = &.{}, .group = .slot, .doc = "release a fired session and its results" },
 };
 
 /// The imports table's size, alongside `imports.len`, as a deliberate
@@ -433,7 +448,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 209;
+const expected_import_count = 215;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -501,7 +516,7 @@ pub const exports = [_]Export{
 const expected_export_count = 17;
 
 comptime {
-    @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124
+    @setEvalBranchQuota(120_000); // the O(n²) duplicate-name scans below, n≈215
     if (imports.len != expected_import_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/contract_data.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a wl_* host import, update `expected_import_count` here. " ++

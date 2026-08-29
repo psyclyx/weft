@@ -1262,6 +1262,56 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     env.slot_host.finish(id);
 }
 
+test "D2: one guest CONSUMES another guest's novel slot — typed, contextual, with no core type and no shared source" {
+    // The consumer half of §6's worked example. Until `wl_slot_fire` existed
+    // a guest could only ANSWER: it could declare, bind and push, but not
+    // ask, so plugin-to-plugin composition had to be spelled as an untyped
+    // `wl_run` command string. Here `badge_consumer` — a SEPARATE wasm
+    // module, separate linear memory, no build edge to `badge` and no shared
+    // source — fires `ui/badge` and decodes the answer against the schema.
+    //
+    // Nothing in `core/` names a badge. Neither guest names the other. The
+    // host resolves WHO answers from context and restamps every observation
+    // locator on the way through; that is the whole contract.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const provider = try loadPlugin(&engine, &env.ctx, "badge", @embedFile("guest_badge_wasm"), .{});
+    defer provider.deinit();
+    const consumer = try loadPlugin(&engine, &env.ctx, "badge_consumer", @embedFile("guest_badge_consumer_wasm"), .{});
+    defer consumer.deinit();
+
+    // Give the entry real content, so the version the host stamps the answer
+    // with is a real document version and not the empty token.
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "hello");
+    const live_version = try ed.doc.version(gpa);
+    defer gpa.free(live_version);
+    try t.expect(live_version.len > 0);
+
+    const answer = try command.run(&env.commands, &env.ctx, "badge-read", &.{});
+    // provider | text | count | the version the HOST stamped. The consumer
+    // never chose that version and never saw the provider's claimed one.
+    const expected = try std.fmt.allocPrint(gpa, "badge|3 failing|3|{s}", .{live_version});
+    defer gpa.free(expected);
+    try t.expectEqualStrings(expected, answer.string);
+    try t.expect(std.mem.indexOf(u8, answer.string, "stale-guest-claimed-version") == null);
+
+    // And with no provider loaded at all, the ask is an ordinary "nobody
+    // offers that here" — not an error, and not a hang.
+    var env2: Env = undefined;
+    try Env.init(gpa, &env2);
+    defer env2.deinit(gpa);
+    const lonely = try loadPlugin(&engine, &env2.ctx, "badge_consumer", @embedFile("guest_badge_consumer_wasm"), .{});
+    defer lonely.deinit();
+    const none = try command.run(&env2.commands, &env2.ctx, "badge-read", &.{});
+    try t.expectEqualStrings("no-provider", none.string);
+}
+
 test "wasm plugin: demo-config composes commands + binds a key (config surface)" {
     const gpa = t.allocator;
     var env: Env = undefined;

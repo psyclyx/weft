@@ -273,6 +273,10 @@ const guests = [_]Guest{
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end.
     .{ .name = "badge", .import = "guest_badge_wasm", .install = false },
+    // …and the CONSUMER half: a separate guest that FIRES `ui/badge` and
+    // decodes the answer, proving plugin-to-plugin typed composition with
+    // no core type, no shared source, and no build edge between the two.
+    .{ .name = "badge_consumer", .import = "guest_badge_consumer_wasm", .install = false },
     // §11.7's worked example — a third-party decorator of entries it does not
     // own, proven end to end by the wasm-membrane suite.
     .{ .name = "marks", .import = "guest_marks_wasm", .install = false },

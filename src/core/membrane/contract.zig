@@ -336,6 +336,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_slot_bind", .handler = slot.hSlotBind },
     .{ .name = "wl_payload_push", .handler = slot.hPayloadPush },
     .{ .name = "wl_payload_read", .handler = slot.hPayloadRead },
+    .{ .name = "wl_slot_fire", .handler = slot.hSlotFire },
+    .{ .name = "wl_slot_result_count", .handler = slot.hSlotResultCount },
+    .{ .name = "wl_slot_done", .handler = slot.hSlotDone },
+    .{ .name = "wl_slot_result", .handler = slot.hSlotResult },
+    .{ .name = "wl_slot_result_provider", .handler = slot.hSlotResultProvider },
+    .{ .name = "wl_slot_finish", .handler = slot.hSlotFinish },
 };
 
 /// Zip `contract_data.imports` (data) with `handlers` (binding) by NAME —

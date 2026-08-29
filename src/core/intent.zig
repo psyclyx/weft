@@ -334,15 +334,41 @@ fn refused(buf: []u8, comptime fmt: []const u8, args: anytype) Invocation {
 /// Dispatch asks it on the keystroke path; `explain` and the palette ask the
 /// SAME question through it — a second, drifting context builder is the bug
 /// this prevents.
+/// The FACTS this head presents right now — what any contextual resolution
+/// (the offer catalog below, the Container's slot bindings, a guest-fired
+/// `wl_slot_fire`) matches its predicates against.
+///
+/// Split out of `catalogContext` so there is ONE fact builder, not one per
+/// consumer: a slot fired from a guest and an intention resolved from a
+/// keystroke see the same world, and a fact added here reaches both without
+/// anyone remembering to copy it. `catalogContext` adds only the clock
+/// (a cache key), which a fire has no use for.
+pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
+    const entry = ctx.buffers.active();
+    return .{
+        .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
+        .name = entry.name,
+        .mode = ctx.head.currentMode(),
+        .lang = Actions.langOfName(entry.name),
+        .tool = entry.tool,
+        .locality = localityOf(entry),
+        .pane = ctx.head.focused_pane,
+    };
+}
+
+/// WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
+/// only now that an entry has a place. A tool entry is `.tool` first: its
+/// content is a projection, so "are the files real here" is not a question
+/// about it.
+fn localityOf(entry: anytype) @import("facts.zig").Locality {
+    return if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
+}
+
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
     const entry = ctx.buffers.active();
-    // WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
-    // only now that an entry has a place. A tool entry is `.tool` first: its
-    // content is a projection, so "are the files real here" is not a question
-    // about it.
-    const locality: @import("facts.zig").Locality =
-        if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
-    const path = if (entry.textEditor()) |ed| ed.backingPath() else null;
+    const facts = factsFor(ctx);
+    const locality = facts.locality;
+    const path = facts.path;
     var h = std.hash.Wyhash.init(0);
     h.update(ctx.head.currentMode());
     h.update(entry.tool);
@@ -367,15 +393,7 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
     return .{
         .key = ctx.head.catalog_clock.key,
         .revision = ctx.head.catalog_clock.revision,
-        .facts = .{
-            .path = path,
-            .name = entry.name,
-            .mode = ctx.head.currentMode(),
-            .lang = Actions.langOfName(entry.name),
-            .tool = entry.tool,
-            .locality = locality,
-            .pane = ctx.head.focused_pane,
-        },
+        .facts = facts,
     };
 }
 

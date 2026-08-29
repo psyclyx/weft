@@ -290,6 +290,12 @@ extern "weft" fn wl_slot_declare(name_ptr: u32, name_len: u32, shape: u32, compo
 extern "weft" fn wl_slot_bind(name_ptr: u32, name_len: u32, pred_ptr: u32, pred_len: u32, tier: u32, priority: i32) void;
 extern "weft" fn wl_payload_push(session: i32, version: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_payload_read(session: i32, ptr: u32, cap: u32) i32;
+extern "weft" fn wl_slot_fire(name_ptr: u32, name_len: u32, req_ptr: u32, req_len: u32) i32;
+extern "weft" fn wl_slot_result_count(session: i32) i32;
+extern "weft" fn wl_slot_done(session: i32) i32;
+extern "weft" fn wl_slot_result(session: i32, index: u32, ptr: u32, cap: u32) i32;
+extern "weft" fn wl_slot_result_provider(session: i32, index: u32, ptr: u32, cap: u32) i32;
+extern "weft" fn wl_slot_finish(session: i32) void;
 
 fn ZigType(comptime v: contract_data.ValType) type {
     return switch (v) {
@@ -307,7 +313,7 @@ fn ZigType(comptime v: contract_data.ValType) type {
 // compile time, pointing at the offending name, instead of silently
 // desyncing the guest and host halves of the membrane again.
 comptime {
-    @setEvalBranchQuota(50_000); // n≈130 entries, each doing a small const-eval
+    @setEvalBranchQuota(120_000); // n≈215 entries, each doing a small const-eval
     for (contract_data.imports) |entry| {
         const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
         if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
@@ -2754,3 +2760,82 @@ pub fn payloadRead(session: u32) []const u8 {
     if (n < 0) return &.{};
     return slot_scratch[0..@intCast(n)];
 }
+
+// ── Consuming a slot: the other half of declare/bind ──────────────────
+/// A live question you asked of every plugin that answers `slot` here.
+///
+/// This is what makes a plugin a CONSUMER and not only a provider. Before
+/// it, a guest could `slotDeclare`/`slotBind`/`payloadPush` — answer the
+/// host — but had no way to ask its own question, so plugin-to-plugin
+/// composition could only be spelled as an untyped `run("some-command")`
+/// with strings in and strings out. A `Fire` is the typed form: the slot's
+/// declared schema is the contract, the CONTEXT decides who answers, and
+/// results arrive with the provider that gave them.
+///
+/// The context is NOT yours to choose. The host resolves eligibility
+/// against the facts of the entry you are dispatching in — the same facts a
+/// keystroke's intention resolves against — so you cannot ask "as" a mode
+/// or language you are not in, and every position in every answer is
+/// restamped against the host's own version.
+///
+/// `deinit` when done; a forgotten session lives until this plugin unloads.
+pub const Fire = struct {
+    session: u32,
+
+    /// Ask `slot`, carrying `request` (schema-encoded, may be empty). Null
+    /// when nothing answers that question here — an undeclared slot, one
+    /// with no schema, and one no eligible provider binds are all the same
+    /// ordinary answer: nobody is offering.
+    pub fn open(slot_name: []const u8, request: []const u8) ?Fire {
+        const id = wl_slot_fire(p(slot_name.ptr), @intCast(slot_name.len), p(request.ptr), @intCast(request.len));
+        if (id < 0) return null;
+        return .{ .session = @bitCast(id) };
+    }
+
+    /// Encode `value` against `sch` and ask with it — the typed spelling of
+    /// `open`, for a slot whose request side has a shape.
+    pub fn openWith(slot_name: []const u8, sch: *const schema.Schema, value: schema.Value) ?Fire {
+        const bytes = schema.encode(allocator, sch, value) catch return null;
+        defer allocator.free(bytes);
+        return open(slot_name, bytes);
+    }
+
+    /// How many answers have landed so far.
+    pub fn count(self: Fire) usize {
+        const n = wl_slot_result_count(@bitCast(self.session));
+        return if (n < 0) 0 else @intCast(n);
+    }
+
+    /// True once every provider that matched has answered or declined. A
+    /// race whose providers all answer synchronously is already done when
+    /// `open` returns; poll this from `on_poll` for the ones that defer.
+    pub fn done(self: Fire) bool {
+        return wl_slot_done(@bitCast(self.session)) == 1;
+    }
+
+    /// Answer `i`'s schema-encoded payload, into a private scratch —
+    /// decode it with `weft.schema` against the slot's own schema. Valid
+    /// until the next `result`/`provider`/`payloadRead` call.
+    pub fn result(self: Fire, i: usize) ?[]const u8 {
+        const n = wl_slot_result(@bitCast(self.session), @intCast(i), p(&slot_scratch), slot_scratch.len);
+        if (n < 0) return null;
+        return slot_scratch[0..@intCast(n)];
+    }
+
+    /// WHO answered `i`. Attribution is data you are given, not something
+    /// to infer from the payload.
+    pub fn provider(self: Fire, i: usize) ?[]const u8 {
+        const n = wl_slot_result_provider(@bitCast(self.session), @intCast(i), p(&provider_scratch), provider_scratch.len);
+        if (n < 0) return null;
+        return provider_scratch[0..@intCast(n)];
+    }
+
+    pub fn deinit(self: Fire) void {
+        wl_slot_finish(@bitCast(self.session));
+    }
+};
+
+/// Separate from `slot_scratch` so a caller can hold a payload and its
+/// provider name at the same time — the obvious thing to want, and a shared
+/// buffer would silently give you the same bytes twice.
+var provider_scratch: [256]u8 = undefined;
