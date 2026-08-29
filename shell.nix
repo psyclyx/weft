@@ -15,20 +15,41 @@ let
     "javascript"
     "html"
   ];
-  # tree-sitter-fennel ships no highlight query, so its entry is the upstream
-  # grammar with weft's query dropped in at the standard path. Fixing the
-  # package's shape here is what keeps the editor from needing a special case
-  # for it.
-  fennelWithQuery = pkgs.runCommand "tree-sitter-fennel-with-query" { } ''
-    mkdir -p $out/queries
-    cp -r ${pkgs.tree-sitter-grammars.tree-sitter-fennel}/* $out/
-    chmod -R u+w $out
-    cp ${./assets/fennel-highlights.scm} $out/queries/highlights.scm
-  '';
+  # Upstream grammar packages carry the queries their authors wrote, which is
+  # not the same set an editor needs: none ship an `outline.scm` (that shape is
+  # Zed's, and every editor curates its own — see doc), and tree-sitter-fennel
+  # ships no highlight query at all. So each entry is the upstream package with
+  # weft's queries laid over it. This is the NORM, not a workaround for one bad
+  # package: curating queries beside the parser, pinned to the same nixpkgs
+  # revision, is exactly what nvim-treesitter's `parser.json` machinery exists
+  # to achieve.
+  overlayFor =
+    name:
+    let
+      overrides = builtins.filter (o: builtins.pathExists o.src) [
+        {
+          src = ./assets + "/${name}-highlights.scm";
+          dst = "highlights.scm";
+        }
+        {
+          src = ./assets + "/${name}-outline.scm";
+          dst = "outline.scm";
+        }
+      ];
+    in
+    if overrides == [ ] then
+      pkgs.tree-sitter-grammars."tree-sitter-${name}"
+    else
+      pkgs.runCommand "weft-grammar-${name}" { } ''
+        mkdir -p $out/queries
+        cp -r ${pkgs.tree-sitter-grammars."tree-sitter-${name}"}/* $out/
+        chmod -R u+w $out
+        ${builtins.concatStringsSep "\n" (map (o: "cp ${o.src} $out/queries/${o.dst}") overrides)}
+      '';
   grammarDir = pkgs.linkFarm "weft-grammars" (
     map (n: {
       name = n;
-      path = if n == "fennel" then fennelWithQuery else pkgs.tree-sitter-grammars."tree-sitter-${n}";
+      path = overlayFor n;
     }) grammarNames
   );
 in

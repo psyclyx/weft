@@ -78,9 +78,13 @@ pub const LanguageSpec = struct {
     parser_dir: []const u8,
     symbol: [:0]const u8,
     highlights: []const u8,
-    /// Node kinds that define document symbols (name = first identifier
-    /// child). Data, not code — a grammar registration supplies its own.
-    symbol_kinds: []const []const u8 = &.{},
+    /// Outline query source — what `collectSymbols` lists. Empty means this
+    /// grammar contributes no symbols. See `Compiled.outline` for the capture
+    /// contract; it is a QUERY rather than a list of node kinds because the
+    /// name of a definition is frequently not its first identifier (`function
+    /// M.g()` names the field, not the table) and depth alone cannot tell a
+    /// top-level binding from a local.
+    outline: []const u8 = &.{},
 };
 
 // There is deliberately no built-in language table here. Which languages
@@ -110,6 +114,15 @@ pub const Compiled = struct {
     /// capture id → class; pattern id → enabled.
     classes: []Class,
     enabled: []bool,
+    /// The compiled outline query, when the grammar has one. Contract: each
+    /// match captures `@item` (the whole definition — its range, and what two
+    /// matches are deduplicated by) and `@name` (the node whose text is the
+    /// symbol's name). `@context` is accepted and ignored, so a Zed
+    /// `outline.scm` can be used verbatim. Null when the grammar ships no
+    /// outline query, or when the query it ships fails to compile.
+    outline: ?*c.TSQuery = null,
+    outline_item: u32 = 0,
+    outline_name: u32 = 0,
     /// Owned copies of the inputs that determined everything above, held
     /// so the cache can recognise a spec by what it SAYS rather than by
     /// where it lives — `Runtime.specs` is an ArrayList, so a spec's
@@ -118,24 +131,39 @@ pub const Compiled = struct {
     key_parser_dir: []u8,
     key_symbol: []u8,
     key_highlights: []u8,
+    key_outline: []u8,
 
     fn matches(self: *const Compiled, spec: *const LanguageSpec) bool {
         return std.mem.eql(u8, self.key_parser_dir, spec.parser_dir) and
             std.mem.eql(u8, self.key_symbol, spec.symbol) and
-            std.mem.eql(u8, self.key_highlights, spec.highlights);
+            std.mem.eql(u8, self.key_highlights, spec.highlights) and
+            std.mem.eql(u8, self.key_outline, spec.outline);
     }
 
     fn destroy(self: *Compiled, gpa: Allocator) void {
         c.ts_query_delete(self.query);
+        if (self.outline) |q| c.ts_query_delete(q);
         gpa.free(self.classes);
         gpa.free(self.enabled);
         gpa.free(self.key_parser_dir);
         gpa.free(self.key_symbol);
         gpa.free(self.key_highlights);
+        gpa.free(self.key_outline);
         self.lib.close();
         gpa.destroy(self);
     }
 };
+
+/// The index of `@name` in `query`, or null if it has no such capture.
+fn captureIndex(query: *c.TSQuery, name: []const u8) ?u32 {
+    const total = c.ts_query_capture_count(query);
+    for (0..total) |i| {
+        var len: u32 = 0;
+        const got = c.ts_query_capture_name_for_id(query, @intCast(i), &len);
+        if (std.mem.eql(u8, got[0..len], name)) return @intCast(i);
+    }
+    return null;
+}
 
 /// Split a comma-separated list into owned pieces, dropping empties. A
 /// registration's lists arrive this way because commands carry strings, not
@@ -236,6 +264,35 @@ pub const Runtime = struct {
         errdefer gpa.free(key_symbol);
         const key_highlights = try gpa.dupe(u8, spec.highlights);
         errdefer gpa.free(key_highlights);
+        const key_outline = try gpa.dupe(u8, spec.outline);
+        errdefer gpa.free(key_outline);
+
+        // The outline query is OPTIONAL and never fatal: a grammar with none,
+        // or with one that does not compile, simply contributes no symbols.
+        // Refusing the whole grammar — losing highlighting too — because its
+        // outline query has a typo would be wildly disproportionate.
+        var outline: ?*c.TSQuery = null;
+        var outline_item: u32 = 0;
+        var outline_name: u32 = 0;
+        if (spec.outline.len > 0) blk: {
+            var oerr_offset: u32 = 0;
+            var oerr_type: c.TSQueryError = c.TSQueryErrorNone;
+            const oq = c.ts_query_new(g.lang, spec.outline.ptr, @intCast(spec.outline.len), &oerr_offset, &oerr_type) orelse {
+                std.log.warn("syntax {s}: outline query error {d} at byte {d}; no symbols", .{ spec.name, oerr_type, oerr_offset });
+                break :blk;
+            };
+            const item = captureIndex(oq, "item");
+            const nm = captureIndex(oq, "name");
+            if (item == null or nm == null) {
+                std.log.warn("syntax {s}: outline query needs both @item and @name; no symbols", .{spec.name});
+                c.ts_query_delete(oq);
+                break :blk;
+            }
+            outline = oq;
+            outline_item = item.?;
+            outline_name = nm.?;
+        }
+        errdefer if (outline) |q| c.ts_query_delete(q);
 
         const entry = try gpa.create(Compiled);
         errdefer gpa.destroy(entry);
@@ -248,6 +305,10 @@ pub const Runtime = struct {
             .key_parser_dir = key_parser_dir,
             .key_symbol = key_symbol,
             .key_highlights = key_highlights,
+            .key_outline = key_outline,
+            .outline = outline,
+            .outline_item = outline_item,
+            .outline_name = outline_name,
         };
         try self.compiled.append(gpa, entry);
         return entry;
@@ -312,8 +373,7 @@ pub const Runtime = struct {
                 gpa.free(@constCast(o.spec.name));
                 for (o.spec.extensions) |e| gpa.free(@constCast(e));
                 gpa.free(@constCast(o.spec.extensions));
-                for (o.spec.symbol_kinds) |k| gpa.free(@constCast(k));
-                gpa.free(@constCast(o.spec.symbol_kinds));
+                gpa.free(@constCast(o.spec.outline));
                 gpa.free(@constCast(o.spec.parser_dir));
                 gpa.free(@constCast(o.spec.symbol[0 .. o.spec.symbol.len + 1]));
                 gpa.free(@constCast(o.spec.highlights));
@@ -355,8 +415,8 @@ pub const Runtime = struct {
         return null;
     }
 
-    /// One grammar registration. `extensions` and `symbol_kinds` are
-    /// comma-separated because commands carry strings, not lists.
+    /// One grammar registration. `extensions` is comma-separated because
+    /// commands carry strings, not lists.
     pub const Registration = struct {
         /// e.g. ".js,.jsx,.mjs" — at least one.
         extensions: []const u8,
@@ -367,8 +427,10 @@ pub const Runtime = struct {
         /// is how the nixpkgs grammar packages are laid out. Explicit because
         /// some grammars ship no query and the one to use lives elsewhere.
         query: ?[]const u8 = null,
-        /// Node kinds that define document symbols, comma-separated.
-        symbol_kinds: ?[]const u8 = null,
+        /// Outline (document-symbol) query; defaults to
+        /// `<dir>/queries/outline.scm` when the package has one, and to no
+        /// symbols when it does not. See `Compiled.outline` for the captures.
+        outline: ?[]const u8 = null,
     };
 
     /// Register a grammar. Everything a grammar can BE is expressible here —
@@ -386,11 +448,24 @@ pub const Runtime = struct {
         const highlights = try file.readAlloc(gpa, qpath);
         errdefer gpa.free(highlights);
 
+        // The outline query is optional in a way the highlight query is not: a
+        // package without one contributes no symbols rather than failing to
+        // register. An EXPLICIT path that cannot be read is still an error —
+        // config asked for that file by name.
+        const opath = if (reg.outline) |o|
+            try gpa.dupe(u8, o)
+        else
+            try std.fmt.allocPrint(gpa, "{s}/queries/outline.scm", .{dir});
+        defer gpa.free(opath);
+        const outline = if (reg.outline != null or file.statKind(gpa, opath) == .file)
+            try file.readAlloc(gpa, opath)
+        else
+            try gpa.dupe(u8, "");
+        errdefer gpa.free(outline);
+
         const exts = try splitOwned(gpa, reg.extensions);
         errdefer freeOwned(gpa, exts);
         if (exts.len == 0) return error.GrammarNotFound;
-        const kinds = try splitOwned(gpa, reg.symbol_kinds orelse "");
-        errdefer freeOwned(gpa, kinds);
 
         const name = try gpa.dupe(u8, std.fs.path.basename(reg.grammar));
         errdefer gpa.free(name);
@@ -402,7 +477,7 @@ pub const Runtime = struct {
             .parser_dir = dir,
             .symbol = sym,
             .highlights = highlights,
-            .symbol_kinds = kinds,
+            .outline = outline,
         } });
         self.warm(gpa, self.specs.items[self.specs.items.len - 1].spec);
     }
@@ -894,57 +969,60 @@ pub const Syntax = struct {
 
     pub const Sym = struct { name: []u8, start: usize, end: usize };
 
-    /// Walk the tree for `symbol_kinds` nodes (depth ≤ 3); names are
-    /// gpa-owned by the caller.
+    /// Run the grammar's outline query and materialize what it captures;
+    /// names are gpa-owned by the caller. Empty when the grammar ships no
+    /// outline query (`Compiled.outline`).
+    ///
+    /// This used to be a depth-≤3 walk over a list of node kinds, taking each
+    /// definition's first identifier descendant as its name. Both halves were
+    /// wrong in practice: lua's `function M.g()` reported the TABLE (`M`,
+    /// the first identifier) rather than the field, and zig's `const Point =
+    /// struct { x: u8 }` reported the first FIELD (`x`) as the type's name.
+    /// A query says which node is the name, so neither is guessable.
     pub fn collectSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, out: *std.ArrayList(Sym)) !void {
         const tree = self.tree orelse return;
-        try self.walkSymbols(gpa, doc, c.ts_tree_root_node(tree), 0, out);
-    }
+        const query = self.compiled.outline orelse return;
+        const cursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
+        defer c.ts_query_cursor_delete(cursor);
+        c.ts_query_cursor_exec(cursor, query, c.ts_tree_root_node(tree));
 
-    fn walkSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, node: c.TSNode, depth: u8, out: *std.ArrayList(Sym)) !void {
-        if (depth > 3) return;
-        const count = c.ts_node_named_child_count(node);
-        for (0..count) |i| {
-            const child = c.ts_node_named_child(node, @intCast(i));
-            const kind = std.mem.span(c.ts_node_type(child));
-            var is_symbol = false;
-            for (self.spec.symbol_kinds) |k| {
-                if (std.mem.eql(u8, kind, k)) {
-                    is_symbol = true;
+        const doc_len = doc.text().byteLen();
+        var match: c.TSQueryMatch = undefined;
+        while (c.ts_query_cursor_next_match(cursor, &match)) {
+            var item: ?c.TSNode = null;
+            var name_node: ?c.TSNode = null;
+            for (match.captures[0..match.capture_count]) |cap| {
+                if (cap.index == self.compiled.outline_item) item = cap.node;
+                if (cap.index == self.compiled.outline_name) name_node = cap.node;
+            }
+            const it_node = item orelse continue;
+            const nm = name_node orelse continue;
+            const start = c.ts_node_start_byte(it_node);
+
+            // Patterns are allowed to overlap so a query can put specific
+            // cases before general ones; the first match for an item wins.
+            var seen = false;
+            for (out.items) |s| {
+                if (s.start == start) {
+                    seen = true;
                     break;
                 }
             }
-            if (is_symbol) {
-                if (identifierOf(child)) |id_node| {
-                    const s = c.ts_node_start_byte(id_node);
-                    const e = c.ts_node_end_byte(id_node);
-                    if (e > s and e - s <= 256 and e <= doc.text().byteLen()) {
-                        const name = try gpa.alloc(u8, e - s);
-                        errdefer gpa.free(name);
-                        var sr = doc.text().streamReader(.{ .start = s, .end = e }, &.{});
-                        sr.interface.readSliceAll(name) catch unreachable;
-                        try out.append(gpa, .{
-                            .name = name,
-                            .start = c.ts_node_start_byte(child),
-                            .end = c.ts_node_end_byte(child),
-                        });
-                    }
-                }
-            }
-            try self.walkSymbols(gpa, doc, child, depth + 1, out);
-        }
-    }
+            if (seen) continue;
 
-    fn identifierOf(node: c.TSNode) ?c.TSNode {
-        const count = c.ts_node_named_child_count(node);
-        for (0..count) |i| {
-            const child = c.ts_node_named_child(node, @intCast(i));
-            const kind = std.mem.span(c.ts_node_type(child));
-            if (std.mem.indexOf(u8, kind, "identifier") != null or std.mem.eql(u8, kind, "name")) {
-                return child;
-            }
+            const s = c.ts_node_start_byte(nm);
+            const e = c.ts_node_end_byte(nm);
+            if (e <= s or e - s > 256 or e > doc_len) continue;
+            const name = try gpa.alloc(u8, e - s);
+            errdefer gpa.free(name);
+            var sr = doc.text().streamReader(.{ .start = s, .end = e }, &.{});
+            sr.interface.readSliceAll(name) catch unreachable;
+            try out.append(gpa, .{
+                .name = name,
+                .start = start,
+                .end = c.ts_node_end_byte(it_node),
+            });
         }
-        return null;
     }
 
     // ── Tree queries (plan 02 P7) ───────────────────────────────

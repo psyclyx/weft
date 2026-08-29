@@ -40,12 +40,7 @@ fn testRuntime(gpa: Allocator) !core.syntax.Runtime {
     var rt: core.syntax.Runtime = .empty;
     errdefer rt.deinit(gpa);
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
-    try rt.add(gpa, .{
-        .extensions = ".zig",
-        .grammar = "zig",
-        .symbol = "tree_sitter_zig",
-        .symbol_kinds = "function_declaration,variable_declaration,struct_declaration",
-    });
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
     return rt;
 }
@@ -1515,11 +1510,16 @@ test "syntax: an external registration can say everything a built-in can" {
     defer rt.deinit(gpa);
     try rt.setSearchPath(gpa, root);
 
+    // An outline query where the package keeps one, picked up without config
+    // naming it.
+    const opath = try std.fmt.allocPrint(gpa, "{s}/outline.scm", .{qdir});
+    defer gpa.free(opath);
+    try core.file.writeBytesMakingDirs(gpa, qdir, opath, "(x) @item (y) @name");
+
     try rt.add(gpa, .{
         .extensions = ".ml,.mli, .mll",
         .grammar = "mylang",
         .symbol = "tree_sitter_mylang",
-        .symbol_kinds = "function_declaration,type_declaration",
     });
 
     // Every declared extension resolves, including the space-padded one.
@@ -1528,8 +1528,7 @@ test "syntax: an external registration can say everything a built-in can" {
         try t.expectEqualStrings("mylang", spec.name);
         try t.expectEqualStrings("tree_sitter_mylang", spec.symbol);
         try t.expectEqualStrings("(identifier) @variable", spec.highlights);
-        try t.expectEqual(@as(usize, 2), spec.symbol_kinds.len);
-        try t.expectEqualStrings("function_declaration", spec.symbol_kinds[0]);
+        try t.expectEqualStrings("(x) @item (y) @name", spec.outline);
     }
     try t.expect(rt.forPath("a.rs") == null);
 
@@ -1561,4 +1560,90 @@ test "syntax: an external registration can say everything a built-in can" {
     const other = rt.forPath("x.other").?;
     try t.expectEqualStrings("(comment) @comment", other.highlights);
     try t.expectEqualStrings(abs_pkg, other.parser_dir);
+}
+
+test "syntax: outline queries name what a first-identifier walk got wrong" {
+    // The two concrete defects the old depth-≤3 walk had. It took a
+    // definition's first identifier DESCENDANT as its name, which is not the
+    // name in either of these cases — and no list of node kinds can express
+    // the difference, which is why this is a query.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
+    try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
+
+    const Case = struct { path: []const u8, src: []const u8, want: []const []const u8 };
+    const cases = [_]Case{
+        // `Point`, not `x`: the struct's first identifier descendant is its
+        // first FIELD. And a `const` inside a function body is a local, which
+        // a depth cap only accidentally excluded.
+        .{
+            .path = "a.zig",
+            .src =
+            \\const Point = struct { x: u8, y: u8 };
+            \\pub fn area(p: Point) u8 {
+            \\    const scratch = 1;
+            \\    return scratch;
+            \\}
+            \\test "it works" {}
+            ,
+            .want = &.{ "Point", "area", "it works" },
+        },
+        // `g` and `h`, not `M` twice: the table is the first identifier in
+        // both `M.g` and `M:h`.
+        .{
+            .path = "a.lua",
+            .src =
+            \\local function f() end
+            \\function M.g() end
+            \\function M:h() end
+            ,
+            .want = &.{ "f", "g", "h" },
+        },
+        // A binding earns an entry by holding a function, not by existing —
+        // the old rule listed every `lexical_declaration`.
+        .{
+            .path = "a.js",
+            .src =
+            \\function f() {}
+            \\class C { m() {} }
+            \\const g = () => {};
+            \\let plain = 1;
+            ,
+            .want = &.{ "f", "C", "m", "g" },
+        },
+    };
+
+    inline for (cases) |case| {
+        var doc = try Document.init(gpa, "user");
+        defer doc.deinit(gpa);
+        try doc.insert(gpa, 0, case.src);
+        const spec = rt.forPath(case.path).?;
+        const syn = try core.syntax.Syntax.create(gpa, &rt, spec, &doc);
+        defer syn.destroy();
+
+        var syms: std.ArrayList(core.syntax.Syntax.Sym) = .empty;
+        defer {
+            for (syms.items) |s| gpa.free(s.name);
+            syms.deinit(gpa);
+        }
+        try syn.collectSymbols(gpa, &doc, &syms);
+
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        for (syms.items, 0..) |s, i| {
+            if (i > 0) try got.appendSlice(gpa, ",");
+            try got.appendSlice(gpa, s.name);
+        }
+        var want: std.ArrayList(u8) = .empty;
+        defer want.deinit(gpa);
+        for (case.want, 0..) |w, i| {
+            if (i > 0) try want.appendSlice(gpa, ",");
+            try want.appendSlice(gpa, w);
+        }
+        try t.expectEqualStrings(want.items, got.items);
+    }
 }

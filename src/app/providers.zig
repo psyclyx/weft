@@ -12,11 +12,13 @@ const std = @import("std");
 const core = @import("../core/core.zig");
 const collab = @import("collab.zig");
 
-/// `grammar-add <exts> <grammar> <symbol> [query] [symbol-kinds]` — grammars
-/// as data. `exts` and `symbol-kinds` are comma-separated; `grammar` is a name
-/// resolved along the registry's search path, or an absolute package
-/// directory. Every field of a `Registration` is reachable from here: there is
-/// no richer way to describe a grammar that config cannot say.
+/// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as
+/// data. `exts` is comma-separated; `grammar` is a name resolved along the
+/// registry's search path, or an absolute package directory; `query` and
+/// `outline` are query-file paths that default to the package's own
+/// `queries/highlights.scm` and `queries/outline.scm`. Every field of a
+/// `Registration` is reachable from here: there is no richer way to describe
+/// a grammar that config cannot say.
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
         .name = "grammar-add",
@@ -26,7 +28,7 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
             .{ .name = "grammar", .type = .string },
             .{ .name = "symbol", .type = .string },
             .{ .name = "query", .type = .string },
-            .{ .name = "symbol-kinds", .type = .string },
+            .{ .name = "outline", .type = .string },
         },
         .handler = grammarAddHandler,
         .data = runtime,
@@ -34,7 +36,7 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
 }
 
 /// The FEWEST arguments `grammar-add` will act on. This — not the declared
-/// arity, which is larger because query and symbol-kinds are optional — is the
+/// arity, which is larger because query and outline are optional — is the
 /// number that has to stay out of guest reach: it is what it takes to get to
 /// `std.DynLib.open` on a caller-named directory. The gate below reads this,
 /// so the two cannot drift apart.
@@ -61,7 +63,7 @@ fn grammarAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
         .grammar = args[1].string,
         .symbol = args[2].string,
         .query = optional.at(args, 3),
-        .symbol_kinds = optional.at(args, 4),
+        .outline = optional.at(args, 4),
     });
     return .nil;
 }
@@ -349,7 +351,7 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
     defer runtime.deinit(gpa);
     const grammar_add = grammarAddCommand(&runtime);
     // Deliberately the MINIMUM the handler acts on, not `grammar_add.args.len`.
-    // Those were the same number until query and symbol-kinds became optional;
+    // Those were the same number until query and outline became optional;
     // comparing the declared count now would overstate the barrier and let a
     // three-argument guest runner through while still reporting green.
     if (grammar_add_min_args <= max_guest_args) {

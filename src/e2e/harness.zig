@@ -2467,25 +2467,10 @@ pub const App = struct {
 /// and not here is a language the e2e suite silently stops covering.
 fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
-    try rt.add(gpa, .{
-        .extensions = ".zig",
-        .grammar = "zig",
-        .symbol = "tree_sitter_zig",
-        .symbol_kinds = "function_declaration,variable_declaration,struct_declaration",
-    });
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
     try rt.add(gpa, .{ .extensions = ".fnl", .grammar = "fennel", .symbol = "tree_sitter_fennel" });
-    try rt.add(gpa, .{
-        .extensions = ".lua",
-        .grammar = "lua",
-        .symbol = "tree_sitter_lua",
-        .symbol_kinds = "function_declaration,function_definition",
-    });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
-    try rt.add(gpa, .{
-        .extensions = ".js,.jsx,.mjs,.cjs",
-        .grammar = "javascript",
-        .symbol = "tree_sitter_javascript",
-        .symbol_kinds = "function_declaration,class_declaration,lexical_declaration",
-    });
+    try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
     try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
 }
