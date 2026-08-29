@@ -6,7 +6,7 @@
 // and reusing vim's own `window` chord (C-w) for splits. Compare with the
 // default doom config (nested submenus) and helix.js (a different editor).
 
-// A compact catalog — modal editing + the everyday tools.
+// A compact plugin set — modal editing + the everyday tools.
 [
   "edit", "complete", "project", "palette", "motions", "textobjects", "operators", "vim",
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",

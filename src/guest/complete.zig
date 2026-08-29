@@ -1,7 +1,6 @@
-//! complete (wasm twin) — buffer-word completion (src/core/catalog/complete.zig)
-//! recompiled as a `.wasm` component. The SAME dabbrev behavior — scan the
-//! active buffer for words sharing the query prefix — expressed against the
-//! guest ABI shim (weft.zig). It proves the host→guest data-gather membrane:
+//! complete — buffer-word (dabbrev) completion: scan the active buffer for
+//! words sharing the query prefix and offer them. It is the host→guest
+//! data-gather membrane's worked example:
 //! `describe` declares the capability, `init` registers the provider, and the
 //! host calls `on_complete(session)` per request, during which the guest reads
 //! the prefix and offers candidates for that session, then commits them (a sync

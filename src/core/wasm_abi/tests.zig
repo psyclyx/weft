@@ -1,8 +1,8 @@
 //! The wasm-membrane test suite + its compact editor `Env`. Exercises the full
 //! ABI end to end: a `.wasm` guest reaches the editor only across the sandbox
-//! membrane, yet lands its edits on the identical authority path an in-process
-//! catalog plugin uses. Kept beside the facade so `zig build test` still runs
-//! them (wasm_abi.zig references this file from a test block).
+//! membrane, and its edits land on the ordinary authority path. Kept beside the
+//! facade so `zig build test` still runs them (wasm_abi.zig references this
+//! file from a test block).
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
@@ -29,7 +29,7 @@ const guest_hello = wasm_abi.guest_hello;
 
 // Every guest in this suite loads through the engine's compiled-module cache
 // (`wasm.Engine.cache_dir`, which a test binary inherits from
-// the build-baked module cache). JIT-compiling the catalog from scratch is the
+// the build-baked module cache). JIT-compiling every guest from scratch is the
 // suite's dominant cost, and the cache is content-addressed, so a changed
 // guest still compiles exactly once.
 const loadPlugin = wasm_abi.loadPlugin;
@@ -680,7 +680,7 @@ const Env = struct {
     }
 };
 
-test "wasm plugin: the edit catalog plugin runs identically as .wasm (duplicate-line)" {
+test "wasm plugin: the edit plugin's duplicate-line lands through the membrane" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);

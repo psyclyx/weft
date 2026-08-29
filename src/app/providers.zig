@@ -83,8 +83,9 @@ pub const Attach = struct {
     seen_commits: usize = 0,
 };
 
-/// The `abi.SyntaxResolver` the catalog uses: reach a buffer's live grammar
-/// through the shell-owned frontend slot (core cannot; the host can).
+/// The `syntax_of` resolver the plugin runtime is wired with (`main.zig`'s
+/// `.opts`): reach a buffer's live grammar through the shell-owned frontend
+/// slot (core cannot; the host can).
 pub fn resolveSyntax(buf: *core.Buffers.Buffer) ?*core.syntax.Syntax {
     const at: *Attach = @ptrCast(@alignCast(buf.frontend orelse return null));
     return at.syntax;

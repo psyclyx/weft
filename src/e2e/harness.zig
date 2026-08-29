@@ -81,7 +81,7 @@ pub const pair_w: u32 = pair_canvas.width;
 pub const pair_h: u32 = pair_canvas.height;
 pub const app_em: f32 = 16;
 
-/// The shipped resident JS plugins, as the catalog installs them — a test
+/// The shipped resident JS plugins, as the bundle installs them — a test
 /// drives the REAL reactor, never a paraphrase of it.
 pub const acp_js = weft.acp_js;
 
@@ -329,7 +329,7 @@ pub const Editor = struct {
     /// Register the app's collaboration commands (share/listen/peers/…) over
     /// this editor's own connection state, exactly as main() does. Opt-in
     /// rather than part of `init`, because only a test that names those
-    /// commands needs them — the plugin catalog and core builtins are the
+    /// commands needs them — the bundled plugins and core builtins are the
     /// default surface everywhere else.
     pub fn enableCollabCommands(self: *Editor) !void {
         self.share_ctx = .{
@@ -1055,7 +1055,7 @@ pub const Loopback = struct {
     }
 };
 
-// ── The guest catalog, embedded for the tests ───────────────────────
+// ── The bundled guests, embedded for the tests ─────────────────────
 
 const guest = struct {
     const edit = @embedFile("guest_edit_wasm");
@@ -1145,12 +1145,12 @@ pub fn loadHeadtest(ed: *Editor) !void {
     try ed.load("headtest", guest.headtest);
 }
 
-/// Load ONE grammar from the embedded catalog by name — the load a config's
+/// Load ONE grammar from the embedded bundle by name — the load a config's
 /// `weft.plugin(name)` performs, without a config in the way. For gates that
 /// drive several grammars through the same script (the §10.4 posture gate),
 /// where the interesting difference is the grammar, not the config.
 pub fn loadGrammar(ed: *Editor, name: []const u8) !void {
-    try ed.load(name, plugin_catalog.get(name) orelse return error.UnknownPlugin);
+    try ed.load(name, bundled_plugins.get(name) orelse return error.UnknownPlugin);
     try setResting(ed);
 }
 
@@ -1815,14 +1815,14 @@ pub const Project = struct {
 // The hand-wired loaders above set up a known plugin set; they can't surface
 // what's MISSING or bound weird in the sample config. `bootConfig` runs the
 // actual `config/config.js` in the quickjs sandbox — the same door main() uses
-// — against the embedded catalog, so a test drives the editor a user really
+// — against the embedded bundle, so a test drives the editor a user really
 // configured. What the config asks for but we can't load is recorded (a
 // finding), not silently dropped.
 
 /// Every reference plugin, keyed by the name a config's `weft.plugin(name)`
-/// uses → its embedded wasm (the test module embeds the whole catalog). The
+/// uses → its embedded wasm (the test module embeds them all). The
 /// analogue of the lib/weft/plugins dir the shipped binary resolves against.
-const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
+const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "edit", @embedFile("guest_edit_wasm") },
     .{ "complete", @embedFile("guest_complete_wasm") },
     .{ "project", @embedFile("guest_project_wasm") },
@@ -1864,22 +1864,22 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
-    // (src/guest/gramtest.zig) — catalog-resolvable so the gate's config
+    // (src/guest/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.
     .{ "gramtest", @embedFile("guest_gramtest_wasm") },
 });
 
 /// The PluginLoader `weft.plugin(name)` funnels through during a config boot.
-/// Resolves each name against the embedded catalog and loads it onto the
+/// Resolves each name against the embedded bundle and loads it onto the
 /// editor; records what it couldn't resolve/load so the test can report it.
 pub const ConfigLoader = struct {
     ed: *Editor,
-    missing: std.ArrayList([]const u8) = .empty, // names not in the catalog
+    missing: std.ArrayList([]const u8) = .empty, // names not in the bundle
     failed: std.ArrayList([]const u8) = .empty, // resolved but loadPlugin errored
     /// EVERY name `weft.plugin(name)` requested, in request order — the
     /// M3/M4 parity harness's "plugin load-list set-equality" evidence
-    /// (config_test.zig): recorded regardless of catalog/load outcome (a
-    /// `.js` name included), so two configs with the same catalog list
+    /// (config_test.zig): recorded regardless of resolve/load outcome (a
+    /// `.js` name included), so two configs with the same plugin list
     /// produce the same set here.
     requested: std.ArrayList([]const u8) = .empty,
 
@@ -1896,14 +1896,14 @@ pub const ConfigLoader = struct {
         const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
         const gpa = self.ed.gpa;
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
-        // The shipped `.js` catalog (build.zig's `js_plugins`, installed
+        // The shipped `.js` plugins (build.zig's `js_plugins`, installed
         // beside the .wasm plugins): embedded here the same way, so a config
         // that names one loads it as a resident quickjs plugin.
-        const js_catalog = [_]struct { name: []const u8, ns: []const u8, src: []const u8 }{
+        const bundled_js = [_]struct { name: []const u8, ns: []const u8, src: []const u8 }{
             .{ .name = "dap.js", .ns = "dap", .src = weft.dap_js },
             .{ .name = "acp.js", .ns = "acp", .src = weft.acp_js },
         };
-        for (js_catalog) |entry| {
+        for (bundled_js) |entry| {
             if (!std.mem.eql(u8, name, entry.name)) continue;
             self.ed.loadJs(entry.ns, entry.src) catch {
                 self.failed.append(gpa, gpa.dupe(u8, name) catch return) catch {};
@@ -1914,7 +1914,7 @@ pub const ConfigLoader = struct {
             self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
             return;
         }
-        const bytes = plugin_catalog.get(name) orelse {
+        const bytes = bundled_plugins.get(name) orelse {
             self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
             return;
         };

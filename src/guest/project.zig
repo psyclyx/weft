@@ -1,9 +1,7 @@
-//! project (wasm twin) — the project-domain catalog plugin
-//! (src/core/catalog/project.zig) recompiled as `.wasm`. Tracks recently
-//! visited files (kv-backed, most-recent-first, deduped, capped) — the same
-//! substrate a switch-file picker renders, expressed against the guest shim.
-//! Proves command args/result + path + kv all cross the membrane, and that a
-//! non-trivial pure computation (prepend/dedup/cap) ports unchanged.
+//! project — the project domain, a `.wasm` plugin. Tracks recently visited
+//! files (kv-backed, most-recent-first, deduped, capped) — the substrate a
+//! switch-file picker renders. Command args/result, `path`, and `kv` all cross
+//! the membrane here, over a non-trivial pure computation (prepend/dedup/cap).
 //!
 //! Declares NO capabilities. It used to hold `fs_read` for one reason — a
 //! VCS-marker climb up from the active buffer — and that climb was a second

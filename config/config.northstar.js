@@ -24,7 +24,7 @@
 //      DEFAULT system — the degenerate composition. Systems appear only when
 //      you want a second one (see the agent-UX note below).
 //   3. `weft.plugin(name)` imports that blob's manifest AND accepts its grant
-//      bundle IF it comes from the bundled catalog (the first-party trust
+//      bundle IF it comes from a bundled plugin (the first-party trust
 //      root). A third-party path takes the explicit form
 //        weft.plugin("/path/x.wasm", { grants: { proc: {root: "project"} } })
 //      and surfaces in the approval diff.
@@ -33,7 +33,7 @@
 //      config priority over the core defaults — the same first-wins machinery
 //      everything else uses, no new composition mode.
 
-// ── The catalog. Each import merges the plugin's manifest (slots, bindings,
+// ── The plugins. Each import merges the plugin's manifest (slots, bindings,
 // grants) into this composition; the reconcile engine activates the final
 // set, so the ordering of these lines is structurally meaningless.
 weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
@@ -369,5 +369,5 @@ weft.echo("weft: config.js loaded");
 // ── What parity did NOT require (the negative space that proves the design):
 // no weft.system(), no scopes, no SlotDecls, no Predicate syntax, no manifest
 // vocabulary. One namespace fix (`editor` → `which_key`) and one trust
-// decision (the bundled catalog's grant bundles) — everything else is the
+// decision (the bundled plugins' grant bundles) — everything else is the
 // same file meaning the same things, now as a value.

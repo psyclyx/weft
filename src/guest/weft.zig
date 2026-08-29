@@ -1,17 +1,19 @@
-//! weft.zig (guest side) — the ABI a `.wasm` plugin sees, mirroring the
-//! in-process `abi.Abi` surface (src/core/abi.zig) one-for-one so the SAME
-//! plugin logic reads identically whether it links in-process or crosses the
-//! sandbox membrane. Only the transport differs: every call here is an
-//! `extern "weft"` host import (the grant), scalars cross as i32/u32, and
-//! bulk bytes cross through the guest's own linear memory — either the host
-//! reads `(ptr, len)` out of us (writes: `edit`, `kvPut`) or fills a scratch
-//! buffer we hand it `(ptr, cap)` and returns the length (reads: `slice`,
-//! `kvGet`, `path`). No host pointer ever reaches the guest.
+//! weft.zig (guest side) — the ABI a `.wasm` plugin sees, and the ONLY door it
+//! has: every call here is an `extern "weft"` host import (the grant), scalars
+//! cross as i32/u32, and bulk bytes cross through the guest's own linear
+//! memory — either the host reads `(ptr, len)` out of us (writes: `edit`,
+//! `kvPut`) or fills a scratch buffer we hand it `(ptr, cap)` and returns the
+//! length (reads: `slice`, `kvGet`, `path`). No host pointer ever reaches the
+//! guest.
 //!
-//! Permission groups match abi.zig: A core (log), the describe-phase
-//! declarations (declareCommand/requestPerm), B read-only (cursor/byteLen/
-//! slice/lineAt/selection/path), C write (edit/register/jump), E admin (kv),
-//! plus echo. A guest declares in `describe()`; the host cross-checks every
+//! The externs below are hand-written but comptime-VERIFIED against
+//! `core/membrane/contract_data.zig` (see the `comptime` block after the
+//! extern list), so this file cannot drift from the host's table.
+//!
+//! Permission groups: A core (log), the describe-phase declarations
+//! (declareCommand/requestPerm), B read-only (cursor/byteLen/slice/lineAt/
+//! selection/path), C write (edit/register/jump), E admin (kv), plus echo. A
+//! guest declares in `describe()`; the host cross-checks every
 //! `register`/effect against that declaration (the perm handshake).
 
 const std = @import("std");
@@ -756,7 +758,7 @@ pub fn echo(msg: []const u8) void {
 // ── Command args & result (valid only during an `on_command` call) ────
 // Integers cross as i32 — the membrane's word, the same width the offset ABI
 // (cursor/edit/slice) already uses. Command Values wider than i32 are outside
-// the sandbox contract (no catalog command passes one).
+// the sandbox contract (no reference plugin's command passes one).
 
 /// Number of args the command was invoked with.
 pub fn argCount() usize {

@@ -1,10 +1,10 @@
 //! A wasm GUEST plugin exercising the FULL lifecycle across the membrane,
-//! written against the guest-side ABI shim (weft.zig) so the logic reads like
-//! an in-process catalog plugin. `describe` declares the command up front (the
-//! perm handshake's no-authority half); `init` registers it; when the user
-//! runs it the host calls back into `on_command`, which edits the buffer
-//! through the host edit gate (authored as this plugin's peer, grade-gated).
-//! This is the bidirectional host↔guest ABI every `.wasm` catalog plugin uses.
+//! written against the guest-side ABI shim (weft.zig). `describe` declares the
+//! command up front (the perm handshake's no-authority half); `init` registers
+//! it; when the user runs it the host calls back into `on_command`, which edits
+//! the buffer through the host edit gate (authored as this plugin's peer,
+//! grade-gated). This is the bidirectional host↔guest ABI every `.wasm` plugin
+//! uses.
 
 const weft = @import("weft");
 

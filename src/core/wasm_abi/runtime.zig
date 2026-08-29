@@ -7,9 +7,8 @@
 //!   undeclared one fails the load and rolls the partial plugin back.
 //! Commands the guest registers bind into the shared registry with a trampoline
 //! that dispatches BACK into the guest's `on_command` export; its edits land on
-//! the SAME grade gate an in-process catalog plugin uses, authored as the
-//! plugin's own peer. Every host import mirrors one abi.Abi method — the
-//! transport is wasm, the shape is unchanged.
+//! the ordinary grade gate, authored as the plugin's own peer — the transport
+//! is wasm, the authority path is the one every effect takes.
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");

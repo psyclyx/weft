@@ -7,12 +7,12 @@
 // same engine the vim leader uses (`C-x` holds pending, which-key shows its
 // completions, `C-x C-f` completes) — NOT modes. This is the forcing function:
 // it drives the sequence model from the modeless side and exercises the whole
-// catalog (git, files, grep, make, repl, …) over a different editor plugin.
+// plugins (git, files, grep, make, repl, …) over a different editor plugin.
 //
 // Keys are written the way you'd say them — "C-x C-f", "M-x", "M-<" — and the
 // one keyspec normalizer canonicalizes them; which-key shows them back the same.
 
-// The catalog (emacs instead of vim/helix). emacs composes the same `motions`.
+// The plugins (emacs instead of vim/helix). emacs composes the same `motions`.
 [
   "edit", "complete", "project", "structural", "region", "shell", "palette",
   "motions", "textobjects", "operators", "emacs",

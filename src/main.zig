@@ -207,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Plugins: external .wasm, sandboxed under wasmtime (no in-process
     //    trust). weft ships MODELESS — nothing here unless the user asks with
-    //    --plugin. The reference catalog (vim, palette, edit, …) lives as
+    //    --plugin. The reference plugins (vim, palette, edit, …) live as
     //    `.wasm` under lib/weft/plugins/; each runs behind the perm handshake,
     //    reaching the editor only through the `weft.*` membrane and authoring
     //    every edit as its own peer. The effect services the ABI's Group D/E

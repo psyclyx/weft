@@ -1368,8 +1368,9 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 }
 
 // ── The `weft.*` config imports: read the guest's strings, drive the ctx.
-// Each mirrors an abi.Abi config-surface method; failures degrade quietly
-// (a bad bind is dropped) — the JS side already validated arity/types. ──
+// Each mirrors one config-surface import of the wasm plane; failures degrade
+// quietly (a bad bind is dropped) — the JS side already validated
+// arity/types. ──
 
 fn readStr(br: *Bridge, caller: *wasm.Caller, ptr: i32, len: i32) ?[]u8 {
     return caller.readMemory(br.activeCtx().gpa, @intCast(ptr), @intCast(len)) catch null;
@@ -1429,7 +1430,7 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     // Nested weft.use (an imported file itself calling weft.use) flat-tiers
     // — the sub-sub-manifest still lands at plain `.imported`, one rung, not
     // a deeper one (manifest.zig's module doc: "a deliberate simplification
-    // — nothing in the shipped catalog nests weft.use more than one level").
+    // — nothing in the shipped config nests weft.use more than one level").
     // LOUD about it (nit c), not a silent behavior a config author has to
     // discover by reading this file's comments.
     if (m.tier == .imported) {

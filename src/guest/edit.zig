@@ -1,9 +1,14 @@
-//! edit (wasm twin) — the edit-domain catalog plugin (src/core/catalog/edit.zig)
-//! recompiled as a `.wasm` component. The SAME line operators — duplicate-line,
-//! upcase-line — expressed against the guest ABI shim (weft.zig) instead of the
-//! in-process `abi.Abi`. Byte-for-byte the same behavior; only the transport is
-//! the sandbox membrane. This is plan 05's definition of done: a real catalog
-//! plugin runs identically as `.wasm` under the perm handshake.
+//! edit — the edit domain's line operators, a `.wasm` plugin with NO core
+//! privilege beyond the edit door (perms `{}`). `duplicate-line` copies the
+//! current line and inserts the copy below it; `upcase-line` upper-cases it in
+//! place as one undoable unit. Both read a read-only snapshot through
+//! `lineAt`/`slice` and write through the gated `edit` door, authored as this
+//! plugin's peer — a `view`-grade doc refuses inside the gate with zero
+//! permission logic here.
+//!
+//! The smallest complete plugin in the reference set, and the shape every
+//! other one repeats: `describe` declares the commands, `init` registers them,
+//! `on_command` runs one. Read this one first.
 
 const std = @import("std");
 const weft = @import("weft");

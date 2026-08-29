@@ -17,7 +17,7 @@
 //! the ROOT config manifest is `.config`; a manifest reached through
 //! `weft.use(name)` is `.imported` — a flat assignment (not `tier - 1`
 //! arithmetic), so nested imports-of-imports stay at `.imported` too. This
-//! is a deliberate simplification: nothing in the shipped catalog nests
+//! is a deliberate simplification: nothing in the shipped config nests
 //! `weft.use` more than one level, and `.imported` already sits below
 //! `.config` in `container.Tier`'s total order, which is all the override
 //! contract (`defaults.js` loses to `config.js`'s own later binds) needs.
@@ -265,23 +265,23 @@ pub const SlotDeclDecl = struct {
     schema: *const schema_mod.Schema,
 };
 
-/// Whether a `weft.plugin(name)` names the bundled catalog or an explicit
+/// Whether a `weft.plugin(name)` names a BUNDLED plugin or an explicit
 /// path — the trust-root choke point (doc/cwa-prior-docs-audit.md §5 "Trust root —
 /// DECIDED", §4 C17). A bare name ("vim") resolves against the bundled
-/// plugin directory and is accepted under the catalog's curated grant
-/// bundle — today's behavior, no prompt. A path-form name (contains '/', or
+/// plugin directory and is accepted under the bundle's curated grant
+/// set — today's behavior, no prompt. A path-form name (contains '/', or
 /// literally names a `.wasm`/`.js` file) is OUTSIDE the trust root: not
 /// curated, its grants unverified. Behavior is unchanged today (both load);
 /// this function exists so W4 has exactly one place to hang an approval
 /// prompt on the path-form branch. `config_load.zig`'s `PluginHost.resolve`
 /// calls this directly (not a parallel test) — a plugin must never resolve
 /// differently than it was trust-classified.
-pub const PluginTrust = enum { catalog, path_form };
+pub const PluginTrust = enum { bundled, path_form };
 pub fn pluginTrust(name: []const u8) PluginTrust {
     if (std.mem.indexOfScalar(u8, name, '/') != null or
         std.mem.endsWith(u8, name, ".wasm") or std.mem.endsWith(u8, name, ".js"))
         return .path_form;
-    return .catalog;
+    return .bundled;
 }
 
 /// The identity a loaded plugin registers itself, and its config values,
@@ -290,7 +290,7 @@ pub fn pluginTrust(name: []const u8) PluginTrust {
 /// same value as `wasm_abi.loadPlugin`'s/`quickjs.JsPlugin.load`'s `name`
 /// param). `std.fs.path.stem` already strips both a leading directory
 /// (`stem` calls `basename` internally) and a trailing extension, so a bare
-/// catalog name ("git"), a bare `.js`/`.wasm` file ("dap.js"), and an
+/// bundled name ("git"), a bare `.js`/`.wasm` file ("dap.js"), and an
 /// explicit path ("/x/y/acp.js") all reduce to the same short identity
 /// ("git", "dap", "acp"). `Manifest.populateKnownPlugins` must PREDICT this
 /// identity before the plugin actually loads (so a `weft.set("acp", ...)`
@@ -307,9 +307,9 @@ pub fn pluginNamespace(name: []const u8) []const u8 {
 /// (`prio_imported`, 50) sitting between `prio_plugin` (0) and `prio_config`
 /// (100) — reusing `prio_plugin` for imports (what plain `tier - 1` would
 /// give, since `container.Tier.imported` sits below `.plugin`) would let an
-/// ordinary catalog plugin's own bind beat `defaults.js`, which is not the
+/// ordinary bundled plugin's own bind beat `defaults.js`, which is not the
 /// override contract (`config.js`'s later binds must win over `defaults.js`;
-/// `defaults.js` itself is not competing with the catalog for keymap slots
+/// `defaults.js` itself is not competing with the plugins for keymap slots
 /// in practice, but the plan is explicit that imports get their own rung).
 pub fn keymapPriorityForTier(tier: Tier) i32 {
     return switch (tier) {
@@ -870,8 +870,8 @@ pub const Manifest = struct {
         for (self.imports.items) |imp| try imp.loadPlugins(actx);
         for (self.plugins.items) |d| {
             switch (pluginTrust(d.name)) {
-                .catalog => {},
-                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled catalog trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
+                .bundled => {},
+                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
             }
             if (actx.loader) |ld| ld.load(ld.ctx, d.name);
         }
@@ -973,8 +973,8 @@ pub const Manifest = struct {
         for (self.plugins.items) |d| {
             if (old_plugins.contains(d.name)) continue; // already loaded — reload isn't wired
             switch (pluginTrust(d.name)) {
-                .catalog => {},
-                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled catalog trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
+                .bundled => {},
+                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
             }
             if (actx.loader) |ld| ld.load(ld.ctx, d.name);
         }
@@ -1172,16 +1172,16 @@ pub const Manifest = struct {
     /// (the first load) reads every plugin as added. `(no change)` when
     /// nothing in either dimension differs.
     ///
-    /// **The catalog-trust-root framing (§5 "Trust root — DECIDED")**: a
-    /// bare catalog plugin name's OWN `describe()`-declared perms are the
-    /// bundled catalog's IMPLICIT, curated grant bundle — deliberately NOT
+    /// **The trust-root framing (§5 "Trust root — DECIDED")**: a bare
+    /// bundled plugin name's OWN `describe()`-declared perms are the
+    /// bundle's IMPLICIT, curated grant set — deliberately NOT
     /// enumerable here. This diff is computed PRE-load (`reconcile` calls it
     /// before `applyDecls`/plugin loading run at all) — it's what a user
     /// would approve BEFORE trusting the load, never a post-hoc report of
     /// what a plugin's `describe()` already asked for (which hasn't run
     /// yet). Only EXPLICIT `weft.grant` decls are data this function CAN
     /// see, so only they appear in the brackets; a bare `+name` with no
-    /// bracket is exactly "this plugin loads under the catalog's own,
+    /// bracket is exactly "this plugin loads under the bundle's own,
     /// curated trust — nothing further was explicitly declared for it".
     /// Caller-owned.
     pub fn grantDiffSummary(gpa: Allocator, old: ?*const Manifest, new: *const Manifest) ![]u8 {
@@ -1395,8 +1395,8 @@ test "manifest: argument-bearing runs are owned and hash-sensitive" {
     try t.expect(a.hash() != b.hash());
 }
 
-test "manifest: pluginTrust classifies bare catalog names vs path-form" {
-    try t.expectEqual(PluginTrust.catalog, pluginTrust("vim"));
+test "manifest: pluginTrust classifies bare bundled names vs path-form" {
+    try t.expectEqual(PluginTrust.bundled, pluginTrust("vim"));
     try t.expectEqual(PluginTrust.path_form, pluginTrust("dap.js"));
     try t.expectEqual(PluginTrust.path_form, pluginTrust("./local/x.wasm"));
     try t.expectEqual(PluginTrust.path_form, pluginTrust("/abs/x.wasm"));
@@ -1405,7 +1405,7 @@ test "manifest: pluginTrust classifies bare catalog names vs path-form" {
 test "manifest: pluginNamespace + pluginTrust agree across name forms — pinned against config_load.zig's callers" {
     const Case = struct { name: []const u8, namespace: []const u8, trust: PluginTrust };
     const cases = [_]Case{
-        .{ .name = "git", .namespace = "git", .trust = .catalog },
+        .{ .name = "git", .namespace = "git", .trust = .bundled },
         .{ .name = "dap.js", .namespace = "dap", .trust = .path_form },
         .{ .name = "/x/y/acp.js", .namespace = "acp", .trust = .path_form },
         .{ .name = "foo.wasm", .namespace = "foo", .trust = .path_form },

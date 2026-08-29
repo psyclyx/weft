@@ -556,7 +556,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
 /// vocabulary, not the mechanism — which is the whole point of declaring a
 /// posture instead of asking what tool an entry is.
 const PostureCase = struct {
-    /// The grammar plugin to load from the embedded catalog.
+    /// The grammar plugin to load from the embedded bundle.
     grammar: []const u8,
     /// The key that puts this grammar in a text-committing state, or null
     /// where its RESTING state already commits (a modeless grammar) or where

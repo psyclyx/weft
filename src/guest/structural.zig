@@ -1,9 +1,8 @@
-//! structural (wasm twin) — syntax-aware editing (src/core/catalog/structural.zig)
-//! recompiled as `.wasm`. `node-kind` reports the tree-sitter construct under
-//! the cursor; `delete-node` removes the innermost named node as one
-//! grade-gated edit. Built from `nodeAt` (the host-resolved structural read)
-//! + the edit door — the same substrate textobjects/folding compose from,
-//! now across the membrane.
+//! structural — syntax-aware editing, a `.wasm` plugin. `node-kind` reports
+//! the tree-sitter construct under the cursor; `delete-node` removes the
+//! innermost named node as one grade-gated edit. Built from `nodeAt` (the
+//! host-resolved structural read) + the edit door — the same substrate
+//! textobjects and folding compose from, across the membrane.
 
 const weft = @import("weft");
 

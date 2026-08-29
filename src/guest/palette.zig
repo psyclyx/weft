@@ -1,6 +1,5 @@
-//! std (wasm twin) — the bundled UI plugin (src/core/catalog/palette.zig)
-//! recompiled as `.wasm`: the command palette (pick-commands/help), the
-//! buffers picker, and the status line. UI policy over core mechanisms
+//! palette — the bundled UI plugin: the command palette (pick-commands/help),
+//! the buffers picker, and the status line. UI policy over core mechanisms
 //! through the guest shim — introspection (commandCount/bufferAt), the
 //! incremental pick (begin/add/end), and accept dispatched back to
 //! on_pick_accept. No core privilege; the same door a user's config uses.

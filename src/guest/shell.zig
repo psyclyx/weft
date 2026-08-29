@@ -1,13 +1,12 @@
-//! shell (wasm twin) — "insert command output" (src/core/catalog/shell.zig)
-//! recompiled as `.wasm`. `insert-shell "<cmd>"` runs the command off the
-//! frame thread and inserts its stdout at the cursor when it finishes,
-//! resolved through its CRDT identity if the buffer moved, authored as the
-//! plugin peer. Perms: proc
-//! (it shells out) + timer (the async delivery), declared up front.
+//! shell — "insert command output", a `.wasm` plugin. `insert-shell "<cmd>"`
+//! runs the command off the frame thread and inserts its stdout at the cursor
+//! when it finishes, resolved through its CRDT identity if the buffer moved,
+//! authored as the plugin peer. Perms: proc (it shells out) + timer (the async
+//! delivery), declared up front.
 //!
-//! The in-process plugin runs proc INSIDE its editLater work body; a `.wasm`
-//! guest can't run off-thread (its store is frame-bound), so the membrane
-//! offers `shellInsert` — the same async target + authority, with the proc
+//! A guest cannot hold the proc body itself — its store is frame-bound, so
+//! there is no off-thread work body to put it in. The membrane offers
+//! `shellInsert` instead: the same async target and authority, with the proc
 //! body host-side. The design anticipated this: "route proc through the
 //! perm-checked host import."
 

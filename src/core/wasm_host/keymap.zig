@@ -1,6 +1,6 @@
 //! The config surface's local plane: key binds, mode entry/fallback, the
-//! text-input command, and menu/sticky-menu marks — each mirrors an abi.Abi
-//! config method, bound at the plugin tier owned by the plugin's name.
+//! text-input command, and menu/sticky-menu marks — each the host half of one
+//! guest config import, bound at the plugin tier owned by the plugin's name.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

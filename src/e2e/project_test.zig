@@ -638,7 +638,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         try t.expect(std.mem.indexOf(u8, scratch, "(autopair)") != null);
     }
 
-    // The catalog's smaller composable providers get real effects too; being
+    // The smaller composable plugins get real effects too; being
     // present in the config manifest is not behavioral coverage.
     ed.run("duplicate-line");
     ed.run("upcase-line");
@@ -758,7 +758,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     proj.capture(&ed, "spine-llm-agent");
     ed.runStr("open", "main.zig");
 
-    // Coverage map for the shipped catalog. Concrete interactions above and
+    // Coverage map for the shipped plugins. Concrete interactions above and
     // below cover the ordinary editing stack, syntax/LSP, pickers, project,
     // proc tools, retained semantic tools, windows, collaboration, and debug
     // decoration. The LLM adapter and REPL use hermetic local commands, and net

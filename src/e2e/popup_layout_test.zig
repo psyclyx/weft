@@ -27,7 +27,7 @@
 //! Every scenario drives the REAL pipeline: a headless `Editor` (the real
 //! `app_session.Session` — builtins, buffer commands, the completion caps
 //! consumer, pick commands — everything `Session.init` wires unconditionally,
-//! deliberately WITHOUT loading a config/plugin catalog: the shipped
+//! deliberately WITHOUT loading a config or any plugins: the shipped
 //! buffer-word completion plugin (`src/guest/complete.zig`) is a SYNCHRONOUS
 //! source ("it answers before returning" — see its own doc comment), so if
 //! it were loaded it would race the fixture provider below and contaminate

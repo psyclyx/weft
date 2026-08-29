@@ -1,5 +1,5 @@
-//! wasm_host — the `weft.*` host-import table: one small function per abi.Abi
-//! method the guest shim (src/guest/weft.zig) imports, each marshalling to
+//! wasm_host — the `weft.*` host-import table: one small function per import
+//! the guest shim (src/guest/weft.zig) declares, each marshalling to
 //! command.Context across the sandbox membrane, plus the trampolines that
 //! dispatch back into the guest (commands, pick accept, completion provider)
 //! and the deferred shell-insert machinery. Split from wasm_abi.zig — which

@@ -1,7 +1,7 @@
 // config.js — weft's reference configuration, and the showcase: read it top
 // to bottom to learn what the editor can do. Every claim below is held honest
 // by the e2e gates (src/e2e/config_test.zig) — a key that names a command
-// nobody registers, a plugin the catalog lost, a grant that admits more than
+// nobody registers, a plugin the bundle lost, a grant that admits more than
 // it declares, all fail the build.
 //
 // It runs in quickjs.wasm and reaches the editor ONLY through the `weft.*`
@@ -34,9 +34,9 @@
 //   weft.run(command, ...args)     — invoke a command now, up to eight string args
 //   weft.echo(message) / weft.log(message)
 
-// ── The catalog ──────────────────────────────────────────────────────
+// ── The plugins ──────────────────────────────────────────────────────
 // Reference plugins, each sandboxed under wasmtime behind the perm handshake.
-// weft ships modeless; this config brings up the catalog itself, so the dev
+// weft ships modeless; this config brings up the plugins itself, so the dev
 // entry point needs no --plugin flags.
 weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider

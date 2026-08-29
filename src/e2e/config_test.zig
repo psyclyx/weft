@@ -299,7 +299,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // Any plugin the sample config asked for but we couldn't load is a FINDING
     // — named on failure (only then, so a clean boot leaves stderr untouched).
     if (loader_state.missing.items.len > 0) {
-        for (loader_state.missing.items) |nm| std.debug.print("[e2e/config] not in catalog: {s}\n", .{nm});
+        for (loader_state.missing.items) |nm| std.debug.print("[e2e/config] not in the bundle: {s}\n", .{nm});
     }
     if (loader_state.failed.items.len > 0) {
         for (loader_state.failed.items) |nm| std.debug.print("[e2e/config] failed to load: {s}\n", .{nm});
@@ -851,9 +851,9 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     defer loader_b.deinit();
     try bootConfigNamed(&ed_b, config_dir, "config.northstar.js", &loader_b);
 
-    if (loader_a.missing.items.len > 0) for (loader_a.missing.items) |nm| std.debug.print("[e2e/config parity] config.js: not in catalog: {s}\n", .{nm});
+    if (loader_a.missing.items.len > 0) for (loader_a.missing.items) |nm| std.debug.print("[e2e/config parity] config.js: not in the bundle: {s}\n", .{nm});
     if (loader_a.failed.items.len > 0) for (loader_a.failed.items) |nm| std.debug.print("[e2e/config parity] config.js: failed to load: {s}\n", .{nm});
-    if (loader_b.missing.items.len > 0) for (loader_b.missing.items) |nm| std.debug.print("[e2e/config parity] config.northstar.js: not in catalog: {s}\n", .{nm});
+    if (loader_b.missing.items.len > 0) for (loader_b.missing.items) |nm| std.debug.print("[e2e/config parity] config.northstar.js: not in the bundle: {s}\n", .{nm});
     if (loader_b.failed.items.len > 0) for (loader_b.failed.items) |nm| std.debug.print("[e2e/config parity] config.northstar.js: failed to load: {s}\n", .{nm});
     try t.expect(loader_a.missing.items.len == 0);
     try t.expect(loader_a.failed.items.len == 0);
@@ -924,7 +924,7 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     const req_b = try h.requestedPluginsSnapshot(gpa, &loader_b);
     defer gpa.free(req_b);
     try t.expectEqualStrings(req_a, req_b);
-    // config.js declares 39 `weft.plugin(...)` entries (37 catalog wasm
+    // config.js declares 39 `weft.plugin(...)` entries (37 bundled wasm
     // plugins, plus dap.js and acp.js) — pin the count so a silently
     // truncated list still fails loudly even in the (impossible, given the
     // equality above) case both sides truncated identically.

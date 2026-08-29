@@ -209,7 +209,8 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
 
 /// Run an arbitrary registered command by name (the composition membrane). The
 /// first whitespace token is the command name (hyphens and all); the remainder
-/// is split into at most two string args (covers the catalog — most take ≤1).
+/// is split into at most two string args (covers every shipped command — most
+/// take ≤1).
 fn fallThrough(rest: []const u8) void {
     var ni: usize = 0;
     while (ni < rest.len and !isSpace(rest[ni])) ni += 1;

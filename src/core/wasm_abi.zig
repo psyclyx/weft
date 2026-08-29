@@ -4,8 +4,8 @@
 //! bytes out of its linear memory and applies them through `Context.edit` —
 //! the SAME grade gate, authored as the plugin's own peer. This is plan 05's
 //! core: a plugin compiled to `.wasm` reaches the editor only across the
-//! sandbox membrane, yet lands its edits on the identical authority path an
-//! in-process catalog plugin uses. The full ABI (log/kv/layers/pick/…) marshals
+//! sandbox membrane, and its edits land on the ordinary authority path — the
+//! one core's own effects take. The full ABI (log/kv/layers/pick/…) marshals
 //! the same way — one host function per import; this proves the shape.
 
 const std = @import("std");

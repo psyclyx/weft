@@ -1,6 +1,5 @@
-//! region (wasm twin) — embedded-region marking (src/core/catalog/region.zig)
-//! recompiled as `.wasm`. `mark-region` claims the current line as a
-//! subbuffer tagged with a language fact — the substrate an
+//! region — embedded-region marking, a `.wasm` plugin. `mark-region` claims
+//! the current line as a subbuffer tagged with a language fact — the substrate an
 //! html-with-embedded-js / markdown-code-fence plugin uses to give a range
 //! its own grammar. Exercises the subbuffer handle across the membrane: claim
 //! returns an opaque handle the guest holds, then attaches a fact to it.

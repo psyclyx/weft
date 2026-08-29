@@ -1,4 +1,4 @@
-//! Hermetic language activation gates for the whole-app spine's shared catalog.
+//! Hermetic language activation gates for the whole-app spine's shared plugin set.
 
 const std = @import("std");
 const t = std.testing;

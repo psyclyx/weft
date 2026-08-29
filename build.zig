@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
-/// the shippable reference catalog: built to `.wasm` and installed to
+/// the shippable reference set: built to `.wasm` and installed to
 /// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —
 /// NOT baked into the binary. weft itself ships modeless. The non-`install`
 /// guests are test fixtures (a bare hello, a perm-violating rogue, a demo
@@ -393,7 +393,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // The reference plugins ship as external `.wasm` under lib/weft/plugins/,
-    // not embedded — weft's binary carries no catalog. Load one with e.g.
+    // not embedded — weft's binary carries none of them. Load one with e.g.
     // `--plugin zig-out/lib/weft/plugins/vim.wasm`.
     installPlugins(b);
 
@@ -435,9 +435,9 @@ pub fn build(b: *std.Build) void {
     weft_mod.addImport("weft_text", text_mod);
     weft_mod.addImport("weft_application", application_mod);
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
-    // Resident JS catalog entries are data dependencies of the full headless
+    // Resident JS plugins are data dependencies of the full headless
     // editor too. Route them through the module graph; the E2E config loader
-    // must not reach out of `src/` to impersonate the installed catalog.
+    // must not reach out of `src/` to impersonate the installed plugins.
     weft_mod.addAnonymousImport("dap_js", .{
         .root_source_file = b.path("config/plugins/dap.js"),
     });
@@ -449,7 +449,7 @@ pub fn build(b: *std.Build) void {
     weft_mod.linkSystemLibrary("vulkan", .{});
     addSyntax(b, weft_mod);
     addWasm(b, weft_mod);
-    embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the catalog
+    embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the guests
     addQuickjs(b, weft_mod);
     addSkia(b, weft_mod);
 
@@ -854,7 +854,7 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 
 /// Point a test binary at the compiled-module (`.cwasm`) cache every test
 /// binary shares — a stable directory under the project cache root, so the
-/// wasm guest catalog and the quickjs runtime compile once per content hash
+/// wasm guests and the quickjs runtime compile once per content hash
 /// instead of once per binary per run (see `wasm.zig`'s `Engine.cache_dir`). The
 /// path is made absolute here: the e2e Project harness chdirs into a tmpdir
 /// mid-suite, so a cwd-relative one would scatter and vanish with it.
@@ -1004,7 +1004,7 @@ fn embedGuests(b: *std.Build, mod: *std.Build.Module) void {
 
 /// Install the reference plugins as external `.wasm` artifacts under
 /// `lib/weft/plugins/`. These are what a user loads with `--plugin`; weft
-/// carries no catalog in-process.
+/// carries no plugins in-process.
 fn installPlugins(b: *std.Build) void {
     @setEvalBranchQuota(10_000); // the guest list grows; comptime `stem` per entry
     inline for (guests) |g| {
@@ -1015,7 +1015,7 @@ fn installPlugins(b: *std.Build) void {
         b.getInstallStep().dependOn(&inst.step);
     }
     // JS plugins (config/plugins/*.js) — resident quickjs plugins (e.g. the ACP
-    // agent client) — install verbatim beside the .wasm catalog, loadable by
+    // agent client) — install verbatim beside the .wasm plugins, loadable by
     // name (`weft.plugin("acp.js")`).
     inline for (js_plugins) |name| {
         const inst = b.addInstallFileWithDir(b.path("config/plugins/" ++ name), .lib, "weft/plugins/" ++ name);
@@ -1023,7 +1023,7 @@ fn installPlugins(b: *std.Build) void {
     }
 }
 
-/// JS plugins shipped in the reference catalog (config/plugins/*.js).
+/// JS plugins shipped in the reference set (config/plugins/*.js).
 const js_plugins = [_][]const u8{ "acp.js", "dap.js" };
 
 /// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the

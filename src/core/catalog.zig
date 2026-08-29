@@ -1,6 +1,13 @@
 //! The pushed-offer catalog (architecture §9.2, §9.5) — the kernel half:
 //! pure data in, pure decisions out, no UI and no dispatch wiring.
 //!
+//! "Catalog" here means the CATALOG OF OFFERS — what the focused context
+//! affords right now — and nothing else. It is not a registry of plugins:
+//! weft ships no plugin catalog in-process (that one was deleted in 8ac1676,
+//! "wasm-only plugins from disk"), and the shipped `.wasm`/`.js` set under
+//! `lib/weft/plugins/` is spelled "the bundled plugins" everywhere, never
+//! "the catalog". One word, one meaning; keep it that way.
+//!
 //! Providers PUSH revision-stamped `Table`s of `Offer`s. Nothing here ever
 //! calls provider code: enumerating, resolving, and explaining are functions
 //! over published tables plus a `Context` snapshot, so `explain()` cannot
