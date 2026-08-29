@@ -407,3 +407,44 @@ test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
         }
     }
 }
+
+// The same proof, for the READ surface. `wasm_host/edit.zig`'s `read_doors`
+// hold one body each; `wl_cursor`/`wl_slice`/… bind them through `wasmDoor`
+// and `qjs_cursor`/`qjs_slice`/… bind the SAME ones through `jsDoor`.
+//
+// This is what "a JS plugin is not second-class" has to mean concretely: not
+// that someone wrote JS-shaped equivalents, but that there is one body and two
+// casts, so the planes cannot describe the buffer differently. Before these
+// doors existed a JS plugin had `weft.lineText()` and nothing else — a narrower
+// answer to a question `lineAt` + `slice` already answered, invented because
+// the real door was out of reach.
+test "demolition: the plugin-plane read doors are ONE body reached two ways" {
+    const edit_doors = h.core.wasm_host.edit_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+
+    inline for (edit_doors.read_doors) |d| {
+        const HostFn = @TypeOf(d.wl);
+
+        // The `wl_*` handler is this door's own generated trampoline…
+        try t.expectEqual(edit_doors.wasmDoor(d.body), d.wl);
+
+        // …it is what the wasm membrane actually binds…
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ d.name)) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, d.wl), wl_handler);
+
+        // …and the JS plane binds the same body through its own trampoline.
+        // These doors are ungated on BOTH planes, and that is not an omission:
+        // reading the entry your own command is dispatching in carries no
+        // authority. If one plane grows a gate the other lacks, the pointers
+        // stop matching here.
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ d.name)) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, null)), qjs_handler);
+    }
+}

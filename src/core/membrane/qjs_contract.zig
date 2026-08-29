@@ -148,6 +148,89 @@ pub const imports = [_]Entry{
     e("qjs_active_buffer", 2, 1, .plugin, "weft.activeBuffer(): the focused buffer's display name — how an instanced JS tool routes a command to the session you can see"),
     e("qjs_pick", 6, 0, .plugin, "weft.pick(prompt, options, token): open a pick bound to this JS plugin; onPick receives the candidate/input/cancelled outcome carrying `token` back — the continuation identity that answers ONE request, never \"the pending one\""),
     e("qjs_status", 2, 0, .plugin, "weft.status(text): set the generic plugin status chip"),
+
+    // ── the READ surface: the same bodies `wl_cursor`/`wl_slice`/… run ──
+    // A JS plugin runs inside quickjs.wasm, which IS a wasm plugin, so it can
+    // read the buffer it is in. It could not, until these: it had
+    // `qjs_line_text` and nothing else, which is a narrower answer to a
+    // question `line_at` + `slice` already answer. Arities are `wl_*`'s by
+    // construction — one body each in `wasm_host/edit.zig`'s `read_doors`,
+    // proven by function pointer in `e2e/demolition_test.zig`.
+    e("qjs_cursor", 0, 1, .plugin, "weft.cursor(): the caret's byte offset in the entry this call is about"),
+    e("qjs_byte_len", 0, 1, .plugin, "weft.byteLen(): that entry's length in bytes"),
+    e("qjs_slice", 4, 1, .plugin, "weft.slice(start, end): its bytes in [start, end)"),
+    e("qjs_line_at", 2, 0, .plugin, "weft.lineAt(offset): the [start, end) of the line containing `offset`"),
+    e("qjs_selection", 1, 1, .plugin, "weft.selection(): the active selection's [start, end), or none"),
+    e("qjs_path", 2, 1, .plugin, "weft.path(): the entry's backing file path, or none"),
+    e("qjs_jump", 1, 0, .plugin, "weft.jump(offset): move the caret there"),
+};
+
+// ── Parity with the wasm plane ───────────────────────────────────────
+// A JS plugin is code running inside `quickjs.wasm`, which IS a wasm plugin.
+// It should therefore be able to do what a wasm plugin can — and the reason
+// it cannot, today, is not a decision anybody made. It is that this table was
+// hand-written door by door while `contract_data.zig` grew to 215, so the gap
+// opened silently and nobody had to look at it.
+//
+// `parity` below makes the gap DATA. Every group of the wasm membrane is
+// named here with the state of its JS twin, so:
+//
+//   - adding a wasm door to a `.shared` group and forgetting the JS side
+//     fails the gate, not review;
+//   - a group that is deliberately wasm-only has to SAY SO, in one line, in
+//     a list a reader can scan;
+//   - "what can a wasm plugin do that a JS plugin cannot" is a table you
+//     read instead of a difference you discover.
+//
+// This is not the end state. The end state is that a `.js` plugin loads with
+// the same surface a `.wasm` plugin does, because it is one; `.absent` rows
+// are the work list for getting there, in the order they matter.
+pub const Parity = enum {
+    /// Both membranes run the SAME body (`wasm_host`'s), bound through
+    /// `wasmDoor`/`jsDoor`. Proven by function pointer in
+    /// `e2e/demolition_test.zig`, not by comment.
+    shared,
+    /// The JS plane has an equivalent under a different name and a different
+    /// body, because the EFFECT legitimately differs.
+    equivalent,
+    /// The JS plane has no twin. Not a decision — a gap, with the reason it
+    /// has not closed yet.
+    absent,
+};
+
+pub const GroupParity = struct {
+    group: @import("contract_data.zig").Group,
+    state: Parity,
+    /// For `.absent`, what it would take. For the others, what the twin is.
+    note: []const u8,
+};
+
+pub const parity = [_]GroupParity{
+    .{ .group = .proc, .state = .shared, .note = "the four proc doors: one body each in wasm_host/proc.zig, both planes generated from its `doors` table (doc/place.md §4.1a)" },
+    .{ .group = .fs, .state = .equivalent, .note = "qjs_file_read/qjs_file_write share wasm_host/fs.zig's POLICY half (possession + .fs_root confinement) but author a buffer edit as the agent peer, where wl_fs_* touch the disk" },
+    .{ .group = .commands, .state = .equivalent, .note = "qjs_register + qjs_run: two local id registries and two command trampolines, same command door underneath" },
+    .{ .group = .config_kv, .state = .equivalent, .note = "qjs_config reads the same per-plugin config store wl_config does" },
+    .{ .group = .keymap, .state = .equivalent, .note = "the .config group (qjs_bind_key/qjs_menu/qjs_action/…) is config's own role, not a lesser plugin surface" },
+    .{ .group = .pick, .state = .equivalent, .note = "qjs_pick opens the same core picker; the outcome comes back through weft_on_pick carrying a continuation token instead of a pick id" },
+
+    // The gap, in the order it costs a JS plugin something real.
+    .{ .group = .edit, .state = .shared, .note = "the READ surface is shared: cursor/byte_len/slice/line_at/selection/path/jump run wasm_host/edit.zig's `read_doors` bodies on both planes. `wl_edit` itself is not — it authors as `p.principal()` and TRAPS on a doc-region violation, and a trap kills a resident QuickJS runtime the next command still needs, so sharing it means first deciding what a refused edit MEANS on a plane that cannot die" },
+    .{ .group = .surface, .state = .absent, .note = "no retained overlay: acp.js and dap.js have a status chip and a buffer, and cannot paint the corner surface which_key and git use. Same shape as .edit — shared bodies plus C shim" },
+    .{ .group = .slot, .state = .absent, .note = "a JS plugin can neither provide nor consume a typed capability, so it cannot participate in the D2 mesh at all — the biggest single second-classness left" },
+    .{ .group = .intent, .state = .absent, .note = "cannot publish offers, so a JS-owned buffer answers no standard intention and its keys must all be bound by hand" },
+    .{ .group = .semantic, .state = .absent, .note = "no target/view/field publication: a JS plugin cannot own a structured scene" },
+    .{ .group = .buffers, .state = .absent, .note = "qjs_active_buffer answers the one question acp/dap needed (which instance is focused); the rest of the introspection surface has had no caller" },
+    .{ .group = .declare, .state = .absent, .note = "no describe() handshake: a JS plugin declares nothing, so weft.grant is its ONLY authority door (config.js says so). Closing this means giving .js a describe phase" },
+    .{ .group = .layers, .state = .absent, .note = "styles/folds/decorations on the active buffer; qjs_buffer_append/qjs_buffer_fold cover the narrow transcript case" },
+    .{ .group = .annotate, .state = .absent, .note = "third-party decoration of an entry it does not own (§11.7)" },
+    .{ .group = .dispatch, .state = .absent, .note = "mode/posture/resting declarations — a JS plugin owns no grammar today" },
+    .{ .group = .menu, .state = .absent, .note = "menu/sticky-menu marks, which follow the keymap surface" },
+    .{ .group = .capability, .state = .absent, .note = "the completion provider surface (wl_caps_*)" },
+    .{ .group = .syntax, .state = .absent, .note = "tree-sitter reads: no caller yet" },
+    .{ .group = .activation, .state = .absent, .note = "on_activate has no JS export twin" },
+    .{ .group = .tool, .state = .absent, .note = "tool-backing declaration" },
+    .{ .group = .register, .state = .absent, .note = "the shared kill/yank ring" },
+    .{ .group = .sessions, .state = .absent, .note = "repl/net sessions; the JS plane has raw proc, which is the transport underneath them" },
 };
 
 /// Same drift-killing tripwire as contract_data.zig's `expected_import_count`
@@ -155,7 +238,32 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 33;
+const expected_count = 40;
+
+comptime {
+    // EVERY wasm import group must appear in `parity` exactly once. This is
+    // the tripwire that makes the JS plane's gap a maintained decision: add a
+    // group to `contract_data.Group` and the build stops until someone says
+    // what it means for a `.js` plugin.
+    @setEvalBranchQuota(20_000);
+    const WasmGroup = @import("contract_data.zig").Group;
+    for (std.enums.values(WasmGroup)) |g| {
+        var seen = false;
+        for (parity) |p| {
+            if (p.group != g) continue;
+            if (seen) @compileError("core/membrane/qjs_contract.zig: duplicate parity row for group '" ++ @tagName(g) ++ "'");
+            seen = true;
+            if (p.note.len == 0)
+                @compileError("core/membrane/qjs_contract.zig: parity row for '" ++ @tagName(g) ++ "' needs a note — an unexplained gap is the thing this table exists to prevent");
+        }
+        if (!seen) @compileError(
+            "core/membrane/qjs_contract.zig: wasm import group '" ++ @tagName(g) ++
+                "' has no `parity` row. A JS plugin runs inside quickjs.wasm, which IS a wasm " ++
+                "plugin — so every door the wasm plane grows is either given to the JS plane or " ++
+                "written down as a gap with a reason. Add a row.",
+        );
+    }
+}
 
 comptime {
     @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=31
@@ -201,7 +309,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 15), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 18), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 25), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -214,6 +322,34 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
 // env read, so not flagged here; see manifest.zig's doc for the one
 // residual gap this table CAN'T see: QuickJS-ng's own built-in
 // `Date`/`Math.random`.)
+test "qjs membrane parity: every wasm group is claimed, and the gap is written down" {
+    const WasmGroup = @import("contract_data.zig").Group;
+    // Every group, exactly once — the comptime block proves this too; the
+    // runtime copy is here so `zig build test` reports it as a named failure
+    // rather than a build error nobody reads twice.
+    for (std.enums.values(WasmGroup)) |g| {
+        var found: usize = 0;
+        for (parity) |p| {
+            if (p.group == g) found += 1;
+        }
+        try t.expectEqual(@as(usize, 1), found);
+    }
+    // A `.shared` claim is a claim about BODIES, and `e2e/demolition_test.zig`
+    // checks those by function pointer. What this asserts is that nobody
+    // relabelled a gap as shared without one: today `proc` is the only group
+    // that has earned it.
+    var shared: usize = 0;
+    for (parity) |p| {
+        if (p.state == .shared) shared += 1;
+    }
+    try t.expectEqual(@as(usize, 2), shared);
+
+    // And the honest headline: a JS plugin reaches 40 doors where a wasm
+    // plugin reaches 215. Pinned so closing a gap is a visible, deliberate
+    // number change rather than something that drifts either way.
+    try t.expectEqual(@as(usize, 40), imports.len);
+}
+
 test "qjs membrane contract: no clock/env/random-shaped .config import" {
     const suspicious = [_][]const u8{ "time", "clock", "rand", "env", "getenv", "date", "now" };
     for (imports) |entry| {

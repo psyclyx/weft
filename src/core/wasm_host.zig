@@ -71,6 +71,23 @@ pub const proc_doors = struct {
     pub const wasmDoor = proc.wasmDoor;
 };
 
+/// The plugin-plane READ doors, whose bodies BOTH membranes run. Re-exported
+/// for the same reason `proc_doors` is: the gate in `e2e/demolition_test.zig`
+/// reaches core only through this facade, and proves the two planes bind one
+/// body by comparing function pointers.
+const edit = @import("wasm_host/edit.zig");
+pub const edit_doors = struct {
+    pub const read_doors = edit.read_doors;
+    pub const wasmDoor = edit.wasmDoor;
+    pub const cursorBody = edit.cursorBody;
+    pub const byteLenBody = edit.byteLenBody;
+    pub const sliceBody = edit.sliceBody;
+    pub const lineAtBody = edit.lineAtBody;
+    pub const selectionBody = edit.selectionBody;
+    pub const pathBody = edit.pathBody;
+    pub const jumpBody = edit.jumpBody;
+};
+
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
 

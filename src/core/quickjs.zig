@@ -38,6 +38,7 @@ const fs_gate = @import("wasm_host/fs.zig");
 /// not be able to reach a proc door shaped differently from the one every
 /// other guest gets (doc/place.md §4.1a).
 const proc_doors = @import("wasm_host/proc.zig");
+const edit_doors = @import("wasm_host/edit.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -232,6 +233,16 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_active_buffer", .handler = cActiveBuffer },
     .{ .name = "qjs_pick", .handler = cPick },
     .{ .name = "qjs_status", .handler = cStatus },
+    // The read surface, running `wasm_host/edit.zig`'s bodies — the SAME ones
+    // `wl_cursor`/`wl_slice`/… run. Ungated: reading the entry your own
+    // command is dispatching in carries no authority, on either plane.
+    .{ .name = "qjs_cursor", .handler = cCursor },
+    .{ .name = "qjs_byte_len", .handler = cByteLen },
+    .{ .name = "qjs_slice", .handler = cSlice },
+    .{ .name = "qjs_line_at", .handler = cLineAt },
+    .{ .name = "qjs_selection", .handler = cSelection },
+    .{ .name = "qjs_path", .handler = cPath },
+    .{ .name = "qjs_jump", .handler = cJump },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -730,6 +741,18 @@ const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
 const cProcRead = jsDoor(proc_doors.readBody, .proc);
 const cProcClose = jsDoor(proc_doors.closeBody, null);
+
+// The read/motion surface, one body each in `wasm_host/edit.zig`. A JS plugin
+// runs inside quickjs.wasm, which IS a wasm plugin, so it reads the buffer it
+// is in through the same code a wasm plugin does — not through a narrower
+// JS-only door someone had to invent because the real one was out of reach.
+const cCursor = jsDoor(edit_doors.cursorBody, null);
+const cByteLen = jsDoor(edit_doors.byteLenBody, null);
+const cSlice = jsDoor(edit_doors.sliceBody, null);
+const cLineAt = jsDoor(edit_doors.lineAtBody, null);
+const cSelection = jsDoor(edit_doors.selectionBody, null);
+const cPath = jsDoor(edit_doors.pathBody, null);
+const cJump = jsDoor(edit_doors.jumpBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";

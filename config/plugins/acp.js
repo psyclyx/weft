@@ -438,12 +438,19 @@ weft.command("agent-start", () => {
   if (c) weft.echo("acp: started " + cmd + " as " + c.peer + " → " + c.buffer);
 });
 
-// agent-send: send the current line as the next prompt of the FOCUSED
-// conversation (a multi-turn turn). Type a request on any line and run this.
+// agent-send: send the SELECTION — or, with none, the current line — as the
+// next prompt of the FOCUSED conversation (a multi-turn turn).
+//
+// The selection arm is the read surface a JS plugin only just got: `weft.slice`
+// and `weft.selection` are the same host bodies `wl_slice`/`wl_selection` run
+// for a wasm plugin (wasm_host/edit.zig's `read_doors`). Before them the only
+// thing a JS plugin could see of the buffer was `weft.lineText()`, which is why
+// "send this line" was the whole of what this command could mean.
 weft.command("agent-send", () => {
-  const line = weft.lineText().trim();
+  const sel = weft.selection();
+  const line = (sel ? weft.slice(sel.start, sel.end) : weft.lineText()).trim();
   if (!line) {
-    weft.echo("acp: nothing on this line to send");
+    weft.echo("acp: nothing selected and nothing on this line to send");
     return;
   }
   if (!focused || !focused.sid) {

@@ -16,7 +16,11 @@ const WasmPlugin = shared.WasmPlugin;
 /// the entry a background delivery captured), for the handlers that have
 /// nothing to answer without an editor: a guest asking about text in an entry
 /// that holds none gets the same reply it gets for an empty document.
-fn activeEditor(p: *WasmPlugin) ?*Editor {
+///
+/// `anytype` because these bodies are SHARED with the resident JS membrane
+/// (see `read_doors`): a `*JsPlugin` has `activeCtx()` and `gpa` too, and a
+/// body that uses only those is one body, not two that can drift.
+fn activeEditor(p: anytype) ?*Editor {
     return (p.activeCtx().entry() orelse return null).textEditor();
 }
 
@@ -24,27 +28,48 @@ fn opaqueHandle(raw: i32) ?u32 {
     return if (raw < 0) null else @intCast(raw);
 }
 
-pub fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+// ── The read surface, shared with the JS plane ───────────────────────
+// A JS plugin runs inside quickjs.wasm, which IS a wasm plugin, so it should
+// be able to read the buffer it is in. It could not: it had `qjs_line_text`,
+// a narrower answer to a question `line_at` + `slice` already answer, and
+// nothing else. These bodies carry no authority — no perm gate, no trap, no
+// mutation — which is exactly why they were the right ones to share first.
+//
+// Same construction as the proc doors (doc/place.md §4.1a): the body lives
+// once, `wasmDoor` and `quickjs.zig`'s `jsDoor` wrap it for their own plugin
+// type, and `e2e/demolition_test.zig` proves by function pointer that neither
+// plane grew a second copy.
+
+/// Wrap a shared body as a `wl_*` handler: the `*WasmPlugin` cast, nothing else.
+pub fn wasmDoor(comptime body: anytype) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            body(@as(*WasmPlugin, @ptrCast(@alignCast(data.?))), caller, args, results);
+        }
+    }.f;
+}
+
+pub fn cursorBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ed = activeEditor(p) orelse {
         results[0] = 0;
         return;
     };
     results[0] = @intCast(ed.cursorOffset());
 }
+pub const hCursor = wasmDoor(cursorBody);
 
-pub fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn byteLenBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ed = activeEditor(p) orelse {
         results[0] = 0;
         return;
     };
     results[0] = @intCast(ed.text().byteLen());
 }
+pub const hByteLen = wasmDoor(byteLenBody);
 
 /// Capture an opaque witness for the active document's current causal
 /// frontier. Negative i32 is reserved for allocation/frontier failure.
@@ -79,8 +104,7 @@ pub fn hDocSnapshotRelease(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
     if (opaqueHandle(args[0])) |handle| p.releaseDocSnapshot(handle);
 }
 
-pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+pub fn sliceBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const ed = activeEditor(p) orelse {
         results[0] = 0;
         return;
@@ -106,19 +130,19 @@ pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), buf) catch 0;
     results[0] = @intCast(n);
 }
+pub const hSlice = wasmDoor(sliceBody);
 
-pub fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn lineAtBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const rope = (activeEditor(p) orelse return).text();
     const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
     const line = rope.lineRange(row);
     const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
     _ = caller.writeMemory(@intCast(args[1]), 8, std.mem.asBytes(&pair)) catch {};
 }
+pub const hLineAt = wasmDoor(lineAtBody);
 
-pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+pub fn selectionBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const ed = activeEditor(p) orelse {
         results[0] = 0;
         return;
@@ -131,9 +155,9 @@ pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     _ = caller.writeMemory(@intCast(args[0]), 8, std.mem.asBytes(&pair)) catch {};
     results[0] = 1;
 }
+pub const hSelection = wasmDoor(selectionBody);
 
-pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+pub fn pathBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const ed = activeEditor(p) orelse {
         results[0] = -1;
         return;
@@ -148,6 +172,7 @@ pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     };
     results[0] = @intCast(n);
 }
+pub const hPath = wasmDoor(pathBody);
 
 /// The doc-region half of the deny taxonomy: a `.doc_region` grant narrowing
 /// this edit (`error.OutOfLimit`), or that grant's identity anchors no longer
@@ -231,13 +256,13 @@ pub fn hRender(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     p.activeCtx().render(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
 }
 
-pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn jumpBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ed = activeEditor(p) orelse return;
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
 }
+pub const hJump = wasmDoor(jumpBody);
 
 // ── The native `editor` surface + anchored-range membrane ────────────
 
@@ -434,3 +459,25 @@ pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         else => {},
     };
 }
+
+/// The read/motion doors BOTH membranes bind, named once. `quickjs.zig` walks
+/// this to bind its own side, and `e2e/demolition_test.zig` walks it to prove
+/// by function pointer that the two planes run the same body — the same proof
+/// the proc doors get, for the same reason: a JS plugin is a wasm plugin, and
+/// two bodies is how they stop being one.
+///
+/// `edit` itself is NOT here yet, and the reason is honest rather than
+/// incidental: it authors as `p.principal()` and TRAPS on a doc-region
+/// violation, and a trap tears down a resident QuickJS runtime the next
+/// command still needs (`quickjs.zig`'s `jsDoor` answers `denied` instead).
+/// Sharing it means deciding what a refused edit means on a plane that cannot
+/// die — a real design question, not a missing extern.
+pub const read_doors = .{
+    .{ .name = "cursor", .body = cursorBody, .wl = hCursor },
+    .{ .name = "byte_len", .body = byteLenBody, .wl = hByteLen },
+    .{ .name = "slice", .body = sliceBody, .wl = hSlice },
+    .{ .name = "line_at", .body = lineAtBody, .wl = hLineAt },
+    .{ .name = "selection", .body = selectionBody, .wl = hSelection },
+    .{ .name = "path", .body = pathBody, .wl = hPath },
+    .{ .name = "jump", .body = jumpBody, .wl = hJump },
+};

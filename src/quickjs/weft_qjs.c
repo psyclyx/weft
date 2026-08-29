@@ -113,6 +113,23 @@ extern int host_file_read(const char *path, int path_len, char *out, int cap);
 // outside the grant's root — a refusal must never look like a write.
 __attribute__((import_module("weft"), import_name("qjs_file_write")))
 extern int host_file_write(const char *path, int path_len, const char *content, int content_len, const char *agent, int agent_len);
+// The READ surface — the same wasm_host/edit.zig bodies `wl_cursor`/`wl_slice`/…
+// run. A JS plugin runs inside this very wasm module, so it reads the buffer it
+// is in through the same code a wasm plugin does. Config stubs them.
+__attribute__((import_module("weft"), import_name("qjs_cursor")))
+extern int host_cursor(void);
+__attribute__((import_module("weft"), import_name("qjs_byte_len")))
+extern int host_byte_len(void);
+__attribute__((import_module("weft"), import_name("qjs_slice")))
+extern int host_slice(int start, int end, char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_line_at")))
+extern void host_line_at(int offset, int *out_pair);
+__attribute__((import_module("weft"), import_name("qjs_selection")))
+extern int host_selection(int *out_pair);
+__attribute__((import_module("weft"), import_name("qjs_path")))
+extern int host_path(char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_jump")))
+extern void host_jump(int offset);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -865,6 +882,87 @@ static JSValue js_file_write(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// ── The read surface (weft.cursor/byteLen/slice/lineAt/selection/path/jump) ──
+// Each calls the SAME host body a wasm plugin's `wl_*` door calls
+// (wasm_host/edit.zig's `read_doors`). They carry no authority — reading the
+// entry your own command is dispatching in is not an effect — so none is
+// perm-gated on either plane.
+
+// weft.cursor() -> number: the caret's byte offset.
+static JSValue js_cursor(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(ctx, host_cursor());
+}
+
+// weft.byteLen() -> number: the entry's length in bytes.
+static JSValue js_byte_len(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(ctx, host_byte_len());
+}
+
+// weft.slice(start, end) -> string: the bytes in [start, end), clamped by the
+// host to the document. Longer than the shared scratch is truncated to it —
+// same bound `weft.lineText` and `weft.fileRead` already answer under.
+static JSValue js_slice(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t start = 0, end = 0;
+    if (argc > 0) JS_ToInt32(ctx, &start, argv[0]);
+    if (argc > 1) JS_ToInt32(ctx, &end, argv[1]);
+    int n = host_slice(start, end, g_config_buf, (int)sizeof g_config_buf);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
+}
+
+// weft.lineAt(offset) -> {start, end}: the line containing `offset`.
+static JSValue js_line_at(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t off = 0;
+    if (argc > 0) JS_ToInt32(ctx, &off, argv[0]);
+    int pair[2] = {0, 0};
+    host_line_at(off, pair);
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "start", JS_NewInt32(ctx, pair[0]));
+    JS_SetPropertyStr(ctx, o, "end", JS_NewInt32(ctx, pair[1]));
+    return o;
+}
+
+// weft.selection() -> {start, end} | null. Null is "no selection", which is a
+// different answer from an empty one and must not read as the same.
+static JSValue js_selection(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int pair[2] = {0, 0};
+    if (!host_selection(pair)) return JS_NULL;
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "start", JS_NewInt32(ctx, pair[0]));
+    JS_SetPropertyStr(ctx, o, "end", JS_NewInt32(ctx, pair[1]));
+    return o;
+}
+
+// weft.path() -> string | null: the entry's backing file, null when it has
+// none (a scratch or tool buffer) — again distinct from "".
+static JSValue js_path(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int n = host_path(g_config_buf, (int)sizeof g_config_buf);
+    if (n < 0) return JS_NULL;
+    return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
+}
+
+// weft.jump(offset): move the caret, clamped by the host.
+static JSValue js_jump(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t off = 0;
+    if (argc > 0) JS_ToInt32(ctx, &off, argv[0]);
+    host_jump(off);
+    return JS_UNDEFINED;
+}
+
 // weft.lineText() -> string: the active buffer's current line (a prompt line).
 static JSValue js_line_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
@@ -990,6 +1088,14 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "breakpoints", JS_NewCFunction(g_ctx, js_breakpoints, "breakpoints", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
+    // The read surface, the same bodies a wasm plugin's wl_* doors run.
+    JS_SetPropertyStr(g_ctx, weft, "cursor", JS_NewCFunction(g_ctx, js_cursor, "cursor", 0));
+    JS_SetPropertyStr(g_ctx, weft, "byteLen", JS_NewCFunction(g_ctx, js_byte_len, "byteLen", 0));
+    JS_SetPropertyStr(g_ctx, weft, "slice", JS_NewCFunction(g_ctx, js_slice, "slice", 2));
+    JS_SetPropertyStr(g_ctx, weft, "lineAt", JS_NewCFunction(g_ctx, js_line_at, "lineAt", 1));
+    JS_SetPropertyStr(g_ctx, weft, "selection", JS_NewCFunction(g_ctx, js_selection, "selection", 0));
+    JS_SetPropertyStr(g_ctx, weft, "path", JS_NewCFunction(g_ctx, js_path, "path", 0));
+    JS_SetPropertyStr(g_ctx, weft, "jump", JS_NewCFunction(g_ctx, js_jump, "jump", 1));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));
