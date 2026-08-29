@@ -1983,19 +1983,34 @@ test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
 }
 
 test "e2e/git: no verb reads a rendered byte range to choose its target" {
-    // By construction, not by review: the plugin is split at a marker, with the
-    // display tables and the projection buffer above it and every verb below.
-    const src = @embedFile("../plugins/git/root.zig");
-    const marker = "Below here nothing reads a rendered byte range";
-    const at = std.mem.indexOf(u8, src, marker) orelse return error.MarkerMissing;
-    const verbs = src[at..];
+    // By construction, not by review — and the construction is now a FILE
+    // BOUNDARY rather than a marker comment. §14.3's rule is that a verb names
+    // a row by the identity it carries, never by scraping the projection; that
+    // used to be enforced by splitting one 2900-line file at a comment and
+    // scanning below it. `render.zig` is that split, made structural: the
+    // display tables and the projection buffer live there and nowhere else, so
+    // "a verb read a rendered offset" now requires importing a module to do it
+    // in, instead of just being written a few hundred lines further down.
+    const verbs = @embedFile("../plugins/git/root.zig");
     for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "sec_body", "render_buf" }) |banned| {
         try t.expect(std.mem.indexOf(u8, verbs, banned) == null);
     }
-    // And targeting has exactly ONE door: `nodeAt` is declared once and called
-    // once, by `nodeAtCursor`; the old direct cursor hit-test is gone.
-    try t.expectEqual(@as(usize, 2), std.mem.count(u8, src, "nodeAt("));
-    try t.expect(std.mem.indexOf(u8, src, "nodeAt(weft.cursor())") == null);
+    // Same for the parser and the patch builder: they are about raw bytes and
+    // the model, and a rendered offset means nothing to either.
+    for ([_][]const u8{ @embedFile("../plugins/git/parse.zig"), @embedFile("../plugins/git/patch.zig") }) |src| {
+        for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "render_buf" }) |banned| {
+            try t.expect(std.mem.indexOf(u8, src, banned) == null);
+        }
+    }
+    // And targeting has exactly ONE door, now on the far side of the file
+    // boundary: `nodeAt` and `nodeAtCursor` are declared once each in
+    // `render.zig`, with the tables they read, and the verbs file names
+    // neither — it asks for a `Target` and cannot ask for anything else.
+    const projection = @embedFile("../plugins/git/render.zig");
+    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "nodeAt("));
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, projection, "pub fn nodeAt("));
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, projection, "pub fn nodeAtCursor("));
+    try t.expect(std.mem.indexOf(u8, projection, "nodeAt(weft.cursor())") == null);
 }
 
 // ── Places: two projects open at once (doc/place.md) ──────────────────
