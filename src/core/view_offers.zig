@@ -208,7 +208,7 @@ const Fixture = struct {
         .{ .id = standard.open_container, .label = "Open container", .enabled = true },
     };
 
-    /// `src/plugins/files/projection.zig`'s shape: a vertical `files` root of
+    /// `src/plugin_lib/files/projection.zig`'s shape: a vertical `files` root of
     /// horizontal `files.row` containers whose focusable `files.name` column
     /// carries the row's target.
     fn scene(self: *Fixture, refused: bool) model.scene.Node {

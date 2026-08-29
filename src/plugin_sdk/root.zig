@@ -311,18 +311,18 @@ comptime {
     for (contract_data.imports) |entry| {
         const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
         if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
-            "src/guest/weft.zig: extern '{s}' takes {d} param(s), contract_data.zig says {d}",
+            "src/plugin_sdk/root.zig: extern '{s}' takes {d} param(s), contract_data.zig says {d}",
             .{ entry.name, Fn.params.len, entry.params.len },
         ));
         for (Fn.params, entry.params, 0..) |got, want, i| {
             if (got.type.? != ZigType(want)) @compileError(std.fmt.comptimePrint(
-                "src/guest/weft.zig: extern '{s}' param {d} type doesn't match contract_data.zig's signedness",
+                "src/plugin_sdk/root.zig: extern '{s}' param {d} type doesn't match contract_data.zig's signedness",
                 .{ entry.name, i },
             ));
         }
         const want_ret = if (entry.results.len == 0) void else ZigType(entry.results[0]);
         if (Fn.return_type.? != want_ret) @compileError(
-            "src/guest/weft.zig: extern '" ++ entry.name ++ "' return type doesn't match contract_data.zig",
+            "src/plugin_sdk/root.zig: extern '" ++ entry.name ++ "' return type doesn't match contract_data.zig",
         );
     }
 }

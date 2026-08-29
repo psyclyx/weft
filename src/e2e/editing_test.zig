@@ -217,7 +217,7 @@ test "workflow: modes — opening a file detects its language on activate, witho
     // fires (harness mirrors main) and detects the language — it no longer
     // echoes it, though: `on_activate` is BACKGROUND (no per-call dispatching
     // head — see `wasm_host/commands.zig`'s classification doc) and `wl_echo`
-    // is head-gated (task #19 item 4), so `src/guest/modes.zig` downgraded
+    // is head-gated (task #19 item 4), so `src/plugins/modes/root.zig` downgraded
     // this to `weft.log` (still observable in the process log, just not the
     // editor's echo line). What this test asserts instead is the structural
     // guarantee: opening a file never lands language text on `ed.echoText()`

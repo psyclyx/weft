@@ -14,7 +14,7 @@
 //! Scope (doc/extensibility-native-surface.md, task W0a-D): this file covers the
 //! HOST import side (zipping `contract_data.imports` with `handlers`) and
 //! the host→guest export call-site helpers. It does NOT generate the guest
-//! externs in src/guest/weft.zig (Zig 0.16 cannot reify a decl from a
+//! externs in src/plugin_sdk/root.zig (Zig 0.16 cannot reify a decl from a
 //! comptime loop — see contract_data.zig's doc comment) — those stay
 //! hand-written, comptime-VERIFIED against `contract_data.imports` from the
 //! guest side instead. quickjs's `qjs_*` table is a separate file
@@ -371,7 +371,7 @@ fn zip() [contract_data.imports.len]Entry {
 /// guest shim declares. `wasm_host.defineImports` walks this to bind the
 /// Linker — nothing else in the host tree defines a `weft.*` import; add or
 /// change one here (in `contract_data.imports` + `handlers` above), and
-/// mirror the extern in src/guest/weft.zig by hand (comptime-verified, see
+/// mirror the extern in src/plugin_sdk/root.zig by hand (comptime-verified, see
 /// that file).
 pub const imports: [contract_data.imports.len]Entry = zip();
 

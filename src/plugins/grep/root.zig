@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const output = @import("output.zig");
+const output = @import("weft_output");
 
 /// Scratch for the assembled shell command line (pattern + rg flags).
 var cmd_buf: [1 << 12]u8 = undefined;

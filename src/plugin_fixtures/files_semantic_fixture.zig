@@ -4,7 +4,7 @@
 //! only the wasm callback table a third-party plugin root would provide.
 
 const weft = @import("weft");
-const files_guest = @import("weft_files_guest");
+const files_guest = @import("weft_files_adapter");
 
 var plugin: files_guest.Plugin = undefined;
 

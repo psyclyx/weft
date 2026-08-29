@@ -199,7 +199,7 @@ fn link(slot: u32) semantic.scene.TargetLink {
     return .{ .target = .{ .authority = .here, .slot = slot, .generation = 1 }, .revision = 1 };
 }
 
-/// The shape `src/plugins/files/projection.zig` publishes: a vertical `files`
+/// The shape `src/plugin_lib/files/projection.zig` publishes: a vertical `files`
 /// root of horizontal `files.row` containers, each holding a metadata label, a
 /// mode column, and the focusable `files.name` field that carries the row's
 /// target.

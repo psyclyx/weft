@@ -1,24 +1,63 @@
 const std = @import("std");
 
-/// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
-/// the shippable reference set: built to `.wasm` and installed to
-/// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —
-/// NOT baked into the binary. weft itself ships modeless. The non-`install`
-/// guests are test fixtures (a bare hello, a perm-violating rogue, a demo
-/// config) exercised only by the wasm-membrane suite, embedded into the test
-/// module below.
+/// One wasm guest: a shipped plugin (`src/plugins/<name>/root.zig`) or a test
+/// fixture (`src/plugin_fixtures/<name>.zig`).
+///
+/// `install` plugins are the shippable reference set: built to `.wasm` and
+/// installed to `lib/weft/plugins/<name>.wasm` as external artifacts a user
+/// loads with `--plugin` — NOT baked into the binary. weft itself ships
+/// modeless. The non-`install` guests are fixtures (a bare hello, a
+/// perm-violating rogue, a demo config) exercised only by the wasm-membrane
+/// suite, embedded into the test module below.
+///
+/// THE DIRECTORY IS THE BOUNDARY. A plugin is a directory, not a file, so it
+/// can grow implementation files without any of them becoming reachable from
+/// a sibling: each guest module is rooted at its OWN directory, and Zig
+/// refuses a relative import that escapes a module root. Shared code is a
+/// LIBRARY (`src/plugin_lib/<name>/`) named in `libraries` below — a build
+/// graph edge, never ambient source access.
 const Guest = struct {
-    src: []const u8,
+    /// The plugin's name — its directory, its installed artifact
+    /// (`lib/weft/plugins/<name>.wasm`), and the name a config's
+    /// `weft.plugin(name)` resolves.
+    name: []const u8,
     import: []const u8,
     install: bool,
-    /// Optional named plugin-library dependencies. These are build graph
-    /// edges, not ambient source access: a guest can import only the public
-    /// facades declared here.
-    libraries: Libraries = .{},
+    /// Plugin libraries this guest may import, by name. Anything not listed
+    /// is not on its import path at all.
+    libraries: []const Library = &.{},
 
-    const Libraries = packed struct {
-        files: bool = false,
-    };
+    /// Where this guest's root source lives. Plugins own a directory;
+    /// fixtures are single files (they exist to be minimal).
+    fn root(self: Guest) []const u8 {
+        return if (self.install)
+            "src/plugins/" ++ self.name ++ "/root.zig"
+        else
+            "src/plugin_fixtures/" ++ self.name ++ ".zig";
+    }
+};
+
+/// The shared plugin libraries (`src/plugin_lib/<name>/root.zig`). Each is a
+/// NAMED module a guest gets only by declaring it: `ex` is vim's and helix's
+/// command line, `output` is the tool-buffer surface `run`/`make`/`grep`
+/// share, `jsonrpc` is the framing under `lsp`, `files` is the portable draft
+/// model + its sandbox adapter.
+const Library = enum {
+    ex,
+    jsonrpc,
+    output,
+    files,
+
+    /// The import name a guest spells. One place, so a library cannot be
+    /// reached under two names.
+    fn importName(self: Library) []const u8 {
+        return switch (self) {
+            .ex => "weft_ex",
+            .jsonrpc => "weft_jsonrpc",
+            .output => "weft_output",
+            .files => "weft_files",
+        };
+    }
 };
 
 /// Compiler-enforced subsystem boundaries. Cross-module code imports these
@@ -155,27 +194,27 @@ fn createFilesPortableModules(
     fs: *std.Build.Module,
 ) FilesPortableModules {
     const model = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/model.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/model.zig"),
         .target = target,
         .optimize = optimize,
     });
     const projection = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/projection.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/projection.zig"),
         .target = target,
         .optimize = optimize,
     });
     const workspace = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/workspace.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/workspace.zig"),
         .target = target,
         .optimize = optimize,
     });
     const actions = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/actions.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/actions.zig"),
         .target = target,
         .optimize = optimize,
     });
     const facade = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/root.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -215,70 +254,73 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
 }
 
 const guests = [_]Guest{
-    .{ .src = "src/guest/hello.zig", .import = "guest_hello_wasm", .install = false },
-    .{ .src = "src/guest/plugin.zig", .import = "guest_plugin_wasm", .install = false },
-    .{ .src = "src/guest/rogue.zig", .import = "guest_rogue_wasm", .install = false },
-    .{ .src = "src/guest/deny.zig", .import = "guest_deny_wasm", .install = false },
-    .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
-    .{ .src = "src/guest/headtest.zig", .import = "guest_headtest_wasm", .install = false },
+    // ── Fixtures (src/plugin_fixtures/) — never shipped ──────────────────
+    .{ .name = "hello", .import = "guest_hello_wasm", .install = false },
+    .{ .name = "plugin", .import = "guest_plugin_wasm", .install = false },
+    .{ .name = "rogue", .import = "guest_rogue_wasm", .install = false },
+    .{ .name = "deny", .import = "guest_deny_wasm", .install = false },
+    .{ .name = "demo_config", .import = "guest_demo_config_wasm", .install = false },
+    .{ .name = "headtest", .import = "guest_headtest_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).
-    .{ .src = "src/guest/gramtest.zig", .import = "guest_gramtest_wasm", .install = false },
-    .{ .src = "src/guest/fs_limit.zig", .import = "guest_fs_limit_wasm", .install = false },
+    .{ .name = "gramtest", .import = "guest_gramtest_wasm", .install = false },
+    .{ .name = "fs_limit", .import = "guest_fs_limit_wasm", .install = false },
     // The `wl_proc_spool` gate's guest: proc+timer only, so the door's promise
     // ("a subprocess gets a real file, the guest gets no fs perm") is proven by
-    // a guest that genuinely holds none. Never shipped.
-    .{ .src = "src/guest/spool.zig", .import = "guest_spool_wasm", .install = false },
+    // a guest that genuinely holds none.
+    .{ .name = "spool", .import = "guest_spool_wasm", .install = false },
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
-    // slot the wasm-membrane suite proves end to end; never shipped.
-    .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
+    // slot the wasm-membrane suite proves end to end.
+    .{ .name = "badge", .import = "guest_badge_wasm", .install = false },
     // §11.7's worked example — a third-party decorator of entries it does not
-    // own, proven end to end by the wasm-membrane suite; never shipped.
-    .{ .src = "src/guest/marks.zig", .import = "guest_marks_wasm", .install = false },
-    .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
-    .{ .src = "src/guest/semantic_fs_fixture.zig", .import = "guest_semantic_fs_wasm", .install = false },
-    .{ .src = "src/guest/files_semantic_fixture.zig", .import = "guest_files_semantic_wasm", .install = false, .libraries = .{ .files = true } },
-    .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
-    .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
-    .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
-    .{ .src = "src/guest/palette.zig", .import = "guest_palette_wasm", .install = true },
-    .{ .src = "src/guest/structural.zig", .import = "guest_structural_wasm", .install = true },
-    .{ .src = "src/guest/ts.zig", .import = "guest_ts_wasm", .install = true },
-    .{ .src = "src/guest/region.zig", .import = "guest_region_wasm", .install = true },
-    .{ .src = "src/guest/shell.zig", .import = "guest_shell_wasm", .install = true },
-    .{ .src = "src/guest/motions.zig", .import = "guest_motions_wasm", .install = true },
-    .{ .src = "src/guest/textobjects.zig", .import = "guest_textobjects_wasm", .install = true },
-    .{ .src = "src/guest/operators.zig", .import = "guest_operators_wasm", .install = true },
-    .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm", .install = true },
-    .{ .src = "src/guest/comment.zig", .import = "guest_comment_wasm", .install = true },
-    .{ .src = "src/guest/lsp.zig", .import = "guest_lsp_wasm", .install = true },
-    .{ .src = "src/guest/indent.zig", .import = "guest_indent_wasm", .install = true },
-    .{ .src = "src/guest/whitespace.zig", .import = "guest_whitespace_wasm", .install = true },
-    .{ .src = "src/guest/numbers.zig", .import = "guest_numbers_wasm", .install = true },
-    .{ .src = "src/guest/autopair.zig", .import = "guest_autopair_wasm", .install = true },
-    .{ .src = "src/guest/consult.zig", .import = "guest_consult_wasm", .install = true },
-    .{ .src = "src/guest/git.zig", .import = "guest_git_wasm", .install = true },
-    .{ .src = "src/guest/grep.zig", .import = "guest_grep_wasm", .install = true },
-    .{ .src = "src/guest/run.zig", .import = "guest_run_wasm", .install = true },
-    .{ .src = "src/guest/make.zig", .import = "guest_make_wasm", .install = true },
-    .{ .src = "src/guest/notes.zig", .import = "guest_notes_wasm", .install = true },
-    .{ .src = "src/guest/fmt.zig", .import = "guest_fmt_wasm", .install = true },
-    .{ .src = "src/guest/buffers.zig", .import = "guest_buffers_wasm", .install = true },
-    .{ .src = "src/guest/windows.zig", .import = "guest_windows_wasm", .install = true },
-    .{ .src = "src/guest/modes.zig", .import = "guest_modes_wasm", .install = true },
-    .{ .src = "src/guest/snippets.zig", .import = "guest_snippets_wasm", .install = true },
-    .{ .src = "src/guest/direnv.zig", .import = "guest_direnv_wasm", .install = true },
-    .{ .src = "src/guest/llm.zig", .import = "guest_llm_wasm", .install = true },
-    .{ .src = "src/guest/console.zig", .import = "guest_console_wasm", .install = true },
-    .{ .src = "src/guest/repl.zig", .import = "guest_repl_wasm", .install = true },
-    .{ .src = "src/guest/net.zig", .import = "guest_net_wasm", .install = true },
-    .{ .src = "src/guest/http.zig", .import = "guest_http_wasm", .install = true },
-    .{ .src = "src/guest/which_key.zig", .import = "guest_which_key_wasm", .install = true },
-    .{ .src = "src/guest/files.zig", .import = "guest_files_wasm", .install = true, .libraries = .{ .files = true } },
-    .{ .src = "src/guest/helix.zig", .import = "guest_helix_wasm", .install = true },
-    .{ .src = "src/guest/emacs.zig", .import = "guest_emacs_wasm", .install = true },
-    .{ .src = "src/guest/debug.zig", .import = "guest_debug_wasm", .install = true },
+    // own, proven end to end by the wasm-membrane suite.
+    .{ .name = "marks", .import = "guest_marks_wasm", .install = false },
+    .{ .name = "semantic_fixture", .import = "guest_semantic_wasm", .install = false },
+    .{ .name = "semantic_fs_fixture", .import = "guest_semantic_fs_wasm", .install = false },
+    .{ .name = "files_semantic_fixture", .import = "guest_files_semantic_wasm", .install = false, .libraries = &.{.files} },
+
+    // ── Shipped plugins (src/plugins/<name>/) ────────────────────────────
+    .{ .name = "edit", .import = "guest_edit_wasm", .install = true },
+    .{ .name = "complete", .import = "guest_complete_wasm", .install = true },
+    .{ .name = "project", .import = "guest_project_wasm", .install = true },
+    .{ .name = "palette", .import = "guest_palette_wasm", .install = true },
+    .{ .name = "structural", .import = "guest_structural_wasm", .install = true },
+    .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
+    .{ .name = "region", .import = "guest_region_wasm", .install = true },
+    .{ .name = "shell", .import = "guest_shell_wasm", .install = true },
+    .{ .name = "motions", .import = "guest_motions_wasm", .install = true },
+    .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true },
+    .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
+    .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
+    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{.jsonrpc} },
+    .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
+    .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
+    .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
+    .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
+    .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true },
+    .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "notes", .import = "guest_notes_wasm", .install = true },
+    .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
+    .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
+    .{ .name = "windows", .import = "guest_windows_wasm", .install = true },
+    .{ .name = "modes", .import = "guest_modes_wasm", .install = true },
+    .{ .name = "snippets", .import = "guest_snippets_wasm", .install = true },
+    .{ .name = "direnv", .import = "guest_direnv_wasm", .install = true },
+    .{ .name = "llm", .import = "guest_llm_wasm", .install = true },
+    .{ .name = "console", .import = "guest_console_wasm", .install = true },
+    .{ .name = "repl", .import = "guest_repl_wasm", .install = true },
+    .{ .name = "net", .import = "guest_net_wasm", .install = true },
+    .{ .name = "http", .import = "guest_http_wasm", .install = true },
+    .{ .name = "which_key", .import = "guest_which_key_wasm", .install = true },
+    .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
+    .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {
@@ -607,7 +649,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const darwin_guest_sdk = b.createModule(.{
-        .root_source_file = b.path("src/guest/weft.zig"),
+        .root_source_file = b.path("src/plugin_sdk/root.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
@@ -624,7 +666,7 @@ pub fn build(b: *std.Build) void {
     darwin_guest_sdk.addImport("weft_fs", darwin_architecture.fs);
     darwin_guest_sdk.addImport("weft_fs_codec", darwin_architecture.fs_codec);
     const darwin_files_guest = b.createModule(.{
-        .root_source_file = b.path("src/plugins/files/guest.zig"),
+        .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
@@ -705,12 +747,12 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_weft_tests.step);
 
-    // A guest library with no wasm import environment (guest/output_targets.zig
+    // A guest library with no wasm import environment (plugin_lib/output/targets.zig
     // — the row → location table `run`/`make`/`grep` navigate by) compiles for
     // the host too, so its logic is tested natively rather than only through a
     // plugin.
     const guest_pure = b.createModule(.{
-        .root_source_file = b.path("src/guest/output_targets.zig"),
+        .root_source_file = b.path("src/plugin_lib/output/targets.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -882,11 +924,16 @@ fn configureTestModule(
 /// Tree-sitter (milestone 7): the library links normally; grammar
 /// packages contribute a runtime dlopen path (baked via build options)
 /// and an embedded highlight query, both from pinned store paths.
-/// Compile one guest plugin (src/guest/*.zig) to a `wasm32-freestanding`
-/// reactor module — no `_start`, exported functions + memory via rdynamic —
-/// so the host can instantiate it under wasmtime.
-fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
-    const src = guest_spec.src;
+/// Compile one guest (a plugin's `src/plugins/<name>/root.zig`, or a
+/// fixture) to a `wasm32-freestanding` reactor module — no `_start`,
+/// exported functions + memory via rdynamic — so the host can instantiate it
+/// under wasmtime.
+///
+/// `comptime guest_spec` because a guest's name IS its path and its artifact
+/// name: both are built by comptime concatenation, in `Guest.root` and in
+/// `installPlugins`, from the one string in the table.
+fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile {
+    const src = comptime guest_spec.root();
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
     const guest_mod = b.createModule(.{
         .root_source_file = b.path(src),
@@ -895,14 +942,14 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     });
     // The guest SDK is a real named module. Plugin roots import `weft` and
     // cannot reach sideways into the SDK implementation by relative path.
-    // src/guest/weft.zig comptime-verifies its hand-written externs against
-    // core/membrane/contract_data.zig's signedness table (task W0a-D) — a
-    // plain relative `@import("../core/membrane/contract_data.zig")` fails
-    // ("import of file outside module path": each guest is its own module,
-    // rooted at src/guest/, and Zig 0.16 won't let a relative import escape
-    // that root). Wire it as a named import instead, same target as the
-    // guest itself (contract_data.zig has zero host-only deps — no
-    // wasmtime, no wasm_host — by design, so it compiles fine here too).
+    // src/plugin_sdk/root.zig comptime-verifies its hand-written externs
+    // against core/membrane/contract_data.zig's signedness table (task
+    // W0a-D) — a plain relative `@import("../core/membrane/contract_data.zig")`
+    // fails ("import of file outside module path": each guest is its own
+    // module, rooted at its own directory, and Zig 0.16 won't let a relative
+    // import escape that root). Wire it as a named import instead, same
+    // target as the guest itself (contract_data.zig has zero host-only deps —
+    // no wasmtime, no wasm_host — by design, so it compiles fine here too).
     const contract_data = b.createModule(.{
         .root_source_file = b.path("src/core/membrane/contract_data.zig"),
         .target = wasm_target,
@@ -912,9 +959,9 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     // IDENTICAL core/schema.zig the host does — same zero-host-dependency
     // posture as contract_data.zig above, same reason it needs a named
     // import rather than a relative `../core/schema.zig` reach-around (each
-    // guest is its own module rooted at src/guest/). This is what makes a
-    // guest's own `parseSchema`/`decodeCursor`/`canonicalizeSchema` calls
-    // (weft.zig's `schemaEncode`/`slotBind` ergonomic wrappers) the SAME
+    // guest is its own module rooted at its own directory). This is what
+    // makes a guest's own `parseSchema`/`decodeCursor`/`canonicalizeSchema`
+    // calls (the SDK's `schemaEncode`/`slotBind` ergonomic wrappers) the SAME
     // implementation the host runs, not a second one.
     const schema = b.createModule(.{
         .root_source_file = b.path("src/core/schema.zig"),
@@ -928,7 +975,7 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     });
     schema.addImport("weft_wire", wire);
     const guest_sdk = b.createModule(.{
-        .root_source_file = b.path("src/guest/weft.zig"),
+        .root_source_file = b.path("src/plugin_sdk/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -971,20 +1018,40 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     guest_sdk.addImport("weft_fs", fs);
     guest_sdk.addImport("weft_fs_codec", fs_codec);
     guest_mod.addImport("weft", guest_sdk);
-    if (guest_spec.libraries.files) {
-        const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
-        guest_mod.addImport("weft_files", files.facade);
-        const files_guest = b.createModule(.{
-            .root_source_file = b.path("src/plugins/files/guest.zig"),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        });
-        files_guest.addImport("weft", guest_sdk);
-        files_guest.addImport("weft_files", files.facade);
-        guest_mod.addImport("weft_files_guest", files_guest);
+    // Plugin libraries: ONE edge per name this guest declared, and nothing
+    // else on its import path. A library it did not ask for is not merely
+    // discouraged — it is absent, so "plugin A quietly reached into plugin
+    // B's implementation" cannot be written.
+    inline for (guest_spec.libraries) |lib| {
+        const mod = switch (lib) {
+            .ex, .jsonrpc, .output => b.createModule(.{
+                .root_source_file = b.path("src/plugin_lib/" ++ @tagName(lib) ++ "/root.zig"),
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+            }),
+            // Files is a module GRAPH, not a single root: the portable draft
+            // model + its sandbox adapter, composed over public architecture
+            // contracts so the build itself rejects plugin-to-provider
+            // reach-through.
+            .files => blk: {
+                const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
+                const adapter = b.createModule(.{
+                    .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
+                    .target = wasm_target,
+                    .optimize = .ReleaseSmall,
+                });
+                adapter.addImport("weft", guest_sdk);
+                adapter.addImport("weft_files", files.facade);
+                guest_mod.addImport("weft_files_adapter", adapter);
+                break :blk files.facade;
+            },
+        };
+        // Every library speaks the same ABI its consumer does.
+        if (lib != .files) mod.addImport("weft", guest_sdk);
+        guest_mod.addImport(comptime lib.importName(), mod);
     }
     const guest = b.addExecutable(.{
-        .name = std.fs.path.stem(src),
+        .name = guest_spec.name,
         .root_module = guest_mod,
     });
     guest.entry = .disabled; // reactor: called through exports, not _start
@@ -1006,12 +1073,11 @@ fn embedGuests(b: *std.Build, mod: *std.Build.Module) void {
 /// `lib/weft/plugins/`. These are what a user loads with `--plugin`; weft
 /// carries no plugins in-process.
 fn installPlugins(b: *std.Build) void {
-    @setEvalBranchQuota(10_000); // the guest list grows; comptime `stem` per entry
+    @setEvalBranchQuota(10_000); // the guest list grows; comptime path per entry
     inline for (guests) |g| {
         if (!g.install) continue;
         const guest = buildGuest(b, g);
-        const name = comptime std.fs.path.stem(g.src);
-        const inst = b.addInstallFileWithDir(guest.getEmittedBin(), .lib, "weft/plugins/" ++ name ++ ".wasm");
+        const inst = b.addInstallFileWithDir(guest.getEmittedBin(), .lib, "weft/plugins/" ++ g.name ++ ".wasm");
         b.getInstallStep().dependOn(&inst.step);
     }
     // JS plugins (config/plugins/*.js) — resident quickjs plugins (e.g. the ACP

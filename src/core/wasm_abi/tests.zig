@@ -966,7 +966,7 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    // The guest never requests fs_read (see src/guest/deny.zig) but calls
+    // The guest never requests fs_read (see src/plugin_fixtures/deny.zig) but calls
     // fs.read from its command handler anyway. The load itself succeeds (no
     // perm is required to load — only to use); the deny happens on use.
     const plugin = try loadPlugin(&engine, &env.ctx, "sneaky", @embedFile("guest_deny_wasm"), .{});
@@ -984,7 +984,7 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
 }
 
 // ── task #19 item 4: closing the `activeCtx()` background escape hatch ─────
-// `src/guest/headtest.zig` (task #14's fixture, see its module doc) exercises
+// `src/plugin_fixtures/headtest.zig` (task #14's fixture, see its module doc) exercises
 // the SAME guest through both a DISPATCHING entry (`on_command` via
 // `command.run` — must work) and a BACKGROUND one (`on_poll`, called directly
 // here rather than through the real readiness/proc-stream machinery — the
@@ -1194,7 +1194,7 @@ test "wasm plugin: a completion provider gathers candidates across the membrane"
 
 test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, restamps, and decodes it with NO core type for it" {
     // doc/d2-schema-payloads.md §6's worked example, made e2e: `badge.zig`
-    // (src/guest/badge.zig) is a third-party CI-status plugin. Nothing in
+    // (src/plugin_fixtures/badge.zig) is a third-party CI-status plugin. Nothing in
     // `core/` — not `capability.zig`, not `container.zig`, not this test
     // file — ever names a "Badge" type. The ONLY thing the host holds is the
     // `*const schema.Schema` tree `wl_slot_declare` shipped across the
@@ -2431,7 +2431,7 @@ test "wasm plugin: modes reacts to the activation event by language, without tou
     // Fire activation for a python, then a zig, then an unrecognized-extension
     // file: on_activate detects the language each time (design §3) — this
     // test can't observe the detection directly (`on_activate` downgraded its
-    // `weft.echo` to `weft.log` — see src/guest/modes.zig's doc: `on_activate`
+    // `weft.echo` to `weft.log` — see src/plugins/modes/root.zig's doc: `on_activate`
     // is BACKGROUND, `wl_echo` is head-gated, and there is no dispatching head
     // to route an echo through here), so what it DOES assert is the
     // structural guarantee this task adds: a BACKGROUND entry never touches
@@ -2529,7 +2529,7 @@ test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
 }
 
 // ── W4 slice 2 / task #8: `.fs_root` limit enforcement through a REAL guest ─
-// `src/guest/fs_limit.zig` requests fs_read+fs_write and exposes each as a
+// `src/plugin_fixtures/fs_limit.zig` requests fs_read+fs_write and exposes each as a
 // command reading its path from the args, so the host controls exactly
 // which path each scenario tries. `loadPlugin` mints `.none`-limit rows for
 // the perms it declared (grants.zig's `mintGrantHandles`, unchanged by this
@@ -2945,7 +2945,7 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
     }
 }
 
-// The Files conformance fixture (src/guest/gramtest.zig): a synthetic
+// The Files conformance fixture (src/plugin_fixtures/gramtest.zig): a synthetic
 // third-party grammar. It loads clean through the wasm membrane, and every
 // key it binds names a STANDARD intention (src/core/intentions.zig) — never a
 // plugin command — which is what makes the Files gates (src/e2e/grammar_test.zig)
@@ -3334,7 +3334,7 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
 }
 
 // ── Annotation layers: the third-party decoration package (§11.7) ─────────
-// `marks` (src/guest/marks.zig) is a plugin nothing else has heard of. It
+// `marks` (src/plugin_fixtures/marks.zig) is a plugin nothing else has heard of. It
 // decorates an entry it does not own, addressed by REFERENCE rather than by
 // focus, and its paint is composited by whatever presentation hosts that
 // entry — no text-side code, in core or in another plugin, knows it exists.

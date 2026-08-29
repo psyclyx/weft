@@ -1,74 +1,68 @@
-//! Portable plugin-facing files facade.
+//! Sandboxed file-browser plugin.
 //!
-//! This root deliberately contains only the host-independent model,
-//! projection, workspace, and action contracts. Runtime integration lives in
-//! the sandbox guest adapter, keeping it impossible for portable files users
-//! to acquire native registries accidentally.
+//! The internal `weft_files_guest` library composes the portable draft model,
+//! semantic projection, and public target-scoped filesystem ABI. This root
+//! contributes only wasm callbacks plus the user-facing launcher. It owns no
+//! text projection, editor mode, keymap, shell command, syscall, or platform
+//! policy.
 
-const std = @import("std");
+const weft = @import("weft");
+const files_guest = @import("weft_files_adapter");
 
-pub const model = @import("weft_files_model");
-pub const workspace = @import("weft_files_workspace");
-pub const projection = @import("weft_files_projection");
-pub const actions = @import("weft_files_actions");
+const command_name = "files";
+var plugin: files_guest.Plugin = undefined;
 
-pub const Model = model.Model;
-pub const NodeId = model.NodeId;
-pub const Pending = model.Pending;
-pub const Conflict = model.Conflict;
-pub const SnapshotEntry = model.SnapshotEntry;
-pub const Snapshot = model.Snapshot;
-pub const Observation = model.Observation;
-pub const Draft = model.Draft;
-pub const Row = model.Row;
-pub const EntryCapture = model.EntryCapture;
-pub const OwnedPlan = model.OwnedPlan;
-pub const PlanPolicy = model.PlanPolicy;
-pub const PastePlacement = model.PastePlacement;
-pub const PasteAnchor = model.PasteAnchor;
+export fn describe() void {
+    weft.requestPerm(.fs_read);
+    weft.requestPerm(.fs_write);
+    weft.declareCommand(command_name);
+}
 
-pub const WorkspaceError = workspace.Error;
-pub const directoryFromDescriptor = workspace.directoryFromDescriptor;
-pub const reconcileListing = workspace.reconcileListing;
-pub const reconcileChildListing = workspace.reconcileChildListing;
-pub const observedChild = workspace.observedChild;
-pub const validateListing = workspace.validateListing;
-pub const sameDirectory = workspace.sameDirectory;
+export fn init() void {
+    plugin = .init(weft.allocator);
+    // The launcher remains usable in a command-only host. Target callbacks
+    // decline until the generic semantic services become available.
+    plugin.start() catch {};
+    _ = weft.register(command_name);
+}
 
-pub const max_transfer_payload = model.max_transfer_payload;
-pub const max_transfer_records = model.max_transfer_records;
-pub const max_transfer_name = model.max_transfer_name;
-pub const max_transfer_revision = model.max_transfer_revision;
-pub const entry_media_type = model.entry_media_type;
-pub const entry_schema_current = model.entry_schema_current;
-pub const entry_schema_legacy = model.entry_schema_legacy;
-pub const isEntryTransferSchema = model.isEntryTransferSchema;
-pub const encodeEntryTransfer = model.encodeEntryTransfer;
-pub const decodeEntryTransfer = model.decodeEntryTransfer;
-pub const decodeEntryTransferWithAttachment = model.decodeEntryTransferWithAttachment;
+export fn on_command(id: u32) void {
+    if (id != 0) return;
+    // The browser opens WHERE the dispatch is (`doc/place.md`): the project the
+    // focused file belongs to, not the directory the editor was launched in.
+    const directory = weft.placeRoot();
+    if (directory.len == 0) {
+        weft.echo("files: this place has no local directory to browse");
+        return;
+    }
+    weft.runStr("open", directory);
+}
 
-pub const FieldBinding = projection.FieldBinding;
-pub const ProjectionOptions = projection.Options;
-pub const OwnedScene = projection.OwnedScene;
-pub const project = projection.project;
-pub const projectWith = projection.projectWith;
-pub const metadata_column = projection.metadata_column;
-pub const mode_column = projection.mode_column;
-pub const name_column = projection.name_column;
-pub const original_column = projection.original_column;
-pub const indent_cells = projection.indent_cells;
-pub const permissions_edit_action = projection.permissions_edit_action;
-pub const create_file_action = projection.create_file_action;
-pub const create_directory_action = projection.create_directory_action;
-pub const rowNodeId = projection.rowNodeId;
-pub const nameNodeId = projection.nameNodeId;
-pub const modeNodeId = projection.modeNodeId;
-pub const rootNodeId = projection.rootNodeId;
-pub const modelRowId = projection.modelRowId;
+export fn on_semantic_target_probe(token: u32) void {
+    plugin.targetProbe(token);
+}
 
-pub const ActionController = actions.Controller;
-pub const ActionError = actions.Error;
+export fn on_semantic_target_open(token: u32) void {
+    plugin.targetOpen(token);
+}
 
-test {
-    std.testing.refAllDecls(@This());
+export fn on_semantic_target_settle(token: u32, authority: u32, slot: u32, generation: u32, outcome: u32) void {
+    if (generation == 0 or outcome > 1) return;
+    plugin.targetSettle(token, .{
+        .authority = @enumFromInt(authority),
+        .slot = slot,
+        .generation = generation,
+    }, outcome == 0);
+}
+
+export fn on_semantic_relation_query(token: u32) void {
+    plugin.relationQuery(token);
+}
+
+export fn on_semantic_action() void {
+    plugin.semanticAction();
+}
+
+export fn on_semantic_field_edit(token: u32) void {
+    plugin.fieldEdit(token);
 }

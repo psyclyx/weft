@@ -6,7 +6,7 @@
 //! needed; the point is `dispatch.zig` + `core.Head`, not any particular
 //! guest config) — through the SAME shape `dispatch.zig`'s `.run` branch
 //! gives any real bound command whose name IS a declared menu mode (the
-//! actual production example: `src/guest/git.zig`'s
+//! actual production example: `src/plugins/git/root.zig`'s
 //! `weft.bindKey("git", "c", "git-commit-dispatch")`, exercised end to end
 //! by `project_test.zig`'s "write a file, init a repo, stage and commit"
 //! spine test — unmodified by this migration, still green).
@@ -181,7 +181,7 @@ test "menu: a leaf's own buffer switch mid-menu drops the transient stack, match
 
     // A second buffer with its OWN resting mode, and a leaf command bound
     // INSIDE `test-menu` that switches to it directly — the same shape
-    // `src/guest/git.zig`'s `git-commit-dispatch` -> `git-commit` leaf takes
+    // `src/plugins/git/root.zig`'s `git-commit-dispatch` -> `git-commit` leaf takes
     // (opens/focuses a different buffer without going through `menu-escape`
     // or an auto-pop). `Buffers.switchTo` bypasses the keymap dispatch site
     // entirely (its own doc) — legacy just overwrote `head.mode`; the

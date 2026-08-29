@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const output = @import("output.zig");
+const output = @import("weft_output");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{

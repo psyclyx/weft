@@ -36,7 +36,7 @@
 //! the call's duration; the quickjs resident-plugin plane
 //! (`core/quickjs.zig`'s `JsPlugin`/`Bridge`) had the identical shape of bug
 //! in its own command trampoline and got the identical fix. The tests below
-//! drive a REAL guest plugin (`src/guest/headtest.zig` — a minimal fixture
+//! drive a REAL guest plugin (`src/plugin_fixtures/headtest.zig` — a minimal fixture
 //! built for exactly this, see its module doc for why not `loadVim`) through
 //! head B and assert head A is untouched, that a BACKGROUND entry
 //! (`on_poll`) targets the system default regardless of which head last
@@ -379,7 +379,7 @@ test "two heads: distinct echo lines" {
 }
 
 // ── Guest-ABI head addressing (task #14) — the gap this file's header used
-// to report rather than patch. `headtest` (src/guest/headtest.zig) is a REAL
+// to report rather than patch. `headtest` (src/plugin_fixtures/headtest.zig) is a REAL
 // wasm plugin, driven through the REAL `on_command`/`on_poll` trampolines —
 // not a synthetic stand-in for them. ──────────────────────────────────────
 

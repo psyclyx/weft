@@ -3,7 +3,7 @@
 //! per-buffer registrations race correctly. Highlight layers key by (doc, name)
 //! in the shared store. Also the config-supplied grammar registry these attach
 //! from (`grammar-add`) and the pooled reconnect task. LSP is no longer here at
-//! all — it's an async wasm plugin (`src/guest/lsp.zig`) that talks to servers
+//! all — it's an async wasm plugin (`src/plugins/lsp/root.zig`) that talks to servers
 //! over the streaming membrane and provides every capability, completion
 //! included, as a caps provider; server commands come from config, not a
 //! registry. See [[lsp-plugin-migration]].

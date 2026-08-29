@@ -4,7 +4,7 @@
 //! host→guest EXPORT entrypoints (describe/init/run/on_command/…). No
 //! wasmtime, no handler function pointers — this file has zero host-only
 //! dependencies, so it compiles under `wasm32-freestanding` and is imported
-//! directly by src/guest/weft.zig (the guest-side comptime tripwire) as well
+//! directly by src/plugin_sdk/root.zig (the guest-side comptime tripwire) as well
 //! as by core/membrane/contract.zig (the host-side handler binding).
 //!
 //! Split from contract.zig (doc/extensibility-native-surface.md, task W0a-D): the
@@ -14,13 +14,13 @@
 //! table's data against a host-only `handlers` list by NAME (not position),
 //! comptime-checked both ways: every data entry must have a bound handler,
 //! and every handler must name a real data entry. See that file for the
-//! zip; see src/guest/weft.zig for the guest-side verification this data
+//! zip; see src/plugin_sdk/root.zig for the guest-side verification this data
 //! enables.
 //!
 //! Zig 0.16 cannot reify a `extern fn` declaration OR a struct-of-decls from
 //! a runtime-driven comptime loop (no `@Type` builtin, no `usingnamespace`
 //! decl-merging) — so this table does not literally GENERATE the guest
-//! externs in src/guest/weft.zig; those stay hand-written. What it generates
+//! externs in src/plugin_sdk/root.zig; those stay hand-written. What it generates
 //! instead is a comptime VERIFICATION: weft.zig walks `imports` and, for
 //! each entry, uses `@field(@This(), entry.name)` + `@typeInfo` to confirm
 //! the hand-written extern's arity AND per-param/result signedness match
@@ -37,7 +37,7 @@ const std = @import("std");
 /// pair of them for bulk data) at the wasm level — both `i32` and `u32`
 /// lower to the same wasm valtype `i32`; wasmtime's `Linker`/`Caller` only
 /// ever see word count, never sign. This enum exists for the GUEST side:
-/// src/guest/weft.zig's hand-written externs mix `u32` (the common case)
+/// src/plugin_sdk/root.zig's hand-written externs mix `u32` (the common case)
 /// and `i32` (sentinel -1 results, a handful of signed args) — this table
 /// records exactly which, transcribed from those externs, so the
 /// verification block in weft.zig can catch a signedness slip too, not
@@ -104,7 +104,7 @@ pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
-    /// <name>(..)` in src/guest/weft.zig exactly.
+    /// <name>(..)` in src/plugin_sdk/root.zig exactly.
     name: []const u8,
     params: []const ValType,
     results: []const ValType,
@@ -154,7 +154,7 @@ pub const Entry = struct {
 /// zips this against `handlers` by name). Add or change an import here
 /// (params/results/group/perm/doc), bind its handler in contract.zig's
 /// `handlers` list, and mirror the extern's arity+signedness by hand in
-/// src/guest/weft.zig — forgetting any of the three now fails a build, not
+/// src/plugin_sdk/root.zig — forgetting any of the three now fails a build, not
 /// a runtime.
 pub const imports = [_]Entry{
     // ── declare.zig — describe-phase declarations ──────────────────────
@@ -427,7 +427,7 @@ pub const imports = [_]Entry{
 
 /// The imports table's size, alongside `imports.len`, as a deliberate
 /// tripwire: bump this BY HAND alongside adding or removing a contract entry
-/// (and its guest extern in src/guest/weft.zig — see the comptime
+/// (and its guest extern in src/plugin_sdk/root.zig — see the comptime
 /// verification block in that file for what happens if you forget), so an
 /// accidental add/remove — a merge conflict, a copy-paste slip, a
 /// half-finished edit — fails the build with a pointed message instead of
@@ -452,7 +452,7 @@ const expected_import_count = 209;
 ///
 /// Guest-side note: unlike `imports`, this table has NO guest-side
 /// counterpart to verify against — a guest's `export fn on_command(id: u32)
-/// void {..}` lives in per-plugin source (src/guest/*.zig, not weft.zig's
+/// void {..}` lives in per-plugin source (src/plugins/*/, not weft.zig's
 /// SDK), and its signature crosses the wasm boundary where Zig's comptime
 /// cannot reach (the guest may not even be Zig — see quickjs.zig). That
 /// boundary is a REAL limit stated up front, not fudged.
@@ -505,7 +505,7 @@ comptime {
     if (imports.len != expected_import_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/contract_data.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a wl_* host import, update `expected_import_count` here. " ++
-            "The guest extern in src/guest/weft.zig still needs adding/removing by hand (Zig " ++
+            "The guest extern in src/plugin_sdk/root.zig still needs adding/removing by hand (Zig " ++
             "can't synthesize a top-level decl from this table) — but forgetting it now fails " ++
             "the BUILD (weft.zig's comptime verification block), not silently.",
         .{ imports.len, expected_import_count },

@@ -53,7 +53,7 @@ pub const Mirror = @import("mirror.zig");
 pub const syntax = @import("syntax.zig");
 pub const syntax_claim = @import("syntax_claim.zig");
 pub const markdown = @import("markdown.zig");
-// lsp (the client) removed — LSP is the `lsp` wasm plugin (src/guest/lsp.zig),
+// lsp (the client) removed — LSP is the `lsp` wasm plugin (src/plugins/lsp/root.zig),
 // a caps provider over the streaming membrane. See [[lsp-plugin-migration]].
 pub const position = @import("position.zig");
 pub const layers = @import("layers.zig");

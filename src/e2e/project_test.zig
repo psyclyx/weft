@@ -185,7 +185,7 @@ test "e2e/project: opening the saved file recognizes its language" {
 
     // `modes`' on_activate detects the language but no longer echoes it
     // (task #19 item 4 — `on_activate` is BACKGROUND, `wl_echo` is head-
-    // gated; see src/guest/modes.zig's doc). Assert the structural
+    // gated; see src/plugins/modes/root.zig's doc). Assert the structural
     // guarantee instead: neither open lands language text on the echo line.
     ed.runStr("open", zig_path);
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
@@ -1985,7 +1985,7 @@ test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
 test "e2e/git: no verb reads a rendered byte range to choose its target" {
     // By construction, not by review: the plugin is split at a marker, with the
     // display tables and the projection buffer above it and every verb below.
-    const src = @embedFile("../guest/git.zig");
+    const src = @embedFile("../plugins/git/root.zig");
     const marker = "Below here nothing reads a rendered byte range";
     const at = std.mem.indexOf(u8, src, marker) orelse return error.MarkerMissing;
     const verbs = src[at..];

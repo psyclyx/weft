@@ -109,20 +109,30 @@ fn fnNameOf(line: []const u8) ?[]const u8 {
     return line[start..end];
 }
 
-/// The plugin id a source file may speak for: `src/guest/git.zig` is `git`,
-/// anything under `src/plugins/files/` is `files`. Null for host code, which
-/// is not a plugin and may name any of them.
+/// The plugin id a source file may speak for. A plugin OWNS a directory, so
+/// every file under `src/plugins/git/` is `git`, however many it grows;
+/// a fixture is a single file under `src/plugin_fixtures/`. Null for host
+/// code, which is not a plugin and may name any of them.
 fn pluginIdOf(rel_path: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, rel_path, "src/plugins/")) {
         const rest = rel_path["src/plugins/".len..];
         const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
         return rest[0..slash];
     }
-    if (std.mem.startsWith(u8, rel_path, "src/guest/")) {
-        const rest = rel_path["src/guest/".len..];
+    if (std.mem.startsWith(u8, rel_path, "src/plugin_fixtures/")) {
+        const rest = rel_path["src/plugin_fixtures/".len..];
         return rest[0 .. std.mem.lastIndexOfScalar(u8, rest, '.') orelse return null];
     }
     return null;
+}
+
+/// A shared plugin library (`src/plugin_lib/<name>/`). It has no plugin id
+/// at all: it is code SEVERAL plugins compile, so naming any one consumer's
+/// private `plugin.<id>.*` surface is the coupling a library exists to avoid
+/// — a stricter rule than a plugin's ("your own and no one else's"), because
+/// a library has no "own".
+fn isPluginLibrary(rel_path: []const u8) bool {
+    return std.mem.startsWith(u8, rel_path, "src/plugin_lib/");
 }
 
 /// The `plugin.<id>.` name a line depends on, if any — the §5.1 grammar's
@@ -183,9 +193,12 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
             try scan.record(rel_path, line_no, "findByName on an async delivery path (resolve the captured ref instead)");
 
         // Doc §19 "cross-plugin private command dependencies": a plugin may
-        // name its OWN `plugin.<id>.*` surface and no one else's.
+        // name its OWN `plugin.<id>.*` surface and no one else's; a shared
+        // library may name none, having no own.
         if (pluginNameIn(line)) |named| {
-            if (pluginIdOf(rel_path)) |owner| {
+            if (isPluginLibrary(rel_path)) {
+                try scan.record(rel_path, line_no, "a plugin LIBRARY names a plugin's private command — shared code must not couple to one consumer (doc §19)");
+            } else if (pluginIdOf(rel_path)) |owner| {
                 if (!std.mem.eql(u8, named, owner))
                     try scan.record(rel_path, line_no, "depends on another plugin's private command name (doc §19)");
             }
@@ -230,10 +243,10 @@ test "demolition: §19 checklist absences hold over src/" {
     }
 
     // `semanticActive` (doc §19: "`semanticActive` branches") has exactly one
-    // definition site left: the guest ABI shim (src/guest/weft.zig). Anything
+    // definition site left: the guest ABI shim (src/plugin_sdk/root.zig). Anything
     // else means a second implementation snuck back in, bypassing the shim.
     if (scan.semantic_active_defs.items.len != 1 or
-        !std.mem.eql(u8, scan.semantic_active_defs.items[0].path, "src/guest/weft.zig"))
+        !std.mem.eql(u8, scan.semantic_active_defs.items[0].path, "src/plugin_sdk/root.zig"))
     {
         for (scan.semantic_active_defs.items) |v|
             std.debug.print("demolition: unexpected semanticActive definition at {s}:{d}\n", .{ v.path, v.line });

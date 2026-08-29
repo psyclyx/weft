@@ -370,7 +370,7 @@ the guest supplies bytes and a command and never a path.
 draft's commit message; the rebase plan) and **dropped `fs_write`**;
 `llm.zig` migrated its prompt and dropped `fs_write` too, taking its
 launch-directory litter with it. Neither plugin names a path it writes, and
-neither cleans up after itself any more. The gate guest is `src/guest/spool.zig`
+neither cleans up after itself any more. The gate guest is `src/plugin_fixtures/spool.zig`
 — `{proc, timer}` and nothing else — so the trade is proven by a guest that
 genuinely holds no filesystem authority.
 

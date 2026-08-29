@@ -1,6 +1,6 @@
 //! e2e test file — the Phase-3 conformance gates
 //! (doc/contextual-workspace-architecture.md §18 "Workspace and input"):
-//! a SYNTHETIC third-party grammar (src/guest/gramtest.zig) binding only
+//! a SYNTHETIC third-party grammar (src/plugin_fixtures/gramtest.zig) binding only
 //! `std.*` intentions gets the same Files behavior the shipped grammars do,
 //! Tab is never text, and a key no grammar binds synthesizes nothing.
 //!

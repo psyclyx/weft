@@ -943,7 +943,7 @@ fn renderStatus() void {
 /// else). `weft.echo` is head-gated (task #19 item 4), so the actual
 /// echoes defer through a self-registered command: a nested `weft.run` from
 /// a background entry IS a dispatching entry for its duration (the same
-/// door an async LSP response uses — see `src/guest/lsp.zig`'s identical
+/// door an async LSP response uses — see `src/plugins/lsp/root.zig`'s identical
 /// pattern), so `gitNoteDropsDeliver` below runs with a real dispatching
 /// head. The session travels WITH the deferral (`.carried` routing) — a
 /// background note never asks what is focused.

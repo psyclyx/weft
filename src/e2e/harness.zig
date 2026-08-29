@@ -1083,11 +1083,11 @@ const guest = struct {
     const console = @embedFile("guest_console_wasm");
     const llm = @embedFile("guest_llm_wasm");
     const which_key = @embedFile("guest_which_key_wasm");
-    /// Test fixture only (not installed) — see `src/guest/headtest.zig`'s
+    /// Test fixture only (not installed) — see `src/plugin_fixtures/headtest.zig`'s
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
-    /// Test fixture only — `src/guest/fs_limit.zig`: declares fs_read +
+    /// Test fixture only — `src/plugin_fixtures/fs_limit.zig`: declares fs_read +
     /// fs_write and exposes each path-taking door as a command reading its
     /// path from the args, so a test controls exactly which path to try
     /// against whichever grant is in force. The place gates
@@ -1137,7 +1137,7 @@ pub fn loadVim(ed: *Editor) !void {
 }
 
 /// The minimal guest-ABI head-addressing test fixture (task #14) — see
-/// `src/guest/headtest.zig`'s module doc for its three commands + `on_poll`.
+/// `src/plugin_fixtures/headtest.zig`'s module doc for its three commands + `on_poll`.
 /// Loaded against `ed`'s (head A's) ctx, exactly like every other `load*`
 /// helper here — the two-head gate then drives its commands "as" a SECOND
 /// head to prove the guest ABI itself is head-addressed.
@@ -1864,7 +1864,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
-    // (src/guest/gramtest.zig) — resolvable by name so the gate's config
+    // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.
     .{ "gramtest", @embedFile("guest_gramtest_wasm") },
 });

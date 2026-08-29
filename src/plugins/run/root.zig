@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const output = @import("output.zig");
+const output = @import("weft_output");
 
 /// Scratch for the shell command line built from a buffer slice (`run-line`),
 /// which borrows `weft`'s read scratch and so must be copied before use.

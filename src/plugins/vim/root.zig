@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const ex_mod = @import("ex.zig");
+const ex_mod = @import("weft_ex");
 const semantic_action = weft.semantic.action.standard;
 
 /// The `:` command line: vim's resting mode is `normal`, its command-line

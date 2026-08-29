@@ -23,7 +23,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const rpc = @import("jsonrpc.zig");
+const rpc = @import("weft_jsonrpc");
 
 // ── Captured document identities ─────────────────────────────────────
 // LSP byte positions are converted once, when they are presented; everything

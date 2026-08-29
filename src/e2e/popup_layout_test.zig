@@ -28,7 +28,7 @@
 //! `app_session.Session` — builtins, buffer commands, the completion caps
 //! consumer, pick commands — everything `Session.init` wires unconditionally,
 //! deliberately WITHOUT loading a config or any plugins: the shipped
-//! buffer-word completion plugin (`src/guest/complete.zig`) is a SYNCHRONOUS
+//! buffer-word completion plugin (`src/plugins/complete/root.zig`) is a SYNCHRONOUS
 //! source ("it answers before returning" — see its own doc comment), so if
 //! it were loaded it would race the fixture provider below and contaminate
 //! the golden with real buffer words), a synthetic `edit/completion` caps
@@ -46,7 +46,7 @@
 //! a `Surface` directly with `popup.textCaretSurface` — a plain "lines of
 //! text anchored at an offset" builder, the same shape the `lsp` plugin's
 //! own `wl_surface_caret`/`wl_surface_row`/`wl_surface_span` calls produce
-//! on the other side of the membrane (see `src/guest/lsp.zig`'s
+//! on the other side of the membrane (see `src/plugins/lsp/root.zig`'s
 //! `presentHover`) — the same way `gfx/harness.zig`'s own tests hand a `Hud`
 //! straight to `View.build`.
 //!

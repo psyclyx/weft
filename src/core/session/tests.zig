@@ -5217,7 +5217,7 @@ const peer_lsp = @import("../peer_lsp.zig");
 const RemoteLsp = remote_fs.RemoteLsp;
 
 /// A hermetic owner-side language service: a fixed answer table, no server,
-/// no protocol. Stands in for the multi-session table `src/guest/lsp.zig`
+/// no protocol. Stands in for the multi-session table `src/plugins/lsp/root.zig`
 /// owns — this gate is about the EXPORT, not about zls.
 const FakeLanguageService = struct {
     asked: usize = 0,

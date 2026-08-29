@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const ex_mod = @import("ex.zig");
+const ex_mod = @import("weft_ex");
 
 /// The `:` command line, in helix's own mode namespace (`helix-normal` resting,
 /// `helix-ex` the command line). Same shared engine vim uses: helix gets the

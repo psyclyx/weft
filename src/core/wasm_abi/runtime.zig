@@ -25,7 +25,7 @@ const WasmPlugin = @import("WasmPlugin.zig");
 const SyntaxResolver = WasmPlugin.SyntaxResolver;
 const contract = @import("../membrane/contract.zig");
 
-/// The embedded reference guest (compiled from `src/guest/hello.zig` to
+/// The embedded reference guest (compiled from `src/plugin_fixtures/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
 pub const guest_hello: []const u8 = @embedFile("guest_hello_wasm");
 

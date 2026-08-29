@@ -1,5 +1,5 @@
 //! wasm_host — the `weft.*` host-import table: one small function per import
-//! the guest shim (src/guest/weft.zig) declares, each marshalling to
+//! the guest shim (src/plugin_sdk/root.zig) declares, each marshalling to
 //! command.Context across the sandbox membrane, plus the trampolines that
 //! dispatch back into the guest (commands, pick accept, completion provider)
 //! and the deferred shell-insert machinery. Split from wasm_abi.zig — which
@@ -87,7 +87,7 @@ const semantic_relation = @import("wasm_host/semantic_relation.zig");
 pub const initSemanticRelationBridge = semantic_relation.initBridge;
 
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
-/// src/guest/weft.zig) by walking `membrane/contract.zig`'s table — one
+/// src/plugin_sdk/root.zig) by walking `membrane/contract.zig`'s table — one
 /// `defineFn` per entry, tagged with the plugin so the callback recovers its
 /// state. The contract table is the only place an import's name/arity/
 /// handler are declared; nothing here hand-lists them anymore.

@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const ordering = @import("buffer_order.zig");
+const ordering = @import("order.zig");
 
 const buf_pick = 0;
 

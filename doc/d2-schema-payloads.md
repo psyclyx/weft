@@ -59,7 +59,7 @@ The machinery D2 must RHYME with (not duplicate) is the membrane contract:
 `contract_data.zig` is a dependency-free pure-data table (`ValType = {i32,
 u32}`, `Entry = {name, params, results, group, perm, head_gated, doc}`) that
 compiles under `wasm32-freestanding` and is imported by BOTH the guest
-(`src/guest/weft.zig`, comptime tripwire) and the host (`contract.zig`,
+(`src/plugin_sdk/root.zig`, comptime tripwire) and the host (`contract.zig`,
 handler binding). Its stated limit is load-bearing for D2: "Zig 0.16 cannot
 reify an `extern fn` declaration OR a struct-of-decls from a runtime-driven
 comptime loop (no `@Type`, no `usingnamespace`)" — so the table VERIFIES

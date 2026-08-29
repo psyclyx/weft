@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const targets = @import("output_targets.zig");
+const targets = @import("targets.zig");
 
 pub const Target = targets.Target;
 
