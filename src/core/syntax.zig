@@ -268,6 +268,49 @@ pub const Runtime = struct {
         return entry;
     }
 
+    /// How many grammars are compiled so far. For tests and diagnostics —
+    /// nothing about behaviour depends on it.
+    pub fn compiledCount(self: *Runtime) usize {
+        self.compiled_mu.lock();
+        defer self.compiled_mu.unlock();
+        return self.compiled.items.len;
+    }
+
+    const WarmJob = struct { rt: *Runtime, gpa: Allocator };
+
+    fn warmWorker(job: *WarmJob) void {
+        defer job.gpa.destroy(job);
+        // Best effort by construction: a grammar that cannot be compiled is
+        // not this job's problem to report — the open that actually needs it
+        // will try again and log there, exactly as if no warm had run.
+        for (&languages) |*spec| _ = job.rt.compiledFor(job.gpa, spec) catch {};
+    }
+
+    /// Compile the BUILT-IN grammars on `pool`, so the first file of a
+    /// language does not pay for it on the frame thread. tree-sitter offers
+    /// no way to persist a compiled query (there is no serialization entry
+    /// point in its API at all), so precomputing within the session is the
+    /// only caching available — see `Compiled`.
+    ///
+    /// Built-ins only, and deliberately: their `LanguageSpec`s are static
+    /// comptime data, so the worker cannot race `Runtime.add` reallocating
+    /// `specs` out from under it. Config grammars still compile on first use.
+    ///
+    /// The caller must join `pool` before `deinit`ing this `Runtime` — the
+    /// worker touches it. `main.zig` gets that from defer order (the pool is
+    /// created after the registry, so it tears down first).
+    pub fn warmBuiltins(self: *Runtime, gpa: Allocator, pool: *task.Pool) void {
+        const job = gpa.create(WarmJob) catch return;
+        job.* = .{ .rt = self, .gpa = gpa };
+        var handle = pool.spawn(warmWorker, .{job}) catch {
+            gpa.destroy(job);
+            return;
+        };
+        // Nothing to poll it for: the results land in `compiled`, not in the
+        // handle, and a warm that never runs is merely a slower first open.
+        handle.detach();
+    }
+
     pub fn deinit(self: *Runtime, gpa: Allocator) void {
         for (self.compiled.items) |ce| ce.destroy(gpa);
         self.compiled.deinit(gpa);

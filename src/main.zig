@@ -121,7 +121,14 @@ pub fn main(init: std.process.Init) !void {
     try providers_state.initRegistries(gpa);
     defer providers_state.deinit(gpa);
     var pool = try core.task.Pool.init(gpa, .{});
+    // Ordering matters and is load-bearing: this defer is registered AFTER
+    // the registry's, so the pool joins first and the warm below can never
+    // outlive the `Runtime` it writes into (see `Runtime.warmBuiltins`).
     defer pool.deinit();
+    // Compiling a highlight query costs ~18ms for zig, and tree-sitter has no
+    // way to persist one across runs — so pay it here, on a worker, instead
+    // of on the frame thread the first time a file of that language opens.
+    providers_state.grammars.warmBuiltins(gpa, pool);
 
     // ── Core editing state ──
     // `Session` owns the buffers, the command/keymap/pick surfaces, the caps

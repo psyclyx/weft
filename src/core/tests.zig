@@ -1425,3 +1425,33 @@ test "syntax: a grammar compiles once per runtime, not once per buffer" {
     try t.expect(a.tree != null);
     try t.expect(b.tree != null);
 }
+
+test "syntax: warming compiles the built-ins off the frame thread" {
+    // tree-sitter cannot persist a compiled query between runs, so the only
+    // caching available is to precompute within the session. This asserts the
+    // warm actually populates the cache — without a clock and without a
+    // sleep: `Pool.deinit` joins its threads and drains whatever is still
+    // queued, so by the time the block below exits the job has run, however
+    // the OS chose to schedule it.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try t.expectEqual(@as(usize, 0), rt.compiledCount());
+    {
+        var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+        defer pool.deinit();
+        rt.warmBuiltins(gpa, pool);
+    }
+    try t.expectEqual(core.syntax.languages.len, rt.compiledCount());
+
+    // A warmed grammar is the SAME entry a buffer then gets — warming that
+    // built a second, parallel copy would cost the compile twice and defeat
+    // the point entirely.
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 1;\n");
+    const spec = core.syntax.builtinForPath("a.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, &rt, spec, &doc);
+    defer syn.destroy();
+    try t.expectEqual(core.syntax.languages.len, rt.compiledCount());
+}
