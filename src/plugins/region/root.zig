@@ -9,7 +9,7 @@ const weft = @import("weft");
 var id_mark: u32 = 0;
 
 export fn describe() void {
-    weft.declareCommand("mark-region");
+    weft.describeCommand("mark-region", "[language]", "Mark this line as a region of another language (default text).");
 }
 
 export fn init() void {

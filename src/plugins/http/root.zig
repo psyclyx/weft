@@ -29,13 +29,22 @@ var url_buf: [1024]u8 = undefined;
 var hostport_buf: [512]u8 = undefined;
 var req_buf: [1536]u8 = undefined;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "http-get", .handler = get },
+    .{ .name = "http-get", .handler = get, .params = "url", .summary = "Fetch a URL into its own buffer (http:// or https://)." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.net);
 }
 export fn init() void {

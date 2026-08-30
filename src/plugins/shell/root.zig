@@ -15,7 +15,7 @@ const weft = @import("weft");
 var id_insert: u32 = 0;
 
 export fn describe() void {
-    weft.declareCommand("insert-shell");
+    weft.describeCommand("insert-shell", "command", "Run a shell command and insert its output at the cursor.");
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

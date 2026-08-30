@@ -16,14 +16,23 @@ const weft = @import("weft");
 var consoles: weft.Instances(void) = .{};
 var cmd_buf: [1 << 12]u8 = undefined;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "console-open", .handler = open },
-    .{ .name = "console-send", .handler = send },
+    .{ .name = "console-open", .handler = open, .summary = "Open a command console of its own." },
+    .{ .name = "console-send", .handler = send, .summary = "Run the current line in this console." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

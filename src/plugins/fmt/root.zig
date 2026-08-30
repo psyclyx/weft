@@ -7,14 +7,23 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "format-buffer", .handler = formatBuffer },
-    .{ .name = "filter", .handler = filter },
+    .{ .name = "format-buffer", .handler = formatBuffer, .summary = "Format the buffer with the formatter configured for its language." },
+    .{ .name = "filter", .handler = filter, .params = "command", .summary = "Pipe the selection (or buffer) through a shell command." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

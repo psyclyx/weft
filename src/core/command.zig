@@ -59,6 +59,11 @@ pub const Type = std.meta.Tag(Value);
 pub const ArgSpec = struct {
     name: []const u8,
     type: Type,
+    /// Whether the command runs without this one. Optional arguments TRAIL
+    /// (`signature` asserts it): a caller filling arguments left to right can
+    /// then stop at the first optional and still have a legal call, which is
+    /// exactly what "ask me for what you still need" needs to know.
+    optional: bool = false,
 };
 
 /// Everything a handler may touch — the whole editor surface, because
@@ -714,6 +719,91 @@ pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []c
     return cmd.handler(ctx, cmd.data, args);
 }
 
+/// How many of `args` a caller MUST supply. Optional arguments trail, so this
+/// is just the length of the leading required run.
+pub fn requiredArity(args: []const ArgSpec) usize {
+    for (args, 0..) |a, i| if (a.optional) return i;
+    return args.len;
+}
+
+/// Render a command's SHAPE from its own declared arguments: `listen <port>
+/// <access>`, `share [preset]`, or bare `save` when it takes none. Truncated
+/// rather than failed — a hint is not worth losing the message it decorates.
+///
+/// One renderer, three readers: the palette's row detail, the `:` line's live
+/// hint, and the refusal `invoke` writes when a call does not fit. What a
+/// person is told a command takes therefore cannot drift from what it takes,
+/// because there is nowhere else for that sentence to be written.
+pub fn signature(buf: []u8, name: []const u8, args: []const ArgSpec) []const u8 {
+    var w: usize = 0;
+    const put = struct {
+        fn f(b: []u8, at: *usize, s: []const u8) void {
+            const n = @min(s.len, b.len - at.*);
+            @memcpy(b[at.* .. at.* + n], s[0..n]);
+            at.* += n;
+        }
+    }.f;
+    put(buf, &w, name);
+    for (args) |a| {
+        put(buf, &w, if (a.optional) " [" else " <");
+        put(buf, &w, a.name);
+        put(buf, &w, if (a.optional) "]" else ">");
+    }
+    return buf[0..w];
+}
+
+/// Invoke a command ON A USER'S BEHALF, and say what happened.
+///
+/// A command reports two ways: by RETURNING a string, and by failing. Until
+/// this door existed, only the keymap path promoted the first and no path at
+/// all promoted the second — so `listen` chosen from the palette (which calls
+/// every command with no arguments) refused on arity into a discarded error,
+/// and `:share` answering "already shared" said it into a dropped return
+/// value. Both were indistinguishable from a command that does nothing.
+///
+/// Every door a person reaches a command through — the keymap
+/// (`app/dispatch.zig`), the palette, a guest's `wl_run*` — goes through here,
+/// so "invoked and reported" is one thing rather than a convention each door
+/// re-keeps. Nothing is returned: this is the door for callers who want the
+/// user informed, not the value. Use `run` when you want the value.
+pub fn invoke(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) void {
+    const result = run(commands, ctx, name, args) catch |err| {
+        var buf: [256]u8 = undefined;
+        echo(ctx, refusal(&buf, commands, name, args, err));
+        std.log.warn("command {s} failed: {t}", .{ name, err });
+        return;
+    };
+    switch (result) {
+        .string => |s| if (s.len > 0) echo(ctx, s),
+        else => {},
+    }
+}
+
+fn echo(ctx: *Context, msg: []const u8) void {
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+}
+
+/// Turn a failed invocation into a line worth reading. An argument mismatch
+/// answers with the command's SHAPE (the one thing that tells a person what
+/// to do next), not with the name of a Zig error.
+fn refusal(buf: []u8, commands: *const Commands, name: []const u8, args: []const Value, err: anyerror) []const u8 {
+    if (err == error.UnknownCommand)
+        return std.fmt.bufPrint(buf, "no such command: {s}", .{name}) catch name;
+    if (err == error.ArityMismatch or err == error.TypeMismatch) {
+        const cmd = commands.resolve(name).?; // resolved, or the error would be UnknownCommand
+        if (cmd.args.len > 0) {
+            var sig_buf: [160]u8 = undefined;
+            const sig = signature(&sig_buf, name, cmd.args);
+            return std.fmt.bufPrint(buf, "{s} — takes {d} argument(s), given {d}", .{
+                sig, cmd.args.len, args.len,
+            }) catch sig;
+        }
+        return std.fmt.bufPrint(buf, "{s} takes no arguments, given {d}", .{ name, args.len }) catch name;
+    }
+    return std.fmt.bufPrint(buf, "{s} failed: {t}", .{ name, err }) catch name;
+}
+
 /// The trampoline a declared action is registered under (see `registerAction`):
 /// resolve the action name against the live context and tail-call the winning
 /// provider's command with the same args. A `pick` action with no applicable
@@ -859,6 +949,85 @@ const t = std.testing;
 fn insertText(ctx: *Context, args: struct { offset: i64, text: []const u8 }) anyerror!Value {
     try ctx.document().?.insert(ctx.gpa, @intCast(args.offset), args.text);
     return .{ .integer = @intCast(ctx.document().?.text().byteLen()) };
+}
+
+test "command: a signature is rendered from what the command declares" {
+    var buf: [128]u8 = undefined;
+    const listen: []const ArgSpec = &.{
+        .{ .name = "port", .type = .string },
+        .{ .name = "access", .type = .string },
+    };
+    try t.expectEqualStrings("listen <port> <access>", signature(&buf, "listen", listen));
+    try t.expectEqual(@as(usize, 2), requiredArity(listen));
+
+    // An optional argument reads as optional, and stops the required run —
+    // which is what tells a caller where it may stop asking.
+    const share: []const ArgSpec = &.{.{ .name = "preset", .type = .string, .optional = true }};
+    try t.expectEqualStrings("share [preset]", signature(&buf, "share", share));
+    try t.expectEqual(@as(usize, 0), requiredArity(share));
+
+    try t.expectEqualStrings("save", signature(&buf, "save", &.{}));
+
+    // Truncated, never overrun: a hint is not worth losing the line it rides.
+    var tiny: [8]u8 = undefined;
+    try t.expectEqualStrings("listen <", signature(&tiny, "listen", listen));
+}
+
+/// A command that reports the way half the editor's commands report: by
+/// RETURNING a string rather than by writing the echo line itself.
+fn answers(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = ctx;
+    _ = args;
+    return .{ .string = "already shared" };
+}
+
+fn needsTwo(ctx: *Context, args: struct { port: []const u8, access: []const u8 }) anyerror!Value {
+    _ = args;
+    _ = ctx;
+    return .{ .string = "listening…" };
+}
+
+fn saysNothing(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = ctx;
+    _ = args;
+    return .nil;
+}
+
+test "command: invoking on a user's behalf reports — the answer AND the refusal" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    _ = try env.commands.bind(gpa, "share", comptime define("share", "Share it.", answers));
+    _ = try env.commands.bind(gpa, "listen", comptime define("listen", "Host.", needsTwo));
+
+    // A returned string lands on the echo line. Before `invoke`, only the
+    // keymap promoted this — the palette and every guest `wl_run*` dropped it,
+    // which is why `:share` answering "already shared" looked like a no-op.
+    invoke(&env.commands, ctx, "share", &.{});
+    try t.expectEqualStrings("already shared", ctx.head.echo.items);
+
+    // An arity refusal answers with the command's SHAPE. This is the palette's
+    // whole failure mode: it calls every command with no arguments, so
+    // `listen` used to refuse into a discarded error and say nothing at all.
+    invoke(&env.commands, ctx, "listen", &.{});
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "listen <port> <access>") != null);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "given 0") != null);
+
+    // An unknown name is named, not swallowed.
+    invoke(&env.commands, ctx, "lisen", &.{});
+    try t.expectEqualStrings("no such command: lisen", ctx.head.echo.items);
+
+    // The same call, given what it asked for, replaces the refusal with its
+    // own answer — the two arrive on one line, in order, like a conversation.
+    invoke(&env.commands, ctx, "listen", &.{ .{ .string = "7777" }, .{ .string = "edit" } });
+    try t.expectEqualStrings("listening…", ctx.head.echo.items);
+
+    // A command with nothing to say leaves the line as it found it: this
+    // promotes what a command REPORTS, and is not a log of what ran.
+    _ = try env.commands.bind(gpa, "quiet", comptime define("quiet", "Say nothing.", saysNothing));
+    invoke(&env.commands, ctx, "quiet", &.{});
+    try t.expectEqualStrings("listening…", ctx.head.echo.items);
 }
 
 test "command Value: a borrowed live range follows edits and rejects another document" {

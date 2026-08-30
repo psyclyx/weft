@@ -561,25 +561,17 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
                 null;
             defer if (menu_before) |m| ctx.gpa.free(m);
 
-            const result = switch (arm) {
+            switch (arm) {
                 // An intention runs through its endpoint token; the invoker
                 // reaches the same command door, and there is no return
                 // value to promote.
-                .decision => |d| blk: {
-                    invokeDecision(ctx, d);
-                    break :blk core.command.Value.nil;
-                },
-                .command => core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
-                    std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
-                    break :blk core.command.Value.nil;
-                },
-            };
-            switch (result) {
-                .string => |s| if (s.len > 0) {
-                    ctx.head.echo.clearRetainingCapacity();
-                    ctx.head.echo.appendSlice(ctx.gpa, s) catch {};
-                },
-                else => {},
+                .decision => |d| invokeDecision(ctx, d),
+                // `command.invoke` — run AND report: a returned string
+                // becomes the echo line, a refusal becomes a legible one.
+                // This path used to keep that promotion itself; it is one
+                // door now, shared with the palette and every guest `wl_run*`
+                // (see `command.invoke`'s doc for what the drift cost).
+                .command => core.command.invoke(ctx.commands, ctx, cmd_name, &.{}),
             }
             if (menu_before) |m| {
                 if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.head.currentMode(), m)) {

@@ -16,16 +16,25 @@ const weft = @import("weft");
 /// value is its host session handle.
 var sessions: weft.Instances(u32) = .{};
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "repl-start", .handler = start },
-    .{ .name = "repl-send", .handler = send },
-    .{ .name = "repl-send-line", .handler = sendLine },
-    .{ .name = "repl-quit", .handler = quit },
+    .{ .name = "repl-start", .handler = start, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer (default sh)." },
+    .{ .name = "repl-send", .handler = send, .params = "text", .summary = "Send a line to this buffer's REPL." },
+    .{ .name = "repl-send-line", .handler = sendLine, .summary = "Send the current line to this buffer's REPL." },
+    .{ .name = "repl-quit", .handler = quit, .summary = "Stop this buffer's REPL; others stay live." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

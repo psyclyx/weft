@@ -1104,6 +1104,158 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "no-text") != null);
 }
 
+// ── Commands WITH ARGUMENTS, from the palette and the `:` line ────────
+//
+// The whole class this covers: a command that takes something was, from the
+// palette, indistinguishable from a command that does nothing. The palette ran
+// every row with zero arguments, so `listen` refused on arity into a discarded
+// error; the `:` line could pass arguments but not ask for them, so `:listen`
+// with the port left off did the same silence. Both doors go through
+// `plugin_lib/invoke` now, so both answer the same way.
+//
+// `listen` is the case that reported the bug, and it is hermetic to drive:
+// the handler RECORDS the intent (port + grade) for the frame loop to apply,
+// so a test observes the decision without a socket ever being bound.
+
+test "e2e/config: the palette runs a command WITH arguments — typed, or asked for" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader_state);
+    try ed.enableCollabCommands();
+
+    // 1. The row SAYS what it takes. A person reads the shape before
+    //    committing to the row, which is the point of showing it here.
+    ed.run("pick-commands");
+    ed.settle(2);
+    const row = pickRow(&ed, "listen") orelse return error.ListenNotListed;
+    try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "<port> <access>"));
+
+    // Every row still NAMES something runnable. Rendering a row's shape reads
+    // the registry three times (name, summary, parameters) and each read lands
+    // in the guest shim's scratch: sharing one buffer between them wrote
+    // `<slot>` over the front of `explain-binding` and listed a row called
+    // `slotain-binding`. A row you cannot run is not a cosmetic defect, so the
+    // sweep is here rather than trusting one spot check.
+    for (ed.pick.items.items) |item| {
+        if (std.mem.indexOfScalar(u8, item, '.') != null) continue; // a dotted offer
+        if (ed.commands.resolve(item) == null) {
+            std.debug.print("\n[e2e/config] palette row names no command: '{s}'\n", .{item});
+            return error.PaletteRowNamesNoCommand;
+        }
+    }
+    ed.press("Escape", "");
+    ed.settle(2);
+
+    // 2. TYPED next to the name. `listen 7777 edit` matches no row (every
+    //    completion style splits on whitespace), so this rides the free-text
+    //    accept — which is exactly why the pick has to allow it.
+    paletteAccept(&ed, "listen 7777 edit");
+    try t.expectEqual(@as(?u16, 7777), ed.share_ctx.pending_listen);
+    try t.expectEqual(core.session.Access.edit, ed.share_ctx.pending_access);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listening") != null);
+
+    // 3. LEFT OUT, and asked for — one prompt per parameter, each labelled
+    //    with the command and the parameter it is filling.
+    ed.share_ctx.pending_listen = null;
+    ed.share_ctx.pending_access = .view;
+    paletteAccept(&ed, "listen");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <port>") != null);
+    try t.expectEqual(@as(?u16, null), ed.share_ctx.pending_listen); // nothing ran yet
+    ed.typeText("7000");
+    ed.press("Return", "");
+    ed.settle(2);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <access>") != null);
+    ed.typeText("own");
+    ed.press("Return", "");
+    ed.settle(2);
+    try t.expectEqual(@as(?u16, 7000), ed.share_ctx.pending_listen);
+    try t.expectEqual(core.session.Access.own, ed.share_ctx.pending_access);
+
+    // 4. Backing out of the question runs nothing — a half-filled call is not
+    //    a call. Escape is the same key that leaves every other prompt.
+    ed.share_ctx.pending_listen = null;
+    paletteAccept(&ed, "connect");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "connect <hostport>") != null);
+    ed.press("Escape", "");
+    ed.settle(2);
+    try t.expect(ed.share_ctx.pending_connect == null);
+
+    // 5. A command whose only argument is OPTIONAL is not interrogated: it
+    //    runs, and its refusal is now VISIBLE rather than a dropped return
+    //    value. (`share` returns a bare string; that used to vanish.)
+    paletteAccept(&ed, "share");
+    try t.expectEqualStrings("not connected", ed.echoText());
+}
+
+test "e2e/config: the `:` line hints what the command being typed still wants" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader_state);
+    try ed.enableCollabCommands();
+
+    // Signature help: the parameters not yet supplied, trailing what you typed
+    // — so the shape of the call is visible while you make it.
+    ed.press("colon", "");
+    ed.settle(2);
+    ed.typeText("listen");
+    ed.settle(2);
+    try t.expectEqualStrings(":listen <port> <access>", ed.echoText());
+
+    // It advances as arguments land, naming what comes NEXT rather than
+    // repeating the one under the cursor — and the line supplies its own
+    // separator, so a trailing space does not double up.
+    ed.typeText(" 777");
+    ed.settle(2);
+    try t.expectEqualStrings(":listen 777 <access>", ed.echoText());
+    ed.typeText("7 ");
+    ed.settle(2);
+    try t.expectEqualStrings(":listen 7777 <access>", ed.echoText());
+    ed.typeText("edit");
+    ed.settle(2);
+    try t.expectEqualStrings(":listen 7777 edit", ed.echoText());
+
+    // A word ex owns is not a registered command, so the registry has nothing
+    // to say about it — no keyword list to keep in step with the parser.
+    ed.press("Escape", "");
+    ed.settle(2);
+    ed.press("colon", "");
+    ed.typeText("wq");
+    ed.settle(2);
+    try t.expectEqualStrings(":wq", ed.echoText());
+    ed.press("Escape", "");
+    ed.settle(2);
+
+    // And the whole call, said at once, still runs as one.
+    ed.press("colon", "");
+    ed.typeText("listen 7100 edit");
+    ed.press("Return", "");
+    ed.settle(2);
+    try t.expectEqual(@as(?u16, 7100), ed.share_ctx.pending_listen);
+    try t.expectEqual(core.session.Access.edit, ed.share_ctx.pending_access);
+
+    // `:listen` alone is a legal thing to type now: it asks for the rest.
+    ed.share_ctx.pending_listen = null;
+    ed.press("colon", "");
+    ed.typeText("listen");
+    ed.press("Return", "");
+    ed.settle(2);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <port>") != null);
+}
+
 // An agent process is its conversation's LIFETIME (doc/agents.md
 // `session/cancel`): when it dies, whatever it left pending is answered
 // cancelled, the transcript says so, and its instance slot returns to the

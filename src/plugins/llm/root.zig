@@ -17,14 +17,23 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "llm-ask", .handler = ask },
-    .{ .name = "llm-ask-line", .handler = askLine },
+    .{ .name = "llm-ask", .handler = ask, .params = "prompt", .summary = "Ask the configured LLM CLI; the reply lands in its own buffer." },
+    .{ .name = "llm-ask-line", .handler = askLine, .summary = "Ask using the current line as the prompt." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

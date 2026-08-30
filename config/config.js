@@ -148,6 +148,13 @@ weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the 
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
 weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
+// The palette's argument behaviour. A command with parameters can be run two
+// ways: type them next to the name (`listen 7777 edit` — the palette accepts
+// typed text, not only a listed row), or pick the row and be ASKED for each
+// one in turn. "off" refuses instead of asking, echoing the command's shape
+// so you can retype the whole call.
+weft.set("palette", "arguments", "ask");    // or "off"
+weft.set("palette", "signature", "on");     // show each row's <parameters>
 // Yours to fill in — weft assumes nothing about how any of these is installed:
 // weft.set("acp", "cmd", "codex-acp"); // or claude-agent-acp, gemini --experimental-acp, …
 // weft.set("acp", "prompt", "Summarize this project."); // the opening turn
@@ -373,10 +380,27 @@ weft.bind("normal", "SPC n E", "notes-embeds-off");
 // (hierarchy | bytes | write, or none/read/rw). Presence is separate from
 // sharing a document: it defaults on (see weft.set("collab", …) above) and
 // `off` retracts the caret peers are already rendering.
+//
+// Those same argument-taking verbs are equally reachable from the PALETTE
+// now: pick `listen` and it asks for the port, then the access grade. Nothing
+// here is `:`-only — the `:` line is just the way to say the whole call at
+// once. A session end to end, host then peer:
+//
+//     :listen 7000 edit         host: accept peers, let them write
+//     :connect host:7000        peer: join (matching --token both sides)
+//     SPC C p                   compare fingerprints + SAS out of band
+//     :verify-peer <fp>         · once they match
+//     SPC C s                   host: announce ANOTHER buffer
+//     SPC C o                   peer: open a buffer a peer announced
+//
+// The buffer that was active when `listen` began is already the shared one;
+// `share` there answers "already shared" rather than doing it twice.
 weft.bind("normal", "SPC C s", "share");
 weft.bind("normal", "SPC C o", "open-shared"); // open a buffer a peer shared
 weft.bind("normal", "SPC C f", "peer-files");  // browse the peer's shared root
 weft.bind("normal", "SPC C p", "peers");       // fingerprints, SAS words, trust
+weft.bind("normal", "SPC C l", "listen");      // asks: port, then access grade
+weft.bind("normal", "SPC C c", "connect");     // asks: host:port
 weft.bind("normal", "SPC C x", "disconnect");
 
 // SPC w — window. Split/close via the windows plugin; focus + move go

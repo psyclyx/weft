@@ -20,16 +20,25 @@ var conns: weft.Instances(u32) = .{};
 var host_buf: [512]u8 = undefined;
 var sni_buf: [256]u8 = undefined;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): it is what the palette shows beside the row,
+/// what the `:` line hints while you type, and what gets ASKED for when you
+/// run `net-open` without saying where.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "net-open", .handler = open },
-    .{ .name = "net-open-tls", .handler = openTls },
-    .{ .name = "net-send", .handler = send },
-    .{ .name = "net-close", .handler = close },
+    .{ .name = "net-open", .handler = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer." },
+    .{ .name = "net-open-tls", .handler = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name." },
+    .{ .name = "net-send", .handler = send, .params = "bytes", .summary = "Write bytes to this buffer's connection." },
+    .{ .name = "net-close", .handler = close, .summary = "Hang up this buffer's connection; others stay live." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.net);
 }
 export fn init() void {

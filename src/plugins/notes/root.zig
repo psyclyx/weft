@@ -61,18 +61,27 @@ var notes: [max_notes]?Note = @splat(null);
 var round: u32 = 0;
 var offering = false;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "notes-capture", .handler = capture },
-    .{ .name = "notes-open", .handler = open },
-    .{ .name = "notes-capture-here", .handler = captureHere },
-    .{ .name = "notes-embeds", .handler = embedsRefresh },
-    .{ .name = "notes-embeds-off", .handler = embedsOff },
-    .{ .name = "notes-embed-activate", .handler = embedActivate },
+    .{ .name = "notes-capture", .handler = capture, .params = "text [file]", .summary = "Append a line to the notes file." },
+    .{ .name = "notes-open", .handler = open, .params = "[file]", .summary = "Open the notes file itself." },
+    .{ .name = "notes-capture-here", .handler = captureHere, .params = "[file]", .summary = "Append an embed naming where you are now." },
+    .{ .name = "notes-embeds", .handler = embedsRefresh, .summary = "Render this note's embeds live beside their own bytes." },
+    .{ .name = "notes-embeds-off", .handler = embedsOff, .summary = "Stop rendering this note's embeds." },
+    .{ .name = "notes-embed-activate", .handler = embedActivate, .summary = "Open what the embed on this line designates." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.fs_read);
     weft.requestPerm(.fs_write);
 }

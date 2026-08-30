@@ -64,6 +64,7 @@ pub const fs_codec = @import("weft_fs_codec");
 // not a silent runtime drift. ──
 extern "weft" fn wl_log(level: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_command(ptr: u32, len: u32) void;
+extern "weft" fn wl_declare_command_doc(ptr: u32, len: u32, params: u32, params_len: u32, summary: u32, summary_len: u32) void;
 extern "weft" fn wl_declare_capability(ptr: u32, len: u32) void;
 extern "weft" fn wl_request_perm(perm: u32) void;
 extern "weft" fn wl_cursor() u32;
@@ -140,10 +141,14 @@ extern "weft" fn wl_run(ptr: u32, len: u32) void;
 extern "weft" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
 extern "weft" fn wl_run_str(ptr: u32, len: u32, s: u32, sl: u32) void;
 extern "weft" fn wl_run_str2(ptr: u32, len: u32, a: u32, al: u32, b: u32, bl: u32) void;
+extern "weft" fn wl_run_argv(ptr: u32, len: u32, vec: u32, argc: u32) void;
 // Introspection (palettes/help/buffers pickers).
 extern "weft" fn wl_command_count() u32;
 extern "weft" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_command_arity(i: u32) i32;
+extern "weft" fn wl_command_arity_required(i: u32) i32;
+extern "weft" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
 // The focused context's live offers, and the door one is accepted through.
 extern "weft" fn wl_offer_count() u32;
 extern "weft" fn wl_offer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
@@ -162,6 +167,7 @@ extern "weft" fn wl_buffer_readonly(i: u32) u32;
 // Fuzzy pick (built incrementally, then opened; accept dispatches back to the
 // guest's on_pick_accept export).
 extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
+extern "weft" fn wl_pick_free_text(on: u32) void;
 extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
 extern "weft" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 extern "weft" fn wl_pick_end() void;
@@ -345,6 +351,13 @@ var prefix_scratch: [1 << 12]u8 = undefined;
 /// A separate scratch for command-arg strings, so a handler can hold an arg
 /// while it reads the buffer through `slice`.
 var arg_scratch: [1 << 12]u8 = undefined;
+/// A separate scratch for a command's declared ARGUMENT NAMES
+/// (`commandArg`) — the third of the introspection trio, and it needs its own
+/// so all three compose. A palette row is `commandName` + `commandSummary` +
+/// the parameter shape at once; sharing `scratch` with `commandName` meant
+/// rendering `<slot>` over the front of `explain-binding` and listing a row
+/// called `slotain-binding` that nothing could ever run.
+var param_scratch: [256]u8 = undefined;
 /// A separate scratch for offer reasons and refusals, so a UI can hold an
 /// offer's name and provider (in `scratch`/`arg_scratch`) while it reads why
 /// that offer cannot run.
@@ -367,6 +380,26 @@ pub fn log(level: Level, msg: []const u8) void {
 // ── Describe phase: up-front declarations (no authority) ──────────────
 pub fn declareCommand(name: []const u8) void {
     wl_declare_command(p(name.ptr), @intCast(name.len));
+}
+/// Declare a command AND say what it takes and does — the form to use for any
+/// command with arguments. `params` is a space-separated parameter list, each
+/// name bare (required) or bracketed (optional), written exactly as a person
+/// will read it back: `"host:port"`, `"port access"`, `"[preset]"`.
+///
+/// This is what makes a plugin command a first-class citizen: the palette
+/// documents it and asks for its arguments, the `:` line hints its shape while
+/// you type, and a refusal names what was missing. Without it a command is a
+/// bare name — which is all a plugin could say before, and why `net-open` from
+/// the palette used to dial nothing at all.
+pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8) void {
+    wl_declare_command_doc(
+        p(name.ptr),
+        @intCast(name.len),
+        p(params.ptr),
+        @intCast(params.len),
+        p(summary.ptr),
+        @intCast(summary.len),
+    );
 }
 /// Declare a capability this plugin will provide (e.g. "edit/completion").
 /// Cross-checked host-side against the matching `provide*` at init time.
@@ -958,6 +991,25 @@ pub fn runStr(cmd: []const u8, s: []const u8) void {
 pub fn runStr2(cmd: []const u8, a: []const u8, b: []const u8) void {
     wl_run_str2(p(cmd.ptr), @intCast(cmd.len), p(a.ptr), @intCast(a.len), p(b.ptr), @intCast(b.len));
 }
+/// Invoke `cmd` with however many string args you have — for a caller whose
+/// argument count is a RUNTIME fact (a command line being dispatched, an
+/// argument list just filled in by prompting). `run`/`runStr`/`runStr2` are
+/// the fixed-arity shorthands; this is the general door.
+///
+/// The host caps it at TWO arguments, the same width `runStr2` already has,
+/// and that cap is a gate rather than a buffer size: `app/providers.zig`'s
+/// census turns on no guest passing three. A wider call is refused out loud.
+pub fn runArgs(cmd: []const u8, args: []const []const u8) void {
+    // The host reads one flat vector of (ptr,len) pairs out of our memory,
+    // so build it here rather than crossing the membrane once per argument.
+    var vec: [4]u32 = undefined;
+    const n = @min(args.len, vec.len / 2);
+    for (args[0..n], 0..) |a, i| {
+        vec[i * 2] = p(a.ptr);
+        vec[i * 2 + 1] = @intCast(a.len);
+    }
+    wl_run_argv(p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n));
+}
 
 // ── Introspection (palettes/help/buffers) ────────────────────────────
 pub fn commandCount() usize {
@@ -975,6 +1027,28 @@ pub fn commandSummary(i: usize) ?[]const u8 {
     const n = wl_command_summary(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
+}
+/// How many arguments the `i`-th command declares, or null if unbound.
+pub fn commandArity(i: usize) ?usize {
+    const n = wl_command_arity(@intCast(i));
+    if (n < 0) return null;
+    return @intCast(n);
+}
+/// How many of them a caller must supply — optional arguments trail, so this
+/// is where "ask me for the rest" is allowed to stop.
+pub fn commandArityRequired(i: usize) ?usize {
+    const n = wl_command_arity_required(@intCast(i));
+    if (n < 0) return null;
+    return @intCast(n);
+}
+/// The `i`-th command's `k`-th argument NAME (into `param_scratch`, so it
+/// survives a paired `commandName`/`commandSummary` read), or null when there
+/// is no such argument. Successive calls reuse it — copy each name out before
+/// asking for the next.
+pub fn commandArg(i: usize, k: usize) ?[]const u8 {
+    const n = wl_command_arg(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
+    if (n < 0) return null;
+    return param_scratch[0..@intCast(n)];
 }
 // ── Live offers (what the FOCUSED context can do right now) ──────────
 /// How many intentions the focused context offers. An intention nobody
@@ -1266,6 +1340,12 @@ pub fn Instances(comptime T: type) type {
 /// logic (dispatched to `on_pick_accept`).
 pub fn pickBegin(prompt: []const u8, pick_id: u32) void {
     wl_pick_begin(p(prompt.ptr), @intCast(prompt.len), pick_id);
+}
+/// Let the pick being built accept what was TYPED as well as a listed row —
+/// the accept then arrives as `PickOutcome.input`. Call between `pickBegin`
+/// and `pickEnd`; every `pickBegin` resets it, so it is per-pick.
+pub fn pickFreeText() void {
+    wl_pick_free_text(1);
 }
 /// Add one item: `text` matches/accepts, `doc` is display-only.
 pub fn pickAdd(text: []const u8, doc: []const u8) void {

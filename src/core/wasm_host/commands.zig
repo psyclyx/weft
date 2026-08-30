@@ -73,12 +73,16 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         return;
     };
     // Cross-check against the manifest: an undeclared command fails the load.
-    if (!p.declaresCommand(cname)) {
+    // The declaration is also where the command's SHAPE comes from — a guest
+    // that documented it (`describeCommand`) registers with the same summary
+    // and `ArgSpec`s a core command carries, so the palette, the `:` line and
+    // every refusal read it the same way. A bare declaration means both empty.
+    const decl = p.declaration(cname) orelse {
         gpa.free(cname);
         p.load_error = error.UndeclaredCommand;
         results[0] = -1;
         return;
-    }
+    };
     const wc = gpa.create(WasmCmd) catch {
         gpa.free(cname);
         results[0] = -1;
@@ -93,8 +97,8 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     };
     _ = p.activeCtx().commands.bind(gpa, wc.name, .{
         .name = wc.name,
-        .summary = "",
-        .args = &.{},
+        .summary = decl.summary,
+        .args = decl.args,
         .handler = wpCmdTrampoline,
         .data = wc,
     }) catch {
@@ -104,12 +108,22 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(wc.id);
 }
 
+/// A guest invoking a command is a person invoking a command: it is `:share`
+/// typed on the ex line, or a palette row accepted. So every door here goes
+/// through `command.invoke` — run AND report — rather than `run` with the
+/// answer dropped. These four used to `catch {}` both the refusal and the
+/// returned string, which is why `:share` answering "already shared" and
+/// `:listen 7000` refusing on arity looked identical to a dead command.
+fn invoke(p: *WasmPlugin, name: []const u8, args: []const command.Value) void {
+    command.invoke(p.activeCtx().commands, p.activeCtx(), name, args);
+}
+
 pub fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(cmd);
-    _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch {};
+    invoke(p, cmd, &.{});
 }
 
 pub fn hRunInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -117,7 +131,7 @@ pub fn hRunInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(cmd);
-    _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{.{ .integer = args[2] }}) catch {};
+    invoke(p, cmd, &.{.{ .integer = args[2] }});
 }
 
 pub fn hRunStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -128,7 +142,7 @@ pub fn hRunStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     defer gpa.free(cmd);
     const s = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(s);
-    _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{.{ .string = s }}) catch {};
+    invoke(p, cmd, &.{.{ .string = s }});
 }
 
 pub fn hRunStr2(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -141,8 +155,64 @@ pub fn hRunStr2(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer gpa.free(a);
     const b = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(b);
-    _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{ .{ .string = a }, .{ .string = b } }) catch {};
+    invoke(p, cmd, &.{ .{ .string = a }, .{ .string = b } });
 }
+
+/// The widest run door: `wl_run_argv(cmd, vec, argc)`, where `vec` points at
+/// `argc` consecutive `(ptr, len)` u32 pairs in GUEST memory. `run_str`/
+/// `run_str2` are the one- and two-argument shorthands a hand-written guest
+/// reaches for; this is what a library invoking a command whose arity it only
+/// learns at RUNTIME needs (`plugin_lib/invoke`), and it is why the invoker
+/// has no arity ceiling baked into it.
+pub fn hRunArgv(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(cmd);
+    const argc: usize = @intCast(@max(args[3], 0));
+    if (argc > max_argv) {
+        // Refused OUT LOUD, on the same echo line every other refusal uses:
+        // a guest that asked for a wider call has hit the gate above, and
+        // silence here is the exact failure mode this whole change is about.
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
+            cmd, argc, max_argv,
+        }) catch "too many arguments";
+        p.activeCtx().head.echo.clearRetainingCapacity();
+        p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+        return;
+    }
+    // The vector first, as bytes, then each string it points at. An
+    // out-of-bounds read refuses the WHOLE call (`readMemory` bounds-checks):
+    // a partially decoded argument list would invoke the command with
+    // something the guest did not say.
+    const vec = caller.readMemory(gpa, @intCast(args[2]), argc * 8) catch return;
+    defer gpa.free(vec);
+
+    var values: [max_argv]command.Value = undefined;
+    var owned: [max_argv][]u8 = undefined;
+    var n: usize = 0;
+    defer for (owned[0..n]) |s| gpa.free(s);
+    while (n < argc) {
+        const ptr = std.mem.readInt(u32, vec[n * 8 ..][0..4], .little);
+        const len = std.mem.readInt(u32, vec[n * 8 + 4 ..][0..4], .little);
+        const s = caller.readMemory(gpa, ptr, len) catch return;
+        owned[n] = s;
+        values[n] = .{ .string = s };
+        n += 1;
+    }
+    invoke(p, cmd, values[0..argc]);
+}
+
+/// Arguments one `wl_run_argv` call may carry — and a SECURITY BOUND, not a
+/// buffer size. `app/providers.zig`'s census gate turns on the fact that no
+/// guest command runner passes three arguments: `grammar-add` needs three, and
+/// what it does with them is `std.DynLib.open` on a caller-named directory.
+/// Arity is the gate. A wider door here would open that one, which is why the
+/// census lists this runner with the number below and the test fails if they
+/// disagree. Read that gate before raising it.
+const max_argv = 2;
 
 // Introspection — command registry + open buffers.
 pub fn hCommandCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -171,6 +241,55 @@ pub fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.summary) catch 0);
+}
+
+// ── A command's SHAPE, read back (the signature-help half) ───────────────
+// A guest that means to invoke a command on a person's behalf has to know
+// what the command takes — to split a typed line into the right arguments,
+// to ask for the ones still missing, and to show the shape while they type.
+// The registry already holds every command's declared `ArgSpec`s; these three
+// doors are that fact, read. -1 throughout means "no such command/argument",
+// never a guess.
+
+pub fn hCommandArity(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.activeCtx().commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(cmd.args.len);
+}
+
+/// How many of them a caller MUST supply — optional arguments trail, so a
+/// guest filling left to right knows exactly where it may stop asking.
+pub fn hCommandArityRequired(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.activeCtx().commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(command.requiredArity(cmd.args));
+}
+
+/// The `k`-th argument's NAME (`port`, `access`, `preset`) into guest memory —
+/// what a prompt labels itself with and what a signature hint shows.
+pub fn hCommandArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.activeCtx().commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    const k: usize = @intCast(@max(args[1], 0));
+    if (k >= cmd.args.len) {
+        results[0] = -1;
+        return;
+    }
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), cmd.args[k].name) catch 0);
 }
 
 /// Command dispatch back into the guest: stash the args (readable via

@@ -85,6 +85,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── declare.zig — describe-phase declarations ──────────────────────
     .{ .name = "wl_log", .handler = declare.hLog },
     .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
+    .{ .name = "wl_declare_command_doc", .handler = declare.hDeclareCommandDoc },
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
@@ -171,9 +172,13 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_run_int", .handler = commands.hRunInt },
     .{ .name = "wl_run_str", .handler = commands.hRunStr },
     .{ .name = "wl_run_str2", .handler = commands.hRunStr2 },
+    .{ .name = "wl_run_argv", .handler = commands.hRunArgv },
     .{ .name = "wl_command_count", .handler = commands.hCommandCount },
     .{ .name = "wl_command_name", .handler = commands.hCommandName },
     .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
+    .{ .name = "wl_command_arity", .handler = commands.hCommandArity },
+    .{ .name = "wl_command_arity_required", .handler = commands.hCommandArityRequired },
+    .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_offer_count", .handler = intent.hOfferCount },
@@ -195,6 +200,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .handler = pick.hPickBegin },
+    .{ .name = "wl_pick_free_text", .handler = pick.hPickFreeText },
     .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
     .{ .name = "wl_pick_add_buffer", .handler = pick.hPickAddBuffer },
     .{ .name = "wl_pick_end", .handler = pick.hPickEnd },

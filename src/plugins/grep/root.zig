@@ -18,15 +18,24 @@ var cmd_buf: [1 << 12]u8 = undefined;
 var pattern_buf: [1 << 10]u8 = undefined;
 var pattern_len: usize = 0;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
+/// `params` is the command's argument shape, written the way a person reads
+/// it back (`describeCommand`): the palette shows it beside the row, the `:`
+/// line hints it while you type, and it is what gets ASKED for when a call
+/// arrives short.
+const Cmd = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    params: []const u8 = "",
+    summary: []const u8 = "",
+};
 const cmds = [_]Cmd{
-    .{ .name = "grep", .handler = grep },
-    .{ .name = "grep-word", .handler = grepWord },
-    .{ .name = "grep-visit", .handler = output.visit },
+    .{ .name = "grep", .handler = grep, .params = "pattern", .summary = "Search the project for a pattern, into *grep*." },
+    .{ .name = "grep-word", .handler = grepWord, .summary = "Search the project for the word under the cursor." },
+    .{ .name = "grep-visit", .handler = output.visit, .summary = "Open the location the focused result row names." },
 };
 
 export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }

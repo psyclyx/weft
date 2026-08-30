@@ -107,6 +107,12 @@ weft.set("which_key", "delay-ms", "200");     // was: weft.set("editor", "which-
 weft.set("which_key", "placement", "corner");
 weft.set("editor", "flash-ms", "150");
 weft.set("collab", "share-presence", "on");
+// The palette's argument behaviour — a value owned by the plugin that reads
+// it, like every other. Typed arguments (`listen 7777 edit`) and asked-for
+// ones are the same invocation either way; "off" refuses with the command's
+// shape instead of asking.
+weft.set("palette", "arguments", "ask");
+weft.set("palette", "signature", "on");
 
 // ── Bindings. A bind is a binding declared at the named mode's scope, config
 // priority tier — which is what it already meant; it just becomes inspectable
@@ -255,12 +261,15 @@ weft.bind("normal", "SPC n E", "notes-embeds-off");
 // SPC C — collaboration. A share PRESET compiles to a grant bundle, and the
 // confirmation is rendered from that bundle: the text approved and the
 // authority selected are one value. Argument-taking verbs (`:share pair`,
-// `:share-presence off`, `:share-fs read`, `:listen 7000 edit`) ride the `:`
-// line, which is the command registry's own door.
+// `:share-presence off`, `:share-fs read`, `:listen 7000 edit`) say the whole
+// call at once on the `:` line; bound to a key or picked from the palette,
+// the same verbs ASK for what they need. One registry, one shape, two paces.
 weft.bind("normal", "SPC C s", "share");
 weft.bind("normal", "SPC C o", "open-shared");
 weft.bind("normal", "SPC C f", "peer-files");
 weft.bind("normal", "SPC C p", "peers");
+weft.bind("normal", "SPC C l", "listen");
+weft.bind("normal", "SPC C c", "connect");
 weft.bind("normal", "SPC C x", "disconnect");
 
 // SPC w — window

@@ -295,6 +295,22 @@ encrypted wire; tree-sitter runs on your replica:
 weft --connect host:7777 --token SECRET file.zig
 ```
 
+Everything the flags do is also a command, so a session can begin from
+inside a running editor. Say the whole call at once on the `:` line, or
+name the command and be asked for the rest:
+
+```
+:listen 7000 edit          # host: accept peers, let them write
+:connect host:7000         # peer: join
+:peers                     # fingerprints + SAS words, to compare aloud
+:share pair                # announce another buffer, with a grant preset
+```
+
+The palette (`SPC SPC`) takes the same two forms: type `listen 7000 edit`
+next to the name, or pick `listen` and answer `<port>`, then `<access>`.
+A command's shape is shown beside it in the palette and trails the `:`
+line as you type, so what a command wants is visible before you run it.
+
 Two editors can also pair directly (`--listen` in one, `--connect` in the
 other); partitions heal as one frontier exchange. Pairing interactively also
 shares your cursor, and says so when it starts; `--no-share-presence`,

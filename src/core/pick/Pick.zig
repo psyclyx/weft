@@ -710,12 +710,16 @@ fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
     return .nil;
 }
 
+/// The core palette's accept. This is the FALLBACK palette — a weft with no
+/// plugins — so it stays argument-free and simply reports (`command.invoke`)
+/// rather than growing its own prompting; choosing `listen` here now says
+/// what `listen` takes instead of failing into a log line. The argument-taking
+/// experience is the `palette` plugin's (`plugin_lib/invoke`), where UI policy
+/// belongs.
 fn runChoice(ctx: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
     _ = data;
     const choice = outcome.text() orelse return;
-    _ = command.run(ctx.commands, ctx, choice, &.{}) catch |err| {
-        std.log.warn("palette: {s} failed: {t}", .{ choice, err });
-    };
+    command.invoke(ctx.commands, ctx, choice, &.{});
 }
 
 /// Register pick commands + the "pick" mode bindings.

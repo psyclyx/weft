@@ -33,6 +33,19 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     p.pick_prompt.clearRetainingCapacity();
     p.pick_prompt.appendSlice(gpa, prompt) catch {};
     p.pick_id = @intCast(args[2]);
+    p.pick_free_text = false; // each pick opts in for itself
+}
+
+/// `wl_pick_free_text(on)` — between `begin` and `end`: let this pick accept
+/// what was TYPED, not only a listed candidate (`Pick.allow_free_text`, the
+/// same option the built-in file pick uses). The command palette needs it to
+/// mean anything by `listen 7777 edit`: a query with arguments in it matches
+/// no row, and without this the accept was a silent cancel.
+pub fn hPickFreeText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.pick_free_text = args[0] != 0;
 }
 
 pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -93,11 +106,11 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
     defer gpa.free(entries);
     for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc };
-    p.activeCtx().head.pick.open(p.activeCtx(), p.pick_prompt.items, entries, .{
+    p.activeCtx().head.pick.openWith(p.activeCtx(), p.pick_prompt.items, entries, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
-    }) catch {
+    }, .{ .allow_free_text = p.pick_free_text }) catch {
         gpa.free(keys);
         gpa.destroy(bp);
     };

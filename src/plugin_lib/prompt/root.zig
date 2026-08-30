@@ -54,7 +54,22 @@ pub const Config = struct {
     /// Longest line accepted. Overflow is refused out loud, never truncated
     /// silently into a shorter branch name than the user typed.
     capacity: usize = 1024,
+    /// An optional trailing HINT, recomputed from the line on every keystroke
+    /// and rendered dimly after it. This is where signature help lives: the
+    /// `:` line hands back the parameters a typed command still wants
+    /// (`:listen 7777` → ` <access>`), so the shape of the call is visible
+    /// while you make it rather than in a refusal after it.
+    ///
+    /// A hook, not a feature: the prompt knows nothing about commands. It
+    /// asks its owner what to trail the line with, and its owner — which does
+    /// know — answers. Return "" for nothing to say.
+    hint: ?*const fn (line: []const u8) []const u8 = null,
 };
+
+/// One of the five commands a prompt answers to. Named at MODULE scope, not
+/// inside `Prompt`, so two instantiations' tables share a type and a plugin
+/// holding several prompts can concatenate them into one flat command table.
+pub const Command = struct { name: []const u8, handler: *const fn () void };
 
 /// One prompt. Instantiate at container scope (`const rename = Prompt(.{…});`)
 /// — the state below is per-instantiation, so a plugin may hold several.
@@ -67,12 +82,14 @@ pub fn Prompt(comptime cfg: Config) type {
         var label_buf: [128]u8 = undefined;
         var label_len: usize = 0;
         var open_now: bool = false;
-        var render_buf: [cfg.capacity + label_buf.len + 2]u8 = undefined;
+        /// Label + line + whatever `cfg.hint` trails it with.
+        var render_buf: [cfg.capacity + label_buf.len + hint_cap]u8 = undefined;
+        const hint_cap = 256;
 
         /// The five commands this prompt answers to. A plugin splices them
         /// into its own command table rather than this module registering
         /// behind its back — one place still owns "what commands do I have".
-        pub const commands = [_]struct { name: []const u8, handler: *const fn () void }{
+        pub const commands = [_]Command{
             .{ .name = cfg.name ++ "-type", .handler = onType },
             .{ .name = cfg.name ++ "-backspace", .handler = onBackspace },
             .{ .name = cfg.name ++ "-clear", .handler = onClear },
@@ -210,6 +227,12 @@ pub fn Prompt(comptime cfg: Config) type {
             w += label_len;
             @memcpy(render_buf[w .. w + len], buf[0..len]);
             w += len;
+            if (cfg.hint) |ask| {
+                const h = ask(buf[0..len]);
+                const n = @min(h.len, render_buf.len - w);
+                @memcpy(render_buf[w .. w + n], h[0..n]);
+                w += n;
+            }
             weft.echo(render_buf[0..w]);
         }
     };

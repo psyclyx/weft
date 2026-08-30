@@ -27,8 +27,8 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
             .{ .name = "exts", .type = .string },
             .{ .name = "grammar", .type = .string },
             .{ .name = "symbol", .type = .string },
-            .{ .name = "query", .type = .string },
-            .{ .name = "outline", .type = .string },
+            .{ .name = "query", .type = .string, .optional = true },
+            .{ .name = "outline", .type = .string, .optional = true },
         },
         .handler = grammarAddHandler,
         .data = runtime,
@@ -281,6 +281,11 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_run_int", .args = 1 },
     .{ .name = "wl_run_str", .args = 1 },
     .{ .name = "wl_run_str2", .args = 2 },
+    // The variadic runner. Its width is `wasm_host/commands.zig`'s `max_argv`,
+    // capped at two FOR THIS GATE — a guest whose argument count is a runtime
+    // fact (the palette dispatching a typed line) still cannot widen the call
+    // past what the fixed-arity runners already allow.
+    .{ .name = "wl_run_argv", .args = 2 },
     .{ .name = "wl_run_range", .args = 0 },
     .{ .name = "wl_run_range_arg", .args = 1 },
     // In the `.commands` group, but they only intern a name or read the
@@ -289,6 +294,9 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_command_count", .args = 0 },
     .{ .name = "wl_command_name", .args = 0 },
     .{ .name = "wl_command_summary", .args = 0 },
+    .{ .name = "wl_command_arity", .args = 0 },
+    .{ .name = "wl_command_arity_required", .args = 0 },
+    .{ .name = "wl_command_arg", .args = 0 },
 };
 
 /// Entries the census must account for, so a new runner cannot slip past

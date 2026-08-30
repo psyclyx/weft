@@ -553,7 +553,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "share", .{
         .name = "share",
         .summary = "Share the active buffer over the connection; an optional preset (look_together|pair|review) compiles to a grant bundle.",
-        .args = &.{.{ .name = "preset", .type = .string }},
+        .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
         .handler = shareHandler,
         .data = sc,
     });

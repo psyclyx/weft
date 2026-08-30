@@ -160,6 +160,7 @@ pub const imports = [_]Entry{
     // ── declare.zig — describe-phase declarations ──────────────────────
     .{ .name = "wl_log", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "write a guest log line at `level`" },
     .{ .name = "wl_declare_command", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command name (id assigned on first declare)" },
+    .{ .name = "wl_declare_command_doc", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command with its parameter list and one-line summary" },
     .{ .name = "wl_declare_capability", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare an abstract capability name this plugin provides" },
     .{ .name = "wl_request_perm", .params = &.{.u32}, .results = &.{}, .group = .declare, .doc = "describe-phase: request a permission bit (fs_read/fs_write/net/proc/timer)" },
 
@@ -246,9 +247,13 @@ pub const imports = [_]Entry{
     .{ .name = "wl_run_int", .params = &.{ .u32, .u32, .i32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with one int arg" },
     .{ .name = "wl_run_str", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with one string arg" },
     .{ .name = "wl_run_str2", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with two string args" },
+    .{ .name = "wl_run_argv", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with `argc` string args, given as a vector of (ptr,len) pairs" },
     .{ .name = "wl_command_count", .params = &.{}, .results = &.{.u32}, .group = .commands, .doc = "the number of registered commands (introspection)" },
     .{ .name = "wl_command_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's name, into guest memory" },
     .{ .name = "wl_command_summary", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's one-line summary, into guest memory" },
+    .{ .name = "wl_command_arity", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many arguments the `i`-th command declares, or -1 if unbound" },
+    .{ .name = "wl_command_arity_required", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many of them a caller must supply (optional arguments trail), or -1" },
+    .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_offer_count", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "the number of intentions offered in the focused context" },
@@ -270,6 +275,7 @@ pub const imports = [_]Entry{
 
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "start building a fuzzy pick with `prompt`, tagged `pick_id`" },
+    .{ .name = "wl_pick_free_text", .params = &.{.u32}, .results = &.{}, .group = .pick, .doc = "let the pick being built accept the typed query, not only a listed candidate" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
@@ -448,7 +454,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 215;
+const expected_import_count = 221;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

@@ -12,6 +12,15 @@
 //! everywhere. This module used to own a private copy of it; that copy is why
 //! there were three.
 //!
+//! The fall-through half is `weft_invoke` for the same reason. It used to
+//! split a line into "first token, then the rest" and hope that matched the
+//! command's arity — so `:listen 7777` (a two-argument command given one) did
+//! nothing at all, silently, and `:listen` with nothing did the same. Asking
+//! the registry what a command TAKES answers both: the split follows the
+//! declared arity, and what is still missing is asked for. That is also where
+//! the `:` line's signature help comes from — `cfg.hint` below trails the
+//! typed line with the parameters it has not supplied yet.
+//!
 //! Instantiated per editor with its own mode names (`Ex("normal","ex")` for vim,
 //! `Ex("helix-normal","helix-ex")` for helix). Each guest is a separate wasm
 //! module, so the module-level scratch below never crosses editors.
@@ -19,6 +28,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const prompt = @import("weft_prompt");
+const invoke = @import("weft_invoke");
 
 // ── Caps (bounded; degrade + echo on overflow, never overrun) ──────────────
 const LINE_CAP = 1024; // the typed command line
@@ -45,6 +55,17 @@ fn echoFmt(comptime fmt: []const u8, args: anytype) void {
 /// because there is only one implementation left to disagree with.
 pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
     return struct {
+        const Self = @This();
+
+        /// Arguments a typed line left out are asked for here, one question
+        /// per parameter, in the same minibuffer. `:listen` is therefore a
+        /// legal thing to type — it becomes "port?", "access?", run — rather
+        /// than a silent arity refusal.
+        pub const asker = invoke.Invoker(.{
+            .name = ex_mode ++ "-arg",
+            .resting = normal_mode,
+        });
+
         pub const line = prompt.Prompt(.{
             .name = ex_mode,
             .resting = normal_mode,
@@ -54,21 +75,39 @@ pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
                     if (text.len > 0) exec(text);
                 }
             }.accept,
+            // Signature help, straight off the registry: what the command
+            // being typed still wants. Words ex OWNS (`w`, `q`, `s/…/…/`, a
+            // bare line number) are not registered command names, so the
+            // registry simply has nothing to say about them — no keyword list
+            // to keep in step with `builtin` below.
+            .hint = struct {
+                fn f(text: []const u8) []const u8 {
+                    return asker.hint(text);
+                }
+            }.f,
         });
 
-        /// The commands this command line answers to, for a guest's table.
-        pub const commands = line.commands;
+        /// The commands this command line answers to, for a guest's table:
+        /// the line's own five, then the argument prompt's five.
+        pub const commands = line.commands ++ asker.commands;
 
         /// `:` in normal — open the command line, empty.
         pub fn enter() void {
             line.open(":");
         }
 
+        /// Dispatch a trimmed, non-empty ex line (see `execWith`).
+        pub fn exec(text: []const u8) void {
+            execWith(asker, text);
+        }
+
         pub fn declare() void {
             line.declare();
+            asker.declare();
         }
         pub fn install() void {
             line.install();
+            asker.install();
         }
     };
 }
@@ -77,8 +116,9 @@ pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
 const LineRange = struct { lo: usize, hi: usize };
 
 /// Dispatch a trimmed, non-empty ex line. Parse order (the composition):
-/// range → bare goto → substitute → builtin keyword → fall-through to `run`.
-pub fn exec(line: []const u8) void {
+/// range → bare goto → substitute → builtin keyword → fall-through to the
+/// registry, through `Asker` (which knows how to ask for what is missing).
+fn execWith(comptime Asker: type, line: []const u8) void {
     var rest = line;
     const range = parseRange(&rest);
     rest = trimLeft(rest);
@@ -113,8 +153,9 @@ pub fn exec(line: []const u8) void {
     const kw_is_token = tail.len == 0 or tail[0] == '!' or isSpace(tail[0]);
     if (kw_is_token and builtin(kw, bang, args)) return;
 
-    // Fall-through: `:name arg…` → the weft command `name` with space-split args.
-    fallThrough(rest);
+    // Fall-through: `:name arg…` → the weft command `name`, split against
+    // what it declares and asked for where it is short.
+    Asker.invokeLine(rest);
 }
 
 /// The vim-owned classic commands. Returns true if `kw` matched (and ran).
@@ -174,43 +215,6 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
         weft.run("clear-selection");
         weft.echo("noh");
         return true;
-    }
-    return false;
-}
-
-/// Run an arbitrary registered command by name (the composition membrane). The
-/// first whitespace token is the command name (hyphens and all); the remainder
-/// is split into at most two string args (covers every shipped command — most
-/// take ≤1).
-fn fallThrough(rest: []const u8) void {
-    var ni: usize = 0;
-    while (ni < rest.len and !isSpace(rest[ni])) ni += 1;
-    const name = rest[0..ni];
-    const args = trimLeft(rest[ni..]);
-    if (!commandExists(name)) {
-        echoFmt("not an editor command: {s}", .{name});
-        return;
-    }
-    if (args.len == 0) {
-        weft.run(name);
-        return;
-    }
-    var ai: usize = 0;
-    while (ai < args.len and !isSpace(args[ai])) ai += 1;
-    const a1 = args[0..ai];
-    const a2 = trimLeft(args[ai..]);
-    if (a2.len == 0) weft.runStr(name, a1) else weft.runStr2(name, a1, a2);
-}
-
-/// Whether a command `name` is registered (scan the introspection list). `name`
-/// borrows the ex line buffer, safe across `commandName`'s scratch reuse.
-fn commandExists(name: []const u8) bool {
-    const n = weft.commandCount();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (weft.commandName(i)) |cn| {
-            if (std.mem.eql(u8, cn, name)) return true;
-        }
     }
     return false;
 }
@@ -502,11 +506,6 @@ fn trimLeft(s: []const u8) []const u8 {
     var i: usize = 0;
     while (i < s.len and isSpace(s[i])) i += 1;
     return s[i..];
-}
-fn trim(s: []const u8) []const u8 {
-    var a = trimLeft(s);
-    while (a.len > 0 and isSpace(a[a.len - 1])) a = a[0 .. a.len - 1];
-    return a;
 }
 fn eqAny(kw: []const u8, comptime list: []const []const u8) bool {
     inline for (list) |w| {

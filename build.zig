@@ -39,12 +39,14 @@ const Guest = struct {
 
 /// The shared plugin libraries (`src/plugin_lib/<name>/root.zig`). Each is a
 /// NAMED module a guest gets only by declaring it: `prompt` is the one
-/// read-a-line minibuffer, `ex` is vim's and helix's command line, `output`
+/// read-a-line minibuffer, `invoke` is the one "run a command, asking for the
+/// arguments you left out", `ex` is vim's and helix's command line, `output`
 /// is the tool-buffer surface `run`/`make`/`grep` share, `jsonrpc` is the
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
 /// adapter.
 const Library = enum {
     prompt,
+    invoke,
     ex,
     jsonrpc,
     output,
@@ -55,6 +57,7 @@ const Library = enum {
     fn importName(self: Library) []const u8 {
         return switch (self) {
             .prompt => "weft_prompt",
+            .invoke => "weft_invoke",
             .ex => "weft_ex",
             .jsonrpc => "weft_jsonrpc",
             .output => "weft_output",
@@ -64,10 +67,13 @@ const Library = enum {
 
     /// Libraries a library itself needs. `ex` is a command-line: a parser
     /// plus a prompt, and the prompt half is the same one git and lsp use —
-    /// it does not get a private copy just because it got there first.
+    /// it does not get a private copy just because it got there first. It
+    /// reaches the registry through `invoke` for the same reason: the palette
+    /// asks for a missing argument the same way, and there is one of those.
     fn deps(self: Library) []const Library {
         return switch (self) {
-            .ex => &.{.prompt},
+            .invoke => &.{.prompt},
+            .ex => &.{ .prompt, .invoke },
             else => &.{},
         };
     }
@@ -301,7 +307,7 @@ const guests = [_]Guest{
     .{ .name = "edit", .import = "guest_edit_wasm", .install = true },
     .{ .name = "complete", .import = "guest_complete_wasm", .install = true },
     .{ .name = "project", .import = "guest_project_wasm", .install = true },
-    .{ .name = "palette", .import = "guest_palette_wasm", .install = true },
+    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{.invoke} },
     .{ .name = "structural", .import = "guest_structural_wasm", .install = true },
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
@@ -945,7 +951,9 @@ fn configureTestModule(
 /// dependencies (`Library.deps`) and nothing else. A fresh module per
 /// consuming guest, because each guest is a separate wasm compilation with
 /// its own linear memory — a library's module-level state is per-consumer by
-/// construction, never shared behind anyone's back.
+/// construction, never shared behind anyone's back. Within ONE guest it is
+/// memoized (`cache`): two libraries wanting the same third want the same
+/// module, and a duplicate would not compile.
 fn libraryModule(
     b: *std.Build,
     comptime lib: Library,
@@ -957,7 +965,10 @@ fn libraryModule(
     /// module rather than a decl of the facade (it needs the SDK; the
     /// portable half deliberately does not).
     consumer: *std.Build.Module,
+    /// This guest's library modules so far, indexed by `Library`.
+    cache: []?*std.Build.Module,
 ) *std.Build.Module {
+    if (cache[@intFromEnum(lib)]) |existing| return existing;
     if (lib == .files) {
         const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
         const adapter = b.createModule(.{
@@ -968,6 +979,7 @@ fn libraryModule(
         adapter.addImport("weft", guest_sdk);
         adapter.addImport("weft_files", files.facade);
         consumer.addImport("weft_files_adapter", adapter);
+        cache[@intFromEnum(lib)] = files.facade;
         return files.facade;
     }
     const mod = b.createModule(.{
@@ -976,8 +988,11 @@ fn libraryModule(
         .optimize = .ReleaseSmall,
     });
     mod.addImport("weft", guest_sdk);
+    // Cached BEFORE the dependency walk: a library reached again from inside
+    // its own subtree gets this module, not a second one.
+    cache[@intFromEnum(lib)] = mod;
     inline for (comptime lib.deps()) |dep| {
-        mod.addImport(comptime dep.importName(), libraryModule(b, dep, wasm_target, guest_sdk, semantic, fs, mod));
+        mod.addImport(comptime dep.importName(), libraryModule(b, dep, wasm_target, guest_sdk, semantic, fs, mod, cache));
     }
     return mod;
 }
@@ -1080,8 +1095,14 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
     // else on its import path. A library it did not ask for is not merely
     // discouraged — it is absent, so "plugin A quietly reached into plugin
     // B's implementation" cannot be written.
+    // ONE module per library per guest: a library reached twice (`ex` wants
+    // `prompt` directly, and again through `invoke`) is the same module both
+    // times. Zig refuses a file that belongs to two modules of one
+    // compilation, so this memo is what lets libraries depend on each other
+    // at all rather than only on the SDK.
+    var lib_cache: [@typeInfo(Library).@"enum".fields.len]?*std.Build.Module = @splat(null);
     inline for (guest_spec.libraries) |lib| {
-        const mod = libraryModule(b, lib, wasm_target, guest_sdk, semantic, fs, guest_mod);
+        const mod = libraryModule(b, lib, wasm_target, guest_sdk, semantic, fs, guest_mod, &lib_cache);
         guest_mod.addImport(comptime lib.importName(), mod);
     }
     const guest = b.addExecutable(.{
