@@ -672,7 +672,7 @@ test "quickjs: a JS plugin with NO declared grants gets NO effect capability —
     try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "permission denied") != null);
     // Denial is not a spawn that merely failed — no child was ever started.
-    try t.expectEqual(@as(usize, 0), plugin.streams.items.len);
+    try t.expectEqual(@as(usize, 0), plugin.streams.len());
 
     _ = try command.run(&env.commands, &env.ctx, "read", &.{});
     try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));

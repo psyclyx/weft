@@ -2,7 +2,11 @@
 //! subprocesses (design §6.3) and network connections (design §6.5). Both share
 //! the same handle/lifecycle model — start returns an index, the frame loop
 //! drains streamed output, quit/close kills + joins (the slot stays for handle
-//! stability).
+//! stability) — and both get it from `core/handles.zig`'s `Slots`, which is
+//! also where the guest-supplied handle is bounds-checked. These handlers used
+//! to `@intCast(args[0])` straight to `usize`: the import table declares the
+//! parameter `.u32`, but a handler receives the raw word, so a guest passing
+//! 2^31 arrived negative and panicked the HOST on a guest's bad argument.
 
 const wasm = @import("../wasm.zig");
 
@@ -63,21 +67,19 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         s.adoptEnviron();
         env_owned = false;
     }
-    p.sessions.append(gpa, s) catch {
+    const handle = p.sessions.open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
     };
-    results[0] = @intCast(p.sessions.items.len - 1);
+    results[0] = @intCast(handle);
 }
 
 /// Write a line to a REPL session's stdin.
 pub fn hReplSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.sessions.items.len) return;
-    const s = p.sessions.items[h] orelse return;
+    const s = p.sessions.at(args[0]) orelse return;
     const line = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(line);
     s.send(line);
@@ -88,24 +90,19 @@ pub fn hReplQuit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.sessions.items.len) return;
-    if (p.sessions.items[h]) |s| {
-        s.deinit();
-        p.sessions.items[h] = null;
-    }
+    p.sessions.close(args[0]);
 }
 
 /// Frame-thread: drain every session's streamed output into its buffer.
 /// Returns true if anything was written (the view repaints).
 pub fn drainReplSessions(p: *WasmPlugin) bool {
     var any = false;
-    for (p.sessions.items) |maybe| {
+    for (p.sessions.slice()) |maybe| {
         if (maybe) |s| {
             if (s.drain()) any = true;
         }
     }
-    for (p.net_sessions.items) |maybe| {
+    for (p.net_sessions.slice()) |maybe| {
         if (maybe) |s| {
             if (s.drain()) any = true;
         }
@@ -145,20 +142,18 @@ pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         results[0] = -1;
         return;
     };
-    p.net_sessions.append(gpa, s) catch {
+    const handle = p.net_sessions.open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
     };
-    results[0] = @intCast(p.net_sessions.items.len - 1);
+    results[0] = @intCast(handle);
 }
 
 pub fn hNetSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.net_sessions.items.len) return;
-    const s = p.net_sessions.items[h] orelse return;
+    const s = p.net_sessions.at(args[0]) orelse return;
     const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(bytes);
     s.send(bytes);
@@ -168,10 +163,5 @@ pub fn hNetClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.net_sessions.items.len) return;
-    if (p.net_sessions.items[h]) |s| {
-        s.deinit();
-        p.net_sessions.items[h] = null;
-    }
+    p.net_sessions.close(args[0]);
 }

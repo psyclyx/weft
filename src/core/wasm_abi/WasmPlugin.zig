@@ -345,18 +345,20 @@ cur_activate_path: []const u8 = &.{},
 /// The task pool interactive REPL sessions run their reader on (design
 /// §6.3). Null → repl-start is unavailable.
 pool: ?*Pool = null,
-/// Live persistent subprocess sessions this plugin started, indexed by the
-/// handle the guest holds (null once quit — the slot stays for handle
-/// stability). The frame loop drains their output; `deinit` tears them down.
-sessions: std.ArrayList(?*repl_session.Session) = .empty,
-/// Live network connections this plugin opened (design §6.5), same handle/
-/// lifecycle model as `sessions`.
-net_sessions: std.ArrayList(?*net_session.Session) = .empty,
-/// Raw persistent subprocess streams (`wl_proc_spawn`), indexed by handle. Unlike
-/// `sessions` (which stream into a buffer), these hand raw stdout bytes back to
-/// the guest via `wl_proc_read` — the transport an in-guest protocol client
-/// (the `lsp` plugin) deframes. Null slot once closed (handles stay stable).
-proc_streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
+// The three live-resource registries. Stable never-reused indices, the
+// negative-handle refusal and teardown-stops-everything are `handles.Slots`'s;
+// what differs between them is only what the resource IS.
+
+/// Live persistent subprocess sessions this plugin started. The frame loop
+/// drains their output; `deinit` tears them down.
+sessions: handles.Slots(repl_session.Session) = .empty,
+/// Live network connections this plugin opened (design §6.5).
+net_sessions: handles.Slots(net_session.Session) = .empty,
+/// Raw persistent subprocess streams (`wl_proc_spawn`). Unlike `sessions`
+/// (which stream into a buffer), these hand raw stdout bytes back to the
+/// guest via `wl_proc_read` — the transport an in-guest protocol client (the
+/// `lsp` plugin) deframes.
+proc_streams: handles.Slots(proc_stream.ProcStream) = .empty,
 
 // ── Pick (built incrementally between begin/end, then opened) ──
 pick_prompt: std.ArrayList(u8) = .empty,
@@ -692,7 +694,7 @@ pub fn procPool(self: *WasmPlugin) ?*Pool {
 }
 
 /// This plugin's handle-indexed proc streams.
-pub fn procStreams(self: *WasmPlugin) *std.ArrayList(?*proc_stream.ProcStream) {
+pub fn procStreams(self: *WasmPlugin) *handles.Slots(proc_stream.ProcStream) {
     return &self.proc_streams;
 }
 
@@ -839,12 +841,9 @@ pub fn deinit(self: *WasmPlugin) void {
         gpa.destroy(wc);
     }
     self.commands.deinit(gpa);
-    for (self.sessions.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
-    self.sessions.deinit(gpa);
-    for (self.net_sessions.items) |maybe| if (maybe) |s| s.deinit(); // shut + join
-    self.net_sessions.deinit(gpa);
-    for (self.proc_streams.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
-    self.proc_streams.deinit(gpa);
+    self.sessions.deinit(gpa); // kill + join each
+    self.net_sessions.deinit(gpa); // shut + join each
+    self.proc_streams.deinit(gpa); // kill + join each
     self.clearAllRanges();
     self.ranges.deinit(gpa);
     self.ephemeral_range_handles.deinit(gpa);

@@ -226,12 +226,12 @@ fn anyOpenStream(items: anytype) bool {
 
 fn hasLiveStream(self: *const PluginStreamCtx) bool {
     for (self.plugins.items) |p| {
-        if (anyOpenStream(p.proc_streams.items)) return true;
-        if (anyOpenStream(p.sessions.items)) return true;
-        if (anyOpenStream(p.net_sessions.items)) return true;
+        if (anyOpenStream(p.proc_streams.slice())) return true;
+        if (anyOpenStream(p.sessions.slice())) return true;
+        if (anyOpenStream(p.net_sessions.slice())) return true;
     }
     for (self.js_plugins.items) |jp| {
-        if (anyOpenStream(jp.streams.items)) return true;
+        if (anyOpenStream(jp.streams.slice())) return true;
     }
     return false;
 }

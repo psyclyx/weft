@@ -24,7 +24,7 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
 /// pending. So idle plugins (and every plugin without a stream) cost nothing —
 /// this is readiness-driven, not a blind per-frame poll. Returns whether it ran.
 pub fn notifyPollIfReady(p: *WasmPlugin) bool {
-    const ready = for (p.proc_streams.items) |maybe| {
+    const ready = for (p.proc_streams.slice()) |maybe| {
         if (maybe) |s| if (s.pending() > 0) break true;
     } else false;
     if (!ready) return false;

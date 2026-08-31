@@ -16,6 +16,7 @@ const wasm = @import("wasm.zig");
 const command = @import("command.zig");
 const task = @import("task.zig");
 const proc_stream = @import("proc_stream.zig");
+const handles = @import("handles.zig");
 const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
@@ -374,8 +375,10 @@ pub const JsPlugin = struct {
     /// each carries the id the host dispatches by and owns its command name.
     cmds: std.ArrayList(*Cmd) = .empty,
     /// Proc streams this plugin spawned, indexed by the handle the JS holds.
-    /// A closed slot is left null so handles stay stable (never reused).
-    streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
+    /// The same `handles.Slots` the wasm plane's registry is — one shape, so
+    /// a JS plugin's handle cannot be bounds-checked differently from a wasm
+    /// plugin's.
+    streams: handles.Slots(proc_stream.ProcStream) = .empty,
     /// Handles whose child's exit has already been announced — an exit is an
     /// EDGE, reported exactly once, never a level the plugin re-reads every
     /// frame. Grown by `tick`, not by the spawn door: spawning is
@@ -449,7 +452,7 @@ pub const JsPlugin = struct {
         return self.pool;
     }
 
-    pub fn procStreams(self: *JsPlugin) *std.ArrayList(?*proc_stream.ProcStream) {
+    pub fn procStreams(self: *JsPlugin) *handles.Slots(proc_stream.ProcStream) {
         return &self.streams;
     }
 
@@ -577,8 +580,8 @@ pub const JsPlugin = struct {
     pub fn tick(self: *JsPlugin) bool {
         var fired = false;
         var h: usize = 0;
-        while (h < self.streams.items.len) : (h += 1) {
-            if (self.streams.items[h]) |s| {
+        while (h < self.streams.len()) : (h += 1) {
+            if (self.streams.slice()[h]) |s| {
                 if (s.pending() > 0) {
                     self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
                     fired = true;
@@ -586,7 +589,7 @@ pub const JsPlugin = struct {
             }
             // Re-read the slot: the handler above may have closed this very
             // stream (`weft.procClose`), which frees it and nulls the slot.
-            const s = self.streams.items[h] orelse continue;
+            const s = self.streams.slice()[h] orelse continue;
             // The child's exit, AFTER its last bytes: a peer that dies mid
             // conversation is news the plugin must act on (answer what it left
             // pending, free the slot), not a silence it has to poll for. Once
@@ -678,8 +681,7 @@ pub const JsPlugin = struct {
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
         gpa.free(self.name);
-        for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
-        self.streams.deinit(gpa);
+        self.streams.deinit(gpa); // kill + join each
         self.exits_reported.deinit(gpa);
         for (self.conversations.items) |c| c.deinit(gpa);
         self.conversations.deinit(gpa);

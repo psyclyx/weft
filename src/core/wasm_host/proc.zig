@@ -91,11 +91,11 @@ const proc_stream = @import("../proc_stream.zig");
 
 const Perm = shared.Perm;
 
-/// A handle's live stream, or null for an out-of-range/closed slot.
+/// A handle's live stream, or null for a negative/out-of-range/closed slot.
+/// The check itself lives in `handles.Slots.at`, shared with the repl and net
+/// registries that get their handles from the same untrusted place.
 fn streamAt(p: anytype, h: i32) ?*proc_stream.ProcStream {
-    const streams = p.procStreams();
-    if (h < 0 or @as(usize, @intCast(h)) >= streams.items.len) return null;
-    return streams.items[@intCast(h)];
+    return p.procStreams().at(h);
 }
 
 /// `procSpawn(cmd) -> handle` (or -1 if unavailable). Spawns a persistent
@@ -144,14 +144,12 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
         s.adoptEnviron();
         env_owned = false;
     }
-    const streams = p.procStreams();
-    const h: i32 = @intCast(streams.items.len);
-    streams.append(gpa, s) catch {
+    const handle = p.procStreams().open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
     };
-    results[0] = h;
+    results[0] = @intCast(handle);
 }
 
 /// `procSend(handle, bytes)`: write to the subprocess's stdin.
@@ -185,11 +183,7 @@ pub fn readBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []
 pub fn closeBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
-    const h = args[0];
-    if (streamAt(p, h)) |s| {
-        s.deinit();
-        p.procStreams().items[@intCast(h)] = null;
-    }
+    p.procStreams().close(args[0]);
 }
 
 /// Bind one shared body onto the `.wasm` guest membrane: cast `data` to the

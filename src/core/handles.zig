@@ -1,5 +1,30 @@
-//! `handles` — the ONE monotonic capability table behind every host-owned
-//! resource a guest holds by number.
+//! `handles` — how a guest names a host-owned thing.
+//!
+//! Everything a plugin holds across a membrane call it holds by NUMBER: an
+//! anchored range, a document frontier witness, an annotation claim, a live
+//! subprocess, a socket. Seven such registries were written out by hand
+//! across `wasm_abi/WasmPlugin.zig`, `wasm_host/sessions.zig`,
+//! `wasm_host/proc.zig` and `quickjs.zig`, and each re-derived the same
+//! invariants — badly, in the places nobody thought to look twice.
+//!
+//! There are two shapes here, and the difference is real rather than
+//! historical:
+//!
+//!   - `Handles(T)` holds DATA the host must take apart with context this
+//!     file does not have (drop two document anchors, free a frontier blob,
+//!     hand a layer name back to the layer store). Sparse; closing removes
+//!     the entry.
+//!   - `Slots(T)` holds `*T` LIVE RESOURCES that own themselves and know how
+//!     to die (`T.deinit()`): a subprocess, a connection. Dense, because
+//!     callers sweep it every frame; and a closed slot STAYS, so a late
+//!     `send` on a dead handle is a no-op rather than a hit on whatever was
+//!     opened next.
+//!
+//! Both refuse to recycle a number, for the same reason: a guest may hold a
+//! handle across calls, so reuse would let a stale release or a late callback
+//! land on a resource minted after it.
+//!
+//! ── `Handles(T)` ────────────────────────────────────────────────────
 //!
 //! Three tables in `wasm_abi/WasmPlugin.zig` used to spell this out
 //! separately — anchored ranges, document frontier witnesses, annotation
@@ -94,6 +119,77 @@ pub fn Handles(comptime T: type) type {
     };
 }
 
+/// A dense, stable-index registry of live `*T` resources a guest holds by
+/// handle. `T` must expose `deinit(*T) void` — every resource here is an
+/// actor that has to be TOLD to stop (kill a child and join its reader, shut
+/// a socket and join its reader), which is exactly why this shape can own
+/// release where `Handles(T)` cannot.
+///
+/// A handle is an index and is never reused. `close` nulls the slot but keeps
+/// it, so a guest that sends on a handle it already closed hits a dead slot
+/// instead of whatever was opened after it.
+pub fn Slots(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        list: std.ArrayList(?*T) = .empty,
+
+        pub const empty: Self = .{};
+
+        /// Register `value` and return its handle. On failure the caller still
+        /// owns `value` (nothing was stored), so it releases it as it would
+        /// any other failed start.
+        pub fn open(self: *Self, gpa: Allocator, value: *T) Allocator.Error!u32 {
+            const handle: u32 = @intCast(self.list.items.len);
+            try self.list.append(gpa, value);
+            return handle;
+        }
+
+        /// The live resource behind a guest-supplied handle, or null when the
+        /// handle is negative, out of range, or already closed.
+        ///
+        /// Takes `i32` deliberately: that is what actually crosses the
+        /// membrane. The import table DECLARES these parameters `.u32`, but a
+        /// handler receives the raw word, so a guest passing 2^31 arrives here
+        /// negative — and a bare `@intCast` to `usize` would panic the HOST on
+        /// a guest's bad argument. Every lookup goes through this one door so
+        /// that check cannot be forgotten in a fifth copy.
+        pub fn at(self: *Self, handle: i32) ?*T {
+            if (handle < 0) return null;
+            const i: usize = @intCast(handle);
+            if (i >= self.list.items.len) return null;
+            return self.list.items[i];
+        }
+
+        /// Release the resource behind `handle` and null its slot. Idempotent;
+        /// a stale or nonsense handle is simply nothing to close.
+        pub fn close(self: *Self, handle: i32) void {
+            const live = self.at(handle) orelse return;
+            live.deinit();
+            self.list.items[@intCast(handle)] = null;
+        }
+
+        /// The slot array, for callers that sweep every live resource each
+        /// frame (drain, tick) and need the INDEX to call back with. Const:
+        /// a sweep may drive a resource it finds, but only `open`/`close` may
+        /// change which slots exist.
+        pub fn slice(self: *const Self) []const ?*T {
+            return self.list.items;
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.list.items.len;
+        }
+
+        /// Release every live resource, then the list. Unlike `Handles(T)`,
+        /// this shape can finish the job: `T` knows how to die.
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            for (self.list.items) |maybe| if (maybe) |live| live.deinit();
+            self.list.deinit(gpa);
+        }
+    };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -161,6 +257,79 @@ test "handles: values are the caller's to release" {
     while (it.next()) |v| gpa.free(v.*);
     h.clearRetainingCapacity();
     try t.expectEqual(@as(usize, 0), h.count());
+}
+
+/// A stand-in for the live resources `Slots` really holds (a REPL session, a
+/// net connection, a proc stream): self-owning, and it knows how to die.
+const FakeResource = struct {
+    gpa: Allocator,
+    stopped: *usize,
+
+    fn start(gpa: Allocator, stopped: *usize) !*FakeResource {
+        const self = try gpa.create(FakeResource);
+        self.* = .{ .gpa = gpa, .stopped = stopped };
+        return self;
+    }
+
+    pub fn deinit(self: *FakeResource) void {
+        self.stopped.* += 1;
+        self.gpa.destroy(self);
+    }
+};
+
+test "slots: a closed handle stays dead rather than naming the next resource" {
+    const gpa = t.allocator;
+    var stopped: usize = 0;
+    var s: Slots(FakeResource) = .empty;
+    defer s.deinit(gpa);
+
+    const a = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+    s.close(@intCast(a));
+    try t.expectEqual(@as(usize, 1), stopped);
+
+    // The slot is kept, so the next open cannot land on `a`'s number — a
+    // guest that sends on its stale handle must hit nothing.
+    const b = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+    try t.expect(a != b);
+    try t.expectEqual(@as(?*FakeResource, null), s.at(@intCast(a)));
+    try t.expect(s.at(@intCast(b)) != null);
+
+    // Idempotent close.
+    s.close(@intCast(a));
+    try t.expectEqual(@as(usize, 1), stopped);
+}
+
+test "slots: a hostile handle is refused, not @intCast into a host panic" {
+    const gpa = t.allocator;
+    var stopped: usize = 0;
+    var s: Slots(FakeResource) = .empty;
+    defer s.deinit(gpa);
+    _ = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+
+    // The import table declares these parameters `.u32`, but the handler gets
+    // the raw word: a guest passing 2^31 arrives NEGATIVE. Before this door
+    // existed, `wasm_host/sessions.zig` cast it straight to `usize` and took
+    // the host down on a guest's bad argument.
+    try t.expectEqual(@as(?*FakeResource, null), s.at(-1));
+    try t.expectEqual(@as(?*FakeResource, null), s.at(std.math.minInt(i32)));
+    try t.expectEqual(@as(?*FakeResource, null), s.at(9999));
+    s.close(-1); // must not panic, must not stop the live resource
+    s.close(std.math.minInt(i32));
+    try t.expectEqual(@as(usize, 0), stopped);
+}
+
+test "slots: teardown stops every live resource exactly once" {
+    const gpa = t.allocator;
+    var stopped: usize = 0;
+    var s: Slots(FakeResource) = .empty;
+
+    _ = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+    const mid = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+    _ = try s.open(gpa, try FakeResource.start(gpa, &stopped));
+    s.close(@intCast(mid)); // already dead: teardown must not double-free it
+
+    s.deinit(gpa);
+    try t.expectEqual(@as(usize, 3), stopped);
 }
 
 test {

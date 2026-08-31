@@ -334,6 +334,10 @@ const guests = [_]Guest{
     // intentions (doc/configuration.md §5.1).
     .{ .name = "gramtest", .import = "guest_gramtest_wasm", .install = false },
     .{ .name = "fs_limit", .import = "guest_fs_limit_wasm", .install = false },
+    // A permless guest that hands the session/stream doors handles it never
+    // got — including the sign-bit word that used to reach a bare `@intCast`
+    // to `usize` and take the HOST down (`core/handles.zig`'s `Slots.at`).
+    .{ .name = "hostile_handle", .import = "guest_hostile_handle_wasm", .install = false },
     // The `wl_proc_spool` gate's guest: proc+timer only, so the door's promise
     // ("a subprocess gets a real file, the guest gets no fs perm") is proven by
     // a guest that genuinely holds none.

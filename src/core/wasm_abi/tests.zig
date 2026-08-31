@@ -929,6 +929,41 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
 }
 
+test "wasm plugin: a handle the guest never got is refused, not fatal to the host" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    // No perms requested and none needed: every door this guest calls only
+    // addresses or RELEASES a resource, so they are ungated on purpose. That
+    // is precisely what made this reachable — no grant stood between a bad
+    // argument and the host.
+    const plugin = try loadPlugin(&engine, &env.ctx, "hostile_handle", @embedFile("guest_hostile_handle_wasm"), .{});
+    defer plugin.deinit();
+
+    // The membrane declares these parameters `.u32`, but a handler receives
+    // the raw word — so `weft.replSend(0x8000_0000, …)` arrived host-side as
+    // a NEGATIVE i32. `wasm_host/sessions.zig` cast it straight to `usize`,
+    // which is a safety panic: a permless guest could take the editor down
+    // with one public SDK call. `handles.Slots.at` now owns that check for
+    // every registry that takes a handle from a guest.
+    //
+    // A normal return IS the assertion — a regression panics the test binary
+    // rather than failing it, so the guest also echoes on the way out to
+    // prove it ran the whole gauntlet instead of trapping partway.
+    _ = try command.run(&env.commands, &env.ctx, "hostile-handles", &.{});
+    try t.expectEqualStrings("survived", env.head.echo.items);
+
+    // Nothing was opened, so nothing can have been closed: a bogus handle
+    // must never have found a slot to null.
+    try t.expectEqual(@as(usize, 0), plugin.sessions.len());
+    try t.expectEqual(@as(usize, 0), plugin.net_sessions.len());
+    try t.expectEqual(@as(usize, 0), plugin.proc_streams.len());
+}
+
 // ── task #19 item 4: closing the `activeCtx()` background escape hatch ─────
 // `src/plugin_fixtures/headtest.zig` (task #14's fixture, see its module doc) exercises
 // the SAME guest through both a DISPATCHING entry (`on_command` via
