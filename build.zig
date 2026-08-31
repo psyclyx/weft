@@ -87,6 +87,8 @@ const Library = enum {
 const ArchitectureModules = struct {
     wire: *std.Build.Module,
     schema: *std.Build.Module,
+    input: *std.Build.Module,
+    membrane: *std.Build.Module,
     semantic: *std.Build.Module,
     scene_codec: *std.Build.Module,
     fs: *std.Build.Module,
@@ -104,16 +106,30 @@ fn createArchitectureModules(
     optimize: std.builtin.OptimizeMode,
 ) ArchitectureModules {
     const wire = b.createModule(.{
-        .root_source_file = b.path("src/core/wire.zig"),
+        .root_source_file = b.path("src/wire/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     const schema = b.createModule(.{
-        .root_source_file = b.path("src/core/schema.zig"),
+        .root_source_file = b.path("src/schema/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     schema.addImport("weft_wire", wire);
+    // The input boundary's vocabulary and the wasm membrane's pure ABI table.
+    // Both are imported by core AND compiled into every wasm32 guest, so
+    // neither may acquire a host-only dependency; giving each its own module
+    // root is what keeps that true by construction rather than by review.
+    const input = b.createModule(.{
+        .root_source_file = b.path("src/input/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const membrane = b.createModule(.{
+        .root_source_file = b.path("src/membrane/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const semantic = b.createModule(.{
         .root_source_file = b.path("src/semantic_model/root.zig"),
         .target = target,
@@ -184,6 +200,8 @@ fn createArchitectureModules(
     return .{
         .wire = wire,
         .schema = schema,
+        .input = input,
+        .membrane = membrane,
         .semantic = semantic,
         .scene_codec = scene_codec,
         .fs = fs,
@@ -263,6 +281,8 @@ fn createFilesPortableModules(
 fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
     mod.addImport("weft_wire", architecture.wire);
     mod.addImport("weft_schema", architecture.schema);
+    mod.addImport("weft_input", architecture.input);
+    mod.addImport("weft_membrane", architecture.membrane);
     mod.addImport("weft_semantic", architecture.semantic);
     mod.addImport("weft_scene_codec", architecture.scene_codec);
     mod.addImport("weft_fs", architecture.fs);
@@ -364,15 +384,15 @@ pub fn build(b: *std.Build) void {
         @panic("WEFT_DEFAULT_MONO not set — build inside the nix shell");
     const mono_font: std.Build.LazyPath = .{ .cwd_relative = mono_font_file };
     const font_provider_contract = b.createModule(.{
-        .root_source_file = b.path("src/gfx/font_provider/contract.zig"),
+        .root_source_file = b.path("src/font_provider/contract.zig"),
         .target = target,
         .optimize = optimize,
     });
     const font_provider_impl = b.createModule(.{
         .root_source_file = b.path(if (target.result.os.tag == .linux)
-            "src/gfx/font_provider/fontconfig.zig"
+            "src/font_provider/fontconfig.zig"
         else
-            "src/gfx/font_provider/unavailable.zig"),
+            "src/font_provider/unavailable.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = target.result.os.tag == .linux,
@@ -381,7 +401,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux)
         font_provider_impl.linkSystemLibrary("fontconfig", .{});
     const font_provider_mod = b.createModule(.{
-        .root_source_file = b.path("src/gfx/font_provider/root.zig"),
+        .root_source_file = b.path("src/font_provider/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -389,12 +409,23 @@ pub fn build(b: *std.Build) void {
     font_provider_mod.addImport("implementation", font_provider_impl);
     font_provider_mod.addAnonymousImport("font_mono", .{ .root_source_file = mono_font });
     const scene_mod = b.createModule(.{
-        .root_source_file = b.path("src/gfx/scene/root.zig"),
+        .root_source_file = b.path("src/scene/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // The Skia binding is a named module, not a `root.zig` reached by relative
+    // path: it decodes the renderer-neutral scene and owns no editor or
+    // platform policy, so nothing above it should be able to reach it except
+    // by declaring the edge. `addSkia` (below) still contributes the compiled
+    // shim + link inputs to whichever binary consumes this.
+    const skia_mod = b.createModule(.{
+        .root_source_file = b.path("src/skia/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skia_mod.addImport("weft_scene", scene_mod);
     const text_mod = b.createModule(.{
-        .root_source_file = b.path("src/gfx/text/root.zig"),
+        .root_source_file = b.path("src/text/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -443,6 +474,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("weft_fs_platform", fs_platform);
     exe_mod.addImport("weft_font_provider", font_provider_mod);
     exe_mod.addImport("weft_scene", scene_mod);
+    exe_mod.addImport("weft_skia", skia_mod);
     exe_mod.addImport("weft_text", text_mod);
     exe_mod.addImport("weft_application", application_mod);
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
@@ -502,6 +534,7 @@ pub fn build(b: *std.Build) void {
     weft_mod.addImport("weft_fs_platform", fs_platform);
     weft_mod.addImport("weft_font_provider", font_provider_mod);
     weft_mod.addImport("weft_scene", scene_mod);
+    weft_mod.addImport("weft_skia", skia_mod);
     weft_mod.addImport("weft_text", text_mod);
     weft_mod.addImport("weft_application", application_mod);
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
@@ -671,23 +704,16 @@ pub fn build(b: *std.Build) void {
         darwin_architecture.semantic,
         darwin_architecture.fs,
     );
-    const darwin_contract_data = b.createModule(.{
-        .root_source_file = b.path("src/core/membrane/contract_data.zig"),
-        .target = darwin_target,
-        .optimize = optimize,
-    });
     const darwin_guest_sdk = b.createModule(.{
         .root_source_file = b.path("src/plugin_sdk/root.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
-    const darwin_input = b.createModule(.{
-        .root_source_file = b.path("src/core/input.zig"),
-        .target = darwin_target,
-        .optimize = optimize,
-    });
-    darwin_guest_sdk.addImport("membrane_contract_data", darwin_contract_data);
-    darwin_guest_sdk.addImport("weft_input", darwin_input);
+    // `input` and `membrane` come from the architecture factory now, so the
+    // darwin gate analyzes the SAME roots the host does instead of a pair of
+    // hand-made copies that could drift from it.
+    darwin_guest_sdk.addImport("weft_membrane", darwin_architecture.membrane);
+    darwin_guest_sdk.addImport("weft_input", darwin_architecture.input);
     darwin_guest_sdk.addImport("weft_schema", darwin_architecture.schema);
     darwin_guest_sdk.addImport("weft_semantic", darwin_architecture.semantic);
     darwin_guest_sdk.addImport("weft_scene_codec", darwin_architecture.scene_codec);
@@ -1021,33 +1047,33 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
     // The guest SDK is a real named module. Plugin roots import `weft` and
     // cannot reach sideways into the SDK implementation by relative path.
     // src/plugin_sdk/root.zig comptime-verifies its hand-written externs
-    // against core/membrane/contract_data.zig's signedness table (task
-    // W0a-D) — a plain relative `@import("../core/membrane/contract_data.zig")`
+    // against membrane/root.zig's signedness table (task
+    // W0a-D) — a plain relative `@import("../membrane/root.zig")`
     // fails ("import of file outside module path": each guest is its own
     // module, rooted at its own directory, and Zig 0.16 won't let a relative
     // import escape that root). Wire it as a named import instead, same
-    // target as the guest itself (contract_data.zig has zero host-only deps —
+    // target as the guest itself (membrane/root.zig has zero host-only deps —
     // no wasmtime, no wasm_host — by design, so it compiles fine here too).
     const contract_data = b.createModule(.{
-        .root_source_file = b.path("src/core/membrane/contract_data.zig"),
+        .root_source_file = b.path("src/membrane/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
     // D2 (doc/d2-schema-payloads.md §3.2/§3.3): the guest SDK imports the
-    // IDENTICAL core/schema.zig the host does — same zero-host-dependency
-    // posture as contract_data.zig above, same reason it needs a named
-    // import rather than a relative `../core/schema.zig` reach-around (each
+    // IDENTICAL schema/root.zig the host does — same zero-host-dependency
+    // posture as membrane/root.zig above, same reason it needs a named
+    // import rather than a relative `../schema/root.zig` reach-around (each
     // guest is its own module rooted at its own directory). This is what
     // makes a guest's own `parseSchema`/`decodeCursor`/`canonicalizeSchema`
     // calls (the SDK's `schemaEncode`/`slotBind` ergonomic wrappers) the SAME
     // implementation the host runs, not a second one.
     const schema = b.createModule(.{
-        .root_source_file = b.path("src/core/schema.zig"),
+        .root_source_file = b.path("src/schema/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
     const wire = b.createModule(.{
-        .root_source_file = b.path("src/core/wire.zig"),
+        .root_source_file = b.path("src/wire/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -1058,11 +1084,11 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
         .optimize = .ReleaseSmall,
     });
     const input = b.createModule(.{
-        .root_source_file = b.path("src/core/input.zig"),
+        .root_source_file = b.path("src/input/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
-    guest_sdk.addImport("membrane_contract_data", contract_data);
+    guest_sdk.addImport("weft_membrane", contract_data);
     guest_sdk.addImport("weft_input", input);
     guest_sdk.addImport("weft_schema", schema);
     const semantic = b.createModule(.{
@@ -1237,7 +1263,7 @@ fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
     }
 }
 
-/// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with
+/// Skia (default renderer): compile the C++ shim (src/skia/shim.cpp) with
 /// g++ against Skia's headers, then link the object + libskia + libstdc++ into
 /// the Zig exe. Resolved via **pkg-config** (Skia ships a `skia.pc`) — no env
 /// var; skia is a shell.nix buildInput, so its pkgconfig is on PKG_CONFIG_PATH,
@@ -1258,7 +1284,7 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
     const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti", "-fno-exceptions" });
     var it = std.mem.tokenizeAny(u8, cflags, " \t\r\n");
     while (it.next()) |tok| cc.addArg(b.dupe(tok));
-    cc.addFileArg(b.path("src/gfx/skia/shim.cpp"));
+    cc.addFileArg(b.path("src/skia/shim.cpp"));
     cc.addArg("-o");
     const obj = cc.addOutputFileArg("weft_skia_shim.o");
     mod.addObjectFile(obj);

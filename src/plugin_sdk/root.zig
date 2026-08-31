@@ -7,7 +7,7 @@
 //! guest.
 //!
 //! The externs below are hand-written but comptime-VERIFIED against
-//! `core/membrane/contract_data.zig` (see the `comptime` block after the
+//! `membrane/root.zig` (see the `comptime` block after the
 //! extern list), so this file cannot drift from the host's table.
 //!
 //! Permission groups: A core (log), the describe-phase declarations
@@ -26,19 +26,19 @@ const std = @import("std");
 pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 
 /// The pure-data half of the membrane contract (core/membrane/
-/// contract_data.zig) — no wasmtime/wasm_host dependency, so it compiles
+/// membrane/root.zig) — no wasmtime/wasm_host dependency, so it compiles
 /// here under wasm32-freestanding same as the host side does. Used below
 /// ONLY by the comptime verification block; the ergonomic wrappers don't
 /// reference it.
-const contract_data = @import("membrane_contract_data");
+const contract_data = @import("weft_membrane");
 
-/// The input boundary's vocabulary (core/input.zig) — the SAME `Posture`
+/// The input boundary's vocabulary (input/root.zig) — the SAME `Posture`
 /// enum the host resolves, imported as a named module for the same reason
 /// `contract_data` is: a guest-side copy of a wire enum is exactly the drift
 /// this membrane exists to prevent.
 pub const Posture = @import("weft_input").Posture;
 
-/// D2's schema language + marshaller (core/schema.zig), imported under the
+/// D2's schema language + marshaller (schema/root.zig), imported under the
 /// SAME name a guest's own code uses to reach it directly for a build-time-
 /// known slot's typed encode/decode (§3.3's build-time codegen arm is a
 /// LATER step; every guest today, including this SDK's own ergonomic
@@ -333,18 +333,18 @@ comptime {
     for (contract_data.imports) |entry| {
         const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
         if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
-            "src/plugin_sdk/root.zig: extern '{s}' takes {d} param(s), contract_data.zig says {d}",
+            "src/plugin_sdk/root.zig: extern '{s}' takes {d} param(s), membrane/root.zig says {d}",
             .{ entry.name, Fn.params.len, entry.params.len },
         ));
         for (Fn.params, entry.params, 0..) |got, want, i| {
             if (got.type.? != ZigType(want)) @compileError(std.fmt.comptimePrint(
-                "src/plugin_sdk/root.zig: extern '{s}' param {d} type doesn't match contract_data.zig's signedness",
+                "src/plugin_sdk/root.zig: extern '{s}' param {d} type doesn't match membrane/root.zig's signedness",
                 .{ entry.name, i },
             ));
         }
         const want_ret = if (entry.results.len == 0) void else ZigType(entry.results[0]);
         if (Fn.return_type.? != want_ret) @compileError(
-            "src/plugin_sdk/root.zig: extern '" ++ entry.name ++ "' return type doesn't match contract_data.zig",
+            "src/plugin_sdk/root.zig: extern '" ++ entry.name ++ "' return type doesn't match membrane/root.zig",
         );
     }
 }

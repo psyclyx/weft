@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const vk = @import("../vk.zig").c;
-const skia = @import("../gfx/skia/root.zig");
+const skia = @import("weft_skia");
 const stats_mod = @import("../gfx/stats.zig");
 const frame = @import("frame.zig");
 const FrameCtx = frame.FrameCtx;

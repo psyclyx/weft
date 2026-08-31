@@ -284,7 +284,7 @@ pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bo
 /// above): every import that MUTATES per-head interaction state (mode/
 /// pending/pick/echo — `Head.zig`'s module doc; NOT mode/menu/action TABLE
 /// declarations, which are system-scoped, and NOT the buffer/editor-owned
-/// cursor/selection — see `contract_data.zig`'s `.head_gated` doc for the
+/// cursor/selection — see `membrane/root.zig`'s `.head_gated` doc for the
 /// full boundary) calls this before touching `activeCtx().head`. TWO entry
 /// classes admit it:
 ///   - In dispatch (`p.in_dispatch`, set by `wpCmdTrampoline`/

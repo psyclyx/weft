@@ -122,7 +122,7 @@ const Bridge = struct {
     /// task #19 item 4 (mirrors `wasm_host/plugin.zig`'s `requireDispatch`
     /// exactly, one layer down under the JS engine): every LIVE `weft.*`
     /// handler that MUTATES head state (`weft.echo`, `weft.pick` — see
-    /// `contract_data.zig`'s `.head_gated` doc for the exact boundary this
+    /// `membrane/root.zig`'s `.head_gated` doc for the exact boundary this
     /// mirrors) calls this before touching `activeCtx().head`. In dispatch
     /// (`in_dispatch`, set by `JsPlugin.onCommand`/`jsPickAccept`) or loading
     /// (`loading`, set by `JsPlugin.load`) → true, the site proceeds.

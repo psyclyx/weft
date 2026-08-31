@@ -39,7 +39,7 @@ const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
 /// `wl_slot_declare(name_ptr, name_len, shape, composition, schema_ptr,
-/// schema_len)` — see contract_data.zig's entry doc for the shape/
+/// schema_len)` — see membrane/root.zig's entry doc for the shape/
 /// composition DEVIATION from the design doc's literal 4-param listing.
 pub fn hSlotDeclare(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;

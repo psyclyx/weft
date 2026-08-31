@@ -1061,7 +1061,7 @@ test "wasm plugin: init-phase table-config declarations are unaffected by dispat
     defer engine.deinit();
     // headtest's `init()` (a BACKGROUND entry) calls `weft.restingMode("poked")`
     // — a mode TABLE declaration (Keymap-owned, not Head-owned; see
-    // contract_data.zig's `.head_gated` doc). `loadPlugin` returning at all
+    // membrane/root.zig's `.head_gated` doc). `loadPlugin` returning at all
     // (not a load-time trap) is the proof: `wl_resting_mode` stayed ungated.
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();

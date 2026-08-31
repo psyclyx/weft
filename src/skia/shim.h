@@ -1,5 +1,5 @@
 // C ABI membrane between Zig and Skia (C++). Only C scalar/pointer types
-// cross here; the Zig side (gfx/skia/root.zig) declares these `extern "C"`.
+// cross here; the Zig side (skia/root.zig) declares these `extern "C"`.
 // The renderer draws editor content — explicit text glyphs and filled rects
 // decoded on the Zig side — onto an
 // SkCanvas, then hands back the rasterized pixels for the Vulkan backend to

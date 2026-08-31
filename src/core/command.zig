@@ -262,7 +262,7 @@ pub const Context = struct {
     /// entry's declaration plus this head's field focus. The ONE place the
     /// pair is read, so a grammar (`weft.posture()`), a builtin, and the
     /// resting-mode restore all see the same answer.
-    pub fn posture(self: *Context) @import("input.zig").Posture {
+    pub fn posture(self: *Context) @import("weft_input").Posture {
         return self.buffer().posture(self.head.semantic_focus.field != null);
     }
 

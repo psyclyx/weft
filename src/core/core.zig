@@ -38,7 +38,7 @@ pub const UndoLog = undo.UndoLog;
 pub const Editor = @import("Editor.zig");
 pub const Buffers = @import("Buffers.zig");
 pub const Keymap = @import("Keymap.zig");
-pub const input = @import("input.zig");
+pub const input = @import("weft_input");
 pub const TextCommit = input.TextCommit;
 pub const Head = @import("Head.zig");
 pub const semantic = @import("semantic.zig");
@@ -95,7 +95,7 @@ pub const env = @import("env.zig");
 /// The membrane import tables, exported so a gate can compare the two
 /// surfaces as DATA rather than by scraping their source text.
 pub const membrane = struct {
-    pub const wl = @import("membrane/contract_data.zig");
+    pub const wl = @import("weft_membrane");
     pub const qjs = @import("membrane/qjs_contract.zig");
     /// `wl`'s data table zipped with the handlers it binds — the gate that
     /// proves the two planes share a door needs the function POINTER, not just

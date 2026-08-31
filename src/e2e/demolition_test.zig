@@ -373,7 +373,7 @@ test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
         //    table says otherwise, and it may only say otherwise for the two
         //    doors whose remainder is named in `proc.zig`'s `doors` doc
         //    (`qjs_proc_send`/`qjs_proc_read` re-check `proc` on every call;
-        //    their `wl_*` twins can't until `contract_data.zig`, which is under
+        //    their `wl_*` twins can't until `membrane/root.zig`, which is under
         //    concurrent edit, gets `.perm = .proc`). A NEW asymmetry has to
         //    add itself to this list to compile past here.
         const named_remainder = comptime std.mem.eql(u8, d.name, "proc_send") or

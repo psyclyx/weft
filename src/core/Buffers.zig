@@ -23,7 +23,7 @@ const assert = std.debug.assert;
 
 const semantic = @import("weft_semantic");
 const Editor = @import("Editor.zig");
-const Posture = @import("input.zig").Posture;
+const Posture = @import("weft_input").Posture;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const task = @import("task.zig");

@@ -1,4 +1,4 @@
-//! core/membrane/contract_data.zig — the PURE DATA half of the `weft.*`
+//! membrane/root.zig — the PURE DATA half of the `weft.*`
 //! guest↔host import membrane: name, param/result shape (with guest-source
 //! signedness), permission gate, and doc, for every `wl_*` import, plus the
 //! host→guest EXPORT entrypoints (describe/init/run/on_command/…). No
@@ -534,7 +534,7 @@ const expected_export_count = 17;
 comptime {
     @setEvalBranchQuota(120_000); // the O(n²) duplicate-name scans below, n≈215
     if (imports.len != expected_import_count) @compileError(std.fmt.comptimePrint(
-        "core/membrane/contract_data.zig: imports table has {d} entries, expected {d}. " ++
+        "membrane/root.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a wl_* host import, update `expected_import_count` here. " ++
             "The guest extern in src/plugin_sdk/root.zig still needs adding/removing by hand (Zig " ++
             "can't synthesize a top-level decl from this table) — but forgetting it now fails " ++
@@ -543,18 +543,18 @@ comptime {
     ));
     for (imports, 0..) |a, i| {
         if (!std.mem.startsWith(u8, a.name, "wl_"))
-            @compileError("core/membrane/contract_data.zig: '" ++ a.name ++ "' doesn't look like a wl_* import");
+            @compileError("membrane/root.zig: '" ++ a.name ++ "' doesn't look like a wl_* import");
         if (a.params.len > 16)
-            @compileError("core/membrane/contract_data.zig: '" ++ a.name ++ "' has more params than wasm.zig's trampoline can carry (16)");
+            @compileError("membrane/root.zig: '" ++ a.name ++ "' has more params than wasm.zig's trampoline can carry (16)");
         if (a.results.len > 8)
-            @compileError("core/membrane/contract_data.zig: '" ++ a.name ++ "' has more results than wasm.zig's trampoline can carry (8)");
+            @compileError("membrane/root.zig: '" ++ a.name ++ "' has more results than wasm.zig's trampoline can carry (8)");
         for (imports[i + 1 ..]) |b| {
             if (std.mem.eql(u8, a.name, b.name))
-                @compileError("core/membrane/contract_data.zig: duplicate wl_* import name '" ++ a.name ++ "'");
+                @compileError("membrane/root.zig: duplicate wl_* import name '" ++ a.name ++ "'");
         }
     }
     if (exports.len != expected_export_count) @compileError(std.fmt.comptimePrint(
-        "core/membrane/contract_data.zig: exports table has {d} entries, expected {d}. " ++
+        "membrane/root.zig: exports table has {d} entries, expected {d}. " ++
             "If you added a new host->guest call site (instance.callVoid/callI32 into a " ++
             "loaded guest), add its (name, params, required) here and update " ++
             "`expected_export_count` — the call site itself now only compiles through " ++
@@ -563,10 +563,10 @@ comptime {
     ));
     for (exports, 0..) |a, i| {
         if (a.params.len > 16)
-            @compileError("core/membrane/contract_data.zig: export '" ++ a.name ++ "' has more params than the trampoline can carry (16)");
+            @compileError("membrane/root.zig: export '" ++ a.name ++ "' has more params than the trampoline can carry (16)");
         for (exports[i + 1 ..]) |b| {
             if (std.mem.eql(u8, a.name, b.name))
-                @compileError("core/membrane/contract_data.zig: duplicate export name '" ++ a.name ++ "'");
+                @compileError("membrane/root.zig: duplicate export name '" ++ a.name ++ "'");
         }
     }
 }

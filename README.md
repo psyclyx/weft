@@ -114,7 +114,7 @@ Weft-owned scene data: explicit filled rectangles and positioned HarfBuzz
 glyphs. The renderer does not know whether its Vulkan target is a desktop
 swapchain or a standard offscreen image used by E2E capture.
 
-- **skia** — a C++ shim (`src/gfx/skia/shim.cpp`, built with g++, linked
+- **skia** — a C++ shim (`src/skia/shim.cpp`, built with g++, linked
   against libskia) draws those items onto an `SkCanvas`
   (`SkFont`/glyph ids + `SkPaint` rects, reusing the same font bytes so
   metrics match). GPU path: Skia's Ganesh Vulkan backend

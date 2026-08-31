@@ -1,5 +1,5 @@
 //! core/membrane/contract.zig — the HOST side of the `weft.*` guest↔host
-//! membrane: binds `contract_data.zig`'s pure data (name/params/results/
+//! membrane: binds `membrane/root.zig`'s pure data (name/params/results/
 //! group/perm/doc) against this file's `handlers` (name → `HostFn`), and
 //! provides the typed helpers that fire the host→guest EXPORT entrypoints
 //! (`contract_data.exports`) instead of each call site naming a bare string.
@@ -15,7 +15,7 @@
 //! HOST import side (zipping `contract_data.imports` with `handlers`) and
 //! the host→guest export call-site helpers. It does NOT generate the guest
 //! externs in src/plugin_sdk/root.zig (Zig 0.16 cannot reify a decl from a
-//! comptime loop — see contract_data.zig's doc comment) — those stay
+//! comptime loop — see membrane/root.zig's doc comment) — those stay
 //! hand-written, comptime-VERIFIED against `contract_data.imports` from the
 //! guest side instead. quickjs's `qjs_*` table is a separate file
 //! (qjs_contract.zig, different marshalling path, not force-unified here).
@@ -27,7 +27,7 @@ const std = @import("std");
 const wasm = @import("../wasm.zig");
 const HostFn = wasm.Linker.HostFn;
 
-const contract_data = @import("contract_data.zig");
+const contract_data = @import("weft_membrane");
 pub const ValType = contract_data.ValType;
 pub const Group = contract_data.Group;
 pub const Perm = contract_data.Perm;
@@ -384,7 +384,7 @@ fn zip() [contract_data.imports.len]Entry {
                 break;
             }
         }
-        if (!found) @compileError("core/membrane/contract.zig: no handler bound for wl_* import '" ++ d.name ++ "' declared in contract_data.zig");
+        if (!found) @compileError("core/membrane/contract.zig: no handler bound for wl_* import '" ++ d.name ++ "' declared in membrane/root.zig");
     }
     return out;
 }
@@ -488,7 +488,7 @@ test "membrane contract: defineImports binds every table entry onto a real linke
 /// way to inspect a `pub fn hFoo(...)`'s BODY for which `requirePerm` calls
 /// it makes — that's control flow, not a type or a declaration comptime can
 /// walk. A test that hand-lists the enforcement sites and diffs both
-/// directions against `contract_data.zig`'s `.perm` metadata is the
+/// directions against `membrane/root.zig`'s `.perm` metadata is the
 /// documented, honest middle ground: it can't catch a NEW ungated effectful
 /// handler (nothing forces this list to grow when one is added — same as
 /// today), but it DOES fail the moment `.perm` in the table and the actual
@@ -531,7 +531,7 @@ test "membrane contract: table .perm metadata agrees with the handlers' actual r
             if (!std.mem.eql(u8, entry.name, g.name)) continue;
             found = true;
             try t.expectEqual(g.perm, entry.perm orelse {
-                std.debug.print("membrane contract: '{s}' is requirePerm-gated ({t}) but contract_data.zig has .perm = null\n", .{ g.name, g.perm });
+                std.debug.print("membrane contract: '{s}' is requirePerm-gated ({t}) but membrane/root.zig has .perm = null\n", .{ g.name, g.perm });
                 return error.TestExpectedEqual;
             });
         }
@@ -588,7 +588,7 @@ test "membrane contract: table .head_gated metadata agrees with the handlers' ac
             if (!std.mem.eql(u8, entry.name, name)) continue;
             found = true;
             if (!entry.head_gated) {
-                std.debug.print("membrane contract: '{s}' is requireDispatch-gated but contract_data.zig has .head_gated = false\n", .{name});
+                std.debug.print("membrane contract: '{s}' is requireDispatch-gated but membrane/root.zig has .head_gated = false\n", .{name});
                 return error.TestExpectedEqual;
             }
         }

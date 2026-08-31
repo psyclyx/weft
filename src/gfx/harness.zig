@@ -12,7 +12,7 @@ const core = @import("../core/core.zig");
 const view_mod = @import("view.zig");
 const region = @import("region.zig");
 const window_layout = @import("window_layout.zig");
-const skia_mod = @import("skia/root.zig");
+const skia_mod = @import("weft_skia");
 
 fn fullFrame(w: u32, h: u32) region.Rect {
     return .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };

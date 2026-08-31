@@ -60,7 +60,7 @@ export fn describe() void {
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
     // task #19 item 4: a TABLE-CONFIG declaration (system-scoped — Keymap
-    // owns it, not Head — contract_data.zig's `.head_gated` doc), legal from
+    // owns it, not Head — membrane/root.zig's `.head_gated` doc), legal from
     // `init` (a BACKGROUND entry) precisely BECAUSE it isn't head state. If
     // `wl_resting_mode` were ever (mis-)classified head-gated, EVERY guest
     // load in the test suite would start trapping right here — this call is

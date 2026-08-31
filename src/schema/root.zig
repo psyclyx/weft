@@ -1,15 +1,15 @@
-//! core/schema.zig — D2's schema language + marshaller
+//! schema/root.zig — D2's schema language + marshaller
 //! (doc/d2-schema-payloads.md §2/§3). Pure Zig over slices and a small
 //! owned-tree representation: no wasmtime, no wasm_host/*, no gfx, no
-//! stemma — the SAME dependency posture as core/membrane/contract_data.zig
+//! stemma — the SAME dependency posture as membrane/root.zig
 //! (§3.2's explicit call-out), so this file compiles under
 //! wasm32-freestanding and a guest SDK can import it identically to the
 //! host (§3.3's runtime-fallback interpreter path). Read
 //! doc/d2-schema-payloads.md in full before touching this file.
 //!
-//! **Non-overlap with contract_data.zig, stated at the function level
+//! **Non-overlap with membrane/root.zig, stated at the function level
 //! (§3.2), because "rhymes with" is not a design**: this file never
-//! declares a `wl_*` call and never knows a slot NAME — `contract_data.zig`
+//! declares a `wl_*` call and never knows a slot NAME — `membrane/root.zig`
 //! stays the sole authority on the membrane's fixed CALL surface (which
 //! `wl_*` imports exist, their arity, their perm gate). This file only knows
 //! how to turn a `Schema` tree + a `Value` tree into bytes and back
@@ -17,10 +17,10 @@
 //! (`walk`, the policy-split locator visitor, §4), and how a `Schema` VALUE itself
 //! serializes (`canonicalizeSchema`/`parseSchema`, the "meta-schema", §2.2
 //! form 2). The four new `wl_slot_*`/`wl_payload_*` imports
-//! (core/membrane/contract_data.zig) carry `(SchemaRef version, ptr, len)`
+//! (membrane/root.zig) carry `(SchemaRef version, ptr, len)`
 //! scalars; this file interprets what's behind `(ptr, len)` once the host
 //! has copied it out of guest memory. One seam, both ways — schema.zig never
-//! declares a call, contract_data.zig never inspects a payload's structure.
+//! declares a call, membrane/root.zig never inspects a payload's structure.
 //!
 //! **Wire conventions reused verbatim from wire.zig** (§1's "the wire
 //! conventions D2 aligns to"): length/count prefixes are LEB128 varints
@@ -842,7 +842,7 @@ fn walkInto(gpa: Allocator, out: *std.ArrayList(u8), schema: *const Schema, byte
 // `Schema` tree is exactly that structural client, one layer too early for
 // the language to serve generically — so `canonicalizeSchema`/`parseSchema`
 // are a HAND-WRITTEN recursive codec (the same wire primitives — `putUv`,
-// fixed-width LE — applied by hand, the way `contract_data.zig`'s own table
+// fixed-width LE — applied by hand, the way `membrane/root.zig`'s own table
 // is data ABOUT the contract without being parsed BY the contract's own
 // mechanism). "Self-hosting" here means "the same wire primitives, applied
 // to describe the language's own tree" — not "a `Schema` value that

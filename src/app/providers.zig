@@ -261,7 +261,7 @@ pub const Providers = struct {
 // can already call. Whichever fires, the answer is the same — put a real
 // gate on the door BEFORE it becomes reachable, not after.
 
-const contract_data = @import("../core/membrane/contract_data.zig");
+const contract_data = @import("weft_membrane");
 
 /// The census: every wasm-membrane import that could plausibly run a
 /// command (see `mustBeCensused`), and the number of arguments it hands
