@@ -924,7 +924,7 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     const req_b = try h.requestedPluginsSnapshot(gpa, &loader_b);
     defer gpa.free(req_b);
     try t.expectEqualStrings(req_a, req_b);
-    // config.js declares 40 `weft.plugin(...)` entries (38 bundled wasm
+    // config.js declares 41 `weft.plugin(...)` entries (39 bundled wasm
     // plugins, plus dap.js and acp.js) — pin the count so a silently
     // truncated list still fails loudly even in the (impossible, given the
     // equality above) case both sides truncated identically.
@@ -932,7 +932,7 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     for (req_a) |c| if (c == '\n') {
         req_count += 1;
     };
-    try t.expectEqual(@as(usize, 40), req_count);
+    try t.expectEqual(@as(usize, 41), req_count);
 
     // 6. The FULL config-store snapshot (namespace/key/value, every entry —
     //    not a hand-picked key), so e.g. `lsp/zig` agreeing is asserted too,

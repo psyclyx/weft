@@ -3465,3 +3465,63 @@ test "wasm plugin: direnv holds the env capability, and nothing wider" {
         try t.expect(env.commands.find(name) != null);
     }
 }
+
+test "marginalia: a real guest annotates real pick rows, through the whole membrane" {
+    // The end-to-end proof doc/marginalia.md is for: a shipped plugin with no
+    // core privilege binds `ui/pick-annotate`, reads the rows core offers,
+    // reaches back through the introspection doors this work added, and its
+    // answer lands in the column beside the producer's own note.
+    //
+    // The `command` category is the one that exercises the most in one pass:
+    // slot bind over the membrane, `wl_payload_read`, a schema decode INSIDE
+    // the guest, `wl_mode_names`/`wl_binding_table` (which exist only because
+    // "which key runs this" was unanswerable), `wl_payload_push`, core's
+    // decode, and the render column.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try pick_mod.declareAnnotation(&env.container);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "marginalia", @embedFile("guest_marginalia_wasm"), .{});
+    defer plugin.deinit();
+
+    // A keymap the annotator can reverse-index. `git-status` is bound behind
+    // a chord, which is exactly the case an indexed binding door could not
+    // have answered as one row.
+    try env.keymap.bind(gpa, "normal", "space g s", "git-status", 0, "test");
+    try env.keymap.bind(gpa, "normal", "d", "delete-line", 0, "test");
+
+    const Sink = struct {
+        fn accept(_: *command.Context, _: ?*anyopaque, _: pick_mod.Outcome) anyerror!void {}
+    };
+    try env.head.pick.openWith(&env.ctx, "command", &.{
+        .{ .text = "git-status", .doc = "Show the repo status." },
+        .{ .text = "delete-line", .doc = "" },
+        .{ .text = "unbound-command", .doc = "" },
+    }, .{ .handler = Sink.accept }, .{ .category = "command" });
+
+    // The round happens on the tick — the same one that will cover rows a
+    // file pick has not streamed in yet.
+    try t.expect(try env.head.pick.tick(&env.ctx));
+
+    var dbuf: [256]u8 = undefined;
+    try t.expectEqualStrings(env.keymap.displayKey(&dbuf, "space g s"), env.head.pick.annots.items[0]);
+    try t.expectEqualStrings(env.keymap.displayKey(&dbuf, "d"), env.head.pick.annots.items[1]);
+    // A command nobody bound gets no note, not a wrong one.
+    try t.expectEqualStrings("", env.head.pick.annots.items[2]);
+    // The producer's own summary is untouched: the annotator wrote beside it.
+    try t.expectEqualStrings("Show the repo status.", env.head.pick.docs.items[0]);
+
+    // A pick that declares NO category is never offered — the annotator is
+    // loaded and bound throughout, and still says nothing here. This is what
+    // protects git's destructive confirm and an agent's permission prompt.
+    try env.head.pick.open(&env.ctx, "Discard 3 files?", &.{
+        .{ .text = "yes" },
+        .{ .text = "no" },
+    }, .{ .handler = Sink.accept });
+    try t.expect(!try env.head.pick.tick(&env.ctx));
+    try t.expectEqualStrings("", env.head.pick.annots.items[0]);
+}

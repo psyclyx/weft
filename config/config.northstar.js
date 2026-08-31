@@ -80,6 +80,7 @@ weft.grant("files", "fs_write", { root: "/" });
 weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // grant bundle: proc + fs.read
 weft.plugin("debug");       // breakpoints (gutter markers)
+weft.plugin("marginalia");  // pick-row annotations, as an ordinary slot provider
 
 // ── `.js` plugins: no describe() handshake, so a config `weft.grant` is the
 // only door to an effect, and without one they fail closed. These GrantDecls

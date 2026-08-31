@@ -76,6 +76,7 @@ weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface d
 weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
+weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
 
 // ── BREADTH, written down ────────────────────────────────────────────
 // A plugin that asks for `fs_read`/`fs_write` in describe() and gets no

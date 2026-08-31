@@ -1863,6 +1863,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
+    .{ "marginalia", @embedFile("guest_marginalia_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
     // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.
