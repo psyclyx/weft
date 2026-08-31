@@ -3658,6 +3658,32 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
             }
             return false;
         }
+        /// Tick until BOTH named sub-peers have authored on `doc`. Bounded,
+        /// like every other wait here.
+        ///
+        /// A transcript line and an edit on the shared file are two DIFFERENT
+        /// events: waiting for "beta one" to appear in agent two's buffer says
+        /// nothing about whether agent two's write has been applied yet. This
+        /// test used to read `doc.peers` straight after the transcript wait and
+        /// was therefore racing — rarely, and only under load, `codex#2` had
+        /// not arrived and the run failed on a real editor that was working
+        /// correctly.
+        fn untilPeers(p: *JsPlugin, doc: anytype, a: []const u8, b: []const u8) bool {
+            const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+            while (task.nowNs() < deadline) {
+                var seen_a = false;
+                var seen_b = false;
+                for (doc.peers.items) |slot| {
+                    const peer = slot orelse continue;
+                    if (std.mem.eql(u8, peer.name, a)) seen_a = true;
+                    if (std.mem.eql(u8, peer.name, b)) seen_b = true;
+                }
+                if (seen_a and seen_b) return true;
+                _ = p.tick();
+                std.Thread.yield() catch {};
+            }
+            return false;
+        }
         /// Tick for a bounded stretch, asserting `needle` never shows up.
         fn absent(p: *JsPlugin, e: *Env, gpa2: Allocator, name: []const u8, needle: []const u8) bool {
             const deadline = task.nowNs() + 300 * std.time.ns_per_ms;
@@ -3702,14 +3728,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     {
         const id = env.buffers.findByPath(shared) orelse return error.NoAgentBuffer;
         const doc = &env.buffers.get(id).?.textEditor().?.doc;
-        var seen_claude = false;
-        var seen_codex = false;
-        for (doc.peers.items) |slot| {
-            const p = slot orelse continue;
-            if (std.mem.eql(u8, p.name, "claude#1")) seen_claude = true;
-            if (std.mem.eql(u8, p.name, "codex#2")) seen_codex = true;
-        }
-        try t.expect(seen_claude and seen_codex);
+        try t.expect(H.untilPeers(plugin, doc, "claude#1", "codex#2"));
     }
 
     // Answer the OPEN pick — agent one's. Only agent one unblocks: agent two
