@@ -423,6 +423,94 @@ pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intFromEnum(kind);
 }
 
+/// `fs.stat(path)` semantic body (perm fs_read): `fsExists`'s answer plus the
+/// rest of the metadata — size, mtime, permission bits, link count. Confined
+/// by the SAME `gate` and the SAME two layers as its five siblings, which is
+/// the whole reason this is a door here rather than a new `statKind` caller
+/// somewhere convenient: a probe that describes a file must never reach a
+/// file `fsRead` would refuse to hand over (this file's module doc, and the
+/// symlink test `fsExists` already carries — extended to this door).
+///
+/// Mundane failure is `Stat.absent` (kind 0), never an error: only a REFUSAL
+/// is exceptional here. Core interprets none of the fields — see `file.Stat`.
+pub fn fsStat(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Stat {
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, .fs_read, path, &scratch)) {
+        .unconfined => return file.statFull(gpa, path),
+        .within => |w| {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return .absent;
+            defer rfs.close();
+            const relz = gpa.dupeZ(u8, rel) catch return .absent;
+            defer gpa.free(relz);
+            const s = rfs.stat(relz.ptr) catch |e| switch (e) {
+                error.Confined => return error.OutOfLimit,
+                // NotFound and mundane I/O are what "absent" means, exactly
+                // as in `fsExists`; the ONE thing that stays distinguishable
+                // is refusal.
+                else => return .absent,
+            };
+            return .{
+                .kind = switch (s.kind) {
+                    .file => .file,
+                    .dir => .dir,
+                    .other => .other,
+                },
+                .mode = s.mode,
+                .size = s.size,
+                .mtime_ns = s.mtime_ns,
+                .nlink = s.nlink,
+            };
+        },
+        .closed => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched or unresolvable limit
+    }
+}
+
+/// `wl_fs_stat`'s wire record — 32 bytes, little-endian, fixed layout, no
+/// framing. A guest reads it out of its own linear memory with the same
+/// `(ptr,cap)` convention every bulk door here uses; the trailing word is
+/// reserved so one more field can land without a second door.
+pub const stat_record_len = 32;
+
+fn encodeStat(s: file.Stat, out: *[stat_record_len]u8) void {
+    std.mem.writeInt(u32, out[0..4], @intCast(@intFromEnum(s.kind)), .little);
+    std.mem.writeInt(u32, out[4..8], s.mode, .little);
+    std.mem.writeInt(u64, out[8..16], s.size, .little);
+    std.mem.writeInt(i64, out[16..24], s.mtime_ns, .little);
+    std.mem.writeInt(u32, out[24..28], s.nlink, .little);
+    std.mem.writeInt(u32, out[28..32], 0, .little); // reserved
+}
+
+pub fn hFsStat(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    const s = fsStat(p.gpa, p, path) catch |e| {
+        switch (e) {
+            error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_read),
+            error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_read, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_read, path),
+        }
+        return;
+    };
+    // A short destination is -1, never a partial record: half a size is a
+    // worse answer than no answer (`wl_pick_outcome_*`'s exact-read rule,
+    // applied to the one door here whose payload is not self-describing).
+    if (@as(usize, @intCast(args[3])) < stat_record_len) {
+        results[0] = -1;
+        return;
+    }
+    var rec: [stat_record_len]u8 = undefined;
+    encodeStat(s, &rec);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), &rec) catch {
+        results[0] = -1;
+        return;
+    });
+}
+
 /// `fs.write(path, bytes)` semantic body (perm fs_write): replace a file.
 /// `true` ok / `false` on a mundane failure.
 pub fn fsWrite(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8) PermError!bool {
@@ -784,6 +872,78 @@ test "fsExists: a symlink planted INSIDE the root cannot report on a target outs
     const missing = try std.fmt.allocPrint(gpa, "{s}/nope.txt", .{root});
     defer gpa.free(missing);
     try t.expectEqual(file.Kind.none, try fsExists(gpa, &id, missing));
+}
+
+test "fsStat: confined exactly as fsExists is, and it actually carries the metadata" {
+    const gpa = t.allocator;
+
+    // The same three-file fixture the symlink test above builds: a granted
+    // root, a secret outside it, and a link inside pointing out.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/root", .{tmp.sub_path});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/ok.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    try file.writeBytesMakingDirs(gpa, root, inside, "in root");
+    // Deliberately a DIFFERENT length from the in-root file: a stat that
+    // leaked through the link would be caught by the size alone.
+    try file.writeBytes(gpa, outside, "out of root, and considerably longer");
+    const leak = try std.fmt.allocPrintSentinel(gpa, "{s}/leak", .{root}, 0);
+    defer gpa.free(leak);
+    if (!makeSymlink("../secret.txt", leak.ptr)) return error.SkipZigTest;
+
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    var id: TestPrincipal = .{ .grant_table = &table };
+    id.grant_handles[shared.perm_fs_read] =
+        try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "confined", null);
+
+    // The whole reason this is a door in `fs.zig` and not a `statFull` call
+    // somewhere convenient: describing a file must not reach further than
+    // reading it. All three doors agree about the link.
+    try t.expectError(error.OutOfLimit, fsStat(gpa, &id, leak));
+    try t.expectError(error.OutOfLimit, fsExists(gpa, &id, leak));
+    try t.expectError(error.OutOfLimit, fsRead(gpa, &id, leak));
+
+    // …and confinement, not blanket refusal: an in-root file answers with
+    // real metadata.
+    const s = try fsStat(gpa, &id, inside);
+    try t.expectEqual(file.Kind.file, s.kind);
+    try t.expectEqual(@as(u64, "in root".len), s.size);
+    try t.expect(s.mtime_ns > 0);
+    try t.expect(s.nlink >= 1);
+    try t.expect(s.mode & ~file.mode_mask == 0); // permission bits only — the type rides `kind`
+
+    // A directory, and an absent path: absence is DATA (kind 0), never an
+    // error, exactly as `fsExists` answers `.none`.
+    try t.expectEqual(file.Kind.dir, (try fsStat(gpa, &id, root)).kind);
+    const missing = try std.fmt.allocPrint(gpa, "{s}/nope.txt", .{root});
+    defer gpa.free(missing);
+    try t.expectEqual(file.Stat.absent, try fsStat(gpa, &id, missing));
+}
+
+test "fsStat: a `root = \".\"` grant confines it, and the machinery carve-out precedes the grant" {
+    const gpa = t.allocator;
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    var id: TestPrincipal = .{ .grant_table = &table };
+    id.grant_handles[shared.perm_fs_read] =
+        try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = "." } }, "cwd-only", null);
+
+    // Layer 1 has nothing to say about a whole-cwd root; the kernel gate is
+    // the only check, and it is enough — the same hole `fsExists` closed.
+    try t.expectError(error.OutOfLimit, fsStat(gpa, &id, "/etc/passwd"));
+    try t.expectError(error.OutOfLimit, fsStat(gpa, &id, "../"));
+
+    // In cwd it answers, with a size a caller can act on.
+    const s = try fsStat(gpa, &id, "build.zig");
+    try t.expectEqual(file.Kind.file, s.kind);
+    try t.expect(s.size > 0);
+    try t.expectEqual(file.Kind.dir, (try fsStat(gpa, &id, "src")).kind);
+    try t.expectEqual(file.Stat.absent, try fsStat(gpa, &id, "definitely-not-here-xyzzy"));
 }
 
 test "fsExists: a `root = \".\"` grant confines it — the whole-cwd case is a kernel gate, not a no-op" {

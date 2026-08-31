@@ -29,6 +29,20 @@ pub const Error = error{ OpenRoot, Confined, NotFound, Io, Stale } || Allocator.
 /// gives, so a caller can never confuse "nothing there" with "refused".
 pub const Kind = enum { file, dir, other };
 
+/// The permission-bit mask `stat` applies. Mirrors `file.mode_mask` (this
+/// module imports nothing from `file.zig` — see `stat`'s doc).
+pub const mode_mask: u32 = 0o7777;
+
+/// A confined path's metadata — `Kind` plus what a lister wants. Mirrors
+/// `file.Stat` minus its `.none` kind, for the same reason `Kind` does.
+pub const Stat = struct {
+    kind: Kind,
+    mode: u32,
+    size: u64,
+    mtime_ns: i64,
+    nlink: u32,
+};
+
 pub const RootedFs = struct {
     root_fd: i32,
 
@@ -185,10 +199,24 @@ pub const RootedFs = struct {
     /// (`ELOOP` → `error.Confined`) exactly as `read` refuses it — the
     /// symlink policy stays ONE policy across all five doors.
     pub fn kind(self: *const RootedFs, rel: [*:0]const u8) Error!Kind {
+        return (try self.stat(rel)).kind;
+    }
+
+    /// `kind`, with the rest of the metadata — the confined half of
+    /// `file.statFull`. ONE statx, one confinement, so a door that describes
+    /// a path can never reach further than the doors that read it.
+    ///
+    /// `mode` is masked to permission bits (`file.mode_mask`) because the
+    /// type already rides `kind`; stating it in both places is how the two
+    /// come to disagree. Restated here rather than imported: this module
+    /// deliberately knows nothing about `file.zig` (see `Kind`'s doc — its
+    /// missing `.none` variant is the same boundary).
+    pub fn stat(self: *const RootedFs, rel: [*:0]const u8) Error!Stat {
         const fd = try self.openBeneath(rel, .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true }, 0);
         defer _ = linux.close(fd);
         var st: linux.Statx = undefined;
-        const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st);
+        const want: linux.STATX = .{ .TYPE = true, .MODE = true, .SIZE = true, .MTIME = true, .NLINK = true };
+        const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, want, &st);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .NOENT => return error.NotFound,
@@ -196,9 +224,13 @@ pub const RootedFs = struct {
             else => return error.Io,
         }
         const file_type = st.mode & linux.S.IFMT;
-        if (file_type == linux.S.IFREG) return .file;
-        if (file_type == linux.S.IFDIR) return .dir;
-        return .other;
+        return .{
+            .kind = if (file_type == linux.S.IFREG) .file else if (file_type == linux.S.IFDIR) .dir else .other,
+            .mode = @as(u32, st.mode) & mode_mask,
+            .size = st.size,
+            .mtime_ns = st.mtime.sec *| std.time.ns_per_s +| @as(i64, st.mtime.nsec),
+            .nlink = st.nlink,
+        };
     }
 };
 

@@ -402,6 +402,7 @@ pub const imports = [_]Entry{
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
     .{ .name = "wl_fs_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "read a file into the guest, within the grant's bounds (the dispatching place by default)" },
     .{ .name = "wl_fs_exists", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "what a path is (absent/file/dir/other), without reading it; resolved against the grant's bounds — the dispatching place by default" },
+    .{ .name = "wl_fs_stat", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "a path's kind/mode/size/mtime/nlink as a fixed 32-byte record, under the same bounds as `wl_fs_read`" },
     .{ .name = "wl_fs_write", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "replace a file's contents" },
     .{ .name = "wl_fs_append", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "append to a file (capture)" },
     .{ .name = "wl_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list a local directory (locus-routed; remote authorities degrade to -1)" },
@@ -454,7 +455,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 221;
+const expected_import_count = 222;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

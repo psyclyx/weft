@@ -33,14 +33,56 @@ pub fn processDirectory(buf: []u8) ?[]const u8 {
     return std.mem.sliceTo(buf[0..rc], 0);
 }
 
+/// What a path is, beyond its `Kind` — the facts a lister or an annotator
+/// wants and `statKind` cannot give. RAW, deliberately: `mode` is the
+/// permission bits as the kernel reports them (the type lives in `kind`,
+/// never in both places), `mtime_ns` is nanoseconds since the epoch. Nothing
+/// here is interpreted — what "executable", "large" or "recently" mean is the
+/// asker's question, and this file has no business having an opinion about it.
+///
+/// Absence is DATA, not an error (`absent` below), for the same reason
+/// `statKind` answers `.none` rather than failing: a caller enumerating a
+/// directory must be able to tell "gone" from "refused", and only refusal is
+/// exceptional.
+pub const Stat = struct {
+    kind: Kind = .none,
+    /// Permission bits only (`& 0o7777`). Both `statFull` and
+    /// `rooted_fs.RootedFs.stat` mask identically, so the confined and
+    /// unconfined answers cannot disagree about what this field means.
+    mode: u32 = 0,
+    size: u64 = 0,
+    mtime_ns: i64 = 0,
+    nlink: u32 = 0,
+
+    pub const absent: Stat = .{};
+};
+
+/// The permission-bit mask both stat paths apply. Named once so the two
+/// cannot drift.
+pub const mode_mask: u32 = 0o7777;
+
 pub fn statKind(gpa: Allocator, path: []const u8) Kind {
+    return statFull(gpa, path).kind;
+}
+
+/// `statKind`, with the rest of the metadata. Mundane failure (absent,
+/// unreadable) is `Stat.absent` — see that type's doc.
+pub fn statFull(gpa: Allocator, path: []const u8) Stat {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
-    const st = std.Io.Dir.cwd().statFile(threaded.io(), path, .{}) catch return .none;
-    return switch (st.kind) {
-        .file => .file,
-        .directory => .dir,
-        else => .other,
+    const st = std.Io.Dir.cwd().statFile(threaded.io(), path, .{}) catch return .absent;
+    return .{
+        .kind = switch (st.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => .other,
+        },
+        .mode = @as(u32, @truncate(@as(u64, @bitCast(@as(i64, st.permissions.toMode()))))) & mode_mask,
+        .size = st.size,
+        // `Io.Timestamp` is an i96; an mtime that doesn't fit an i64 is a
+        // clock nobody has, and saturating is a better answer than a trap.
+        .mtime_ns = std.math.cast(i64, st.mtime.nanoseconds) orelse std.math.maxInt(i64),
+        .nlink = std.math.cast(u32, st.nlink) orelse std.math.maxInt(u32),
     };
 }
 

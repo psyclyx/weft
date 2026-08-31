@@ -327,6 +327,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
     .{ .name = "wl_fs_read", .handler = fs.hFsRead },
     .{ .name = "wl_fs_exists", .handler = fs.hFsExists },
+    .{ .name = "wl_fs_stat", .handler = fs.hFsStat },
     .{ .name = "wl_fs_write", .handler = fs.hFsWrite },
     .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
@@ -496,6 +497,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_net_connect", .perm = .net }, // sessions.zig hNetConnect: .net
     .{ .name = "wl_fs_read", .perm = .fs_read }, // fs.zig hFsRead: .fs_read
     .{ .name = "wl_fs_exists", .perm = .fs_read }, // fs.zig hFsExists: .fs_read
+    .{ .name = "wl_fs_stat", .perm = .fs_read }, // fs.zig hFsStat: .fs_read
     .{ .name = "wl_fs_write", .perm = .fs_write }, // fs.zig hFsWrite: .fs_write
     .{ .name = "wl_fs_append", .perm = .fs_write }, // fs.zig hFsAppend: .fs_write
     .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read

@@ -282,6 +282,7 @@ extern "weft" fn wl_proc_spool(cmd: u32, cmd_len: u32, input: u32, input_len: u3
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
+extern "weft" fn wl_fs_stat(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
@@ -2480,6 +2481,41 @@ pub fn fsExists(fpath: []const u8) FsKind {
         else => .none, // 0 absent
     };
 }
+/// What `fsStat` answers — `fsExists`'s kind plus the facts a lister wants.
+/// RAW: `mode` is permission bits, `mtime_ns` is nanoseconds since the epoch.
+/// Formatting them ("12.4K", "2h ago") is the caller's job, deliberately: the
+/// membrane carries facts, never a rendering.
+pub const FsStat = struct {
+    kind: FsKind = .none,
+    mode: u32 = 0,
+    size: u64 = 0,
+    mtime_ns: i64 = 0,
+    nlink: u32 = 0,
+
+    pub const absent: FsStat = .{};
+};
+
+/// A path's metadata, under the same grant bounds as `fsRead`. Perm: fs_read.
+/// An absent path answers `.absent` (kind `.none`), not null — only a
+/// REFUSAL is exceptional, and a refusal traps rather than returning.
+pub fn fsStat(fpath: []const u8) FsStat {
+    var rec: [32]u8 = undefined;
+    const n = wl_fs_stat(p(fpath.ptr), @intCast(fpath.len), p(&rec), rec.len);
+    if (n != rec.len) return .absent;
+    return .{
+        .kind = switch (std.mem.readInt(u32, rec[0..4], .little)) {
+            1 => .file,
+            2 => .dir,
+            3 => .other,
+            else => .none,
+        },
+        .mode = std.mem.readInt(u32, rec[4..8], .little),
+        .size = std.mem.readInt(u64, rec[8..16], .little),
+        .mtime_ns = std.mem.readInt(i64, rec[16..24], .little),
+        .nlink = std.mem.readInt(u32, rec[24..28], .little),
+    };
+}
+
 /// Replace a file with `bytes`. Perm: fs_write. Returns success.
 pub fn fsWrite(fpath: []const u8, bytes: []const u8) bool {
     return wl_fs_write(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
