@@ -4,7 +4,7 @@
 //! `return ok_echo(ctx, "…")` in one line.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 
 pub fn ok_echo(ctx: *core.command.Context, msg: []const u8) !core.command.Value {
     ctx.head.echo.clearRetainingCapacity();

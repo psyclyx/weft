@@ -24,9 +24,9 @@
 //! (`qjs_semantic_action` DECLARES a command; `wl_semantic_action` INVOKES
 //! one). That is a naming problem, not a capability one.
 //!
-//! Same `Entry`-data shape as `contract_data.zig` (name/params/results/
+//! Same `Entry`-data shape as `membrane/root.zig` (name/params/results/
 //! group/doc), deliberately NOT unified with it: this is a different
-//! marshalling path (QuickJS-ng's own C shim, `src/quickjs/weft_qjs.c`,
+//! marshalling path (QuickJS-ng's own C shim, `src/core/quickjs/weft_qjs.c`,
 //! calls these — not a Zig guest with externs to verify), and the plugin-
 //! plane names are bound to TWO different handler sets depending on
 //! context (generic reject-stubs on the config linker, real handlers on a
@@ -169,7 +169,7 @@ pub const imports = [_]Entry{
 // A JS plugin is code running inside `quickjs.wasm`, which IS a wasm plugin.
 // It should therefore be able to do what a wasm plugin can — and the reason
 // it cannot, today, is not a decision anybody made. It is that this table was
-// hand-written door by door while `contract_data.zig` grew to 215, so the gap
+// hand-written door by door while `membrane/root.zig` grew to 215, so the gap
 // opened silently and nobody had to look at it.
 //
 // `parity` below makes the gap DATA. Every group of the wasm membrane is
@@ -199,7 +199,7 @@ pub const Parity = enum {
 };
 
 pub const GroupParity = struct {
-    group: @import("contract_data.zig").Group,
+    group: @import("weft_membrane").Group,
     state: Parity,
     /// For `.absent`, what it would take. For the others, what the twin is.
     note: []const u8,
@@ -233,7 +233,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .sessions, .state = .absent, .note = "repl/net sessions; the JS plane has raw proc, which is the transport underneath them" },
 };
 
-/// Same drift-killing tripwire as contract_data.zig's `expected_import_count`
+/// Same drift-killing tripwire as membrane/root.zig's `expected_import_count`
 /// (see that file): bump this BY HAND alongside adding or removing a
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
@@ -246,7 +246,7 @@ comptime {
     // group to `contract_data.Group` and the build stops until someone says
     // what it means for a `.js` plugin.
     @setEvalBranchQuota(20_000);
-    const WasmGroup = @import("contract_data.zig").Group;
+    const WasmGroup = @import("weft_membrane").Group;
     for (std.enums.values(WasmGroup)) |g| {
         var seen = false;
         for (parity) |p| {
@@ -323,7 +323,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
 // residual gap this table CAN'T see: QuickJS-ng's own built-in
 // `Date`/`Math.random`.)
 test "qjs membrane parity: every wasm group is claimed, and the gap is written down" {
-    const WasmGroup = @import("contract_data.zig").Group;
+    const WasmGroup = @import("weft_membrane").Group;
     // Every group, exactly once — the comptime block proves this too; the
     // runtime copy is here so `zig build test` reports it as a named failure
     // rather than a build error nobody reads twice.

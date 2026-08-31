@@ -3,10 +3,10 @@
 //! pane geometry) and keeps the focused pane == the active buffer.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
-const view_mod = @import("../gfx/view.zig");
-const region = @import("../gfx/region.zig");
-const window_layout = @import("../gfx/window_layout.zig");
+const core = @import("weft_core");
+const view_mod = @import("weft_gfx").view;
+const region = @import("weft_gfx").region;
+const window_layout = @import("weft_gfx").window_layout;
 const ok_echo = @import("handler.zig").ok_echo;
 
 /// Window-layout intents; applied in the frame loop (which owns the pane

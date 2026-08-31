@@ -8,7 +8,7 @@
 const std = @import("std");
 
 const stemma = @import("stemma");
-const core = @import("../../core/core.zig");
+const core = @import("weft_core");
 const region = @import("../region.zig");
 const ui_mesh = @import("ui_mesh.zig");
 const semantic_data = @import("semantic_data.zig");

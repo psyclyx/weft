@@ -9,7 +9,7 @@
 //! registry. See [[lsp-plugin-migration]].
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const collab = @import("collab.zig");
 
 /// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as
@@ -261,7 +261,7 @@ pub const Providers = struct {
 // can already call. Whichever fires, the answer is the same — put a real
 // gate on the door BEFORE it becomes reachable, not after.
 
-const contract_data = @import("../core/membrane/contract_data.zig");
+const contract_data = @import("weft_membrane");
 
 /// The census: every wasm-membrane import that could plausibly run a
 /// command (see `mustBeCensused`), and the number of arguments it hands

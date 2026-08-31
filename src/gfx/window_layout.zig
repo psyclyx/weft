@@ -61,7 +61,7 @@
 
 const std = @import("std");
 const region = @import("region.zig");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 
 pub const Rect = region.Rect;
 pub const Axis = region.Axis;

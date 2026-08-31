@@ -8,7 +8,7 @@
 const std = @import("std");
 
 const scene = @import("weft_scene");
-const core = @import("../../core/core.zig");
+const core = @import("weft_core");
 
 const HighlightClass = core.capability.HighlightClass;
 const StyleClass = core.capability.StyleClass;

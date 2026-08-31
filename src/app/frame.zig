@@ -14,10 +14,10 @@
 //! the seam that grouping will replace.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
-const region = @import("../gfx/region.zig");
-const view_mod = @import("../gfx/view.zig");
-const window_layout = @import("../gfx/window_layout.zig");
+const core = @import("weft_core");
+const region = @import("weft_gfx").region;
+const view_mod = @import("weft_gfx").view;
+const window_layout = @import("weft_gfx").window_layout;
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const window_cmds = @import("window_cmds.zig");

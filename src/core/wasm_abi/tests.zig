@@ -7,7 +7,6 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
-const dispatch = @import("../../app/dispatch.zig");
 const kv = @import("../kv.zig");
 const file = @import("../file.zig");
 const pick_mod = @import("../pick.zig");
@@ -1061,7 +1060,7 @@ test "wasm plugin: init-phase table-config declarations are unaffected by dispat
     defer engine.deinit();
     // headtest's `init()` (a BACKGROUND entry) calls `weft.restingMode("poked")`
     // — a mode TABLE declaration (Keymap-owned, not Head-owned; see
-    // contract_data.zig's `.head_gated` doc). `loadPlugin` returning at all
+    // membrane/root.zig's `.head_gated` doc). `loadPlugin` returning at all
     // (not a load-time trap) is the proof: `wl_resting_mode` stayed ungated.
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
@@ -1991,43 +1990,6 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     try t.expectEqualStrings("row-a\nrow-a", s);
     const pasted = subs.at(&ed.doc, 8) orelse return error.NoIdOnPastedRow;
     try t.expectEqualStrings("42", pasted.fact("id").?);
-}
-
-test "wasm plugin: explicit named text register survives a later delete yank" {
-    const gpa = t.allocator;
-    var env: Env = undefined;
-    try Env.init(gpa, &env);
-    defer env.deinit(gpa);
-    var engine = try wasm.Engine.init(gpa);
-    defer engine.deinit();
-    var bank: register.Bank = .{};
-    defer bank.deinit(gpa);
-    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
-    defer operators.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &bank });
-    defer plugin.deinit();
-
-    const ed = env.buffers.active().textEditor().?;
-    try ed.insertText(gpa, "alpha\nbeta");
-    ed.placeCursor(0);
-    // The command sequence is the wasm equivalent of `"ayy`.
-    try dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
-    try dispatch.dispatchSpec(&env.ctx, "a", .none);
-    try dispatch.dispatchSpec(&env.ctx, "y", .none);
-    try dispatch.dispatchSpec(&env.ctx, "y", .none);
-    // Capture the later line into unnamed (the same capture that precedes
-    // `dd`) and remove it; this keeps the test focused on register routing.
-    ed.placeCursor(6);
-    try dispatch.dispatchSpec(&env.ctx, "d", .none);
-    try dispatch.dispatchSpec(&env.ctx, "d", .none);
-    // The final sequence is `"ap`; it reads the named slot explicitly.
-    ed.placeCursor(0);
-    try dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
-    try dispatch.dispatchSpec(&env.ctx, "a", .none);
-    try dispatch.dispatchSpec(&env.ctx, "p", .none);
-    const text = try ed.text().toOwnedSlice(gpa);
-    defer gpa.free(text);
-    try t.expectEqualStrings("alpha\nalpha\n", text);
 }
 
 test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" {

@@ -202,7 +202,7 @@ active_ctx: *command.Context,
 /// (already true, or promoting it from false — see `wasm_host/plugin.zig`'s
 /// `requireDispatch` doc for what that promotion means) and restores
 /// whatever it was on the way out — LIFO, never a bare set. Every head-
-/// gated `wasm_host/*` handler (`contract_data.zig`'s `.head_gated = true`
+/// gated `wasm_host/*` handler (`membrane/root.zig`'s `.head_gated = true`
 /// entries) calls `requireDispatch` first, which reads this field (and
 /// `loading`, below).
 in_dispatch: bool = false,

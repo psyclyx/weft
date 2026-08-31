@@ -9,52 +9,52 @@
 //!   weft [file] [--font path.ttf] [--em N] [--plugin p.wasm]... [--config config.js]
 
 const std = @import("std");
-const core = @import("core/core.zig");
+const core = @import("weft_core");
 const build_options = @import("build_options");
-const view_mod = @import("gfx/view.zig");
-const region = @import("gfx/region.zig");
-const window_layout = @import("gfx/window_layout.zig");
-const stats_mod = @import("gfx/stats.zig");
+const view_mod = @import("weft_gfx").view;
+const region = @import("weft_gfx").region;
+const window_layout = @import("weft_gfx").window_layout;
+const stats_mod = @import("weft_gfx").stats;
 const stemma = @import("stemma");
-const vk = @import("vk.zig").c;
+const vk = @import("weft_vk").c;
 const font_provider = @import("weft_font_provider");
 
 const embedded_font = font_provider.defaultMono();
 
 const headless = @import("headless.zig");
 
-const handler = @import("app/handler.zig");
+const handler = @import("weft_app").handler;
 const ok_echo = handler.ok_echo;
 const setEcho = handler.setEcho;
-const scroll = @import("app/scroll.zig");
-const window_cmds = @import("app/window_cmds.zig");
-const cursor_config = @import("app/cursor_config.zig");
-const config_load = @import("app/config_load.zig");
-const dispatch = @import("app/dispatch.zig");
-const setup = @import("app/setup.zig");
-const session_mod = @import("app/session.zig");
+const scroll = @import("weft_app").scroll;
+const window_cmds = @import("weft_app").window_cmds;
+const cursor_config = @import("weft_app").cursor_config;
+const config_load = @import("weft_app").config_load;
+const dispatch = @import("weft_app").dispatch;
+const setup = @import("weft_app").setup;
+const session_mod = @import("weft_app").session;
 const Session = session_mod.Session;
-const window_head = @import("app/window_head.zig");
-const application_mod = @import("app/application.zig");
-const frame_mod = @import("app/frame.zig");
-const collab = @import("app/collab.zig");
-const collab_cmds = @import("app/collab_cmds.zig");
-const loop_sources = @import("app/loop_sources.zig");
+const window_head = @import("weft_app").window_head;
+const application_mod = @import("weft_app").application;
+const frame_mod = @import("weft_app").frame;
+const collab = @import("weft_app").collab;
+const collab_cmds = @import("weft_app").collab_cmds;
+const loop_sources = @import("weft_app").loop_sources;
 const scheduler = core.scheduler;
 const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab_cmds.identityHandler;
 const guiConfigure = collab.guiConfigure;
-const providers = @import("app/providers.zig");
+const providers = @import("weft_app").providers;
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
 const resolveSyntax = providers.resolveSyntax;
 const lspAddCommand = providers.lspAddCommand;
 const grammarAddCommand = providers.grammarAddCommand;
 const reconnectTask = providers.reconnectTask;
-const buffers_cmds = @import("app/buffers_cmds.zig");
+const buffers_cmds = @import("weft_app").buffers_cmds;
 
-const arg_parse = @import("app/args.zig");
+const arg_parse = @import("weft_app").args;
 const Args = arg_parse.Args;
 const parseArgs = arg_parse.parseArgs;
 

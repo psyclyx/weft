@@ -12,9 +12,9 @@ const session = h.session;
 const region = h.region;
 const window_layout = h.window_layout;
 const harness = h.gfx_harness;
-const app_providers = h.app_providers;
-const app_session = h.app_session;
-const app_collab = h.app_collab;
+const app_providers = h.app.providers;
+const app_session = h.app.session;
+const app_collab = h.app.collab;
 const semantic = h.semantic_model;
 
 const Editor = h.Editor;

@@ -11,9 +11,9 @@ const session = h.session;
 const region = h.region;
 const window_layout = h.window_layout;
 const harness = h.gfx_harness;
-const app_providers = h.app_providers;
-const app_session = h.app_session;
-const app_collab = h.app_collab;
+const app_providers = h.app.providers;
+const app_session = h.app.session;
+const app_collab = h.app.collab;
 
 const Editor = h.Editor;
 const Loopback = h.Loopback;
@@ -266,4 +266,47 @@ test "workflow: intentions — Return resolves its fallback list through the cat
     try t.expect(trace.outcome == .decision);
     try t.expectEqual(@as(u32, 1), trace.outcome.decision.arm);
     try t.expectEqualStrings("core.editing", plane.catalog.providerName(trace.outcome.decision.provider));
+}
+
+// Moved here from core/wasm_abi/tests.zig, which reached UP into
+// `app/dispatch.zig` to get it — the one core->app import in the tree, and
+// something a module wall now makes impossible. The test is genuinely
+// cross-layer (core's wasm membrane driven through app's keypress path), so it
+// belongs at the layer that legitimately sees both. Kept verbatim rather than
+// re-expressed in the harness idiom, so what it covers is unchanged.
+test "wasm plugin: explicit named text register survives a later delete yank" {
+    const gpa = t.allocator;
+    var env: core.TestHost = undefined;
+    try core.TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try core.wasm.Engine.init(gpa);
+    defer engine.deinit();
+    var bank: core.register.Bank = .{};
+    defer bank.deinit(gpa);
+    const operators = try core.wasm_abi.loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+    const plugin = try core.wasm_abi.loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &bank });
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "alpha\nbeta");
+    ed.placeCursor(0);
+    // The command sequence is the wasm equivalent of `"ayy`.
+    try h.dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "a", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "y", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "y", .none);
+    // Capture the later line into unnamed (the same capture that precedes
+    // `dd`) and remove it; this keeps the test focused on register routing.
+    ed.placeCursor(6);
+    try h.dispatch.dispatchSpec(&env.ctx, "d", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "d", .none);
+    // The final sequence is `"ap`; it reads the named slot explicitly.
+    ed.placeCursor(0);
+    try h.dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "a", .none);
+    try h.dispatch.dispatchSpec(&env.ctx, "p", .none);
+    const text = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("alpha\nalpha\n", text);
 }

@@ -6,7 +6,7 @@ const std = @import("std");
 const semantic = @import("weft_semantic");
 const target_runtime = @import("weft_target_runtime");
 const view_runtime = @import("weft_view_runtime");
-const input = @import("input.zig");
+const input = @import("weft_input");
 const Head = @import("Head.zig");
 
 pub const Services = struct {

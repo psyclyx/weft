@@ -6,7 +6,7 @@
 //! order they had inline (registration is last-wins — order is load-bearing).
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const cursor_config = @import("cursor_config.zig");
 const dispatch = @import("dispatch.zig");
 const providers = @import("providers.zig");

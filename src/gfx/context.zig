@@ -4,7 +4,7 @@
 //! copies, submits, and presents swapchain images.
 
 const std = @import("std");
-const vkmod = @import("../vk.zig");
+const vkmod = @import("weft_vk");
 const vk = vkmod.c;
 const swapchain_state = @import("swapchain_state.zig");
 

@@ -4,8 +4,8 @@
 //! the runtime `set-color` theme command and the markdown-path test.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
-const view_mod = @import("../gfx/view.zig");
+const core = @import("weft_core");
+const view_mod = @import("weft_gfx").view;
 
 pub const CursorConfig = struct {
     const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, blink: bool = false };

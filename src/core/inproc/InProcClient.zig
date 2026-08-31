@@ -28,7 +28,7 @@
 //! field name on either struct fails to COMPILE the guard call, exactly
 //! like a nominal interface would) while keeping this a genuinely small,
 //! reviewable diff on the wasm side. This mirrors a convention already
-//! established in this codebase for the same reason: `platform/platform.zig`'s
+//! established in this codebase for the same reason: `platform/root.zig`'s
 //! `assertPlatform` is a comptime duck-typed decl set, not a vtable or a
 //! shared base type — `assertClientIdentity` below is the identical move one layer down (a
 //! shared FIELD shape instead of a shared DECL shape).
@@ -190,7 +190,7 @@ pub const InProcClient = struct {
 /// `hasPerm`/`canDispatch` duck-type against (`perms`, `in_dispatch`,
 /// `loading`, `name`) — the compile-time proof that `InProcClient` and
 /// `WasmPlugin` really do share ONE guard contract, not two that happen to
-/// look alike today. Mirrors `platform/platform.zig`'s `assertPlatform`
+/// look alike today. Mirrors `platform/root.zig`'s `assertPlatform`
 /// convention (comptime duck-typed contract, not a vtable or a shared
 /// nominal base).
 pub fn assertClientIdentity(comptime T: type) void {

@@ -6,7 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command_mod = @import("../command.zig");
-const input = @import("../input.zig");
+const input = @import("weft_input");
 const Keymap = @import("../Keymap.zig");
 
 const shared = @import("plugin.zig");

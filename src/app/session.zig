@@ -36,12 +36,12 @@
 //! separate `main()` local — see `frame.MenuOverlay`'s field doc for why.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");
 const frame = @import("frame.zig");
-const ui_mesh = @import("../gfx/view.zig").ui_mesh;
+const ui_mesh = @import("weft_gfx").view.ui_mesh;
 const fs_platform = @import("weft_fs_platform");
 const fs = @import("weft_fs");
 const fs_runtime = @import("weft_fs_runtime");
@@ -820,7 +820,24 @@ test "session: config manifest invokes the production grammar-add command with a
     defer tmp.cleanup();
     try tmp.dir.createDirPath(t.io, "grammar/queries");
     try tmp.dir.writeFile(t.io, .{ .sub_path = "grammar/queries/highlights.scm", .data = "" });
-    const tmp_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/grammar", .{tmp.sub_path});
+    // ABSOLUTE, deliberately. `syntax.Runtime.resolveDir` takes a grammar path
+    // verbatim only when it is absolute; a relative one is searched along
+    // `search_path`, which this bare `.empty` Runtime does not have, so the
+    // registration would fail with GrammarNotFound and the apply below would
+    // silently do nothing. That is what it did while nothing compiled it.
+    const tmp_rel = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/grammar", .{tmp.sub_path});
+    defer gpa.free(tmp_rel);
+    // ABSOLUTE, deliberately, and joined onto the process directory rather than
+    // handed to `std.fs.path.resolve` alone — which normalises `.`/`..` but is
+    // documented NOT to make a relative path absolute (see `placeForFile`'s
+    // note above, which learned the same thing). `syntax.Runtime.resolveDir`
+    // takes a grammar path verbatim only when it is absolute; a relative one is
+    // searched along `search_path`, which this bare `.empty` Runtime does not
+    // have, so `add` returns GrammarNotFound and the apply silently does
+    // nothing. That is what it did while nothing compiled this test.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const here = core.file.processDirectory(&cwd_buf) orelse return error.NoProcessDirectory;
+    const tmp_path = try std.fs.path.resolve(gpa, &.{ here, tmp_rel });
     defer gpa.free(tmp_path);
     const source = try std.fmt.allocPrint(gpa, "weft.run('grammar-add', '.fixture', '{s}', 'tree_sitter_fixture');", .{tmp_path});
     defer gpa.free(source);
@@ -840,6 +857,13 @@ test "session: config manifest invokes the production grammar-add command with a
     defer manifest.destroy();
     try t.expectEqual(@as(usize, 1), manifest.runs.items.len);
     try t.expectEqualStrings(tmp_path, manifest.runs.items[0].args[1].value);
+
+    // The PRODUCTION command, which is this test's whole subject — bound the
+    // way setup.zig binds it for the real app. `Session.init` does not bind it
+    // (grammar-add hangs off the caller-owned registry, by design), so without
+    // this the apply below resolves nothing, logs a warning, and the final
+    // assertion can never hold. That is what it did while nothing compiled it.
+    _ = try sess.system.commands.bind(gpa, "grammar-add", providers.grammarAddCommand(&grammars));
 
     var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = &sess.cmd_ctx, .loader = null, .config = &sess.system.config_kv };
     try manifest.apply(gpa, &actx);
@@ -943,7 +967,7 @@ test "session: local directories become deduplicated semantic targets while file
     // target handler. No process cwd or core-side path joining participates.
     sess.head.working_target = .{
         .target = first_target,
-        .revision = sess.directory_targets[0].publication.revision,
+        .revision = sess.directory_targets.items[0].publication.revision,
     };
     _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "open-relative", &.{.{ .string = "child\n\xfe" }});
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
@@ -986,16 +1010,16 @@ test "session: local directories become deduplicated semantic targets while file
     // lexical path later reacquires a fresh root handle, but provider identity
     // comparison must reuse the existing publication and session.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, tmp_path));
-    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
 
     // Reopening the same publication reuses the handler-owned retained view;
     // it does not create shared mutable draft state or a text-buffer twin.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(first_target, sess.directory_targets.items[0].publication.ref);
     try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
-    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
     try t.expect(!try sess.openLocalDirectory(&sess.cmd_ctx, file_path));
-    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
 
     // A directory can be renamed and replaced at its old path while its
     // original fd remains pinned. Opening that path must resolve the new
@@ -1004,12 +1028,12 @@ test "session: local directories become deduplicated semantic targets while file
     try tmp.dir.rename("odd\n\xff", tmp.dir, "moved\n\xff", t.io);
     try tmp.dir.createDirPath(t.io, "odd\n\xff");
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
-    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
-    try t.expect(!sess.directory_targets.items[2].publication.ref.eql(first_target));
+    try t.expectEqual(@as(usize, 4), sess.directory_targets.items.len);
+    try t.expect(!sess.directory_targets.items[3].publication.ref.eql(first_target));
 
     var replacement_parent = try sess.system.semantic.resolveTargetRelation(gpa, .{
-        .target = sess.directory_targets.items[2].publication.ref,
-        .revision = sess.directory_targets.items[2].publication.revision,
+        .target = sess.directory_targets.items[3].publication.ref,
+        .revision = sess.directory_targets.items[3].publication.revision,
     }, "container");
     defer replacement_parent.deinit();
     try t.expectEqual(sess.directory_targets.items[1].publication.ref, replacement_parent.value.resolved.target);
@@ -1027,10 +1051,10 @@ test "session: local directories become deduplicated semantic targets while file
     defer replacement_child.deinit();
     const replacement_child_target = replacement_child.value.resolved.target;
     try t.expect(!replacement_child_target.eql(child_target));
-    try t.expectEqual(@as(usize, 4), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 5), sess.directory_targets.items.len);
     try t.expect(!try sess.filesystem_system.filesystems.sameRoot(
-        sess.directory_targets.items[2].root,
         sess.directory_targets.items[3].root,
+        sess.directory_targets.items[4].root,
     ));
 
     var replacement_child_again = try sess.system.semantic.resolveTargetRelationWithSelector(gpa, .{
@@ -1039,7 +1063,7 @@ test "session: local directories become deduplicated semantic targets while file
     }, target_runtime.relation.standard.child, "child\n\xfe");
     defer replacement_child_again.deinit();
     try t.expectEqual(replacement_child_target, replacement_child_again.value.resolved.target);
-    try t.expectEqual(@as(usize, 4), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 5), sess.directory_targets.items.len);
 }
 
 test "session: GATE — system-swap live-rebinds the REAL Session's head; buffers/commands/keymap switch, refuses on an open transient" {
@@ -1064,14 +1088,22 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     // Type into the editor system first — lands on ITS buffer.
     _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "editor text" }});
 
+    // Bound into BOTH systems, because a command table is per-system — which
+    // is the very thing this test asserts a few lines below
+    // (`cmd_ctx.commands == &agent_sys.commands`). Binding only into the
+    // editor's table and then invoking the swap-back against the agent's is
+    // `error.UnknownCommand`, and is what this test did while nothing compiled
+    // it.
     var swap_data: Session.SwapCmdData = .{ .session = &sess };
-    try sess.system.commands.bind(gpa, "system-swap", .{
+    const swap_spec: core.command.Command = .{
         .name = "system-swap",
         .summary = "test",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = Session.systemSwapHandler,
         .data = &swap_data,
-    });
+    };
+    _ = try editor_sys.commands.bind(gpa, "system-swap", swap_spec);
+    _ = try agent_sys.commands.bind(gpa, "system-swap", swap_spec);
 
     // The swap runs through the ORDINARY command surface — proving this
     // isn't a special path, exactly like `core/System.zig`'s own "via the
@@ -1130,7 +1162,7 @@ test "session: SwapCmdData.isBlocked refuses loudly BEFORE touching the Host —
         }
     };
     var swap_data: Session.SwapCmdData = .{ .session = &sess, .isBlocked = AlwaysBlocked.blocked };
-    try sess.system.commands.bind(gpa, "system-swap", .{
+    _ = try sess.system.commands.bind(gpa, "system-swap", .{
         .name = "system-swap",
         .summary = "test",
         .args = &.{.{ .name = "name", .type = .string }},

@@ -1,4 +1,4 @@
-//! `weft_application` — platform- and renderer-independent application-wake
+//! `weft_lifecycle` — platform- and renderer-independent application-wake
 //! policy.
 //!
 //! The module owns only sequencing and the tiny state whose meaning is defined

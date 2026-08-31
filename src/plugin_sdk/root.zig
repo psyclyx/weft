@@ -1,14 +1,23 @@
-//! weft.zig (guest side) — the ABI a `.wasm` plugin sees, and the ONLY door it
-//! has: every call here is an `extern "weft"` host import (the grant), scalars
-//! cross as i32/u32, and bulk bytes cross through the guest's own linear
-//! memory — either the host reads `(ptr, len)` out of us (writes: `edit`,
-//! `kvPut`) or fills a scratch buffer we hand it `(ptr, cap)` and returns the
-//! length (reads: `slice`, `kvGet`, `path`). No host pointer ever reaches the
-//! guest.
+//! `weft` (guest side) — the ABI a `.wasm` plugin sees, and the ONLY door it
+//! has: every call here bottoms out in an `extern "weft"` host import (the
+//! grant), scalars cross as i32/u32, and bulk bytes cross through the guest's
+//! own linear memory — either the host reads `(ptr, len)` out of us (writes:
+//! `edit`, `kvPut`) or fills a scratch buffer we hand it `(ptr, cap)` and
+//! returns the length (reads: `slice`, `kvGet`, `path`). No host pointer ever
+//! reaches the guest.
 //!
-//! The externs below are hand-written but comptime-VERIFIED against
-//! `core/membrane/contract_data.zig` (see the `comptime` block after the
-//! extern list), so this file cannot drift from the host's table.
+//! **The doors live in `externs.zig`**, reached here as `e.wl_*`: 231
+//! hand-written externs plus the comptime tripwire that holds them to
+//! `membrane/root.zig`'s table, so neither half can drift from the other. This
+//! file is the ERGONOMICS over them — the surface guest code actually calls.
+//!
+//! Everything public here is flat (`weft.slice`, `weft.edit`) because that is
+//! the API 50 plugins are written against. Zig 0.16 removed `usingnamespace`,
+//! so a namespace cannot be composed from several files without one
+//! re-export line per declaration; splitting these 232 wrappers into topical
+//! files would buy a smaller implementation and a 232-line catalogue to go
+//! with it. The doors were worth separating because they cost NO re-exports
+//! and are the security-relevant surface; the wrappers are not.
 //!
 //! Permission groups: A core (log), the describe-phase declarations
 //! (declareCommand/requestPerm), B read-only (cursor/byteLen/slice/lineAt/
@@ -26,19 +35,17 @@ const std = @import("std");
 pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 
 /// The pure-data half of the membrane contract (core/membrane/
-/// contract_data.zig) — no wasmtime/wasm_host dependency, so it compiles
+/// membrane/root.zig) — no wasmtime/wasm_host dependency, so it compiles
 /// here under wasm32-freestanding same as the host side does. Used below
 /// ONLY by the comptime verification block; the ergonomic wrappers don't
 /// reference it.
-const contract_data = @import("membrane_contract_data");
-
-/// The input boundary's vocabulary (core/input.zig) — the SAME `Posture`
+/// The input boundary's vocabulary (input/root.zig) — the SAME `Posture`
 /// enum the host resolves, imported as a named module for the same reason
 /// `contract_data` is: a guest-side copy of a wire enum is exactly the drift
 /// this membrane exists to prevent.
 pub const Posture = @import("weft_input").Posture;
 
-/// D2's schema language + marshaller (core/schema.zig), imported under the
+/// D2's schema language + marshaller (schema/root.zig), imported under the
 /// SAME name a guest's own code uses to reach it directly for a build-time-
 /// known slot's typed encode/decode (§3.3's build-time codegen arm is a
 /// LATER step; every guest today, including this SDK's own ergonomic
@@ -54,300 +61,9 @@ pub const semantic_codec = @import("weft_scene_codec");
 pub const fs = @import("weft_fs");
 pub const fs_codec = @import("weft_fs_codec");
 
-// ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
-// wrappers below as the surface guest code actually calls. Hand-written —
-// Zig 0.16 can't synthesize an `extern fn` declaration from a comptime loop
-// (no `@Type`, no `usingnamespace` decl-merging) — but comptime-VERIFIED
-// against `contract_data.imports` below: an arity or signedness slip here,
-// or an extern this file forgot to add/remove after the table changed,
-// fails the BUILD (see the `comptime` block right after the extern list),
-// not a silent runtime drift. ──
-extern "weft" fn wl_log(level: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_declare_command(ptr: u32, len: u32) void;
-extern "weft" fn wl_declare_command_doc(ptr: u32, len: u32, params: u32, params_len: u32, summary: u32, summary_len: u32) void;
-extern "weft" fn wl_declare_capability(ptr: u32, len: u32) void;
-extern "weft" fn wl_request_perm(perm: u32) void;
-extern "weft" fn wl_cursor() u32;
-extern "weft" fn wl_byte_len() u32;
-extern "weft" fn wl_doc_snapshot() i32;
-extern "weft" fn wl_doc_snapshot_is_current(handle: u32) u32;
-extern "weft" fn wl_doc_snapshot_release(handle: u32) void;
-extern "weft" fn wl_slice(start: u32, end: u32, out_ptr: u32, out_cap: u32) u32;
-extern "weft" fn wl_line_at(offset: u32, out_ptr: u32) void;
-extern "weft" fn wl_selection(out_ptr: u32) u32;
-extern "weft" fn wl_path(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_render(start: u32, end: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_edit_as(agent: u32, agent_len: u32, start: u32, end: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_register(ptr: u32, len: u32) u32;
-extern "weft" fn wl_jump(offset: u32) void;
-extern "weft" fn wl_flash(start: u32, end: u32) void;
-extern "weft" fn wl_style_clear() void;
-extern "weft" fn wl_style(start: u32, end: u32, class: u32) void;
-extern "weft" fn wl_fold_clear() void;
-extern "weft" fn wl_fold(start: u32, end: u32) void;
-extern "weft" fn wl_readonly_clear() void;
-extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
-extern "weft" fn wl_decorate_clear() void;
-extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_breakpoint_toggle(offset: u32) i32;
-extern "weft" fn wl_breakpoint_clear() void;
-extern "weft" fn wl_breakpoint_offsets(ptr: u32, cap: u32) i32;
-// Annotation layers: decorate an entry this plugin does not own (§11.7).
-extern "weft" fn wl_annotate_open(entry: u32, ptr: u32, len: u32) i32;
-extern "weft" fn wl_annotate_close(handle: u32) void;
-extern "weft" fn wl_annotate_len(handle: u32) i32;
-extern "weft" fn wl_annotate_read(handle: u32, start: u32, end: u32, ptr: u32, cap: u32) i32;
-extern "weft" fn wl_annotate_begin(handle: u32) i32;
-extern "weft" fn wl_annotate_span(handle: u32, start: u32, end: u32, role: u32, placement: u32, ptr: u32, len: u32) void;
-// Native `editor` surface + anchored ranges. A range crosses as an opaque u32
-// handle into a host-side table of document-owned anchors.
-extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
-extern "weft" fn wl_set_selection(start: u32, end: u32) void;
-extern "weft" fn wl_anchor_range(start: u32, end: u32) i32;
-extern "weft" fn wl_set_result_range(handle: u32) void;
-extern "weft" fn wl_run_range(ptr: u32, len: u32) i32;
-extern "weft" fn wl_range_ends(handle: u32, out_ptr: u32) i32;
-extern "weft" fn wl_range_retain(handle: u32) i32;
-extern "weft" fn wl_range_release(handle: u32) void;
-extern "weft" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;
-extern "weft" fn wl_arg_range(i: u32) i32;
-extern "weft" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
-extern "weft" fn wl_echo(ptr: u32, len: u32) void;
-// Command args (readable during on_command) + result (set during it).
-extern "weft" fn wl_arg_count() u32;
-extern "weft" fn wl_arg_int(i: u32) i32;
-extern "weft" fn wl_arg_str(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_set_result_int(n: i32) void;
-extern "weft" fn wl_set_result_str(ptr: u32, len: u32) void;
-// Config surface (the local plane — bindings/modes, as init.fnl did).
-extern "weft" fn wl_bind_key(m: u32, ml: u32, k: u32, kl: u32, c: u32, cl: u32) void;
-extern "weft" fn wl_bind_keys(m: u32, ml: u32, k: u32, kl: u32, list: u32, list_len: u32) void;
-extern "weft" fn wl_set_mode(ptr: u32, len: u32) void;
-extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
-extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
-extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
-extern "weft" fn wl_resting_mode(ptr: u32, len: u32) void;
-extern "weft" fn wl_exit_to_resting() void;
-extern "weft" fn wl_resting_posture(posture: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_posture() u32;
-extern "weft" fn wl_declare_posture(posture: u32) void;
-extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
-extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
-extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
-extern "weft" fn wl_run(ptr: u32, len: u32) void;
-extern "weft" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
-extern "weft" fn wl_run_str(ptr: u32, len: u32, s: u32, sl: u32) void;
-extern "weft" fn wl_run_str2(ptr: u32, len: u32, a: u32, al: u32, b: u32, bl: u32) void;
-extern "weft" fn wl_run_argv(ptr: u32, len: u32, vec: u32, argc: u32) void;
-// Introspection (palettes/help/buffers pickers).
-extern "weft" fn wl_command_count() u32;
-extern "weft" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_command_arity(i: u32) i32;
-extern "weft" fn wl_command_arity_required(i: u32) i32;
-extern "weft" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
-// The focused context's live offers, and the door one is accepted through.
-extern "weft" fn wl_offer_count() u32;
-extern "weft" fn wl_offer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_offer_provider(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_offer_reason(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;
-extern "weft" fn wl_offer(i: u32, il: u32, c: u32, cl: u32, r: u32, rl: u32) u32;
-extern "weft" fn wl_offers_commit() u32;
-extern "weft" fn wl_offers_retract() void;
-extern "weft" fn wl_buffer_count() u32;
-extern "weft" fn wl_buffer_id(i: u32) i32;
-extern "weft" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_buffer_active(i: u32) u32;
-extern "weft" fn wl_mode_names(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_binding_table(mode_ptr: u32, mode_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_buffer_readonly(i: u32) u32;
-extern "weft" fn wl_buffer_path(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_buffer_dirty(i: u32) i32;
-extern "weft" fn wl_buffer_lang(i: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_buffer_byte_len(i: u32) i32;
-extern "weft" fn wl_buffer_tool(i: u32, out_ptr: u32, out_cap: u32) i32;
-// Fuzzy pick (built incrementally, then opened; accept dispatches back to the
-// guest's on_pick_accept export).
-extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
-extern "weft" fn wl_pick_free_text(on: u32) void;
-extern "weft" fn wl_pick_category(ptr: u32, len: u32) void;
-extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
-extern "weft" fn wl_pick_add_keyed(t: u32, tl: u32, d: u32, dl: u32, k: u32, kl: u32) void;
-extern "weft" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
-extern "weft" fn wl_pick_end() void;
-extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
-extern "weft" fn wl_pick_outcome_kind() i32;
-extern "weft" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_pick_outcome_index() i32;
-extern "weft" fn wl_pick_outcome_buffer() i32;
-extern "weft" fn wl_pick_outcome_match_start() i32;
-extern "weft" fn wl_pick_outcome_match_span() i32;
-extern "weft" fn wl_surface_begin(placement: u32) void;
-extern "weft" fn wl_surface_caret(offset: u32) void;
-extern "weft" fn wl_surface_row() void;
-extern "weft" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
-extern "weft" fn wl_surface_end(selected: i32) void;
-extern "weft" fn wl_surface_close() void;
-extern "weft" fn wl_menu_binding_count() i32;
-extern "weft" fn wl_menu_binding_key(i: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_menu_binding_cmd(i: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_menu_binding_is_group(i: u32) i32;
-extern "weft" fn wl_menu_binding_intent_status(i: u32) i32;
-extern "weft" fn wl_menu_binding_intent(i: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_menu_binding_intent_note(i: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_provide_completion() void;
-extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
-extern "weft" fn wl_caps_item(session: i32, t: u32, tl: u32, l: u32, ll: u32, d: u32, dl: u32, kind: i32, doc: u32, docl: u32, rank: i32) void;
-extern "weft" fn wl_caps_commit(session: i32) void;
-extern "weft" fn wl_caps_decline(session: i32) void;
-// Structural (tree-sitter) read + subbuffers.
-extern "weft" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
-extern "weft" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
-extern "weft" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
-extern "weft" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
-extern "weft" fn wl_node_children(off: u32) i32;
-extern "weft" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
-extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
-extern "weft" fn wl_subbuffer_clear() void;
-extern "weft" fn wl_subbuffer_fact_at(offset: u32, k: u32, kl: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_tool_backing(ptr: u32, len: u32) void;
-// Register/kill service (core, shared by every editor): yank snapshots text +
-// any overlapping subbuffer facts; paste re-stamps them over inserted text.
-extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32, name: u32) void;
-extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32, name: u32) u32;
-extern "weft" fn wl_register_linewise(name: u32) u32;
-extern "weft" fn wl_paste_at(base: u32, name: u32) void;
-extern "weft" fn wl_semantic_active() u32;
-extern "weft" fn wl_semantic_working_target(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
-extern "weft" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_action(action: u32, action_len: u32, register: u32) i32;
-extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
-extern "weft" fn wl_semantic_target_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_target_describe_len(authority: u32, slot: u32, generation: u32) i32;
-extern "weft" fn wl_semantic_target_describe(authority: u32, slot: u32, generation: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_view_publish(payload: u32, payload_len: u32, target_authority: u32, target_slot: u32, target_generation: u32, revision: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_view_replace(authority: u32, slot: u32, generation: u32, revision: u32, payload: u32, payload_len: u32) i32;
-extern "weft" fn wl_semantic_view_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_field_register(token: u32, revision: u32, revision_len: u32, bytes: u32, bytes_len: u32, anchor: u32, caret: u32, flags: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_field_update(authority: u32, slot: u32, generation: u32, revision: u32, revision_len: u32, bytes: u32, bytes_len: u32, anchor: u32, caret: u32, flags: u32) i32;
-extern "weft" fn wl_semantic_field_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_field_edit_meta(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_field_edit_revision(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_field_edit_replacement(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_action_provider() i32;
-extern "weft" fn wl_semantic_action_request_len() i32;
-extern "weft" fn wl_semantic_action_request(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_action_respond(kind: u32, payload: u32, payload_len: u32) i32;
-// Synchronous target-handler callbacks. The host owns the registry and calls
-// the guest's optional `on_semantic_target_probe/open` export. During those
-// callbacks, the request imports expose one canonical descriptor/located
-// target and the response imports accept exactly one scalar answer.
-extern "weft" fn wl_semantic_target_handler_register(token: u32, id: u32, id_len: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_target_handler_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_target_handler_request_len() i32;
-extern "weft" fn wl_semantic_target_handler_request(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_target_handler_probe_respond(kind: u32) i32;
-extern "weft" fn wl_semantic_target_handler_open_respond(kind: u32, authority: u32, slot: u32, generation: u32) i32;
-// Synchronous named-relation providers. A response carries only the located
-// destination: the host retains the requested relation name and validates the
-// returned target revision/location before admitting it.
-extern "weft" fn wl_semantic_relation_provider_register(token: u32, id: u32, id_len: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_relation_provider_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_relation_request_len() i32;
-extern "weft" fn wl_semantic_relation_request(out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_relation_respond(kind: u32, payload: u32, payload_len: u32) i32;
-extern "weft" fn wl_semantic_transfer_capture(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, source_root_authority: u32, source_root_slot: u32, source_root_generation: u32, source_ref_authority: u32, source_ref_slot: u32, source_ref_generation: u32, revision_ptr: u32, revision_len: u32, out: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_transfer_retain(authority: u32, slot: u32, generation: u32) i32;
-extern "weft" fn wl_semantic_transfer_release(authority: u32, slot: u32, generation: u32) i32;
-extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
-extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
-extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_repl_quit(handle: u32) void;
-extern "weft" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
-extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
-extern "weft" fn wl_proc_close(handle: u32) void;
-extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
-extern "weft" fn wl_place_id() i32;
-extern "weft" fn wl_place_has(rel: u32, rel_len: u32) i32;
-extern "weft" fn wl_env_publish(ptr: u32, len: u32) i32;
-extern "weft" fn wl_env_retract() i32;
-extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
-extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_net_close(handle: u32) void;
-extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
-extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
-extern "weft" fn wl_proc_spool(cmd: u32, cmd_len: u32, input: u32, input_len: u32, name: u32, name_len: u32, token: u32) void;
-extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
-extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
-extern "weft" fn wl_fs_stat(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
-extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
-extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
-extern "weft" fn wl_semantic_fs_publish_child_directory(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_fs_publish_child_file(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_fs_capabilities(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
-// D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
-extern "weft" fn wl_slot_declare(name_ptr: u32, name_len: u32, shape: u32, composition: u32, schema_ptr: u32, schema_len: u32) void;
-extern "weft" fn wl_slot_bind(name_ptr: u32, name_len: u32, pred_ptr: u32, pred_len: u32, tier: u32, priority: i32) void;
-extern "weft" fn wl_payload_push(session: i32, version: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_payload_read(session: i32, ptr: u32, cap: u32) i32;
-extern "weft" fn wl_slot_fire(name_ptr: u32, name_len: u32, req_ptr: u32, req_len: u32) i32;
-extern "weft" fn wl_slot_result_count(session: i32) i32;
-extern "weft" fn wl_slot_done(session: i32) i32;
-extern "weft" fn wl_slot_result(session: i32, index: u32, ptr: u32, cap: u32) i32;
-extern "weft" fn wl_slot_result_provider(session: i32, index: u32, ptr: u32, cap: u32) i32;
-extern "weft" fn wl_slot_finish(session: i32) void;
-
-fn ZigType(comptime v: contract_data.ValType) type {
-    return switch (v) {
-        .i32 => i32,
-        .u32 => u32,
-    };
-}
-
-// The comptime tripwire the extern block's doc comment promises (task
-// W0a-D): walk every `contract_data.imports` entry and confirm the
-// hand-written extern of the same name, above, has the exact same arity
-// AND per-param/result signedness. A drift — wrong count, `u32` where the
-// table says `i32`, an extern renamed without updating the table, or a
-// table entry with no matching extern at all — fails right here at
-// compile time, pointing at the offending name, instead of silently
-// desyncing the guest and host halves of the membrane again.
-comptime {
-    @setEvalBranchQuota(120_000); // n≈215 entries, each doing a small const-eval
-    for (contract_data.imports) |entry| {
-        const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
-        if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
-            "src/plugin_sdk/root.zig: extern '{s}' takes {d} param(s), contract_data.zig says {d}",
-            .{ entry.name, Fn.params.len, entry.params.len },
-        ));
-        for (Fn.params, entry.params, 0..) |got, want, i| {
-            if (got.type.? != ZigType(want)) @compileError(std.fmt.comptimePrint(
-                "src/plugin_sdk/root.zig: extern '{s}' param {d} type doesn't match contract_data.zig's signedness",
-                .{ entry.name, i },
-            ));
-        }
-        const want_ret = if (entry.results.len == 0) void else ZigType(entry.results[0]);
-        if (Fn.return_type.? != want_ret) @compileError(
-            "src/plugin_sdk/root.zig: extern '" ++ entry.name ++ "' return type doesn't match contract_data.zig",
-        );
-    }
-}
+/// The raw host imports — the doors themselves. See `externs.zig`; the
+/// wrappers below are the surface guest code actually calls.
+const e = @import("externs.zig");
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next
@@ -384,12 +100,12 @@ pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer
 
 // ── Group A: core ────────────────────────────────────────────────────
 pub fn log(level: Level, msg: []const u8) void {
-    wl_log(@intFromEnum(level), p(msg.ptr), @intCast(msg.len));
+    e.wl_log(@intFromEnum(level), p(msg.ptr), @intCast(msg.len));
 }
 
 // ── Describe phase: up-front declarations (no authority) ──────────────
 pub fn declareCommand(name: []const u8) void {
-    wl_declare_command(p(name.ptr), @intCast(name.len));
+    e.wl_declare_command(p(name.ptr), @intCast(name.len));
 }
 /// Declare a command AND say what it takes and does — the form to use for any
 /// command with arguments. `params` is a space-separated parameter list, each
@@ -402,7 +118,7 @@ pub fn declareCommand(name: []const u8) void {
 /// bare name — which is all a plugin could say before, and why `net-open` from
 /// the palette used to dial nothing at all.
 pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8) void {
-    wl_declare_command_doc(
+    e.wl_declare_command_doc(
         p(name.ptr),
         @intCast(name.len),
         p(params.ptr),
@@ -414,56 +130,56 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
 /// Declare a capability this plugin will provide (e.g. "edit/completion").
 /// Cross-checked host-side against the matching `provide*` at init time.
 pub fn declareCapability(name: []const u8) void {
-    wl_declare_capability(p(name.ptr), @intCast(name.len));
+    e.wl_declare_capability(p(name.ptr), @intCast(name.len));
 }
 pub fn requestPerm(perm: Perm) void {
-    wl_request_perm(@intFromEnum(perm));
+    e.wl_request_perm(@intFromEnum(perm));
 }
 
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
-    return wl_cursor();
+    return e.wl_cursor();
 }
 pub fn byteLen() usize {
-    return wl_byte_len();
+    return e.wl_byte_len();
 }
 /// Capture an opaque witness for the active document's current CRDT frontier.
 /// The handle carries no version bytes or ordering information; release it
 /// when the equality check is no longer needed.
 pub fn docSnapshot() ?u32 {
-    const handle = wl_doc_snapshot();
+    const handle = e.wl_doc_snapshot();
     return if (handle < 0) null else @intCast(handle);
 }
 /// Test whether the witness still names the active buffer's exact causal
 /// frontier. Missing, stale, or cross-buffer handles return false.
 pub fn docSnapshotIsCurrent(handle: u32) bool {
-    return wl_doc_snapshot_is_current(handle) != 0;
+    return e.wl_doc_snapshot_is_current(handle) != 0;
 }
 /// Release a document snapshot witness. Repeated release is harmless.
 pub fn releaseDocSnapshot(handle: u32) void {
-    wl_doc_snapshot_release(handle);
+    e.wl_doc_snapshot_release(handle);
 }
 /// Bytes of `[start, end)` of the active document (clamped). Valid until the
 /// next read call — copy to keep.
 pub fn slice(start: usize, end: usize) []const u8 {
-    const n = wl_slice(@intCast(start), @intCast(end), p(&scratch), scratch.len);
+    const n = e.wl_slice(@intCast(start), @intCast(end), p(&scratch), scratch.len);
     return scratch[0..n];
 }
 /// `[start, end)` of the line containing `offset` (end before the newline).
 pub fn lineAt(offset: usize) Range {
     var pair: [2]u32 = undefined;
-    wl_line_at(@intCast(offset), p(&pair));
+    e.wl_line_at(@intCast(offset), p(&pair));
     return .{ .start = pair[0], .end = pair[1] };
 }
 /// The current selection range, or null.
 pub fn selection() ?Range {
     var pair: [2]u32 = undefined;
-    if (wl_selection(p(&pair)) == 0) return null;
+    if (e.wl_selection(p(&pair)) == 0) return null;
     return .{ .start = pair[0], .end = pair[1] };
 }
 /// The active buffer's backing path, or null. Valid until the next read call.
 pub fn path() ?[]const u8 {
-    const n = wl_path(p(&scratch), scratch.len);
+    const n = e.wl_path(p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
@@ -472,7 +188,7 @@ pub fn path() ?[]const u8 {
 /// THE text-mutation door: replace `[r.start, r.end)` with `bytes`, authored
 /// as this plugin's peer through the host's grade gate.
 pub fn edit(r: Range, bytes: []const u8) void {
-    wl_edit(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
+    e.wl_edit(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
 }
 /// CONTENT PRODUCTION door: draw a derived/streamed projection (a tool buffer's
 /// listing, a transcript) into `[r.start, r.end)`. Distinct from `edit`: it
@@ -480,28 +196,28 @@ pub fn edit(r: Range, bytes: []const u8) void {
 /// user-editable) and authors as the plugin's own peer (not the user's undo).
 /// Tool/model buffers render with this; `edit` is for interactive text.
 pub fn render(r: Range, bytes: []const u8) void {
-    wl_render(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
+    e.wl_render(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
 }
 /// Like `edit`, but authored as the named `role=.agent` sub-peer `agent`
 /// (e.g. "claude", "codex") instead of this plugin's own peer — so an agent
 /// plugin's edits attribute per-agent and get their own selective-undo unit.
 /// An empty `agent` falls back to the plugin peer. Grade-gated identically.
 pub fn editAs(agent: []const u8, r: Range, bytes: []const u8) void {
-    wl_edit_as(p(agent.ptr), @intCast(agent.len), @intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
+    e.wl_edit_as(p(agent.ptr), @intCast(agent.len), @intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
 }
 /// Register a command (cross-checked against `describe`). Returns its id, the
 /// value the host passes back to `on_command`.
 pub fn register(name: []const u8) u32 {
-    return wl_register(p(name.ptr), @intCast(name.len));
+    return e.wl_register(p(name.ptr), @intCast(name.len));
 }
 /// Place the live cursor at a byte offset (clamped).
 pub fn jump(offset: usize) void {
-    wl_jump(@intCast(offset));
+    e.wl_jump(@intCast(offset));
 }
 /// vim-goggles: briefly flash the byte range `[start, end)` (e.g. the region a
 /// yank just copied), a visual confirmation of what an operator affected.
 pub fn flash(start: usize, end: usize) void {
-    wl_flash(@intCast(start), @intCast(end));
+    e.wl_flash(@intCast(start), @intCast(end));
 }
 
 // ── Styles (tool-buffer coloring): publish per-byte-range StyleClass spans over
@@ -522,12 +238,12 @@ pub const StyleClass = enum(u32) {
 /// Drop the active buffer's style spans and re-baseline them to `.normal` over
 /// the whole buffer — call before repopulating with `style`.
 pub fn styleClear() void {
-    wl_style_clear();
+    e.wl_style_clear();
 }
 /// Paint `[start, end)` of the active buffer with `class` (clamped to the buffer;
 /// a no-op if `styleClear` wasn't called first this round).
 pub fn style(start: usize, end: usize, class: StyleClass) void {
-    wl_style(@intCast(start), @intCast(end), @intFromEnum(class));
+    e.wl_style(@intCast(start), @intCast(end), @intFromEnum(class));
 }
 
 // ── Folding: hide byte ranges of the active buffer (rows collapse; vertical
@@ -536,34 +252,34 @@ pub fn style(start: usize, end: usize, class: StyleClass) void {
 // re-render (offsets move). `start` should be just past a header line's newline
 // so the header stays visible. ──
 pub fn foldClear() void {
-    wl_fold_clear();
+    e.wl_fold_clear();
 }
 /// Hide `[start, end)` — collapse those rows until the next `foldClear`.
 pub fn fold(start: usize, end: usize) void {
-    wl_fold(@intCast(start), @intCast(end));
+    e.wl_fold(@intCast(start), @intCast(end));
 }
 /// Reclaim + empty the read-only-span layer (republish the full set after).
 pub fn readOnlyClear() void {
-    wl_readonly_clear();
+    e.wl_readonly_clear();
 }
 /// Mark `[start, end)` read-only: an interactive edit overlapping it is refused
 /// at the edit door (a comint's produced output vs its editable input line).
 pub fn readOnlySpan(start: usize, end: usize) void {
-    wl_readonly_span(@intCast(start), @intCast(end));
+    e.wl_readonly_span(@intCast(start), @intCast(end));
 }
 
 /// How a decoration is placed beside the text (never in the document).
 pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
 /// Reclaim + empty the decorations layer (republish the full set after).
 pub fn decorateClear() void {
-    wl_decorate_clear();
+    e.wl_decorate_clear();
 }
 /// Place a display-only decoration anchored at `anchor`: virtual text drawn
 /// beside the line, colored by `role` (a styles-palette class). It is NEVER a
 /// document byte — so `yy` never yanks it and it takes no commit. This is how a
 /// projection shows metadata (files's perms/size/arrow/mark) off the text.
 pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text: []const u8) void {
-    wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
+    e.wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
 }
 
 // ── Breakpoints (anchored on the document, not remembered here) ──────
@@ -577,18 +293,18 @@ pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text:
 /// Toggle a breakpoint at `offset` in the active document. True if one is now
 /// set there.
 pub fn breakpointToggle(offset: usize) bool {
-    return wl_breakpoint_toggle(@intCast(offset)) == 1;
+    return e.wl_breakpoint_toggle(@intCast(offset)) == 1;
 }
 
 /// Drop every breakpoint in the active document.
 pub fn breakpointClear() void {
-    wl_breakpoint_clear();
+    e.wl_breakpoint_clear();
 }
 
 /// The active document's breakpoint offsets, as an "o1,o2,…" CSV at the
 /// current head. Borrows `scratch` — valid until the next read call.
 pub fn breakpointOffsets() []const u8 {
-    const n = wl_breakpoint_offsets(p(&scratch), scratch.len);
+    const n = e.wl_breakpoint_offsets(p(&scratch), scratch.len);
     if (n <= 0) return "";
     return scratch[0..@intCast(n)];
 }
@@ -617,38 +333,38 @@ pub const Annotations = struct {
     /// `bufferId`). Null when the entry is unknown, holds no text, or `name`
     /// is a builtin feed this door refuses to hand over.
     pub fn open(entry: u32, name: []const u8) ?Annotations {
-        const h = wl_annotate_open(entry, p(name.ptr), @intCast(name.len));
+        const h = e.wl_annotate_open(entry, p(name.ptr), @intCast(name.len));
         return if (h < 0) null else .{ .handle = @intCast(h) };
     }
 
     /// Drop this layer: the paint goes, the entry is untouched.
     pub fn close(self: Annotations) void {
-        wl_annotate_close(self.handle);
+        e.wl_annotate_close(self.handle);
     }
 
     /// The decorated entry's byte length, or 0 once the entry is gone.
     pub fn byteLen(self: Annotations) usize {
-        const n = wl_annotate_len(self.handle);
+        const n = e.wl_annotate_len(self.handle);
         return if (n < 0) 0 else @intCast(n);
     }
 
     /// Read `[start, end)` of the decorated entry into `buf`.
     pub fn read(self: Annotations, start: usize, end: usize, buf: []u8) []const u8 {
-        const n = wl_annotate_read(self.handle, @intCast(start), @intCast(end), p(buf.ptr), @intCast(buf.len));
+        const n = e.wl_annotate_read(self.handle, @intCast(start), @intCast(end), p(buf.ptr), @intCast(buf.len));
         return if (n <= 0) "" else buf[0..@intCast(n)];
     }
 
     /// Open a publish round against the entry's CURRENT revision, dropping
     /// the previous set. False once the entry is gone.
     pub fn begin(self: Annotations) bool {
-        return wl_annotate_begin(self.handle) == 1;
+        return e.wl_annotate_begin(self.handle) == 1;
     }
 
     /// One span in the open round, colored by `role` (a styles-palette class).
     /// `text` is the display string for a decoration placement, ignored by
     /// `.range`.
     pub fn span(self: Annotations, start: usize, end: usize, role: StyleClass, placement: Annotations.Placement, text: []const u8) void {
-        wl_annotate_span(
+        e.wl_annotate_span(
             self.handle,
             @intCast(start),
             @intCast(end),
@@ -667,72 +383,72 @@ pub const Kind = enum(u32) { char = 0, line = 1 };
 /// The target offset one char (grapheme) or line from `from` in `dir`, without
 /// moving the cursor. The native primitive a motion composes (design §6.1).
 pub fn step(from: usize, dir: Dir, kind: Kind) usize {
-    return wl_editor_step(@intCast(from), @intFromEnum(dir), @intFromEnum(kind));
+    return e.wl_editor_step(@intCast(from), @intFromEnum(dir), @intFromEnum(kind));
 }
 /// Select `[r.start, r.end)` (mark at start, cursor at end).
 pub fn setSelection(r: Range) void {
-    wl_set_selection(@intCast(r.start), @intCast(r.end));
+    e.wl_set_selection(@intCast(r.start), @intCast(r.end));
 }
 
 /// Anchor `[r.start, r.end)` in the active CRDT document and return an opaque
 /// live-range handle. The document advances its endpoints through local and
 /// merged edits; call `releaseRange` when retaining it across a callback.
 pub fn anchorRange(r: Range) ?u32 {
-    const h = wl_anchor_range(@intCast(r.start), @intCast(r.end));
+    const h = e.wl_anchor_range(@intCast(r.start), @intCast(r.end));
     return if (h < 0) null else @intCast(h);
 }
 /// Return the anchored range `handle` as this command's borrowed result. The
 /// live anchors remain document-owned across the synchronous command chain.
 pub fn setResultRange(handle: u32) void {
-    wl_set_result_range(handle);
+    e.wl_set_result_range(handle);
 }
 /// Run `cmd` (a motion) and take its returned range as an opaque handle, or
 /// null if it produced none. The handle is valid for the rest of this dispatch.
 pub fn runRange(cmd: []const u8) ?u32 {
-    const h = wl_run_range(p(cmd.ptr), @intCast(cmd.len));
+    const h = e.wl_run_range(p(cmd.ptr), @intCast(cmd.len));
     return if (h < 0) null else @intCast(h);
 }
 /// Resolve a live range handle to its current `[start, end)`, or null if its
 /// buffer/resource no longer exists.
 pub fn rangeEnds(handle: u32) ?Range {
     var pair: [2]u32 = undefined;
-    if (wl_range_ends(handle, p(&pair)) < 0) return null;
+    if (e.wl_range_ends(handle, p(&pair)) < 0) return null;
     return .{ .start = pair[0], .end = pair[1] };
 }
 /// Keep a live range across later command dispatches. Pair a successful retain
 /// with `releaseRange` in the interaction's terminal callback.
 pub fn retainRange(handle: u32) bool {
-    return wl_range_retain(handle) == 0;
+    return e.wl_range_retain(handle) == 0;
 }
 /// Release a live range retained across callbacks. Idempotent.
 pub fn releaseRange(handle: u32) void {
-    wl_range_release(handle);
+    e.wl_range_release(handle);
 }
 /// Run `cmd` (an operator) passing a range `handle` as its single arg.
 pub fn runRangeArg(cmd: []const u8, handle: u32) void {
-    wl_run_range_arg(p(cmd.ptr), @intCast(cmd.len), handle);
+    e.wl_run_range_arg(p(cmd.ptr), @intCast(cmd.len), handle);
 }
 /// Import the `i`-th borrowed live-range argument as an opaque handle, or null.
 pub fn argRange(i: usize) ?u32 {
-    const h = wl_arg_range(@intCast(i));
+    const h = e.wl_arg_range(@intCast(i));
     return if (h < 0) null else @intCast(h);
 }
 /// Replace the anchored range `handle` with `bytes`, authored as this plugin's
 /// peer through the grade gate after resolving its current endpoints.
 pub fn editRange(handle: u32, bytes: []const u8) void {
-    wl_edit_range(handle, p(bytes.ptr), @intCast(bytes.len));
+    e.wl_edit_range(handle, p(bytes.ptr), @intCast(bytes.len));
 }
 
 // ── Group E: admin (kv) ──────────────────────────────────────────────
 /// This plugin's value for `key` (namespaced host-side), or null. Valid until
 /// the next read call.
 pub fn kvGet(key: []const u8) ?[]const u8 {
-    const n = wl_kv_get(p(key.ptr), @intCast(key.len), p(&scratch), scratch.len);
+    const n = e.wl_kv_get(p(key.ptr), @intCast(key.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 pub fn kvPut(key: []const u8, value: []const u8) void {
-    wl_kv_put(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
+    e.wl_kv_put(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
 }
 
 // ── Config data (weft.set): declarative tables that override a plugin's
@@ -742,7 +458,6 @@ pub fn kvPut(key: []const u8, value: []const u8) void {
 // bytes) — the same LEB128 style the shim encodes; the decoder returns null on
 // a short/truncated buffer rather than silently dropping tail records. ──
 var config_scratch: [1 << 16]u8 = undefined;
-extern "weft" fn wl_config_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 
 fn getUv(cur: *[]const u8) ?u64 {
     var shift: u6 = 0;
@@ -785,7 +500,7 @@ pub const ConfigIter = struct {
 /// iterator borrows `config_scratch` — valid until the next config read; safe
 /// to hold across `slice`/`kvGet` (its own buffer).
 pub fn configList(key: []const u8) ?ConfigIter {
-    const n = wl_config_get(p(key.ptr), @intCast(key.len), p(&config_scratch), config_scratch.len);
+    const n = e.wl_config_get(p(key.ptr), @intCast(key.len), p(&config_scratch), config_scratch.len);
     if (n < 0) return null;
     var cur: []const u8 = config_scratch[0..@intCast(n)];
     const count = getUv(&cur) orelse return null;
@@ -801,7 +516,7 @@ pub fn config(key: []const u8) []const u8 {
 
 /// Show a transient status-line message.
 pub fn echo(msg: []const u8) void {
-    wl_echo(p(msg.ptr), @intCast(msg.len));
+    e.wl_echo(p(msg.ptr), @intCast(msg.len));
 }
 
 // ── Command args & result (valid only during an `on_command` call) ────
@@ -811,32 +526,32 @@ pub fn echo(msg: []const u8) void {
 
 /// Number of args the command was invoked with.
 pub fn argCount() usize {
-    return wl_arg_count();
+    return e.wl_arg_count();
 }
 /// The `i`-th arg as an integer (0 if absent or not an integer).
 pub fn argInt(i: usize) i32 {
-    return wl_arg_int(@intCast(i));
+    return e.wl_arg_int(@intCast(i));
 }
 /// The `i`-th arg as a string, or null if absent / not a string. Valid until
 /// the next arg read (its own scratch — safe to hold across `slice`).
 pub fn argStr(i: usize) ?[]const u8 {
-    const n = wl_arg_str(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    const n = e.wl_arg_str(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
 }
 /// Set the command's integer return value.
 pub fn setResultInt(n: i32) void {
-    wl_set_result_int(n);
+    e.wl_set_result_int(n);
 }
 /// Set the command's string return value (copied host-side).
 pub fn setResultStr(s: []const u8) void {
-    wl_set_result_str(p(s.ptr), @intCast(s.len));
+    e.wl_set_result_str(p(s.ptr), @intCast(s.len));
 }
 
 // ── Config surface (the local plane) ─────────────────────────────────
 /// Bind `key` in keymap `mode` to `cmd` (late-bound; resolves at keypress).
 pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
-    wl_bind_key(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(cmd.ptr), @intCast(cmd.len));
+    e.wl_bind_key(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(cmd.ptr), @intCast(cmd.len));
 }
 /// Bind `key` in keymap `mode` to a FIRST-APPLICABLE list (architecture
 /// §10.2): `bindKeys("normal", "Return", &.{ "std.target.activate",
@@ -848,7 +563,7 @@ pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
 pub fn bindKeys(mode: []const u8, key: []const u8, cmds: []const []const u8) void {
     var buf: [512]u8 = undefined;
     const blob = frameList(&buf, cmds) orelse return;
-    wl_bind_keys(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(blob.ptr), @intCast(blob.len));
+    e.wl_bind_keys(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(blob.ptr), @intCast(blob.len));
 }
 
 /// Frame `records` as uvarint(count) then count×(uvarint(len) ++ bytes) — the
@@ -879,11 +594,11 @@ fn putUv(buf: []u8, n: *usize, value: usize) bool {
 
 /// Switch the active keymap mode.
 pub fn setMode(mode: []const u8) void {
-    wl_set_mode(p(mode.ptr), @intCast(mode.len));
+    e.wl_set_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// `mode` falls back to `parent` for unbound keys (mode inheritance).
 pub fn setFallback(mode: []const u8, parent: []const u8) void {
-    wl_set_fallback(p(mode.ptr), @intCast(mode.len), p(parent.ptr), @intCast(parent.len));
+    e.wl_set_fallback(p(mode.ptr), @intCast(mode.len), p(parent.ptr), @intCast(parent.len));
 }
 /// DECLARE that `mode` commits text, running `cmd` on each commit (null
 /// withdraws the declaration). Nothing is inherited: a mode that never
@@ -891,27 +606,27 @@ pub fn setFallback(mode: []const u8, parent: []const u8) void {
 /// from — so a structural mode needs no opt-out.
 pub fn textInput(mode: []const u8, cmd: ?[]const u8) void {
     if (cmd) |c| {
-        wl_text_input(p(mode.ptr), @intCast(mode.len), p(c.ptr), @intCast(c.len), 1);
+        e.wl_text_input(p(mode.ptr), @intCast(mode.len), p(c.ptr), @intCast(c.len), 1);
     } else {
-        wl_text_input(p(mode.ptr), @intCast(mode.len), 0, 0, 0);
+        e.wl_text_input(p(mode.ptr), @intCast(mode.len), 0, 0, 0);
     }
 }
 /// Declare `mode` a menu/prefix mode (which-key shows its bindings).
 pub fn menuMode(mode: []const u8) void {
-    wl_menu_mode(p(mode.ptr), @intCast(mode.len));
+    e.wl_menu_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Declare `mode` a RESTING mode — the base a buffer settles in: the editing base
 /// (`normal`) or a tool projection (`files`, `output`, …). Leaving a buffer in a
 /// transient sub-mode (visual/insert) remembers this instead of overshooting to
 /// the root, so switching back doesn't strand you in an editing-less mode.
 pub fn restingMode(mode: []const u8) void {
-    wl_resting_mode(p(mode.ptr), @intCast(mode.len));
+    e.wl_resting_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Leave a transient mode (insert/visual) back to the active buffer's RESTING
 /// mode — its tool mode (files) if any, else the editing base. Use on Escape
 /// instead of a hardcoded `setMode("normal")`, so a projection's keys stay live.
 pub fn exitToResting() void {
-    wl_exit_to_resting();
+    e.wl_exit_to_resting();
 }
 /// DECLARE the mode THIS GRAMMAR rests in for `posture` (architecture §10.4).
 /// The grammar's half of the posture pair: an entry declares how it rests,
@@ -921,25 +636,25 @@ pub fn exitToResting() void {
 /// (emacs) must declare a separate structural one, or typing would leak into
 /// a projection. Implies `restingMode`.
 pub fn restingPosture(rests_in: Posture, mode: []const u8) void {
-    wl_resting_posture(@intFromEnum(rests_in), p(mode.ptr), @intCast(mode.len));
+    e.wl_resting_posture(@intFromEnum(rests_in), p(mode.ptr), @intCast(mode.len));
 }
 /// How the addressed entry RESTS under input (§10.4) — the one read a
 /// grammar needs. It asks the DECLARATION; no tool identity, mode name, or
 /// view liveness crosses this boundary.
 pub fn posture() Posture {
-    return Posture.fromWire(wl_posture()) orelse .text;
+    return Posture.fromWire(e.wl_posture()) orelse .text;
 }
 /// DECLARE the addressed entry's posture as its presentation owner,
 /// overriding the derivation. `capture` is paired: it stacks the declaration
 /// it displaced, and the grammar's always-retained break-out
 /// (`std.input.break-out`) restores it.
 pub fn declarePosture(declared: Posture) void {
-    wl_declare_posture(@intFromEnum(declared));
+    e.wl_declare_posture(@intFromEnum(declared));
 }
 /// Declare `mode` a STICKY menu: stays open after a leaf key (flag-accumulating
 /// transients) instead of one-shot auto-popping. Implies `menuMode`.
 pub fn stickyMenu(mode: []const u8) void {
-    wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
+    e.wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
 }
 
 /// A provider's context predicate — the ambient facts that must hold for it to
@@ -959,7 +674,7 @@ pub const When = struct {
 /// trampoline command). Providers registered with `provide` resolve it by
 /// context at fire time — the synthetic bind. Late-bound like `declareCommand`.
 pub fn declareAction(name: []const u8) void {
-    wl_declare_action(p(name.ptr), @intCast(name.len));
+    e.wl_declare_action(p(name.ptr), @intCast(name.len));
 }
 
 /// Register `cmd` as a provider for `action` under the predicate `when`, at
@@ -971,7 +686,7 @@ pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void 
     const m = when.mode orelse "";
     const l = when.lang orelse "";
     const tl = when.tool orelse "";
-    wl_provide(
+    e.wl_provide(
         p(action.ptr),
         @intCast(action.len),
         p(m.ptr),
@@ -987,19 +702,19 @@ pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void 
 }
 /// Invoke a command by name (no args), late-bound.
 pub fn run(cmd: []const u8) void {
-    wl_run(p(cmd.ptr), @intCast(cmd.len));
+    e.wl_run(p(cmd.ptr), @intCast(cmd.len));
 }
 /// Invoke `cmd` with a single integer arg (e.g. buffer-switch).
 pub fn runInt(cmd: []const u8, n: i32) void {
-    wl_run_int(p(cmd.ptr), @intCast(cmd.len), n);
+    e.wl_run_int(p(cmd.ptr), @intCast(cmd.len), n);
 }
 /// Invoke `cmd` with a single string arg (e.g. open <path>).
 pub fn runStr(cmd: []const u8, s: []const u8) void {
-    wl_run_str(p(cmd.ptr), @intCast(cmd.len), p(s.ptr), @intCast(s.len));
+    e.wl_run_str(p(cmd.ptr), @intCast(cmd.len), p(s.ptr), @intCast(s.len));
 }
 /// Invoke `cmd` with two string args (e.g. set-cursor <mode> <style>).
 pub fn runStr2(cmd: []const u8, a: []const u8, b: []const u8) void {
-    wl_run_str2(p(cmd.ptr), @intCast(cmd.len), p(a.ptr), @intCast(a.len), p(b.ptr), @intCast(b.len));
+    e.wl_run_str2(p(cmd.ptr), @intCast(cmd.len), p(a.ptr), @intCast(a.len), p(b.ptr), @intCast(b.len));
 }
 /// Invoke `cmd` with however many string args you have — for a caller whose
 /// argument count is a RUNTIME fact (a command line being dispatched, an
@@ -1018,36 +733,36 @@ pub fn runArgs(cmd: []const u8, args: []const []const u8) void {
         vec[i * 2] = p(a.ptr);
         vec[i * 2 + 1] = @intCast(a.len);
     }
-    wl_run_argv(p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n));
+    e.wl_run_argv(p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n));
 }
 
 // ── Introspection (palettes/help/buffers) ────────────────────────────
 pub fn commandCount() usize {
-    return wl_command_count();
+    return e.wl_command_count();
 }
 /// The `i`-th command's name (into `scratch`), or null for an empty slot.
 pub fn commandName(i: usize) ?[]const u8 {
-    const n = wl_command_name(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_command_name(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 /// The `i`-th command's summary (into `arg_scratch`, so it survives a paired
 /// `commandName` read), or null.
 pub fn commandSummary(i: usize) ?[]const u8 {
-    const n = wl_command_summary(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    const n = e.wl_command_summary(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
 }
 /// How many arguments the `i`-th command declares, or null if unbound.
 pub fn commandArity(i: usize) ?usize {
-    const n = wl_command_arity(@intCast(i));
+    const n = e.wl_command_arity(@intCast(i));
     if (n < 0) return null;
     return @intCast(n);
 }
 /// How many of them a caller must supply — optional arguments trail, so this
 /// is where "ask me for the rest" is allowed to stop.
 pub fn commandArityRequired(i: usize) ?usize {
-    const n = wl_command_arity_required(@intCast(i));
+    const n = e.wl_command_arity_required(@intCast(i));
     if (n < 0) return null;
     return @intCast(n);
 }
@@ -1056,7 +771,7 @@ pub fn commandArityRequired(i: usize) ?usize {
 /// is no such argument. Successive calls reuse it — copy each name out before
 /// asking for the next.
 pub fn commandArg(i: usize, k: usize) ?[]const u8 {
-    const n = wl_command_arg(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
+    const n = e.wl_command_arg(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
     if (n < 0) return null;
     return param_scratch[0..@intCast(n)];
 }
@@ -1064,25 +779,25 @@ pub fn commandArg(i: usize, k: usize) ?[]const u8 {
 /// How many intentions the focused context offers. An intention nobody
 /// offers is absent — absence is nonapplicable, not refused.
 pub fn offerCount() usize {
-    return wl_offer_count();
+    return e.wl_offer_count();
 }
 /// The `i`-th offered intention's name (into `scratch`).
 pub fn offerName(i: usize) ?[]const u8 {
-    const n = wl_offer_name(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_offer_name(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 /// Who wins that offer (into `arg_scratch`, so it survives a paired
 /// `offerName` read).
 pub fn offerProvider(i: usize) ?[]const u8 {
-    const n = wl_offer_provider(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    const n = e.wl_offer_provider(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
 }
 /// Why the `i`-th offer cannot run right now (into `intent_scratch`), or
 /// null when it can. Relevant but impossible — worth SHOWING, not hiding.
 pub fn offerReason(i: usize) ?[]const u8 {
-    const n = wl_offer_reason(@intCast(i), p(&intent_scratch), intent_scratch.len);
+    const n = e.wl_offer_reason(@intCast(i), p(&intent_scratch), intent_scratch.len);
     if (n <= 0) return null;
     return intent_scratch[0..@intCast(n)];
 }
@@ -1100,7 +815,7 @@ pub const Invocation = union(enum) {
 /// through the effect door. Never a stored decision: a list built earlier
 /// resolves again here, so a stale offer refuses instead of running.
 pub fn invokeIntention(name: []const u8) Invocation {
-    const n = wl_intent_invoke(p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
+    const n = e.wl_intent_invoke(p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
     if (n < 0) return .unknown;
     if (n == 0) return .invoked;
     return .{ .refused = intent_scratch[0..@intCast(n)] };
@@ -1117,7 +832,7 @@ pub fn invokeIntention(name: []const u8) Invocation {
 /// A table reaches the catalog whole or not at all: stage rows with `offer`,
 /// then `offersCommit`.
 pub fn offersBegin(tool: []const u8, revision: u32) void {
-    _ = wl_offers_begin(p(tool.ptr), @intCast(tool.len), revision);
+    _ = e.wl_offers_begin(p(tool.ptr), @intCast(tool.len), revision);
 }
 /// Stage one row: `intention` (a `plugin.<id>.<verb>` name) answered by
 /// `cmd`, one of THIS plugin's own commands. `reason` empty is an enabled
@@ -1125,7 +840,7 @@ pub fn offersBegin(tool: []const u8, revision: u32) void {
 /// fallback list then reports the obstacle instead of running its next arm,
 /// and which-key explains the key without invoking anything.
 pub fn offer(intention: []const u8, cmd: []const u8, reason: []const u8) void {
-    _ = wl_offer(
+    _ = e.wl_offer(
         p(intention.ptr),
         @intCast(intention.len),
         p(cmd.ptr),
@@ -1136,12 +851,12 @@ pub fn offer(intention: []const u8, cmd: []const u8, reason: []const u8) void {
 }
 /// Publish the staged rows as this plugin's whole offer set.
 pub fn offersCommit() void {
-    _ = wl_offers_commit();
+    _ = e.wl_offers_commit();
 }
 /// Withdraw them: this plugin offers nothing right now. Absence is
 /// nonapplicable — an empty table would still be a claim.
 pub fn offersRetract() void {
-    wl_offers_retract();
+    e.wl_offers_retract();
 }
 
 // ── Reading the keymap tables ────────────────────────────────────────
@@ -1155,7 +870,7 @@ pub fn offersRetract() void {
 
 /// Every mode with a binding table, newline-joined.
 pub fn modeNames(out: []u8) ?[]const u8 {
-    const n = wl_mode_names(p(out.ptr), @intCast(out.len));
+    const n = e.wl_mode_names(p(out.ptr), @intCast(out.len));
     if (n < 0) return null;
     return out[0..@intCast(n)];
 }
@@ -1163,7 +878,7 @@ pub fn modeNames(out: []u8) ?[]const u8 {
 /// Mode `mode`'s bindings resolved through its fallback chain, one
 /// `<key>\t<command>` per line. Walk it with `bindingRows`.
 pub fn bindingTable(mode: []const u8, out: []u8) ?[]const u8 {
-    const n = wl_binding_table(p(mode.ptr), @intCast(mode.len), p(out.ptr), @intCast(out.len));
+    const n = e.wl_binding_table(p(mode.ptr), @intCast(mode.len), p(out.ptr), @intCast(out.len));
     if (n < 0) return null;
     return out[0..@intCast(n)];
 }
@@ -1193,53 +908,53 @@ pub fn bindingRows(listing: []const u8) BindingRows {
 }
 
 pub fn bufferCount() usize {
-    return wl_buffer_count();
+    return e.wl_buffer_count();
 }
 pub fn bufferId(i: usize) ?i32 {
-    const id = wl_buffer_id(@intCast(i));
+    const id = e.wl_buffer_id(@intCast(i));
     return if (id < 0) null else id;
 }
 pub fn bufferName(i: usize) ?[]const u8 {
-    const n = wl_buffer_name(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_buffer_name(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 pub fn bufferActive(i: usize) bool {
-    return wl_buffer_active(@intCast(i)) != 0;
+    return e.wl_buffer_active(@intCast(i)) != 0;
 }
 pub fn bufferReadOnly(i: usize) bool {
-    return wl_buffer_readonly(@intCast(i)) != 0;
+    return e.wl_buffer_readonly(@intCast(i)) != 0;
 }
 /// The `i`-th buffer's file backing, or null when nothing backs it (a
 /// scratch, a projection, an entry holding no text). Lands in the shared read
 /// scratch — copy it out before the next read call.
 pub fn bufferPath(i: usize) ?[]const u8 {
-    const n = wl_buffer_path(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_buffer_path(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 /// Whether the `i`-th buffer holds edits its file never received. Null when
 /// unanswerable. A tool projection is never dirty — it has no file to write.
 pub fn bufferDirty(i: usize) ?bool {
-    const d = wl_buffer_dirty(@intCast(i));
+    const d = e.wl_buffer_dirty(@intCast(i));
     return if (d < 0) null else d != 0;
 }
 /// The `i`-th buffer's language (an extension sans dot), "" when it has none.
 /// Shared read scratch.
 pub fn bufferLang(i: usize) ?[]const u8 {
-    const n = wl_buffer_lang(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_buffer_lang(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
 /// The `i`-th buffer's document length, or null when it holds no text.
 pub fn bufferByteLen(i: usize) ?usize {
-    const n = wl_buffer_byte_len(@intCast(i));
+    const n = e.wl_buffer_byte_len(@intCast(i));
     return if (n < 0) null else @intCast(n);
 }
 /// The projection the `i`-th buffer represents (`files`, `git`), "" for a
 /// plain entry. Shared read scratch.
 pub fn bufferTool(i: usize) ?[]const u8 {
-    const n = wl_buffer_tool(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_buffer_tool(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
@@ -1430,13 +1145,13 @@ pub fn Instances(comptime T: type) type {
 /// Begin a pick with `prompt`; `pick_id` is the guest's tag for its accept
 /// logic (dispatched to `on_pick_accept`).
 pub fn pickBegin(prompt: []const u8, pick_id: u32) void {
-    wl_pick_begin(p(prompt.ptr), @intCast(prompt.len), pick_id);
+    e.wl_pick_begin(p(prompt.ptr), @intCast(prompt.len), pick_id);
 }
 /// Let the pick being built accept what was TYPED as well as a listed row —
 /// the accept then arrives as `PickOutcome.input`. Call between `pickBegin`
 /// and `pickEnd`; every `pickBegin` resets it, so it is per-pick.
 pub fn pickFreeText() void {
-    wl_pick_free_text(1);
+    e.wl_pick_free_text(1);
 }
 /// Declare what KIND of pick this is — `"file"`, `"buffer"`, `"command"`.
 /// Uninterpreted: it is handed to annotators and to nothing else.
@@ -1446,16 +1161,16 @@ pub fn pickFreeText() void {
 /// destructive confirmation, an agent permission prompt. Consumed at open, so
 /// it is per-pick and never a leftover of the last one.
 pub fn pickCategory(category: []const u8) void {
-    wl_pick_category(p(category.ptr), @intCast(category.len));
+    e.wl_pick_category(p(category.ptr), @intCast(category.len));
 }
 /// Add one item: `text` matches/accepts, `doc` is display-only.
 pub fn pickAdd(text: []const u8, doc: []const u8) void {
-    wl_pick_add(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len));
+    e.wl_pick_add(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len));
 }
 /// `pickAdd` plus a public KEY an annotator can resolve — for a row whose
 /// label is not itself a name (`"3: foo.zig [ro] *"`). Core never parses it.
 pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
-    wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
+    e.wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
 }
 /// Add one item ABOUT the `i`-th open buffer. The candidate carries that
 /// buffer's identity, read back as `PickCandidate.buffer` — so the accept
@@ -1463,16 +1178,16 @@ pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
 /// closed while the picker was open reads back as null instead of as
 /// whatever took its slot.
 pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
-    wl_pick_add_buffer(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), @intCast(i));
+    e.wl_pick_add_buffer(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), @intCast(i));
 }
 /// Open the accumulated pick.
 pub fn pickEnd() void {
-    wl_pick_end();
+    e.wl_pick_end();
 }
 /// Open a fuzzy FILE picker rooted at `root` (native recursive finder);
 /// accept dispatches to `on_pick_accept` with the chosen path.
 pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
-    wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), p(root.ptr), @intCast(root.len), pick_id);
+    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), p(root.ptr), @intCast(root.len), pick_id);
 }
 
 // ── Surface (retained overlay: build begin→row→span…→end, then close) ────
@@ -1489,7 +1204,7 @@ pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect
 /// since it also needs the anchor offset). Not shown until `surfaceEnd`; the
 /// previously-drawn surface stays live until then.
 pub fn surfaceBegin(placement: Placement) void {
-    wl_surface_begin(@intFromEnum(placement));
+    e.wl_surface_begin(@intFromEnum(placement));
 }
 /// Begin (re)building a CARET-anchored overlay — placed at `offset` (a
 /// document byte offset) instead of a corner/center/bottom dock; core lays
@@ -1499,44 +1214,44 @@ pub fn surfaceBegin(placement: Placement) void {
 /// picker's own completion list draws through (rendering P2 — see
 /// doc/rendering.md).
 pub fn surfaceCaret(offset: usize) void {
-    wl_surface_caret(@intCast(offset));
+    e.wl_surface_caret(@intCast(offset));
 }
 /// Start a new row.
 pub fn surfaceRow() void {
-    wl_surface_row();
+    e.wl_surface_row();
 }
 /// Append a styled span to the current row.
 pub fn surfaceSpan(text: []const u8, role: Role) void {
-    wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role));
+    e.wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role));
 }
 /// Commit the built rows and show the surface. `selected` highlights a row
 /// (a picker/files cursor), or -1 for none.
 pub fn surfaceEnd(selected: i32) void {
-    wl_surface_end(selected);
+    e.wl_surface_end(selected);
 }
 /// Hide the surface (done with it).
 pub fn surfaceClose() void {
-    wl_surface_close();
+    e.wl_surface_close();
 }
 
 // ── Menu bindings (for a which-key-style overlay): enumerate the CURRENT menu
 // mode's table. Valid during on_menu(open). key → scratch, cmd → arg_scratch,
 // so a caller can hold both of one binding at once. ──
 pub fn menuBindingCount() usize {
-    const n = wl_menu_binding_count();
+    const n = e.wl_menu_binding_count();
     return if (n < 0) 0 else @intCast(n);
 }
 pub fn menuBindingKey(i: usize) []const u8 {
-    const n = wl_menu_binding_key(@intCast(i), p(&scratch), scratch.len);
+    const n = e.wl_menu_binding_key(@intCast(i), p(&scratch), scratch.len);
     return if (n < 0) "" else scratch[0..@intCast(n)];
 }
 pub fn menuBindingCmd(i: usize) []const u8 {
-    const n = wl_menu_binding_cmd(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    const n = e.wl_menu_binding_cmd(@intCast(i), p(&arg_scratch), arg_scratch.len);
     return if (n < 0) "" else arg_scratch[0..@intCast(n)];
 }
 /// Whether the `i`-th binding opens a submenu (a group) vs a leaf command.
 pub fn menuBindingIsGroup(i: usize) bool {
-    return wl_menu_binding_is_group(@intCast(i)) != 0;
+    return e.wl_menu_binding_is_group(@intCast(i)) != 0;
 }
 
 /// Their own scratch, so a hint row can hold key, command, intention and note
@@ -1558,11 +1273,11 @@ pub const MenuIntent = struct {
 /// The `i`-th binding's intention explanation, or null when no intention arm
 /// explains it (a plain command binding, or nothing offers one).
 pub fn menuBindingIntent(i: usize) ?MenuIntent {
-    const status = wl_menu_binding_intent_status(@intCast(i));
+    const status = e.wl_menu_binding_intent_status(@intCast(i));
     if (status <= 0) return null;
-    const n = wl_menu_binding_intent(@intCast(i), p(&hint_scratch), hint_scratch.len);
+    const n = e.wl_menu_binding_intent(@intCast(i), p(&hint_scratch), hint_scratch.len);
     if (n < 0) return null;
-    const m = wl_menu_binding_intent_note(@intCast(i), p(&hint_note_scratch), hint_note_scratch.len);
+    const m = e.wl_menu_binding_intent_note(@intCast(i), p(&hint_note_scratch), hint_note_scratch.len);
     return .{
         .name = hint_scratch[0..@intCast(n)],
         .note = if (m < 0) "" else hint_note_scratch[0..@intCast(m)],
@@ -1609,23 +1324,23 @@ pub const PickOutcome = union(enum) {
 /// the caller must `deinit` the result. The two-pass host read refuses a short
 /// destination instead of silently truncating a candidate or its query.
 pub fn pickOutcome(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{InvalidPickOutcome})!?PickOutcome {
-    return switch (wl_pick_outcome_kind()) {
+    return switch (e.wl_pick_outcome_kind()) {
         0 => .cancelled,
         1 => blk: {
-            break :blk .{ .input = try readPickOutcomeBytes(gpa, wl_pick_outcome_text) };
+            break :blk .{ .input = try readPickOutcomeBytes(gpa, e.wl_pick_outcome_text) };
         },
         2 => blk: {
-            const text = try readPickOutcomeBytes(gpa, wl_pick_outcome_text);
+            const text = try readPickOutcomeBytes(gpa, e.wl_pick_outcome_text);
             errdefer gpa.free(text);
-            const accepted_query = try readPickOutcomeBytes(gpa, wl_pick_outcome_query);
-            const index = wl_pick_outcome_index();
-            const start = wl_pick_outcome_match_start();
-            const span = wl_pick_outcome_match_span();
+            const accepted_query = try readPickOutcomeBytes(gpa, e.wl_pick_outcome_query);
+            const index = e.wl_pick_outcome_index();
+            const start = e.wl_pick_outcome_match_start();
+            const span = e.wl_pick_outcome_match_span();
             if (index < 0 or start < 0 or span < 0) {
                 gpa.free(accepted_query);
                 return error.InvalidPickOutcome;
             }
-            const buffer = wl_pick_outcome_buffer();
+            const buffer = e.wl_pick_outcome_buffer();
             break :blk .{ .candidate = .{
                 .index = @intCast(index),
                 .text = text,
@@ -1676,18 +1391,18 @@ pub const Completion = struct {
 /// matching capability). Read-only — results race + merge-rank with everyone
 /// else's.
 pub fn provideCompletion() void {
-    wl_provide_completion();
+    e.wl_provide_completion();
 }
 /// The current completion request's query prefix (valid for the duration of
 /// `on_complete`). Its own scratch — safe to hold while calling `slice`. An
 /// async source must copy it before deferring.
 pub fn completionPrefix() []const u8 {
-    const n = wl_completion_prefix(p(&prefix_scratch), prefix_scratch.len);
+    const n = e.wl_completion_prefix(p(&prefix_scratch), prefix_scratch.len);
     return prefix_scratch[0..n];
 }
 /// Offer one candidate for `session` (accretes into a batch flushed by commit).
 pub fn capsItem(session: u32, it: Completion) void {
-    wl_caps_item(
+    e.wl_caps_item(
         @bitCast(session),
         p(it.text.ptr),
         @intCast(it.text.len),
@@ -1703,18 +1418,18 @@ pub fn capsItem(session: u32, it: Completion) void {
 }
 /// Flush this source's offered items into `session` as one answer.
 pub fn capsCommit(session: u32) void {
-    wl_caps_commit(@bitCast(session));
+    e.wl_caps_commit(@bitCast(session));
 }
 /// Answer `session` with nothing (unsupported / no results / dead).
 pub fn capsDecline(session: u32) void {
-    wl_caps_decline(@bitCast(session));
+    e.wl_caps_decline(@bitCast(session));
 }
 
 // ── Activation (the buffer taking focus; valid during on_activate) ────
 /// The path of the buffer that just took focus (into `scratch`). Empty for an
 /// unbacked/scratch buffer. Call from an exported `on_activate` fn.
 pub fn activatePath() []const u8 {
-    const n = wl_activate_path(p(&scratch), scratch.len);
+    const n = e.wl_activate_path(p(&scratch), scratch.len);
     return scratch[0..@intCast(n)];
 }
 
@@ -1725,7 +1440,7 @@ pub const Node = struct { kind: []const u8, start: usize, end: usize };
 /// null when the buffer has no grammar / no node. Kind is in `scratch`.
 pub fn nodeAt(offset: usize) ?Node {
     var span: [2]u32 = undefined;
-    const n = wl_node_at(@intCast(offset), p(&scratch), scratch.len, p(&span));
+    const n = e.wl_node_at(@intCast(offset), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
     return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
 }
@@ -1734,7 +1449,7 @@ pub fn nodeAt(offset: usize) ?Node {
 /// — repeat to grow a selection to the next scope. Kind is in `scratch`.
 pub fn nodeEnclosing(r: Range) ?Node {
     var span: [2]u32 = undefined;
-    const n = wl_node_enclosing(@intCast(r.start), @intCast(r.end), p(&scratch), scratch.len, p(&span));
+    const n = e.wl_node_enclosing(@intCast(r.start), @intCast(r.end), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
     return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
 }
@@ -1743,45 +1458,45 @@ pub const Capture = struct { name: []const u8, start: usize, end: usize };
 /// Run a tree-sitter query (`.scm`) over `[r.start, r.end)`; returns the
 /// capture count, read back with `queryCapture(i)`. 0 if no grammar/error.
 pub fn query(scm: []const u8, r: Range) usize {
-    const n = wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
+    const n = e.wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
     return if (n < 0) 0 else @intCast(n);
 }
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {
     var span: [2]u32 = undefined;
-    const n = wl_query_capture(@intCast(i), p(&scratch), scratch.len, p(&span));
+    const n = e.wl_query_capture(@intCast(i), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
     return .{ .name = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
 }
 /// The named children of the smallest node at `off` (structural descent);
 /// returns the count, read back with `queryCapture(i)`. 0 if none/no grammar.
 pub fn nodeChildren(off: usize) usize {
-    const n = wl_node_children(@intCast(off));
+    const n = e.wl_node_children(@intCast(off));
     return if (n < 0) 0 else @intCast(n);
 }
 
 /// Claim `[start, end)` as a subbuffer (an anchored range with its own facts)
 /// on the active document. Returns an opaque handle, or null if unavailable.
 pub fn claimSubbuffer(start: usize, end: usize) ?u32 {
-    const h = wl_claim_subbuffer(@intCast(start), @intCast(end));
+    const h = e.wl_claim_subbuffer(@intCast(start), @intCast(end));
     return if (h < 0) null else @intCast(h);
 }
 /// Attach a fact (`key` = `value`) to a claimed subbuffer.
 pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
-    wl_subbuffer_put_fact(handle, p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
+    e.wl_subbuffer_put_fact(handle, p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
 }
 /// Release every subbuffer this plugin claimed — a projection clears before it
 /// re-claims a fresh id-span per row each render, so stale spans never linger.
 pub fn subbufferClear() void {
-    wl_subbuffer_clear();
+    e.wl_subbuffer_clear();
 }
 var subfact_scratch: [512]u8 = undefined;
 /// Read fact `key` off the innermost subbuffer covering `offset` (in the shared
 /// service — so it finds an id-span the register re-stamped on paste), or null.
 /// The reconcile read-back: a row's hidden id → its original identity.
 pub fn subbufferFactAt(offset: usize, key: []const u8) ?[]const u8 {
-    const n = wl_subbuffer_fact_at(@intCast(offset), p(key.ptr), @intCast(key.len), p(&subfact_scratch), subfact_scratch.len);
+    const n = e.wl_subbuffer_fact_at(@intCast(offset), p(key.ptr), @intCast(key.len), p(&subfact_scratch), subfact_scratch.len);
     return if (n < 0) null else subfact_scratch[0..@intCast(n)];
 }
 
@@ -1789,7 +1504,7 @@ pub fn subbufferFactAt(offset: usize, key: []const u8) ?[]const u8 {
 /// plugin-regenerated). A save then resolves the `save` action to a provider
 /// this plugin registers for `When{ .tool = "<name>" }` — no core special-case.
 pub fn toolBacking(name: []const u8) void {
-    wl_tool_backing(p(name.ptr), @intCast(name.len));
+    e.wl_tool_backing(p(name.ptr), @intCast(name.len));
 }
 
 // ── Register / kill (core, shared by every editor) ───────────────────
@@ -1806,7 +1521,7 @@ pub fn yankRange(start: usize, end: usize, linewise: bool) void {
     yankRangeIn(0, start, end, linewise);
 }
 pub fn yankRangeIn(name: u8, start: usize, end: usize, linewise: bool) void {
-    wl_yank_range(@intCast(start), @intCast(end), @intFromBool(linewise), name);
+    e.wl_yank_range(@intCast(start), @intCast(end), @intFromBool(linewise), name);
 }
 /// The register bytes (into a private scratch, valid until the next call) — for
 /// an editor to build its paste. Charwise callers can insert these directly.
@@ -1814,7 +1529,7 @@ pub fn registerText() []const u8 {
     return registerTextIn(0);
 }
 pub fn registerTextIn(name: u8) []const u8 {
-    const n = wl_register_text(p(&reg_scratch), reg_scratch.len, name);
+    const n = e.wl_register_text(p(&reg_scratch), reg_scratch.len, name);
     return reg_scratch[0..@intCast(n)];
 }
 /// Whether the register holds a linewise yank (the editor's paste-positioning
@@ -1823,7 +1538,7 @@ pub fn registerLinewise() bool {
     return registerLinewiseIn(0);
 }
 pub fn registerLinewiseIn(name: u8) bool {
-    return wl_register_linewise(name) != 0;
+    return e.wl_register_linewise(name) != 0;
 }
 /// Re-stamp any ferried id-spans over register text ALREADY inserted at `base`
 /// (call right after inserting `registerText()`). Turns `dd`→`p` into a MOVE;
@@ -1832,7 +1547,7 @@ pub fn pasteAt(base: usize) void {
     pasteAtIn(0, base);
 }
 pub fn pasteAtIn(name: u8, base: usize) void {
-    wl_paste_at(@intCast(base), name);
+    e.wl_paste_at(@intCast(base), name);
 }
 
 // ── Generic semantic views ────────────────────────────────────────────
@@ -1840,13 +1555,13 @@ pub fn pasteAtIn(name: u8, base: usize) void {
 /// Editor plugins use this to translate their normal interaction model into
 /// open actions; no tool identity or mode crosses this boundary.
 pub fn semanticActive() bool {
-    return wl_semantic_active() != 0;
+    return e.wl_semantic_active() != 0;
 }
 
 /// Copy the dispatching head's validated working target. The returned value
 /// owns its canonical decode and remains provider-neutral.
 pub fn semanticWorkingTarget(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!?semantic_codec.target.OwnedLocated {
-    const result = wl_semantic_working_target(p(&scratch), scratch.len);
+    const result = e.wl_semantic_working_target(p(&scratch), scratch.len);
     if (result == 0) return null;
     if (result < 0) return error.Rejected;
     const len: usize = @intCast(result);
@@ -1862,7 +1577,7 @@ pub fn semanticViewFocus(ref: semantic.view.Ref, preferred: ?semantic.scene.Node
     const raw: u64 = if (preferred) |node| @intFromEnum(node) else 0;
     const low: u32 = @truncate(raw);
     const high: u32 = @truncate(raw >> 32);
-    return wl_semantic_view_focus(wire.authority, wire.slot, wire.generation, low, high, @intFromBool(preferred != null)) != 0;
+    return e.wl_semantic_view_focus(wire.authority, wire.slot, wire.generation, low, high, @intFromBool(preferred != null)) != 0;
 }
 
 /// Open a bounded head-local interaction definition using the canonical
@@ -1871,14 +1586,14 @@ pub fn semanticInteractionOpen(definition: semantic.interaction.Definition) Sema
     const payload = try semantic_codec.encodeInteraction(allocator, definition);
     defer allocator.free(payload);
     var out: [12]u8 = undefined;
-    if (wl_semantic_interaction_open(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
+    if (e.wl_semantic_interaction_open(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
     return readSemanticHandle(semantic.interaction.Ref, &out);
 }
 
 /// Close only the currently active interaction named by this typed ref.
 pub fn semanticInteractionClose(ref: semantic.interaction.Ref) bool {
     const wire = ref.toWire();
-    return wl_semantic_interaction_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_interaction_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 pub const SemanticActionResult = enum(i32) {
@@ -1898,13 +1613,13 @@ pub fn semanticAction(action: []const u8) SemanticActionResult {
     return semanticActionIn(action, 0);
 }
 pub fn semanticActionIn(action: []const u8, slot: u8) SemanticActionResult {
-    return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len), slot));
+    return @enumFromInt(e.wl_semantic_action(p(action.ptr), @intCast(action.len), slot));
 }
 
 /// Register this plugin as the single provider for scenes it owns. Core routes
 /// by retained view ownership; the guest callback remains tool-defined.
 pub fn semanticActionProvider() bool {
-    return wl_semantic_action_provider() == 1;
+    return e.wl_semantic_action_provider() == 1;
 }
 
 pub const SemanticActionResponse = enum(u32) {
@@ -1920,17 +1635,17 @@ pub const SemanticActionResponse = enum(u32) {
 
 /// Read the request available only during `on_semantic_action()`.
 pub fn semanticActionCurrent(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.action.OwnedRequest {
-    const raw_len = wl_semantic_action_request_len();
+    const raw_len = e.wl_semantic_action_request_len();
     if (raw_len <= 0) return error.Rejected;
     const len: usize = @intCast(raw_len);
     const bytes = try gpa.alloc(u8, len);
     defer gpa.free(bytes);
-    if (wl_semantic_action_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
+    if (e.wl_semantic_action_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
     return semantic_codec.action.decodeRequest(gpa, bytes);
 }
 
 fn semanticActionRespondEmpty(kind: SemanticActionResponse) bool {
-    return wl_semantic_action_respond(@intFromEnum(kind), 0, 0) == 1;
+    return e.wl_semantic_action_respond(@intFromEnum(kind), 0, 0) == 1;
 }
 
 pub fn semanticActionDecline() bool {
@@ -1944,14 +1659,14 @@ pub fn semanticActionHandled() bool {
 pub fn semanticActionTransfer(item: semantic.transfer.Item) SemanticPublishError!void {
     const payload = try semantic_codec.transfer.encode(allocator, item);
     defer allocator.free(payload);
-    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.transfer), p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.transfer), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
 pub fn semanticActionInteraction(definition: semantic.interaction.Definition) SemanticPublishError!void {
     const payload = try semantic_codec.interaction.encode(allocator, definition);
     defer allocator.free(payload);
-    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.interaction), p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.interaction), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
@@ -1961,7 +1676,7 @@ pub fn semanticActionInteraction(definition: semantic.interaction.Definition) Se
 pub fn semanticActionOpenTarget(located: semantic.target.Located) SemanticPublishError!void {
     const payload = try semantic_codec.encodeLocatedTarget(allocator, located);
     defer allocator.free(payload);
-    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_target), p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_target), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
@@ -1972,7 +1687,7 @@ pub fn semanticActionFocus(node: semantic.scene.NodeId) bool {
     if (raw == 0) return false;
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, raw, .little);
-    return wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.focus), p(&bytes), bytes.len) == 1;
+    return e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.focus), p(&bytes), bytes.len) == 1;
 }
 
 /// Ask core to resolve a named relation from an exact source target and open
@@ -1980,7 +1695,7 @@ pub fn semanticActionFocus(node: semantic.scene.NodeId) bool {
 pub fn semanticActionOpenRelation(request: semantic.action.RelationRequest) SemanticPublishError!void {
     const payload = try semantic_codec.action.encodeRelation(allocator, request);
     defer allocator.free(payload);
-    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_relation), p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_relation), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
@@ -1989,7 +1704,7 @@ pub fn semanticActionOpenRelation(request: semantic.action.RelationRequest) Sema
 pub fn semanticActionSetWorkingTarget(located: semantic.target.Located) SemanticPublishError!void {
     const payload = try semantic_codec.encodeLocatedTarget(allocator, located);
     defer allocator.free(payload);
-    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.set_working_target), p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.set_working_target), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
@@ -2013,7 +1728,7 @@ pub fn semanticTargetPublish(definition: semantic.target.Definition) SemanticPub
     const payload = try semantic_codec.encodeTarget(allocator, definition);
     defer allocator.free(payload);
     var out: [12]u8 = undefined;
-    if (wl_semantic_target_publish(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
+    if (e.wl_semantic_target_publish(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
     return readSemanticHandle(semantic.target.Ref, &out);
 }
 
@@ -2021,13 +1736,13 @@ pub fn semanticTargetReplace(ref: semantic.target.Ref, definition: semantic.targ
     const payload = try semantic_codec.encodeTarget(allocator, definition);
     defer allocator.free(payload);
     const wire = ref.toWire();
-    if (wl_semantic_target_replace(wire.authority, wire.slot, wire.generation, p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_target_replace(wire.authority, wire.slot, wire.generation, p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
 pub fn semanticTargetClose(ref: semantic.target.Ref) bool {
     const wire = ref.toWire();
-    return wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 /// Read a live target descriptor as one canonical, owned snapshot. The host
@@ -2037,13 +1752,13 @@ pub fn semanticTargetClose(ref: semantic.target.Ref) bool {
 /// closed rather than returning an ambiguous partial value.
 pub fn semanticTargetDescribe(ref: semantic.target.Ref, gpa: std.mem.Allocator) SemanticTargetDescribeError!semantic_codec.target.OwnedDescriptor {
     const wire = ref.toWire();
-    const raw_len = wl_semantic_target_describe_len(wire.authority, wire.slot, wire.generation);
+    const raw_len = e.wl_semantic_target_describe_len(wire.authority, wire.slot, wire.generation);
     if (raw_len <= 0) return error.Rejected;
     const len: usize = @intCast(raw_len);
     if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
     const bytes = try gpa.alloc(u8, len);
     defer gpa.free(bytes);
-    const written = wl_semantic_target_describe(wire.authority, wire.slot, wire.generation, p(bytes.ptr), @intCast(bytes.len));
+    const written = e.wl_semantic_target_describe(wire.authority, wire.slot, wire.generation, p(bytes.ptr), @intCast(bytes.len));
     if (written != raw_len) return error.Rejected;
     var descriptor = try semantic_codec.target.decodeDescriptor(gpa, bytes);
     errdefer descriptor.deinit();
@@ -2080,7 +1795,7 @@ pub fn semanticTargetHandlerRegister(token: u32, id: []const u8) SemanticTargetH
     if (id.len == 0) return error.InvalidData;
     if (id.len > semantic_codec.Limits.max_string_bytes) return error.LimitExceeded;
     var out: [12]u8 = undefined;
-    if (wl_semantic_target_handler_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
+    if (e.wl_semantic_target_handler_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
         return error.Rejected;
     return readSemanticHandle(SemanticTargetHandlerRef, &out);
 }
@@ -2089,7 +1804,7 @@ pub fn semanticTargetHandlerRegister(token: u32, id: []const u8) SemanticTargetH
 /// a later plugin instance reuses the same slot.
 pub fn semanticTargetHandlerClose(ref: SemanticTargetHandlerRef) bool {
     const wire = ref.toWire();
-    return wl_semantic_target_handler_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_target_handler_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 /// Read and own the canonical request available only during
@@ -2097,13 +1812,13 @@ pub fn semanticTargetHandlerClose(ref: SemanticTargetHandlerRef) bool {
 /// one bounded payload; callers must use the returned codec-owned value's
 /// `deinit` before returning from the callback.
 fn semanticTargetHandlerRequest(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})![]u8 {
-    const raw_len = wl_semantic_target_handler_request_len();
+    const raw_len = e.wl_semantic_target_handler_request_len();
     if (raw_len <= 0) return error.Rejected;
     const len: usize = @intCast(raw_len);
     if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
     const bytes = try gpa.alloc(u8, len);
     errdefer gpa.free(bytes);
-    if (wl_semantic_target_handler_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len)
+    if (e.wl_semantic_target_handler_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len)
         return error.Rejected;
     return bytes;
 }
@@ -2128,11 +1843,11 @@ pub fn semanticTargetHandlerCurrentLocated(gpa: std.mem.Allocator) (semantic_cod
 /// plugin. The host accepts one response for each callback and rejects all
 /// subsequent answers.
 pub fn semanticTargetHandlerProbeNone() bool {
-    return wl_semantic_target_handler_probe_respond(0) == 1;
+    return e.wl_semantic_target_handler_probe_respond(0) == 1;
 }
 
 pub fn semanticTargetHandlerProbeMatch(match: semantic.target.Match) bool {
-    return wl_semantic_target_handler_probe_respond(1 + @as(u32, @intFromEnum(match))) == 1;
+    return e.wl_semantic_target_handler_probe_respond(1 + @as(u32, @intFromEnum(match))) == 1;
 }
 
 pub fn semanticTargetHandlerProbeError(err: SemanticTargetProbeError) bool {
@@ -2141,7 +1856,7 @@ pub fn semanticTargetHandlerProbeError(err: SemanticTargetProbeError) bool {
         error.InvalidTarget => 6,
         error.Failed => 7,
     };
-    return wl_semantic_target_handler_probe_respond(code) == 1;
+    return e.wl_semantic_target_handler_probe_respond(code) == 1;
 }
 
 /// Answer an open with a retained semantic view. The host validates the view
@@ -2149,7 +1864,7 @@ pub fn semanticTargetHandlerProbeError(err: SemanticTargetProbeError) bool {
 pub fn semanticTargetHandlerOpenView(view: semantic.view.Ref) bool {
     if (view.generation == 0) return false;
     const wire = view.toWire();
-    return wl_semantic_target_handler_open_respond(0, wire.authority, wire.slot, wire.generation) == 1;
+    return e.wl_semantic_target_handler_open_respond(0, wire.authority, wire.slot, wire.generation) == 1;
 }
 
 /// Answer an open with a newly provisioned view. The host settles this view
@@ -2158,7 +1873,7 @@ pub fn semanticTargetHandlerOpenView(view: semantic.view.Ref) bool {
 pub fn semanticTargetHandlerOpenProvisional(view: semantic.view.Ref) bool {
     if (view.generation == 0) return false;
     const wire = view.toWire();
-    return wl_semantic_target_handler_open_respond(5, wire.authority, wire.slot, wire.generation) == 1;
+    return e.wl_semantic_target_handler_open_respond(5, wire.authority, wire.slot, wire.generation) == 1;
 }
 
 pub fn semanticTargetHandlerOpenError(err: SemanticTargetOpenError) bool {
@@ -2168,7 +1883,7 @@ pub fn semanticTargetHandlerOpenError(err: SemanticTargetOpenError) bool {
         error.Rejected => 3,
         error.Failed => 4,
     };
-    return wl_semantic_target_handler_open_respond(code, 0, 0, 0) == 1;
+    return e.wl_semantic_target_handler_open_respond(code, 0, 0, 0) == 1;
 }
 
 // ── Generic relation-provider callbacks ───────────────────────────────
@@ -2185,30 +1900,30 @@ pub fn semanticRelationProviderRegister(token: u32, id: []const u8) SemanticRela
     if (id.len == 0) return error.InvalidData;
     if (id.len > semantic_codec.Limits.max_string_bytes) return error.LimitExceeded;
     var out: [12]u8 = undefined;
-    if (wl_semantic_relation_provider_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
+    if (e.wl_semantic_relation_provider_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
         return error.Rejected;
     return readSemanticHandle(SemanticRelationProviderRef, &out);
 }
 
 pub fn semanticRelationProviderClose(ref: SemanticRelationProviderRef) bool {
     const wire = ref.toWire();
-    return wl_semantic_relation_provider_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_relation_provider_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 /// Read the query available only during `on_semantic_relation_query(token)`.
 pub fn semanticRelationCurrentQuery(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.action.OwnedRelation {
-    const raw_len = wl_semantic_relation_request_len();
+    const raw_len = e.wl_semantic_relation_request_len();
     if (raw_len <= 0) return error.Rejected;
     const len: usize = @intCast(raw_len);
     if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
     const bytes = try gpa.alloc(u8, len);
     defer gpa.free(bytes);
-    if (wl_semantic_relation_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
+    if (e.wl_semantic_relation_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
     return semantic_codec.action.decodeRelation(gpa, bytes);
 }
 
 pub fn semanticRelationRespondNone() bool {
-    return wl_semantic_relation_respond(0, 0, 0) == 1;
+    return e.wl_semantic_relation_respond(0, 0, 0) == 1;
 }
 
 /// Return only the located destination. The host supplies the exact relation
@@ -2217,7 +1932,7 @@ pub fn semanticRelationRespondNone() bool {
 pub fn semanticRelationRespondTarget(target: semantic.target.Located) SemanticRelationProviderError!void {
     const payload = try semantic_codec.target.encodeLocated(allocator, target);
     defer allocator.free(payload);
-    if (wl_semantic_relation_respond(1, p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_relation_respond(1, p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
@@ -2228,7 +1943,7 @@ pub fn semanticRelationRespondError(err: SemanticRelationQueryError) bool {
         error.StaleTarget => 4,
         error.Failed => 5,
     };
-    return wl_semantic_relation_respond(kind, 0, 0) == 1;
+    return e.wl_semantic_relation_respond(kind, 0, 0) == 1;
 }
 
 /// Publish a retained scene. A null target is represented canonically by an
@@ -2238,7 +1953,7 @@ pub fn semanticViewPublish(root: semantic.scene.Node, target: ?semantic.target.R
     defer allocator.free(payload);
     const target_wire: semantic.handle.Wire = if (target) |ref| ref.toWire() else .{ .authority = 0, .slot = 0, .generation = 0 };
     var out: [12]u8 = undefined;
-    if (wl_semantic_view_publish(
+    if (e.wl_semantic_view_publish(
         p(payload.ptr),
         @intCast(payload.len),
         target_wire.authority,
@@ -2255,13 +1970,13 @@ pub fn semanticViewReplace(ref: semantic.view.Ref, revision: u32, root: semantic
     const payload = try semantic_codec.encodeScene(allocator, root);
     defer allocator.free(payload);
     const wire = ref.toWire();
-    if (wl_semantic_view_replace(wire.authority, wire.slot, wire.generation, revision, p(payload.ptr), @intCast(payload.len)) != 1)
+    if (e.wl_semantic_view_replace(wire.authority, wire.slot, wire.generation, revision, p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
 pub fn semanticViewClose(ref: semantic.view.Ref) bool {
     const wire = ref.toWire();
-    return wl_semantic_view_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_view_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 pub const SemanticFieldSnapshot = struct {
@@ -2284,7 +1999,7 @@ fn semanticFieldFlags(snapshot: SemanticFieldSnapshot) u32 {
 
 pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) SemanticPublishError!semantic.scene.FieldRef {
     var out: [12]u8 = undefined;
-    if (wl_semantic_field_register(
+    if (e.wl_semantic_field_register(
         token,
         p(snapshot.revision.ptr),
         @intCast(snapshot.revision.len),
@@ -2301,7 +2016,7 @@ pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) Semant
 
 pub fn semanticFieldUpdate(ref: semantic.scene.FieldRef, snapshot: SemanticFieldSnapshot) SemanticPublishError!void {
     const wire = ref.toWire();
-    if (wl_semantic_field_update(
+    if (e.wl_semantic_field_update(
         wire.authority,
         wire.slot,
         wire.generation,
@@ -2317,7 +2032,7 @@ pub fn semanticFieldUpdate(ref: semantic.scene.FieldRef, snapshot: SemanticField
 
 pub fn semanticFieldClose(ref: semantic.scene.FieldRef) bool {
     const wire = ref.toWire();
-    return wl_semantic_field_close(wire.authority, wire.slot, wire.generation) != 0;
+    return e.wl_semantic_field_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 pub const SemanticFieldEdit = struct {
@@ -2340,7 +2055,7 @@ pub const SemanticFieldEdit = struct {
 /// rejecting the field in provider code.
 pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{Rejected})!SemanticFieldEdit {
     var meta: [28]u8 = undefined;
-    if (wl_semantic_field_edit_meta(p(&meta), meta.len) != meta.len) return error.Rejected;
+    if (e.wl_semantic_field_edit_meta(p(&meta), meta.len) != meta.len) return error.Rejected;
     const start = std.mem.readInt(u32, meta[0..4], .little);
     const end = std.mem.readInt(u32, meta[4..8], .little);
     const revision_len = std.mem.readInt(u32, meta[8..12], .little);
@@ -2351,8 +2066,8 @@ pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error
     errdefer gpa.free(revision);
     const replacement = try gpa.alloc(u8, replacement_len);
     errdefer gpa.free(replacement);
-    if (wl_semantic_field_edit_revision(p(revision.ptr), revision_len) != revision_len or
-        (replacement_len != 0 and wl_semantic_field_edit_replacement(p(replacement.ptr), replacement_len) != replacement_len))
+    if (e.wl_semantic_field_edit_revision(p(revision.ptr), revision_len) != revision_len or
+        (replacement_len != 0 and e.wl_semantic_field_edit_replacement(p(replacement.ptr), replacement_len) != replacement_len))
         return error.Rejected;
     return .{
         .storage_allocator = gpa,
@@ -2372,44 +2087,44 @@ pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error
 /// when it finishes, resolved through its CRDT identity. Perms: proc + timer
 /// (declared in `describe`).
 pub fn shellInsert(cmd: []const u8) void {
-    wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
+    e.wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
 }
 
 // ── Interactive REPL sessions (persistent child + comint buffer) ──────
 /// Start a persistent REPL running `cmd` under a shell, streaming its output
 /// into buffer `name`. Returns a session handle, or null. Perms: proc + timer.
 pub fn replStart(cmd: []const u8, name: []const u8) ?u32 {
-    const h = wl_repl_start(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+    const h = e.wl_repl_start(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
     return if (h < 0) null else @intCast(h);
 }
 /// Write a line to a REPL session's stdin (a newline is appended if absent).
 pub fn replSend(handle: u32, line: []const u8) void {
-    wl_repl_send(handle, p(line.ptr), @intCast(line.len));
+    e.wl_repl_send(handle, p(line.ptr), @intCast(line.len));
 }
 /// Terminate a REPL session.
 pub fn replQuit(handle: u32) void {
-    wl_repl_quit(handle);
+    e.wl_repl_quit(handle);
 }
 
 /// Spawn a persistent subprocess whose stdout comes BACK to the guest (via
 /// `procRead`), for an in-guest protocol client. Returns a handle, or null.
 pub fn procSpawn(cmd: []const u8) ?u32 {
-    const h = wl_proc_spawn(p(cmd.ptr), @intCast(cmd.len));
+    const h = e.wl_proc_spawn(p(cmd.ptr), @intCast(cmd.len));
     return if (h < 0) null else @intCast(h);
 }
 /// Write bytes to the subprocess's stdin.
 pub fn procSend(handle: u32, bytes: []const u8) void {
-    wl_proc_send(handle, p(bytes.ptr), @intCast(bytes.len));
+    e.wl_proc_send(handle, p(bytes.ptr), @intCast(bytes.len));
 }
 /// Drain up to `out.len` buffered stdout bytes; returns the slice read (may be
 /// empty). Valid until the next call.
 pub fn procRead(handle: u32, out: []u8) []u8 {
-    const n = wl_proc_read(handle, p(out.ptr), @intCast(out.len));
+    const n = e.wl_proc_read(handle, p(out.ptr), @intCast(out.len));
     return if (n <= 0) out[0..0] else out[0..@intCast(n)];
 }
 /// Kill the subprocess (its handle stays reserved).
 pub fn procClose(handle: u32) void {
-    wl_proc_close(handle);
+    e.wl_proc_close(handle);
 }
 /// WHERE this dispatch runs, as an absolute directory (`doc/place.md`) — the
 /// project a file belongs to, the pinned working target, or the editor's own
@@ -2425,7 +2140,7 @@ pub fn procClose(handle: u32) void {
 /// another `placeId()`; never interpret the number, and never persist it (it
 /// is stable for this run only).
 pub fn placeId() i32 {
-    return wl_place_id();
+    return e.wl_place_id();
 }
 
 /// Publish this plugin's environment overlay for the place this dispatch is
@@ -2433,16 +2148,16 @@ pub fn placeId() i32 {
 /// Perm: env -- distinct from proc, because an overlay governs every
 /// subprocess ANY plugin runs at that place, not just your own.
 pub fn envPublish(vars: []const u8) i32 {
-    return wl_env_publish(p(vars.ptr), @intCast(vars.len));
+    return e.wl_env_publish(p(vars.ptr), @intCast(vars.len));
 }
 
 /// Withdraw this plugin's overlay for this place. Owner-scoped.
 pub fn envRetract() bool {
-    return wl_env_retract() == 1;
+    return e.wl_env_retract() == 1;
 }
 
 pub fn placeRoot() []const u8 {
-    const n = wl_place_root(p(&scratch), scratch.len);
+    const n = e.wl_place_root(p(&scratch), scratch.len);
     return if (n <= 0) "" else scratch[0..@intCast(n)];
 }
 
@@ -2462,7 +2177,7 @@ pub fn placeRoot() []const u8 {
 /// describes what the place contains, and nothing else. Touches no scratch, so
 /// a borrowed `path()`/`placeRoot()` slice stays valid across a call.
 pub fn placeHas(rel: []const u8) FsKind {
-    return switch (wl_place_has(p(rel.ptr), @intCast(rel.len))) {
+    return switch (e.wl_place_has(p(rel.ptr), @intCast(rel.len))) {
         1 => .file,
         2 => .dir,
         3 => .other,
@@ -2506,16 +2221,16 @@ pub fn placePath(root: []const u8, spelled: []const u8, out: []u8) []const u8 {
 /// Dial `hostport`, streaming the socket into buffer `name`. If `sni` is
 /// non-empty, run TLS verifying that host name. Returns a handle, or null.
 pub fn netConnect(hostport: []const u8, name: []const u8, sni: []const u8) ?u32 {
-    const h = wl_net_connect(p(hostport.ptr), @intCast(hostport.len), p(name.ptr), @intCast(name.len), p(sni.ptr), @intCast(sni.len));
+    const h = e.wl_net_connect(p(hostport.ptr), @intCast(hostport.len), p(name.ptr), @intCast(name.len), p(sni.ptr), @intCast(sni.len));
     return if (h < 0) null else @intCast(h);
 }
 /// Send bytes on a connection.
 pub fn netSend(handle: u32, bytes: []const u8) void {
-    wl_net_send(handle, p(bytes.ptr), @intCast(bytes.len));
+    e.wl_net_send(handle, p(bytes.ptr), @intCast(bytes.len));
 }
 /// Close a connection.
 pub fn netClose(handle: u32) void {
-    wl_net_close(handle);
+    e.wl_net_close(handle);
 }
 
 /// Run `cmd` off the frame thread and replace the scratch buffer named `name`
@@ -2526,11 +2241,11 @@ pub fn netClose(handle: u32) void {
 /// that call, so reads/edits/styles mean it rather than whatever is focused.
 /// Pass 0 when nothing needs to run afterwards. Perms: proc + timer.
 pub fn procToBuffer(cmd: []const u8, name: []const u8, token: u32) void {
-    wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
+    e.wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
 }
 /// Like `procToBuffer` but APPENDS the output — a console/comint log.
 pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
-    wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
+    e.wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
 }
 
 /// `procToBuffer` for a command that needs its input as a FILE. The host
@@ -2547,7 +2262,7 @@ pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
 /// `cmd` is yours to compose, so keep `{}` reserved: any other `{}` in the
 /// string (a path with braces in it, say) is substituted too.
 pub fn procSpool(cmd: []const u8, input: []const u8, name: []const u8, token: u32) void {
-    wl_proc_spool(p(cmd.ptr), @intCast(cmd.len), p(input.ptr), @intCast(input.len), p(name.ptr), @intCast(name.len), token);
+    e.wl_proc_spool(p(cmd.ptr), @intCast(cmd.len), p(input.ptr), @intCast(input.len), p(name.ptr), @intCast(name.len), token);
 }
 
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file
@@ -2555,7 +2270,7 @@ pub fn procSpool(cmd: []const u8, input: []const u8, name: []const u8, token: u3
 /// the range with the result — formatters and vim `!`-filters. Async, CRDT-
 /// anchored, and authored as this plugin's peer. Perms: proc + timer.
 pub fn procFilter(cmd: []const u8, r: Range) void {
-    wl_proc_filter(p(cmd.ptr), @intCast(cmd.len), @intCast(r.start), @intCast(r.end));
+    e.wl_proc_filter(p(cmd.ptr), @intCast(cmd.len), @intCast(r.start), @intCast(r.end));
 }
 
 // ── fs (perm-gated fs_read / fs_write) — local, cwd-relative ──────────
@@ -2566,7 +2281,7 @@ pub fn procFilter(cmd: []const u8, r: Range) void {
 /// Read a file into `scratch` (valid until the next read call), or null (not
 /// found / too big). Perm: fs_read.
 pub fn fsRead(fpath: []const u8) ?[]const u8 {
-    const n = wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
+    const n = e.wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
@@ -2578,7 +2293,7 @@ pub fn fsRead(fpath: []const u8) ?[]const u8 {
 /// (`git`, `project`) no longer hold `fs_read` at all (`doc/place.md` §4.2).
 pub const FsKind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 pub fn fsExists(fpath: []const u8) FsKind {
-    const k = wl_fs_exists(p(fpath.ptr), @intCast(fpath.len));
+    const k = e.wl_fs_exists(p(fpath.ptr), @intCast(fpath.len));
     return switch (k) {
         1 => .file,
         2 => .dir,
@@ -2605,7 +2320,7 @@ pub const FsStat = struct {
 /// REFUSAL is exceptional, and a refusal traps rather than returning.
 pub fn fsStat(fpath: []const u8) FsStat {
     var rec: [32]u8 = undefined;
-    const n = wl_fs_stat(p(fpath.ptr), @intCast(fpath.len), p(&rec), rec.len);
+    const n = e.wl_fs_stat(p(fpath.ptr), @intCast(fpath.len), p(&rec), rec.len);
     if (n != rec.len) return .absent;
     return .{
         .kind = switch (std.mem.readInt(u32, rec[0..4], .little)) {
@@ -2623,18 +2338,18 @@ pub fn fsStat(fpath: []const u8) FsStat {
 
 /// Replace a file with `bytes`. Perm: fs_write. Returns success.
 pub fn fsWrite(fpath: []const u8, bytes: []const u8) bool {
-    return wl_fs_write(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
+    return e.wl_fs_write(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
 }
 /// Append `bytes` to a file (created if absent). Perm: fs_write. Returns success.
 pub fn fsAppend(fpath: []const u8, bytes: []const u8) bool {
-    return wl_fs_append(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
+    return e.wl_fs_append(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
 }
 /// List a directory at `authority` (locus): "here" for the local fs; a peer/
 /// shell authority once the collab transport is wired. Entries newline-joined,
 /// directories with a trailing `/`, into `scratch` (valid until the next read).
 /// null = unresolved authority / not a directory. Perm: fs_read.
 pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
-    const n = wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
+    const n = e.wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
@@ -2643,7 +2358,7 @@ pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
 /// true if queued (a connected session exists), false otherwise. For local
 /// listings use the synchronous `fsList("here", …)`.
 pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) bool {
-    return wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
+    return e.wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
 }
 
 /// Typed status returned by the target-scoped filesystem membrane.  A
@@ -2720,8 +2435,8 @@ fn semanticFsPublishChild(
     defer gpa.free(request);
     var output: [64]u8 = undefined;
     const result = switch (kind) {
-        .directory => wl_semantic_fs_publish_child_directory(p(request.ptr), @intCast(request.len), p(&output), output.len),
-        .file => wl_semantic_fs_publish_child_file(p(request.ptr), @intCast(request.len), p(&output), output.len),
+        .directory => e.wl_semantic_fs_publish_child_directory(p(request.ptr), @intCast(request.len), p(&output), output.len),
+        .file => e.wl_semantic_fs_publish_child_file(p(request.ptr), @intCast(request.len), p(&output), output.len),
     };
     try semanticFsError(result);
     const result_len: usize = @intCast(result);
@@ -2749,7 +2464,7 @@ pub fn semanticFsCapabilities(
         if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
         const bytes = try gpa.alloc(u8, capacity);
         defer gpa.free(bytes);
-        const result = wl_semantic_fs_capabilities(
+        const result = e.wl_semantic_fs_capabilities(
             wire.authority,
             wire.slot,
             wire.generation,
@@ -2780,7 +2495,7 @@ pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revis
         if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
         const bytes = try gpa.alloc(u8, capacity);
         defer gpa.free(bytes);
-        const result = wl_semantic_fs_list(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(bytes.ptr), @intCast(bytes.len));
+        const result = e.wl_semantic_fs_list(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(bytes.ptr), @intCast(bytes.len));
         if (result == -6) {
             if (capacity == fs_codec.Limits.max_payload_bytes) return error.LimitExceeded;
             capacity = @min(capacity * 2, fs_codec.Limits.max_payload_bytes);
@@ -2805,7 +2520,7 @@ pub fn semanticFsApply(gpa: std.mem.Allocator, target: semantic.target.Ref, revi
         if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
         const bytes = try gpa.alloc(u8, capacity);
         defer gpa.free(bytes);
-        const result = wl_semantic_fs_apply(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(plan_bytes.ptr), @intCast(plan_bytes.len), p(bytes.ptr), @intCast(bytes.len));
+        const result = e.wl_semantic_fs_apply(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(plan_bytes.ptr), @intCast(plan_bytes.len), p(bytes.ptr), @intCast(bytes.len));
         if (result == -6) {
             if (capacity == fs_codec.Limits.max_payload_bytes) return error.LimitExceeded;
             capacity = @min(capacity * 2, fs_codec.Limits.max_payload_bytes);
@@ -2848,7 +2563,7 @@ pub fn semanticTransferCapture(
 ) SemanticTransferError!SemanticTransferCapture {
     const target_wire = target.toWire();
     var out: [36]u8 = undefined;
-    const result = wl_semantic_transfer_capture(
+    const result = e.wl_semantic_transfer_capture(
         target_wire.authority,
         target_wire.slot,
         target_wire.generation,
@@ -2890,12 +2605,12 @@ pub fn semanticTransferCapture(
 
 pub fn semanticTransferRetain(attachment: semantic.transfer.Attachment) bool {
     const wire = attachment.toWire();
-    return wl_semantic_transfer_retain(wire.authority, wire.slot, wire.generation) == 1;
+    return e.wl_semantic_transfer_retain(wire.authority, wire.slot, wire.generation) == 1;
 }
 
 pub fn semanticTransferRelease(attachment: semantic.transfer.Attachment) bool {
     const wire = attachment.toWire();
-    return wl_semantic_transfer_release(wire.authority, wire.slot, wire.generation) == 1;
+    return e.wl_semantic_transfer_release(wire.authority, wire.slot, wire.generation) == 1;
 }
 
 // ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────
@@ -2916,7 +2631,7 @@ pub const SlotTier = enum(u32) { core = 0, imported = 1, plugin = 2, config = 3,
 pub fn slotDeclare(name: []const u8, shape: SlotShape, composition: SlotComposition, sch: *const schema.Schema) void {
     const blob = schema.canonicalizeSchema(allocator, sch) catch return;
     defer allocator.free(blob);
-    wl_slot_declare(p(name.ptr), @intCast(name.len), @intFromEnum(shape), @intFromEnum(composition), p(blob.ptr), @intCast(blob.len));
+    e.wl_slot_declare(p(name.ptr), @intCast(name.len), @intFromEnum(shape), @intFromEnum(composition), p(blob.ptr), @intCast(blob.len));
 }
 
 /// A single-axis predicate for `slotBind` — the wire micro-format
@@ -2958,7 +2673,7 @@ pub fn slotBind(name: []const u8, pred: SlotPredicate, tier: SlotTier, priority:
         @memcpy(buf[len..][0..lf.s.len], lf.s);
         len += lf.s.len;
     }
-    wl_slot_bind(p(name.ptr), @intCast(name.len), p(&buf), @intCast(len), @intFromEnum(tier), priority);
+    e.wl_slot_bind(p(name.ptr), @intCast(name.len), p(&buf), @intCast(len), @intFromEnum(tier), priority);
 }
 
 /// Push one schema-encoded payload for a fired `session` (`wl_payload_push`).
@@ -2969,7 +2684,7 @@ pub fn slotBind(name: []const u8, pred: SlotPredicate, tier: SlotTier, priority:
 pub fn payloadPush(session: u32, version: u32, sch: *const schema.Schema, value: schema.Value) void {
     const bytes = schema.encode(allocator, sch, value) catch return;
     defer allocator.free(bytes);
-    wl_payload_push(@bitCast(session), version, p(bytes.ptr), @intCast(bytes.len));
+    e.wl_payload_push(@bitCast(session), version, p(bytes.ptr), @intCast(bytes.len));
 }
 
 var slot_scratch: [1 << 16]u8 = undefined;
@@ -2977,7 +2692,7 @@ var slot_scratch: [1 << 16]u8 = undefined;
 /// The fired session's schema-encoded REQUEST payload (`wl_payload_read`),
 /// into a private scratch — empty if there is none. Valid until the next call.
 pub fn payloadRead(session: u32) []const u8 {
-    const n = wl_payload_read(@bitCast(session), p(&slot_scratch), slot_scratch.len);
+    const n = e.wl_payload_read(@bitCast(session), p(&slot_scratch), slot_scratch.len);
     if (n < 0) return &.{};
     return slot_scratch[0..@intCast(n)];
 }
@@ -3008,7 +2723,7 @@ pub const Fire = struct {
     /// with no schema, and one no eligible provider binds are all the same
     /// ordinary answer: nobody is offering.
     pub fn open(slot_name: []const u8, request: []const u8) ?Fire {
-        const id = wl_slot_fire(p(slot_name.ptr), @intCast(slot_name.len), p(request.ptr), @intCast(request.len));
+        const id = e.wl_slot_fire(p(slot_name.ptr), @intCast(slot_name.len), p(request.ptr), @intCast(request.len));
         if (id < 0) return null;
         return .{ .session = @bitCast(id) };
     }
@@ -3023,7 +2738,7 @@ pub const Fire = struct {
 
     /// How many answers have landed so far.
     pub fn count(self: Fire) usize {
-        const n = wl_slot_result_count(@bitCast(self.session));
+        const n = e.wl_slot_result_count(@bitCast(self.session));
         return if (n < 0) 0 else @intCast(n);
     }
 
@@ -3031,14 +2746,14 @@ pub const Fire = struct {
     /// race whose providers all answer synchronously is already done when
     /// `open` returns; poll this from `on_poll` for the ones that defer.
     pub fn done(self: Fire) bool {
-        return wl_slot_done(@bitCast(self.session)) == 1;
+        return e.wl_slot_done(@bitCast(self.session)) == 1;
     }
 
     /// Answer `i`'s schema-encoded payload, into a private scratch —
     /// decode it with `weft.schema` against the slot's own schema. Valid
     /// until the next `result`/`provider`/`payloadRead` call.
     pub fn result(self: Fire, i: usize) ?[]const u8 {
-        const n = wl_slot_result(@bitCast(self.session), @intCast(i), p(&slot_scratch), slot_scratch.len);
+        const n = e.wl_slot_result(@bitCast(self.session), @intCast(i), p(&slot_scratch), slot_scratch.len);
         if (n < 0) return null;
         return slot_scratch[0..@intCast(n)];
     }
@@ -3046,13 +2761,13 @@ pub const Fire = struct {
     /// WHO answered `i`. Attribution is data you are given, not something
     /// to infer from the payload.
     pub fn provider(self: Fire, i: usize) ?[]const u8 {
-        const n = wl_slot_result_provider(@bitCast(self.session), @intCast(i), p(&provider_scratch), provider_scratch.len);
+        const n = e.wl_slot_result_provider(@bitCast(self.session), @intCast(i), p(&provider_scratch), provider_scratch.len);
         if (n < 0) return null;
         return provider_scratch[0..@intCast(n)];
     }
 
     pub fn deinit(self: Fire) void {
-        wl_slot_finish(@bitCast(self.session));
+        e.wl_slot_finish(@bitCast(self.session));
     }
 };
 

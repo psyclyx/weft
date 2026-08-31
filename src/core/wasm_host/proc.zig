@@ -225,7 +225,7 @@ pub const hProcClose = wasmDoor(closeBody, null);
 /// `qjs_proc_send`/`qjs_proc_read` re-check `proc` possession on every call
 /// (so revoking the grant stops an already-running agent on its next call,
 /// not merely its next spawn) and their `wl_*` twins do not. Making the wasm
-/// twins match means adding `.perm = .proc` to two `contract_data.zig` rows
+/// twins match means adding `.perm = .proc` to two `membrane/root.zig` rows
 /// and two lines to `contract.zig`'s `perm_gated` list — that file is under
 /// concurrent edit, so the remainder is NAMED here instead of forced. Every
 /// other difference between the two planes is now unrepresentable: same body,
