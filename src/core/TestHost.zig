@@ -96,6 +96,13 @@ pub fn editor(self: *TestHost) *Editor {
 }
 
 pub fn deinit(self: *TestHost, gpa: Allocator) void {
+    // A live pick's acceptor needs a context to observe its cancellation
+    // through, and `Pick.deinit` asserts one was never silently discarded
+    // ("Owners must call terminate before destroying that context"). The
+    // fixture is that owner, so it does it here — a test that left a picker
+    // open should not have to know this, and one that forgets should not
+    // trip an assertion three frames away from its own last line.
+    self.head.pick.terminate(&self.ctx);
     self.slot_host.deinit();
     self.actions.deinit();
     self.caps.deinit();

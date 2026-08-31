@@ -29,6 +29,10 @@ const matchScore = match.matchScore;
 const orderlessMatch = match.orderlessMatch;
 const Style = match.Style;
 
+const annotate = @import("annotate.zig");
+const pick_annotate = annotate;
+const intent = @import("../intent.zig");
+
 const types = @import("types.zig");
 const Acceptor = types.Acceptor;
 const Outcome = types.Outcome;
@@ -50,6 +54,19 @@ docs: std.ArrayList([]u8) = .empty,
 /// Parallel to `items`: the full info body (completion documentation) shown in a
 /// side popup for the selected row ("" when none).
 infos: std.ArrayList([]u8) = .empty,
+/// Parallel to `items`: an uninterpreted public key per row, "" when the text
+/// is the key (`types.Entry.key`).
+keys: std.ArrayList([]u8) = .empty,
+/// Parallel to `items`: what ANNOTATORS said about each row ("" when nothing
+/// or nobody). Kept apart from `docs` on purpose — `docs` is the producer's
+/// own affixation and an annotator may not overwrite it. Two arrays is how
+/// that stops being a rule anyone has to follow.
+annots: std.ArrayList([]u8) = .empty,
+/// This pick's kind, uninterpreted; empty = never annotated (`Options.category`).
+category: []u8 = &.{},
+/// How many rows have been OFFERED for annotation. `items.len !=
+/// annotated_len` is the entire rows-changed edge — see `annotateTick`.
+annotated_len: usize = 0,
 query: std.ArrayList(u8) = .empty,
 /// Indices into `items`, filtered by `query`, rank order.
 filtered: std.ArrayList(u32) = .empty,
@@ -157,6 +174,15 @@ fn clear(self: *Pick, gpa: Allocator) void {
     for (self.infos.items) |d| gpa.free(d);
     self.infos.deinit(gpa);
     self.infos = .empty;
+    for (self.keys.items) |k| gpa.free(k);
+    self.keys.deinit(gpa);
+    self.keys = .empty;
+    for (self.annots.items) |a| gpa.free(a);
+    self.annots.deinit(gpa);
+    self.annots = .empty;
+    gpa.free(self.category);
+    self.category = &.{};
+    self.annotated_len = 0;
     self.query.deinit(gpa);
     self.query = .empty;
     self.filtered.deinit(gpa);
@@ -168,6 +194,57 @@ fn clear(self: *Pick, gpa: Allocator) void {
     gpa.free(self.prev_mode);
     self.prev_mode = &.{};
     self.active = false;
+}
+
+/// Append one row across EVERY parallel array, or none of them.
+///
+/// There are five arrays indexed in lockstep by `filtered` (`items`, `docs`,
+/// `infos`, `keys`, `annots`) and three places that grow them (`openWith`,
+/// `appendItems`, `refresh`). Before this, each of those three carried its
+/// own copy of the append sequence, and each new array meant remembering to
+/// edit all three — `infos` was already handled inconsistently between them.
+/// Capacity is reserved for all five up front so the appends themselves
+/// cannot fail: a half-appended row would leave `docs[i]` describing
+/// `items[i+1]`, which is the one failure mode parallel arrays actually have.
+fn pushRow(self: *Pick, gpa: Allocator, e: Entry, info: []const u8) !void {
+    try self.items.ensureUnusedCapacity(gpa, 1);
+    try self.docs.ensureUnusedCapacity(gpa, 1);
+    try self.infos.ensureUnusedCapacity(gpa, 1);
+    try self.keys.ensureUnusedCapacity(gpa, 1);
+    try self.annots.ensureUnusedCapacity(gpa, 1);
+
+    const text = try gpa.dupe(u8, e.text);
+    errdefer gpa.free(text);
+    const doc = try gpa.dupe(u8, e.doc);
+    errdefer gpa.free(doc);
+    const inf = try gpa.dupe(u8, info);
+    errdefer gpa.free(inf);
+    const key = try gpa.dupe(u8, e.key);
+    errdefer gpa.free(key);
+    const ann = try gpa.dupe(u8, "");
+
+    self.items.appendAssumeCapacity(text);
+    self.docs.appendAssumeCapacity(doc);
+    self.infos.appendAssumeCapacity(inf);
+    self.keys.appendAssumeCapacity(key);
+    self.annots.appendAssumeCapacity(ann);
+}
+
+/// Drop every row, keeping the arrays themselves. `refresh`'s half of
+/// `pushRow` — same reason, same one place.
+fn clearRows(self: *Pick, gpa: Allocator) void {
+    for (self.items.items) |x| gpa.free(x);
+    self.items.clearRetainingCapacity();
+    for (self.docs.items) |x| gpa.free(x);
+    self.docs.clearRetainingCapacity();
+    for (self.infos.items) |x| gpa.free(x);
+    self.infos.clearRetainingCapacity();
+    for (self.keys.items) |x| gpa.free(x);
+    self.keys.clearRetainingCapacity();
+    for (self.annots.items) |x| gpa.free(x);
+    self.annots.clearRetainingCapacity();
+    // Every cached annotation described a row that no longer exists.
+    self.annotated_len = 0;
 }
 
 /// Open a static pick session: copies `entries`, switches to "pick"
@@ -213,15 +290,8 @@ pub fn openWith(
         if (self.active) return error.PickOpenedDuringCancellation;
     }
     self.prompt = try gpa.dupe(u8, prompt);
-    for (entries) |e| {
-        const owned = try gpa.dupe(u8, e.text);
-        errdefer gpa.free(owned);
-        try self.items.append(gpa, owned);
-        const doc = try gpa.dupe(u8, e.doc);
-        errdefer gpa.free(doc);
-        try self.docs.append(gpa, doc);
-        try self.infos.append(gpa, try gpa.dupe(u8, "")); // static picks carry no info
-    }
+    self.category = try gpa.dupe(u8, opts.category);
+    for (entries) |e| try self.pushRow(gpa, e, ""); // static picks carry no info
     try self.refilter(gpa);
     const prev = try gpa.dupe(u8, ctx.head.currentMode());
     errdefer gpa.free(prev);
@@ -254,8 +324,12 @@ pub fn openWith(
 /// source, so it is cheap to call every frame.
 pub fn tick(self: *Pick, ctx: *command.Context) anyerror!bool {
     if (!self.active) return false;
-    const src = if (self.source) |*s| s else return false;
-    var changed = false;
+    // BEFORE the source check: a static pick has no source and still has rows
+    // to annotate. This is the whole reason the drive lives here rather than
+    // at the producers — `openWith` cannot see rows a source will stream, and
+    // `refresh` cannot see rows it is about to be handed again.
+    var changed = try self.annotateTick(ctx);
+    const src = if (self.source) |*s| s else return changed;
     if (self.source_epoch != self.query_epoch and
         self.query.items.len >= src.min_query and
         task.nowNs() - self.last_query_ns >= src.debounce_ns)
@@ -265,6 +339,109 @@ pub fn tick(self: *Pick, ctx: *command.Context) anyerror!bool {
     }
     if (src.poll) |f| changed = (try f(src.data, ctx)) or changed;
     return changed;
+}
+
+/// One annotation round, if this pick has a category and has grown since the
+/// last one. Returns whether any note landed (→ repaint).
+///
+/// Everything here is bounded, and each bound has a reason:
+///   - only rows `[annotated_len, …)` are offered, so a 4000-row file pick
+///     does not re-marshal itself every frame for the life of the pick;
+///   - at most `annotate.batch` rows per round, so no single frame marshals
+///     an unbounded tree — the next frame resumes;
+///   - `annotated_len` advances whether or not anyone answered, so a pick
+///     with no annotator costs one fire that finds nothing eligible and then
+///     nothing at all.
+///
+/// A provider runs synchronously inside `fire` and is arbitrary plugin code.
+/// It cannot open a pick or set a mode (`wasm_host/slot.zig`'s
+/// `wpSlotProvider` withholds `in_dispatch`), but it CAN run a command that
+/// dismisses this one — so `active` is re-checked before anything is written
+/// back, and a round whose pick vanished is dropped rather than applied to
+/// whatever replaced it.
+fn annotateTick(self: *Pick, ctx: *command.Context) !bool {
+    if (self.category.len == 0) return false;
+    if (self.items.items.len == self.annotated_len) return false;
+    const host = ctx.slot_host orelse return false;
+    const gpa = ctx.gpa;
+
+    const from = self.annotated_len;
+    const hi = @min(self.items.items.len, from + annotate.batch);
+    const rows = try gpa.alloc(annotate.Row, hi - from);
+    defer gpa.free(rows);
+    for (rows, from..) |*r, i| r.* = .{ .text = self.items.items[i], .key = self.keys.items[i] };
+
+    const request = (try annotate.encodeAsk(gpa, self.category, from, rows)) orelse {
+        self.annotated_len = hi; // unencodable (an absurd row count); do not retry it
+        return false;
+    };
+    defer gpa.free(request);
+
+    const version = self.annotateVersion(ctx, gpa);
+    defer if (version.len > 0) gpa.free(version);
+
+    const id = (try host.fire(annotate.slot_name, intent.factsFor(ctx), version, .{
+        .request = request,
+        .ctx = ctx,
+    })) orelse {
+        // Nothing eligible: no annotator wants this category here. A normal
+        // answer, and the rows are still "offered" — asking again next frame
+        // would be a per-frame fire that can never succeed.
+        self.annotated_len = hi;
+        return false;
+    };
+    defer host.finish(id);
+
+    // The provider may have torn this pick down out from under us.
+    if (!self.active) return false;
+    self.annotated_len = hi;
+
+    var changed = false;
+    for (host.session(id).?.all()) |result| {
+        var tell = annotate.decodeTell(result.payload) orelse continue;
+        var i: usize = tell.from;
+        while (try tell.notes.next()) |note_cur| : (i += 1) {
+            if (i >= self.annots.items.len) break;
+            const note = note_cur.asStr() catch break;
+            if (note.len == 0) continue;
+            try self.appendAnnotation(gpa, i, note);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// Join another provider's note onto row `i`. `ordered_union` means several
+/// annotators may speak about one row; they are joined in the order the slot
+/// raced them (Container priority), two spaces apart. A column per provider
+/// is what marginalia itself does and would need dynamic column sizing in
+/// `surface.Surface` — deliberately not v1.
+fn appendAnnotation(self: *Pick, gpa: Allocator, i: usize, note: []const u8) !void {
+    const old = self.annots.items[i];
+    const joined = if (old.len == 0)
+        try gpa.dupe(u8, note)
+    else
+        try std.fmt.allocPrint(gpa, "{s}  {s}", .{ old, note });
+    gpa.free(old);
+    self.annots.items[i] = joined;
+}
+
+/// The document version an annotation round's answers are restamped against.
+/// A pick is not about a document, so there is usually nothing to stamp —
+/// an annotator returning an observation locator then fails the restamp walk
+/// rather than smuggling an unstamped offset through, which is the right
+/// outcome for a party that was asked to describe rows.
+fn annotateVersion(self: *const Pick, ctx: *command.Context, gpa: Allocator) []u8 {
+    _ = self;
+    const ed = ctx.buffers.active().textEditor() orelse return &.{};
+    return ed.doc.version(gpa) catch &.{};
+}
+
+/// The annotation of the `i`-th filtered row, or "".
+pub fn annotationOf(self: *const Pick, filtered_index: usize) []const u8 {
+    const idx = self.filtered.items[filtered_index];
+    if (idx >= self.annots.items.len) return "";
+    return self.annots.items[idx];
 }
 
 /// Note a query mutation (drives debounce + source regeneration).
@@ -287,14 +464,9 @@ pub fn appendItems(
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
     defer if (keep_owned) |k| gpa.free(k);
     for (texts, 0..) |it, i| {
-        const owned = try gpa.dupe(u8, it);
-        errdefer gpa.free(owned);
-        try p.items.append(gpa, owned);
-        const d = if (docs) |ds| ds[i] else "";
-        const doc = try gpa.dupe(u8, d);
-        errdefer gpa.free(doc);
-        try p.docs.append(gpa, doc);
-        try p.infos.append(gpa, try gpa.dupe(u8, ""));
+        // A streamed row's text IS its key: every producer that streams
+        // (the file finder, a dir listing) streams paths.
+        try p.pushRow(gpa, .{ .text = it, .doc = if (docs) |ds| ds[i] else "" }, "");
     }
     try p.refilter(gpa);
     if (keep_owned) |k| {
@@ -451,6 +623,13 @@ fn buildCaretSurface(self: *const Pick, scratch: Allocator, off: usize, max_rows
             const note = self.docs.items[idx];
             if (note.len > 0) surf.addSpanCol(scratch, note, .annotation, 1);
         }
+        // Column 2, its OWN column: an annotator adds beside the producer's
+        // note, never over it. The renderer sizes each column from whichever
+        // rows carry one, so a half-annotated list still aligns.
+        if (idx < self.annots.items.len) {
+            const ann = self.annots.items[idx];
+            if (ann.len > 0) surf.addSpanCol(scratch, ann, .annotation, 2);
+        }
     }
     surf.end(scratch, self.selected - start);
     surf.anchor = off;
@@ -487,8 +666,15 @@ fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?sur
         const fi = start + i;
         const item = self.items.items[self.filtered.items[fi]];
         const doc = self.docOf(fi);
-        const l = (if (doc.len > 0)
+        const ann = self.annotationOf(fi);
+        // The dock joins into one span (it never column-aligns), so the
+        // annotation trails the producer's own note with the same separator.
+        const l = (if (doc.len > 0 and ann.len > 0)
+            std.fmt.allocPrint(scratch, "  {s}  · {s} · {s}", .{ item, doc, ann })
+        else if (doc.len > 0)
             std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
+        else if (ann.len > 0)
+            std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, ann })
         else
             std.fmt.allocPrint(scratch, "  {s}", .{item})) catch continue;
         surf.addRow(scratch);
@@ -706,7 +892,7 @@ fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
             try entries.append(ctx.gpa, .{ .text = ctx.commands.nameOf(n), .doc = cmd.summary });
         }
     }
-    try ctx.head.pick.open(ctx, "command", entries.items, .{ .handler = runChoice });
+    try ctx.head.pick.openWith(ctx, "command", entries.items, .{ .handler = runChoice }, .{ .category = "command" });
     return .nil;
 }
 
@@ -760,20 +946,13 @@ pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []cons
     const keep = p.selection();
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
     defer if (keep_owned) |k| gpa.free(k);
-    for (p.items.items) |it| gpa.free(it);
-    p.items.clearRetainingCapacity();
-    for (p.docs.items) |d| gpa.free(d);
-    p.docs.clearRetainingCapacity();
-    for (p.infos.items) |d| gpa.free(d);
-    p.infos.clearRetainingCapacity();
+    p.clearRows(gpa);
     for (items, 0..) |it, i| {
-        const owned = try gpa.dupe(u8, it);
-        errdefer gpa.free(owned);
-        try p.items.append(gpa, owned);
-        const doc = try gpa.dupe(u8, if (i < docs.len) docs[i] else "");
-        errdefer gpa.free(doc);
-        try p.docs.append(gpa, doc);
-        try p.infos.append(gpa, try gpa.dupe(u8, if (i < infos.len) infos[i] else ""));
+        try p.pushRow(
+            gpa,
+            .{ .text = it, .doc = if (i < docs.len) docs[i] else "" },
+            if (i < infos.len) infos[i] else "",
+        );
     }
     try p.refilter(gpa);
     if (keep_owned) |k| {
@@ -837,63 +1016,7 @@ test {
 
 // A heap-stable editor context for driving the picker in tests (Context
 // holds pointers into these fields, so the env must not move).
-const TestEnv = struct {
-    gpa: Allocator,
-    pool: *task.Pool,
-    buffers: @import("../Buffers.zig"),
-    commands: command.Commands = .empty,
-    keymap: @import("../Keymap.zig") = .empty,
-    /// The ONE shared Container `caps`/`actions` bind into (task #19).
-    container: @import("../container.zig").Container = undefined,
-    caps: @import("../capability.zig").Caps,
-    actions: @import("../action.zig"),
-    quit: bool = false,
-    head: @import("../Head.zig") = .empty,
-
-    fn init(gpa: Allocator) !*TestEnv {
-        const pool = try task.Pool.init(gpa, .{ .threads = 1 });
-        const self = try gpa.create(TestEnv);
-        self.* = .{
-            .gpa = gpa,
-            .pool = pool,
-            .buffers = try @import("../Buffers.zig").init(gpa, pool, "user"),
-            .container = @import("../container.zig").Container.init(gpa),
-            .caps = undefined,
-            .actions = undefined,
-        };
-        self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &self.container);
-        self.actions = @import("../action.zig").init(gpa, &self.container);
-        return self;
-    }
-
-    fn ctx(self: *TestEnv) command.Context {
-        return .{
-            .gpa = self.gpa,
-            .buffers = &self.buffers,
-            .commands = &self.commands,
-            .keymap = &self.keymap,
-            .actions = &self.actions,
-            .caps = &self.caps,
-            .quit = &self.quit,
-            .head = &self.head,
-        };
-    }
-
-    fn deinit(self: *TestEnv) void {
-        const gpa = self.gpa;
-        var pick_ctx = self.ctx();
-        self.head.pick.terminate(&pick_ctx);
-        self.head.deinit(gpa);
-        self.actions.deinit();
-        self.caps.deinit();
-        self.container.deinit();
-        self.keymap.deinit(gpa);
-        self.commands.deinit(gpa);
-        self.buffers.deinit(gpa);
-        self.pool.deinit();
-        gpa.destroy(self);
-    }
-};
+const TestEnv = @import("../TestHost.zig");
 
 const Sink = struct {
     got: std.ArrayList(u8) = .empty,
@@ -914,9 +1037,10 @@ const Sink = struct {
 
 test "pick: acceptance is one immutable callback value and is reentrant" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         intact_after_nested_open: bool = false,
@@ -961,26 +1085,27 @@ test "pick: acceptance is one immutable callback value and is reentrant" {
     };
 
     var probe: Probe = .{};
-    try env.head.pick.open(&ctx, "line", &.{
+    try env.head.pick.open(ctx, "line", &.{
         .{ .text = "other" },
         .{ .text = "    ALICE_SLOT" },
     }, .{ .handler = Probe.handle, .cleanup = Probe.cleanup, .data = &probe });
-    _ = try cInput(&ctx, .{ .text = "ALICE_SLOT" });
-    _ = try cAccept(&ctx, .{});
+    _ = try cInput(ctx, .{ .text = "ALICE_SLOT" });
+    _ = try cAccept(ctx, .{});
     try t.expect(probe.intact_after_nested_open);
     try t.expectEqual(@as(usize, 1), probe.cleanups); // outer only
     try t.expect(env.head.pick.active); // nested pick opened successfully
 
-    try env.head.pick.dismiss(&ctx);
+    try env.head.pick.dismiss(ctx);
     try t.expectEqual(@as(usize, 1), probe.cancelled);
     try t.expectEqual(@as(usize, 2), probe.cleanups);
 }
 
 test "pick: replacement explicitly cancels and cleans the displaced session" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         cancelled: usize = 0,
@@ -996,12 +1121,12 @@ test "pick: replacement explicitly cancels and cleans the displaced session" {
     };
     var first: Probe = .{};
     var second: Probe = .{};
-    try env.head.pick.open(&ctx, "first", &.{.{ .text = "one" }}, .{
+    try env.head.pick.open(ctx, "first", &.{.{ .text = "one" }}, .{
         .handler = Probe.handle,
         .cleanup = Probe.cleanup,
         .data = &first,
     });
-    try env.head.pick.open(&ctx, "second", &.{.{ .text = "two" }}, .{
+    try env.head.pick.open(ctx, "second", &.{.{ .text = "two" }}, .{
         .handler = Probe.handle,
         .cleanup = Probe.cleanup,
         .data = &second,
@@ -1009,16 +1134,17 @@ test "pick: replacement explicitly cancels and cleans the displaced session" {
     try t.expectEqual(@as(usize, 1), first.cancelled);
     try t.expectEqual(@as(usize, 1), first.cleaned);
     try t.expectEqualStrings("second", env.head.pick.prompt);
-    try env.head.pick.dismiss(&ctx);
+    try env.head.pick.dismiss(ctx);
     try t.expectEqual(@as(usize, 1), second.cancelled);
     try t.expectEqual(@as(usize, 1), second.cleaned);
 }
 
 test "pick: termination rejects a picker reopened by cancellation" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         cancellations: usize = 0,
@@ -1049,12 +1175,12 @@ test "pick: termination rejects a picker reopened by cancellation" {
     };
 
     var probe: Probe = .{};
-    try env.head.pick.open(&ctx, "leaving", &.{.{ .text = "one" }}, .{
+    try env.head.pick.open(ctx, "leaving", &.{.{ .text = "one" }}, .{
         .handler = Probe.handle,
         .cleanup = Probe.cleanup,
         .data = &probe,
     });
-    env.head.pick.terminate(&ctx);
+    env.head.pick.terminate(ctx);
     try t.expect(probe.replacement_rejected);
     try t.expectEqual(@as(usize, 1), probe.cancellations);
     try t.expectEqual(@as(usize, 1), probe.cleanups);
@@ -1064,9 +1190,10 @@ test "pick: termination rejects a picker reopened by cancellation" {
 
 test "pick: replacement cannot resume after cancellation begins termination" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         cancellations: usize = 0,
@@ -1088,13 +1215,13 @@ test "pick: replacement cannot resume after cancellation begins termination" {
     };
 
     var probe: Probe = .{};
-    try env.head.pick.open(&ctx, "first", &.{.{ .text = "one" }}, .{
+    try env.head.pick.open(ctx, "first", &.{.{ .text = "one" }}, .{
         .handler = Probe.handle,
         .cleanup = Probe.cleanup,
         .data = &probe,
     });
     try t.expectError(error.PickTerminating, env.head.pick.open(
-        &ctx,
+        ctx,
         "too late",
         &.{.{ .text = "two" }},
         .{ .handler = Probe.replacement },
@@ -1107,17 +1234,18 @@ test "pick: replacement cannot resume after cancellation begins termination" {
 
 test "pick: acceptance records frecency under its originating prompt" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         fn handle(_: *command.Context, _: ?*anyopaque, _: Outcome) anyerror!void {}
     };
-    try env.head.pick.open(&ctx, "buffers", &.{.{ .text = "scratch" }}, .{
+    try env.head.pick.open(ctx, "buffers", &.{.{ .text = "scratch" }}, .{
         .handler = Probe.handle,
     });
-    _ = try cAccept(&ctx, .{});
+    _ = try cAccept(ctx, .{});
 
     const namespaced = env.head.pick.frecency.get("buffers\x00scratch") orelse
         return error.TestUnexpectedResult;
@@ -1127,9 +1255,10 @@ test "pick: acceptance records frecency under its originating prompt" {
 
 test "pick: close allocation failure keeps the live acceptor owned" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
-    var ctx = env.ctx();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
 
     const Probe = struct {
         calls: usize = 0,
@@ -1145,18 +1274,18 @@ test "pick: close allocation failure keeps the live acceptor owned" {
     };
     var probe: Probe = .{};
     try env.head.setModeRaw(gpa, "normal");
-    try env.head.pick.open(&ctx, "line", &.{.{ .text = "    target" }}, .{
+    try env.head.pick.open(ctx, "line", &.{.{ .text = "    target" }}, .{
         .handler = Probe.handle,
         .cleanup = Probe.cleanup,
         .data = &probe,
     });
-    _ = try cInput(&ctx, .{ .text = "target" });
+    _ = try cInput(ctx, .{ .text = "target" });
 
     // finish owns two stable string copies before close duplicates prev_mode;
     // fail that third allocation. The session must remain live with the same
     // acceptor instead of becoming an active picker which can never finish.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 2 });
-    var failing_ctx = ctx;
+    var failing_ctx = ctx.*;
     failing_ctx.gpa = failing.allocator();
     try t.expectError(error.OutOfMemory, cAccept(&failing_ctx, .{}));
     try t.expect(env.head.pick.active);
@@ -1164,26 +1293,27 @@ test "pick: close allocation failure keeps the live acceptor owned" {
     try t.expectEqual(@as(usize, 0), probe.calls);
     try t.expectEqual(@as(usize, 0), probe.cleanups);
 
-    try env.head.pick.dismiss(&ctx);
+    try env.head.pick.dismiss(ctx);
     try t.expectEqual(@as(usize, 1), probe.calls);
     try t.expectEqual(@as(usize, 1), probe.cleanups);
 }
 
 test "pick: free-text accept — typed query when nothing matches" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
     var sink: Sink = .{};
     defer sink.got.deinit(gpa);
-    var ctx = env.ctx();
+    const ctx = &env.ctx;
 
-    try env.head.pick.openWith(&ctx, "read", &.{.{ .text = "apple" }}, .{
+    try env.head.pick.openWith(ctx, "read", &.{.{ .text = "apple" }}, .{
         .handler = Sink.accept,
         .data = &sink,
     }, .{ .allow_free_text = true });
-    _ = try cInput(&ctx, .{ .text = "zzz" }); // matches nothing
+    _ = try cInput(ctx, .{ .text = "zzz" }); // matches nothing
     try t.expect(env.head.pick.selection() == null);
-    _ = try cAccept(&ctx, .{});
+    _ = try cAccept(ctx, .{});
     try t.expect(sink.called);
     try t.expectEqualStrings("zzz", sink.got.items);
     try t.expect(!env.head.pick.active);
@@ -1191,18 +1321,19 @@ test "pick: free-text accept — typed query when nothing matches" {
 
 test "pick: free-text off — no candidate means no acceptance" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
     var sink: Sink = .{};
     defer sink.got.deinit(gpa);
-    var ctx = env.ctx();
+    const ctx = &env.ctx;
 
-    try env.head.pick.open(&ctx, "cmd", &.{.{ .text = "apple" }}, .{
+    try env.head.pick.open(ctx, "cmd", &.{.{ .text = "apple" }}, .{
         .handler = Sink.accept,
         .data = &sink,
     });
-    _ = try cInput(&ctx, .{ .text = "zzz" });
-    _ = try cAccept(&ctx, .{});
+    _ = try cInput(ctx, .{ .text = "zzz" });
+    _ = try cAccept(ctx, .{});
     try t.expect(sink.called);
     try t.expect(sink.cancelled);
     try t.expect(!env.head.pick.active);
@@ -1210,16 +1341,17 @@ test "pick: free-text off — no candidate means no acceptance" {
 
 test "pick: appendItems preserves query and selection" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
     var sink: Sink = .{};
     defer sink.got.deinit(gpa);
-    var ctx = env.ctx();
+    const ctx = &env.ctx;
 
-    try env.head.pick.open(&ctx, "p", &.{
+    try env.head.pick.open(ctx, "p", &.{
         .{ .text = "one" }, .{ .text = "two" }, .{ .text = "three" },
     }, .{ .handler = Sink.accept, .data = &sink });
-    _ = try cNext(&ctx, .{}); // select "two"
+    _ = try cNext(ctx, .{}); // select "two"
     try t.expectEqualStrings("two", env.head.pick.selection().?);
     try env.head.pick.appendItems(gpa, &.{"four"}, null);
     try t.expectEqual(@as(usize, 4), env.head.pick.items.items.len);
@@ -1255,14 +1387,15 @@ const FakeSrc = struct {
 
 test "pick: async source — poll folds, onQuery on change, close once" {
     const gpa = t.allocator;
-    const env = try TestEnv.init(gpa);
-    defer env.deinit();
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
     var sink: Sink = .{};
     defer sink.got.deinit(gpa);
     var fake: FakeSrc = .{};
-    var ctx = env.ctx();
+    const ctx = &env.ctx;
 
-    try env.head.pick.openWith(&ctx, "src", &.{}, .{
+    try env.head.pick.openWith(ctx, "src", &.{}, .{
         .handler = Sink.accept,
         .data = &sink,
     }, .{ .source = .{
@@ -1273,16 +1406,259 @@ test "pick: async source — poll folds, onQuery on change, close once" {
         .debounce_ns = 0,
     } });
 
-    try t.expect(try env.head.pick.tick(&ctx)); // poll emits
+    try t.expect(try env.head.pick.tick(ctx)); // poll emits
     try t.expectEqual(@as(usize, 2), env.head.pick.items.items.len);
-    try t.expect(!try env.head.pick.tick(&ctx)); // nothing new
+    try t.expect(!try env.head.pick.tick(ctx)); // nothing new
     try t.expectEqual(@as(usize, 0), fake.query_fires); // no query change yet
 
-    _ = try cInput(&ctx, .{ .text = "a" });
-    _ = try env.head.pick.tick(&ctx);
+    _ = try cInput(ctx, .{ .text = "a" });
+    _ = try env.head.pick.tick(ctx);
     try t.expectEqual(@as(usize, 1), fake.query_fires); // fired on change
 
-    _ = try cCancel(&ctx, .{});
+    _ = try cCancel(ctx, .{});
     try t.expectEqual(@as(usize, 1), fake.closes);
     try t.expect(!env.head.pick.active);
+}
+
+// ── Annotation ──────────────────────────────────────────────────────
+
+/// A host-side annotator: binds `ui/pick-annotate` and answers with a fixed
+/// note per row. Stands in for a plugin — a provider is a provider, and this
+/// exercises the same `SlotHost.fire` path a wasm guest reaches through
+/// `on_slot_fire`.
+const Annotator = struct {
+    saw_category: std.ArrayList(u8) = .empty,
+    saw_keys: std.ArrayList(u8) = .empty,
+    rounds: usize = 0,
+    prefix: []const u8 = "note",
+
+    fn install(self: *Annotator, host: *@import("../slot.zig").SlotHost) !void {
+        try host.register(.{ .slot = annotate.slot_name, .owner = "test-annotator", .handler = answer, .data = self });
+    }
+
+    fn answer(data: ?*anyopaque, host: *@import("../slot.zig").SlotHost, req: *const @import("../slot.zig").Request) anyerror!void {
+        const self: *Annotator = @ptrCast(@alignCast(data.?));
+        const gpa = host.gpa;
+        self.rounds += 1;
+
+        const schema_mod = @import("weft_schema");
+        const cur = schema_mod.decodeCursor(&annotate.schema, req.payload);
+        const variant = try cur.enterVariant();
+        const s = try variant.selected().enterStruct();
+        const category = try (try s.field("category")).?.asStr();
+        self.saw_category.clearRetainingCapacity();
+        try self.saw_category.appendSlice(gpa, category);
+        const from = try (try s.field("from")).?.asU32();
+        var rows = try (try s.field("rows")).?.enterArray();
+
+        var notes: std.ArrayList(schema_mod.Value) = .empty;
+        defer notes.deinit(gpa);
+        var owned: std.ArrayList([]u8) = .empty;
+        defer {
+            for (owned.items) |o| gpa.free(o);
+            owned.deinit(gpa);
+        }
+        while (try rows.next()) |row| {
+            const rs = try row.enterStruct();
+            const key = try (try rs.field("key")).?.asStr();
+            // Record the keys so a test can prove the annotator sees the
+            // PRODUCER's key, not the display label.
+            if (self.saw_keys.items.len > 0) try self.saw_keys.append(gpa, ',');
+            try self.saw_keys.appendSlice(gpa, key);
+            const note = try std.fmt.allocPrint(gpa, "{s}:{s}", .{ self.prefix, key });
+            try owned.append(gpa, note);
+            try notes.append(gpa, .{ .str = note });
+        }
+
+        const tell_values = [_]schema_mod.Value{
+            .{ .scalar = .{ .u32 = from } },
+            .{ .array = notes.items },
+        };
+        const tell: schema_mod.Value = .{ .@"struct" = &tell_values };
+        const bytes = try schema_mod.encode(gpa, req.schema, .{ .variant = .{ .tag = 1, .payload = &tell } });
+        defer gpa.free(bytes);
+        try host.push(req.session, .{ .owner = "test-annotator" }, bytes);
+    }
+
+    fn deinit(self: *Annotator, gpa: Allocator) void {
+        self.saw_category.deinit(gpa);
+        self.saw_keys.deinit(gpa);
+    }
+};
+
+test "annotation: a categorised pick gets notes; the producer's own doc is untouched" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
+    try pick_annotate.declare(&env.container);
+
+    var ann: Annotator = .{};
+    defer ann.deinit(gpa);
+    try ann.install(&env.slot_host);
+
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+
+    // The buffer pick's real shape: a display LABEL that is not a key, and a
+    // key the producer supplied beside it.
+    try env.head.pick.openWith(ctx, "buffer", &.{
+        .{ .text = "1: main.zig *", .doc = "ro", .key = "src/main.zig" },
+        .{ .text = "2: other.zig", .doc = "", .key = "src/other.zig" },
+    }, .{ .handler = Sink.accept, .data = &sink }, .{ .category = "buffer" });
+
+    // Nothing yet — the round happens on the tick, which is what lets rows
+    // that arrive later be covered by the same mechanism.
+    try t.expectEqualStrings("", env.head.pick.annots.items[0]);
+    try t.expect(try env.head.pick.tick(ctx));
+
+    try t.expectEqualStrings("buffer", ann.saw_category.items);
+    // The annotator resolved rows by KEY, never by the display label.
+    try t.expectEqualStrings("src/main.zig,src/other.zig", ann.saw_keys.items);
+    try t.expectEqualStrings("note:src/main.zig", env.head.pick.annots.items[0]);
+    try t.expectEqualStrings("note:src/other.zig", env.head.pick.annots.items[1]);
+    // The producer's own affixation is intact — an annotator adds beside it,
+    // never over it. Two arrays, so this is structural, not a convention.
+    try t.expectEqualStrings("ro", env.head.pick.docs.items[0]);
+
+    // Idempotent: a second tick with no new rows fires nothing.
+    try t.expect(!try env.head.pick.tick(ctx));
+    try t.expectEqual(@as(usize, 1), ann.rounds);
+}
+
+test "annotation: a pick with NO category is never offered to an annotator" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
+    try pick_annotate.declare(&env.container);
+
+    var ann: Annotator = .{};
+    defer ann.deinit(gpa);
+    try ann.install(&env.slot_host);
+
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+
+    // This is git's destructive confirm and an agent's permission prompt:
+    // they declare nothing, so no annotator can decorate them. The
+    // protection is that saying nothing is the DEFAULT, not a rule anyone
+    // has to remember at the call site.
+    try env.head.pick.open(ctx, "Discard 3 files?", &.{
+        .{ .text = "yes" },
+        .{ .text = "no" },
+    }, .{ .handler = Sink.accept, .data = &sink });
+
+    try t.expect(!try env.head.pick.tick(ctx));
+    try t.expectEqual(@as(usize, 0), ann.rounds);
+    try t.expectEqualStrings("", env.head.pick.annots.items[0]);
+}
+
+test "annotation: rows that STREAM IN after open are annotated too" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
+    try pick_annotate.declare(&env.container);
+
+    var ann: Annotator = .{};
+    defer ann.deinit(gpa);
+    try ann.install(&env.slot_host);
+
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+
+    // The file pick's shape: opened empty, filled by a source over frames.
+    // A producer-pull design (fire once, at open) annotates zero rows here,
+    // which is why the drive lives on the tick.
+    try env.head.pick.openWith(ctx, "open", &.{}, .{ .handler = Sink.accept, .data = &sink }, .{ .category = "file" });
+    try t.expect(!try env.head.pick.tick(ctx)); // nothing to say about nothing
+
+    try env.head.pick.appendItems(gpa, &.{ "src/a.zig", "src/b.zig" }, null);
+    try t.expect(try env.head.pick.tick(ctx));
+    try t.expectEqualStrings("note:src/a.zig", env.head.pick.annots.items[0]);
+    try t.expectEqual(@as(usize, 1), ann.rounds);
+
+    // A second wave: only the NEW rows are offered, and the already-annotated
+    // ones keep what they had.
+    try env.head.pick.appendItems(gpa, &.{"src/c.zig"}, null);
+    try t.expect(try env.head.pick.tick(ctx));
+    try t.expectEqual(@as(usize, 2), ann.rounds);
+    try t.expectEqualStrings("src/a.zig,src/b.zig,src/c.zig", ann.saw_keys.items);
+    try t.expectEqualStrings("note:src/a.zig", env.head.pick.annots.items[0]);
+    try t.expectEqualStrings("note:src/c.zig", env.head.pick.annots.items[2]);
+}
+
+test "annotation: refresh drops stale notes rather than reattaching them to new rows" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
+    try pick_annotate.declare(&env.container);
+
+    var ann: Annotator = .{};
+    defer ann.deinit(gpa);
+    try ann.install(&env.slot_host);
+
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+
+    // Completion's race-and-refine REPLACES the row set. Every cached
+    // annotation described a row that no longer exists, so keeping them
+    // indexed would silently label new candidates with old notes.
+    try env.head.pick.openWith(ctx, "complete", &.{}, .{ .handler = Sink.accept, .data = &sink }, .{ .category = "complete" });
+    try env.head.pick.appendItems(gpa, &.{"first"}, null);
+    _ = try env.head.pick.tick(ctx);
+    try t.expectEqualStrings("note:first", env.head.pick.annots.items[0]);
+
+    try refresh(&env.head.pick, gpa, &.{"second"}, &.{}, &.{});
+    try t.expectEqualStrings("", env.head.pick.annots.items[0]); // dropped, not rebased
+    _ = try env.head.pick.tick(ctx);
+    try t.expectEqualStrings("note:second", env.head.pick.annots.items[0]);
+}
+
+test "annotation: two annotators compose; a silent one costs the other nothing" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    const ctx = &env.ctx;
+    try pick_annotate.declare(&env.container);
+
+    var a: Annotator = .{ .prefix = "size" };
+    defer a.deinit(gpa);
+    try a.install(&env.slot_host);
+    var b: Annotator = .{ .prefix = "lang" };
+    defer b.deinit(gpa);
+    try env.slot_host.register(.{
+        .slot = annotate.slot_name,
+        .owner = "second-annotator",
+        .handler = Annotator.answer,
+        .data = &b,
+    });
+
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+    try env.head.pick.openWith(ctx, "open", &.{
+        .{ .text = "x.zig" },
+    }, .{ .handler = Sink.accept, .data = &sink }, .{ .category = "file" });
+    try t.expect(try env.head.pick.tick(ctx));
+
+    // `ordered_union`: both contribute, joined two spaces apart. Two
+    // annotators saying different things about one row is composition
+    // working, not a collision.
+    //
+    // The RELATIVE order is the Container's (tier, then priority, then
+    // specificity) and both of these registered at the same rung, so it is
+    // deliberately not asserted here — pinning it would be testing a tie-break
+    // nothing promises.
+    const joined = env.head.pick.annots.items[0];
+    try t.expect(std.mem.indexOf(u8, joined, "size:x.zig") != null);
+    try t.expect(std.mem.indexOf(u8, joined, "lang:x.zig") != null);
+    try t.expect(std.mem.indexOf(u8, joined, "  ") != null);
+    try t.expectEqual(@as(usize, "size:x.zig  lang:x.zig".len), joined.len);
 }

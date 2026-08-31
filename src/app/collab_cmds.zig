@@ -479,11 +479,11 @@ pub fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
             return err;
         };
     }
-    try ctx.head.pick.open(ctx, "shared", entries.items, .{
+    try ctx.head.pick.openWith(ctx, "shared", entries.items, .{
         .handler = openSharedAccept,
         .cleanup = openSharedCleanup,
         .data = state,
-    });
+    }, .{ .category = "shared" });
     return .nil;
 }
 

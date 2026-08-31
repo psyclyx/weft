@@ -175,7 +175,9 @@ extern "weft" fn wl_buffer_tool(i: u32, out_ptr: u32, out_cap: u32) i32;
 // guest's on_pick_accept export).
 extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_free_text(on: u32) void;
+extern "weft" fn wl_pick_category(ptr: u32, len: u32) void;
 extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
+extern "weft" fn wl_pick_add_keyed(t: u32, tl: u32, d: u32, dl: u32, k: u32, kl: u32) void;
 extern "weft" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
@@ -1436,9 +1438,24 @@ pub fn pickBegin(prompt: []const u8, pick_id: u32) void {
 pub fn pickFreeText() void {
     wl_pick_free_text(1);
 }
+/// Declare what KIND of pick this is — `"file"`, `"buffer"`, `"command"`.
+/// Uninterpreted: it is handed to annotators and to nothing else.
+///
+/// **A pick that does not call this is never annotated.** That is the opt-in.
+/// Say nothing for anything an outsider has no business decorating — a
+/// destructive confirmation, an agent permission prompt. Consumed at open, so
+/// it is per-pick and never a leftover of the last one.
+pub fn pickCategory(category: []const u8) void {
+    wl_pick_category(p(category.ptr), @intCast(category.len));
+}
 /// Add one item: `text` matches/accepts, `doc` is display-only.
 pub fn pickAdd(text: []const u8, doc: []const u8) void {
     wl_pick_add(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len));
+}
+/// `pickAdd` plus a public KEY an annotator can resolve — for a row whose
+/// label is not itself a name (`"3: foo.zig [ro] *"`). Core never parses it.
+pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
+    wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
 }
 /// Add one item ABOUT the `i`-th open buffer. The candidate carries that
 /// buffer's identity, read back as `PickCandidate.buffer` — so the accept

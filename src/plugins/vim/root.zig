@@ -1085,6 +1085,7 @@ fn opLine() void {
 
 // ── Files ──────────────────────────────────────────────────────────────
 fn findFile() void {
+    weft.pickCategory("file");
     weft.openFilePick("open", ".", file_pick);
 }
 fn openChosen(choice: []const u8) void {

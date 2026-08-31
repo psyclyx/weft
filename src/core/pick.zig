@@ -26,6 +26,7 @@
 
 const match = @import("pick/match.zig");
 const types = @import("pick/types.zig");
+const annotate = @import("pick/annotate.zig");
 
 /// How the query filters candidates.
 pub const Style = match.Style;
@@ -55,6 +56,12 @@ pub const install = Pick.install;
 /// Replace the item set of a live pick, preserving query and selection.
 pub const refresh = Pick.refresh;
 
+/// Declare the `ui/pick-annotate` slot (`pick/annotate.zig`) — everything
+/// core knows about pick annotation is one slot name and one shape.
+pub const declareAnnotation = annotate.declare;
+/// That slot's name, for a host-side annotator that wants to bind it.
+pub const annotate_slot = annotate.slot_name;
+
 // Pull every implementation file into the test graph so `zig build test`
 // discovers the matcher, pool, and state tests through this facade.
 comptime {
@@ -62,4 +69,5 @@ comptime {
     _ = Pool;
     _ = types;
     _ = Pick;
+    _ = annotate;
 }

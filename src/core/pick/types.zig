@@ -90,6 +90,19 @@ pub const Options = struct {
     source: ?Source = null,
     /// Completion style for this pick (default orderless).
     style: Style = .orderless,
+    /// What KIND of pick this is (`"file"`, `"buffer"`, `"command"`) —
+    /// uninterpreted by everything in core; the only thing done with it is
+    /// handing it to annotators (`pick/annotate.zig`).
+    ///
+    /// **Empty means no annotation, and that is the opt-in, not a default.**
+    /// A pick that says nothing is never offered to an annotator, which is
+    /// what makes git's destructive yes/no and an agent's permission prompt
+    /// structurally undecorable rather than protected by a rule someone has
+    /// to remember. It is deliberately NOT the prompt: a prompt is a label
+    /// ("Discard 3 files?", "dir host:path"), and matching on prompt
+    /// substrings is exactly how an annotator would end up decorating a
+    /// confirmation dialog.
+    category: []const u8 = "",
 };
 
 /// One selectable item: the text is what matching and acceptance see;
@@ -97,4 +110,14 @@ pub const Options = struct {
 pub const Entry = struct {
     text: []const u8,
     doc: []const u8 = "",
+    /// An uninterpreted PUBLIC key for this row, for an annotator that cannot
+    /// read the label. Empty = the text IS the key, which is the common case
+    /// (a path, a command name).
+    ///
+    /// It exists for the buffer pick, where the label is `"3: foo.zig [ro] *"`
+    /// and the identity is a `Buffers.Ref` living in the producer's own bound
+    /// -pick state — something no annotator can resolve. The accept path still
+    /// uses the `Ref`; this is a parallel, weaker handle that says only "here
+    /// is a name you could look up", and core never parses it.
+    key: []const u8 = "",
 };

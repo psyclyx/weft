@@ -71,7 +71,7 @@ pub const CompletionUi = struct {
         try ctx.head.pick.openWith(ctx, "complete", &.{}, .{
             .handler = accept,
             .data = self,
-        }, .{ .source = self.source() });
+        }, .{ .source = self.source(), .category = "complete" });
         // Draw the completion list as a popup AT the caret, not the bottom dock.
         ctx.head.pick.caret_anchor = editor.cursorOffset();
         self.session = id;

@@ -117,7 +117,14 @@ pub const DeclaredCommand = struct {
 /// `buffer` is the candidate's ACCEPT KEY when it names one: a generation-
 /// checked identity captured at add time, so the accept resolves the buffer
 /// the row was ABOUT rather than whatever now sits in its slot.
-pub const PendingItem = struct { text: []u8, doc: []u8, buffer: ?Buffers.Ref = null };
+pub const PendingItem = struct {
+    text: []u8,
+    doc: []u8,
+    /// The uninterpreted public key an annotator resolves rows by
+    /// (`pick.Entry.key`) — owned. Empty when the text IS the key.
+    key: []u8 = &.{},
+    buffer: ?Buffers.Ref = null,
+};
 
 /// An open pick's binding: which plugin + which of its picks (the guest's
 /// `pick_id`, dispatched to `on_pick_accept`), plus the accept keys taken in
@@ -359,6 +366,10 @@ pick_id: u32 = 0,
 /// this pick's choice and never a leftover of the last one.
 pick_free_text: bool = false,
 pick_items: std.ArrayList(PendingItem) = .empty,
+/// The KIND of the pick being accumulated (`wl_pick_category`), uninterpreted.
+/// Reset by every `wl_pick_begin` — empty means this pick is never annotated,
+/// so opting in is per-pick and never a leftover of the last one.
+pick_category: std.ArrayList(u8) = .empty,
 /// The immutable terminal event, valid only during `on_pick_accept`. The
 /// trampoline saves/restores it, so nested guest dispatch cannot overwrite an
 /// outer callback's acceptance facts.
@@ -861,9 +872,11 @@ pub fn deinit(self: *WasmPlugin) void {
     self.retired_result_bufs.deinit(gpa);
     self.result_buf.deinit(gpa);
     self.pick_prompt.deinit(gpa);
+    self.pick_category.deinit(gpa);
     for (self.pick_items.items) |it| {
         gpa.free(it.text);
         gpa.free(it.doc);
+        gpa.free(it.key);
     }
     self.pick_items.deinit(gpa);
     self.surface.deinit(gpa);

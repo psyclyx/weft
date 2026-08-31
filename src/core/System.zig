@@ -262,6 +262,12 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     self.caps = Caps.init(gpa, task.nowNs, &self.container);
     self.actions = Actions.init(gpa, &self.container);
     self.slot_host = SlotHost.init(gpa, &self.container);
+    // The one slot core both fires and decodes (`pick/annotate.zig`). Core
+    // declares it because core has to READ the answers, and it can only do
+    // that against a shape it knows; a plugin-declared schema would leave
+    // core holding bytes it cannot interpret. Nothing else about annotation
+    // is core's — no category, no note, no policy about who may write one.
+    try pick.declareAnnotation(&self.container);
     try self.intent.init(gpa);
     errdefer self.intent.deinit(gpa);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);

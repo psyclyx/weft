@@ -44,6 +44,7 @@ export fn on_pick_accept(pick_id: u32) void {
 /// Fuzzy-pick a live buffer by name and switch to it (by its identity).
 fn bufPick() void {
     weft.pickBegin("buffer", buf_pick);
+    weft.pickCategory("buffer");
     const count = weft.bufferCount();
     var n_candidates: usize = 0;
     var i: usize = 0;

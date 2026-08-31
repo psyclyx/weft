@@ -136,7 +136,7 @@ pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
         .handler = browseRemoteAccept,
         .cleanup = browseRemoteCleanup,
         .data = rb,
-    }, .{ .allow_free_text = true, .source = rd.source() });
+    }, .{ .allow_free_text = true, .source = rd.source(), .category = "dir" });
     return .nil;
 }
 

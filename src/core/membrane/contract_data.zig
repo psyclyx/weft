@@ -283,7 +283,9 @@ pub const imports = [_]Entry{
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "start building a fuzzy pick with `prompt`, tagged `pick_id`" },
     .{ .name = "wl_pick_free_text", .params = &.{.u32}, .results = &.{}, .group = .pick, .doc = "let the pick being built accept the typed query, not only a listed candidate" },
+    .{ .name = "wl_pick_category", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "declare the KIND of the pick being built (`file`/`buffer`/`command`); empty — the default — means it is never annotated" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
+    .{ .name = "wl_pick_add_keyed", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying an uninterpreted public key an annotator can resolve when the label is not one" },
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
@@ -462,7 +464,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 229;
+const expected_import_count = 231;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

@@ -94,6 +94,7 @@ export fn on_command(id: u32) void {
 /// registry; accept runs the choice.
 fn palette() void {
     weft.pickBegin("command", pick_commands);
+    weft.pickCategory("command");
     // A query with arguments in it (`listen 7777 edit`) matches no row by
     // construction — every completion style splits on whitespace. Free text
     // is what makes that query mean something instead of accepting into a
@@ -145,6 +146,7 @@ fn offers() void {
 /// Pick over the open buffers ("id: name"); accept switches to that buffer.
 fn buffers() void {
     weft.pickBegin("buffer", pick_buffers);
+    weft.pickCategory("buffer");
     const n = weft.bufferCount();
     var i: usize = 0;
     while (i < n) : (i += 1) {

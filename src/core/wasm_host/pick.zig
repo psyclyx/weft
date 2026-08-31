@@ -26,6 +26,7 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     for (p.pick_items.items) |it| {
         gpa.free(it.text);
         gpa.free(it.doc);
+        gpa.free(it.key);
     }
     p.pick_items.clearRetainingCapacity();
     const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -34,6 +35,7 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     p.pick_prompt.appendSlice(gpa, prompt) catch {};
     p.pick_id = @intCast(args[2]);
     p.pick_free_text = false; // each pick opts in for itself
+    p.pick_category.clearRetainingCapacity(); // …and so does annotation
 }
 
 /// `wl_pick_free_text(on)` — between `begin` and `end`: let this pick accept
@@ -48,9 +50,45 @@ pub fn hPickFreeText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     p.pick_free_text = args[0] != 0;
 }
 
+/// `wl_pick_category(str)` — between `begin` and `end`: what KIND of pick
+/// this is (`"file"`, `"buffer"`, `"command"`). Uninterpreted by core; the
+/// only thing done with it is handing it to annotators.
+///
+/// **Empty — the default — means this pick is never annotated.** `begin`
+/// resets it, so every pick opts in for itself and a producer that says
+/// nothing (git's confirm, an agent's permission prompt) cannot be decorated
+/// by anyone. Ungated for the same reason `wl_pick_free_text` is: it touches
+/// only this plugin's own scratch.
+pub fn hPickCategory(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const category = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(category);
+    p.pick_category.clearRetainingCapacity();
+    p.pick_category.appendSlice(p.gpa, category) catch {};
+}
+
 pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    addItem(data, caller, args, null);
+    addItem(data, caller, args, null, "");
+}
+
+/// `wl_pick_add_keyed`: `wl_pick_add` plus an uninterpreted PUBLIC key an
+/// annotator can resolve when the label is not one. Core never parses it.
+///
+/// No producer in the tree needs this today — the ones whose label is not a
+/// key are `wl_pick_add_buffer` (which supplies its own, below) and the
+/// intrinsic pickers, whose rows no outside annotator can resolve at all. It
+/// ships anyway because without it the annotation membrane would be usable
+/// only by core producers and by whichever shipped plugins someone edits,
+/// which is the opposite of the point. Speculative, and said so here so it is
+/// not later misremembered as demand.
+pub fn hPickAddKeyed(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const key = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer p.gpa.free(key);
+    addItem(data, caller, args, null, key);
 }
 
 /// `wl_pick_add_buffer`: like `wl_pick_add`, but the candidate carries the
@@ -62,10 +100,17 @@ pub fn hPickAddBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const b = buffers.bufferAtIndex(p, @intCast(args[4])) orelse return;
-    addItem(data, caller, args, b.ref());
+    // TWO handles for two different jobs, and they must not be confused. The
+    // `Ref` is IDENTITY — it survives a rename and refuses a reused slot, and
+    // it is what accept resolves. The annotation key is a NAME an outsider
+    // could look up, because a `Ref` means nothing to an annotator and the
+    // label ("3: foo.zig [ro] *") is display text, not a handle. The path
+    // when there is one, else the display name.
+    const annot_key = if (b.textEditor()) |ed| (ed.backingPath() orelse b.name) else b.name;
+    addItem(data, caller, args, b.ref(), annot_key);
 }
 
-fn addItem(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, key: ?Buffers.Ref) void {
+fn addItem(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, buffer: ?Buffers.Ref, key: []const u8) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
     const text = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -74,9 +119,16 @@ fn addItem(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, key: ?Buf
         gpa.free(text);
         return;
     };
-    p.pick_items.append(gpa, .{ .text = text, .doc = doc, .buffer = key }) catch {
+    errdefer gpa.free(doc);
+    const owned_key = gpa.dupe(u8, key) catch {
         gpa.free(text);
         gpa.free(doc);
+        return;
+    };
+    p.pick_items.append(gpa, .{ .text = text, .doc = doc, .key = owned_key, .buffer = buffer }) catch {
+        gpa.free(text);
+        gpa.free(doc);
+        gpa.free(owned_key);
     };
 }
 
@@ -90,6 +142,7 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // `Head`, so they stay ungated; the actual head mutation happens here.
     if (!requireDispatch(p, caller, "wl_pick_end")) return;
     const gpa = p.gpa;
+    defer p.pick_category.clearRetainingCapacity(); // consumed at open — see `hOpenFilePick`
     const bp = gpa.create(WasmBoundPick) catch return;
     // Accept keys move in ONE bulk transfer at open — never a per-candidate
     // callback the pick would have to make at accept time.
@@ -105,12 +158,12 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         return;
     };
     defer gpa.free(entries);
-    for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc };
+    for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc, .key = it.key };
     p.activeCtx().head.pick.openWith(p.activeCtx(), p.pick_prompt.items, entries, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
-    }, .{ .allow_free_text = p.pick_free_text }) catch {
+    }, .{ .allow_free_text = p.pick_free_text, .category = p.pick_category.items }) catch {
         gpa.free(keys);
         gpa.destroy(bp);
     };
@@ -134,11 +187,15 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         return;
     };
     // openWith closes the source on failure; only the BoundPick is ours.
+    // The category is CONSUMED at open, here as in `hPickEnd`: this door has
+    // no `begin` to reset it, so leaving it set would let one pick's opt-in
+    // leak into the next one that forgot to declare.
+    defer p.pick_category.clearRetainingCapacity();
     p.activeCtx().head.pick.openWith(p.activeCtx(), prompt, &.{}, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
-    }, .{ .source = finder.source(), .allow_free_text = true }) catch {
+    }, .{ .source = finder.source(), .allow_free_text = true, .category = p.pick_category.items }) catch {
         gpa.destroy(bp);
     };
 }
