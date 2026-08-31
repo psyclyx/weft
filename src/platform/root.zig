@@ -239,3 +239,17 @@ comptime {
 test "Platform seam: the skeleton typechecks (compile-time only)" {
     comptime assertPlatform(HeadlessPlatformSkeleton);
 }
+
+/// The ONE platform compiled in. Selecting a different one is a build-time
+/// decision (there is no `-Dplatform` flag today); consumers reach it through
+/// this module root rather than by relative path into the implementation, so
+/// the contract above is the only thing between them and it.
+pub const wayland = @import("wayland.zig");
+
+test {
+    // resize.zig is reached only THROUGH wayland.zig, and a file being
+    // imported for its types does not put its tests in the binary — these
+    // five configure-reducer tests had never run. A module owns its tests.
+    _ = @import("resize.zig");
+    _ = wayland;
+}

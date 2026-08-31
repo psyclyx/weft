@@ -62,5 +62,5 @@ test {
     _ = @import("app/config_load.zig"); // W4 slice 4: the production plugin/grant-table loader
     _ = app_providers; // the `grammar-add` arity gate (its DynLib.open must stay guest-unreachable)
     // Platform seam contract tests remain display-free.
-    _ = @import("platform/platform.zig");
+    _ = @import("weft_platform");
 }

@@ -51,7 +51,7 @@ const view_mod = @import("../gfx/view.zig");
 const region = @import("../gfx/region.zig");
 const window_layout = @import("../gfx/window_layout.zig");
 const window_cmds = @import("window_cmds.zig");
-const wayland = @import("../platform/wayland.zig");
+const wayland = @import("weft_platform").wayland;
 
 /// Pointer → caret: a plain left click places the caret (and arms a drag
 /// anchor); motion with the button held extends a selection from that anchor.

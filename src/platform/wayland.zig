@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const platform = @import("platform.zig");
+const platform = @import("root.zig");
 const resize = @import("resize.zig");
 
 /// Monotonic clock in nanoseconds (raw syscall; matches core/task.zig).

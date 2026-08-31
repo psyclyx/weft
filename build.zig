@@ -490,11 +490,28 @@ pub fn build(b: *std.Build) void {
     });
     fs_platform.addImport("weft_fs", architecture.fs);
 
+    // The window/input/present seam (src/platform/root.zig's `assertPlatform`
+    // contract plus the one implementation compiled in). It depends on nothing
+    // in this tree — not core, not gfx, not app — and this module edge is what
+    // keeps that true: a platform that reaches up into the editor cannot be
+    // written, it fails to compile.
+    const platform_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    platform_mod.linkSystemLibrary("wayland-client", .{});
+    platform_mod.linkSystemLibrary("xkbcommon", .{});
+    platform_mod.linkSystemLibrary("vulkan", .{});
+    addWaylandProtocols(b, platform_mod);
+
     // The dependency set the app tree (src/core + src/gfx + src/app) needs,
     // named once so the shipped binary and the tested one cannot be wired
     // differently by accident. See `configureAppModule`.
     const app_deps: AppDeps = .{
         .architecture = architecture,
+        .platform = platform_mod,
         .fs_platform = fs_platform,
         .font_provider = font_provider_mod,
         .scene = scene_mod,
@@ -512,11 +529,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     configureAppModule(b, exe_mod, app_deps);
-    // What only the desktop binary has: a compositor and a keymap library.
-    // Runtime font-family resolution is owned by `weft_font_provider`.
-    exe_mod.linkSystemLibrary("wayland-client", .{});
-    exe_mod.linkSystemLibrary("xkbcommon", .{});
-    addWaylandProtocols(b, exe_mod);
+    // The compositor link and the generated protocol glue now ride on
+    // `weft_platform`, which is where the code that uses them lives. Runtime
+    // font-family resolution is owned by `weft_font_provider`.
 
     const exe = b.addExecutable(.{
         .name = "weft",
@@ -688,6 +703,12 @@ pub fn build(b: *std.Build) void {
     const application_tests = b.addTest(.{ .root_module = application_mod });
     const run_application_tests = b.addRunArtifact(application_tests);
     test_step.dependOn(&run_application_tests.step);
+    // A module owns its own tests. Before `weft_platform` was a module its
+    // seam test rode along in the `weft` binary; a module's tests do not run
+    // just because a dependent references it, so this is the edge that keeps
+    // it in the gate.
+    const platform_tests = b.addTest(.{ .root_module = platform_mod });
+    test_step.dependOn(&b.addRunArtifact(platform_tests).step);
 
     // A focused entry point for the whole-app spine narrative.  Keeping the
     // filter in the build graph makes the opt-in video command reproducible:
@@ -976,6 +997,7 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 /// one argument instead of eight positional modules a caller could transpose.
 const AppDeps = struct {
     architecture: ArchitectureModules,
+    platform: *std.Build.Module,
     fs_platform: *std.Build.Module,
     font_provider: *std.Build.Module,
     scene: *std.Build.Module,
@@ -1001,6 +1023,7 @@ const AppDeps = struct {
 /// the wasm guests and the resident JS plugins.
 fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void {
     addArchitectureImports(mod, deps.architecture);
+    mod.addImport("weft_platform", deps.platform);
     mod.addImport("weft_fs_platform", deps.fs_platform);
     mod.addImport("weft_font_provider", deps.font_provider);
     mod.addImport("weft_scene", deps.scene);
