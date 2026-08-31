@@ -1613,3 +1613,63 @@ test "e2e/config: the showcased weft.set values land under their owners" {
     try t.expect(app_collab.presenceDefault(null, "on"));
     try t.expect(!app_collab.presenceDefault(null, "off"));
 }
+
+test "e2e/config: the shipped config annotates palette rows — the whole chain, in the real editor" {
+    // Everything doc/marginalia.md builds, exercised the way a user meets it:
+    // boot the REAL config/config.js, open the palette the way `SPC :` does,
+    // let the frame loop run, and look at what is beside the rows.
+    //
+    // This is the gate the fixture tests cannot be: it proves the slot is
+    // declared on the path the shipped binary actually takes (`Session` over
+    // `core.System`), that `marginalia` binds it during config load, and that
+    // the round is driven by the ordinary frame advance rather than by a test
+    // calling `tick` by hand.
+    const gpa = std.testing.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed_storage: Editor = undefined;
+    try Editor.init(gpa, &ed_storage);
+    const ed = &ed_storage;
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = ed };
+    defer loader.deinit();
+    try bootShowcase(gpa, &proj, ed, &loader);
+
+    ed.run("pick-commands");
+    ed.settle(4); // the annotation round rides the ordinary frame advance
+
+    try t.expect(ed.pick.active);
+    // The palette declares its category, so it is offered to annotators…
+    try t.expectEqualStrings("command", ed.pick.category);
+
+    // …and at least one row carries the key that runs it. Which commands are
+    // bound is the config's business and changes as it grows, so the
+    // assertion is "the chain produced something", not a pinned row: a
+    // specific command here would fail for a reason that has nothing to do
+    // with annotation.
+    var annotated: usize = 0;
+    for (ed.pick.annots.items) |a| {
+        if (a.len > 0) annotated += 1;
+    }
+    try t.expect(annotated > 0);
+
+    // A note must be a KEY, not a stray fragment: every one of them has to
+    // appear in some mode's resolved table. A mis-indexed answer — notes
+    // shifted by one against the rows they describe — would still be
+    // non-empty, so counting is not enough.
+    var dbuf: [256]u8 = undefined;
+    for (ed.pick.annots.items) |note| {
+        if (note.len == 0) continue;
+        var found = false;
+        for (ed.keymap.modes.keys()) |mode| {
+            var i: usize = 0;
+            while (i < ed.keymap.bindingCount(mode)) : (i += 1) {
+                const b = ed.keymap.bindingAt(mode, i) orelse continue;
+                if (std.mem.eql(u8, ed.keymap.displayKey(&dbuf, b.key), note)) found = true;
+            }
+        }
+        try t.expect(found);
+    }
+}
