@@ -6,7 +6,7 @@
 //! editor actions through the ordinary dispatch layer.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const Target = @import("../gfx/headless_vulkan.zig").Context;
 const render_mod = @import("render.zig");
 

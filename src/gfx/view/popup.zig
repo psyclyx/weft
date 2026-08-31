@@ -25,7 +25,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const text_engine = @import("weft_text");
-const core = @import("../../core/core.zig");
+const core = @import("weft_core");
 const region = @import("../region.zig");
 const view = @import("../view.zig");
 

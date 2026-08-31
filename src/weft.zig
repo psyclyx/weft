@@ -5,7 +5,7 @@
 //! themselves, and everything routed through this one module shares a single
 //! `core` instance (no cross-module type duplication). Wired in build.zig.
 
-pub const core = @import("core/core.zig");
+pub const core = @import("weft_core");
 pub const semantic_model = @import("weft_semantic");
 pub const view_runtime = @import("weft_view_runtime");
 pub const target_runtime = @import("weft_target_runtime");
@@ -39,14 +39,8 @@ pub const acp_js = @embedFile("acp_js");
 // end-to-end tests on top.
 const std = @import("std");
 test {
-    std.testing.refAllDecls(core); // the core ABI + its property tests
-    _ = @import("core/target_open.zig");
-    _ = @import("core/intentions.zig");
-    _ = @import("core/tests.zig");
-    _ = @import("core/markdown.zig");
-    _ = @import("core/identity.zig");
-    _ = @import("core/facts.zig");
-    _ = @import("core/container.zig");
+    // Core's own tests run in the `weft_core` test binary now (build.zig) —
+    // a module's tests do not ride along in a dependent's.
     _ = @import("gfx/stats.zig");
     _ = @import("gfx/layout.zig");
     _ = view;

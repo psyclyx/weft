@@ -5,7 +5,7 @@
 //! POSIX argv is static, so the parsed slices stay valid for the run.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 
 pub const Args = struct {
     file: ?[]const u8 = null,

@@ -36,7 +36,7 @@
 //! separate `main()` local — see `frame.MenuOverlay`'s field doc for why.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");

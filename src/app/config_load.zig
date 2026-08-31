@@ -5,7 +5,7 @@
 //! resolution and lifetime are one path.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 
 /// Load and run the user's `config.js` in the quickjs.wasm sandbox (plan
 /// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config

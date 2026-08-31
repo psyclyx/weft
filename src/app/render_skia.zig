@@ -19,7 +19,7 @@ const frame = @import("frame.zig");
 const FrameCtx = frame.FrameCtx;
 const Active = frame.Active;
 const FrameBuilder = @import("frame_builder.zig").FrameBuilder;
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 
 /// Env var (any non-empty value) forcing Skia's CPU raster backend even when a
 /// real GPU is present — the same path taken automatically when there is no

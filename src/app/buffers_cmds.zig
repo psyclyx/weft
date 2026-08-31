@@ -6,7 +6,7 @@
 //! document dies.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const providers = @import("providers.zig");
 const AttachDeps = providers.AttachDeps;
 

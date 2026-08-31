@@ -6,7 +6,7 @@
 //! handlers that poke this state live in `collab_cmds.zig`.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const window_layout = @import("../gfx/window_layout.zig");
 const setEcho = @import("handler.zig").setEcho;
 const fs = @import("weft_fs");

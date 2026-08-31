@@ -46,7 +46,7 @@
 
 const std = @import("std");
 const semantic = @import("weft_semantic");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const view_mod = @import("../gfx/view.zig");
 const region = @import("../gfx/region.zig");
 const window_layout = @import("../gfx/window_layout.zig");

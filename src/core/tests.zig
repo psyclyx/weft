@@ -18,7 +18,7 @@ const t = std.testing;
 const Allocator = std.mem.Allocator;
 
 const stemma = @import("stemma");
-const core = @import("core.zig");
+const core = @import("root.zig");
 const Document = core.Document;
 
 const lower = "abcdefghijklmnopqrstuvwxyz";

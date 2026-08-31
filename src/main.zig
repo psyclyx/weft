@@ -9,7 +9,7 @@
 //!   weft [file] [--font path.ttf] [--em N] [--plugin p.wasm]... [--config config.js]
 
 const std = @import("std");
-const core = @import("core/core.zig");
+const core = @import("weft_core");
 const build_options = @import("build_options");
 const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");

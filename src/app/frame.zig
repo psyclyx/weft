@@ -14,7 +14,7 @@
 //! the seam that grouping will replace.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const region = @import("../gfx/region.zig");
 const view_mod = @import("../gfx/view.zig");
 const window_layout = @import("../gfx/window_layout.zig");

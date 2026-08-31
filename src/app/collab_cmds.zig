@@ -4,7 +4,7 @@
 //! `collab.zig`. Split out so neither file exceeds a single concern's size.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const handler = @import("handler.zig");
 const ok_echo = handler.ok_echo;
 const collab = @import("collab.zig");

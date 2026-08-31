@@ -51,7 +51,7 @@ const wayland = @import("weft_platform").wayland;
 const Context = @import("../gfx/context.zig").Context;
 const render_mod = @import("render.zig");
 const dispatch = @import("dispatch.zig");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const command = core.command;
 
 pub const WindowHead = struct {

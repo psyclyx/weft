@@ -38,7 +38,7 @@
 //!   weft --headless --listen PORT [--token T] [file]
 
 const std = @import("std");
-const core = @import("core/core.zig");
+const core = @import("weft_core");
 const session = core.session;
 const capability = core.capability;
 const scheduler = core.scheduler;

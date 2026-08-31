@@ -6,7 +6,7 @@
 //! `gfx/headless_vulkan.zig` and reads the completed offscreen GPU image.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const frame = @import("frame.zig");
 const FrameBuilder = @import("frame_builder.zig").FrameBuilder;
 const cpu = @import("../gfx/harness.zig");

@@ -37,6 +37,11 @@ pub const undo = @import("undo.zig");
 pub const UndoLog = undo.UndoLog;
 pub const Editor = @import("Editor.zig");
 pub const Buffers = @import("Buffers.zig");
+/// The compact editor environment core's own tests run against. Exported
+/// because a cross-layer test — one that drives core's membrane through app's
+/// keypress path, so it can live in neither — needs to build the same `Context`
+/// core's tests do rather than hand-roll a fourth copy of it.
+pub const TestHost = @import("TestHost.zig");
 pub const Keymap = @import("Keymap.zig");
 pub const input = @import("weft_input");
 pub const TextCommit = input.TextCommit;
@@ -118,4 +123,14 @@ pub const transcript = @import("transcript.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // Files whose tests `refAllDecls` alone does not reach — they were listed
+    // in src/weft.zig's test block while core was compiled into that module.
+    // Core is its own module now, and a module owns its tests.
+    _ = @import("target_open.zig");
+    _ = @import("intentions.zig");
+    _ = @import("tests.zig");
+    _ = @import("markdown.zig");
+    _ = @import("identity.zig");
+    _ = @import("facts.zig");
+    _ = @import("container.zig");
 }

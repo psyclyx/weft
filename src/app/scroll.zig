@@ -4,7 +4,7 @@
 //! pane's scroll.
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const view_mod = @import("../gfx/view.zig");
 
 /// Scrolling commands operate on the focused pane's viewport, which lives

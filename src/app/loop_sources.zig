@@ -23,7 +23,7 @@
 //! pointer are all window concerns headless has none of).
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const scheduler = core.scheduler;
 const wayland = @import("weft_platform").wayland;
 const cursor_config = @import("cursor_config.zig");

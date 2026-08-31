@@ -506,11 +506,30 @@ pub fn build(b: *std.Build) void {
     platform_mod.linkSystemLibrary("vulkan", .{});
     addWaylandProtocols(b, platform_mod);
 
+    // The editor kernel. It is graphics-free by construction now, not by
+    // convention: `weft_core` is given no scene, text, font, skia, gfx, app or
+    // platform edge, so `core/Head.zig`'s standing instruction — "core ... must
+    // not depend on gfx/window_layout.zig" — is a compile error rather than a
+    // comment somebody has to keep honouring.
+    const core_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addArchitectureImports(core_mod, architecture);
+    core_mod.addImport("weft_fs_platform", fs_platform);
+    core_mod.addImport("stemma", stemma_dep.module("stemma"));
+    addSyntax(b, core_mod);
+    addWasm(b, core_mod);
+    addQuickjs(b, core_mod);
+
     // The dependency set the app tree (src/core + src/gfx + src/app) needs,
     // named once so the shipped binary and the tested one cannot be wired
     // differently by accident. See `configureAppModule`.
     const app_deps: AppDeps = .{
         .architecture = architecture,
+        .core = core_mod,
         .platform = platform_mod,
         .fs_platform = fs_platform,
         .font_provider = font_provider_mod,
@@ -709,6 +728,25 @@ pub fn build(b: *std.Build) void {
     // it in the gate.
     const platform_tests = b.addTest(.{ .root_module = platform_mod });
     test_step.dependOn(&b.addRunArtifact(platform_tests).step);
+    // Core's own suite — the ABI property tests plus the whole wasm-membrane
+    // suite — was running inside the `weft` binary because core was compiled
+    // into it. It is a module now, so it gets its own binary, and it needs the
+    // embedded guests its membrane tests @embedFile.
+    const core_tests_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addArchitectureImports(core_tests_mod, architecture);
+    core_tests_mod.addImport("weft_fs_platform", fs_platform);
+    core_tests_mod.addImport("stemma", stemma_dep.module("stemma"));
+    addSyntax(b, core_tests_mod);
+    addWasm(b, core_tests_mod);
+    addQuickjs(b, core_tests_mod);
+    embedGuests(b, core_tests_mod);
+    const core_tests = b.addTest(.{ .root_module = core_tests_mod });
+    test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
     // A focused entry point for the whole-app spine narrative.  Keeping the
     // filter in the build graph makes the opt-in video command reproducible:
@@ -997,6 +1035,7 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 /// one argument instead of eight positional modules a caller could transpose.
 const AppDeps = struct {
     architecture: ArchitectureModules,
+    core: *std.Build.Module,
     platform: *std.Build.Module,
     fs_platform: *std.Build.Module,
     font_provider: *std.Build.Module,
@@ -1023,6 +1062,7 @@ const AppDeps = struct {
 /// the wasm guests and the resident JS plugins.
 fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void {
     addArchitectureImports(mod, deps.architecture);
+    mod.addImport("weft_core", deps.core);
     mod.addImport("weft_platform", deps.platform);
     mod.addImport("weft_fs_platform", deps.fs_platform);
     mod.addImport("weft_font_provider", deps.font_provider);

@@ -9,7 +9,7 @@
 //! registry. See [[lsp-plugin-migration]].
 
 const std = @import("std");
-const core = @import("../core/core.zig");
+const core = @import("weft_core");
 const collab = @import("collab.zig");
 
 /// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as

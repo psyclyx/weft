@@ -6,7 +6,7 @@
 const std = @import("std");
 
 /// Monotonic clock (shared with core; std.time.Timer is gone in 0.16).
-pub const nowNs = @import("../core/task.zig").nowNs;
+pub const nowNs = @import("weft_core").task.nowNs;
 
 pub const Ring = struct {
     buf: [512]u64 = undefined,
