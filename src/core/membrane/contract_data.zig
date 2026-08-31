@@ -238,6 +238,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
     .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
+    .{ .name = "wl_mode_names", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "every mode with a binding table, newline-joined; cap=0 reports the length, short destinations return -2" },
+    .{ .name = "wl_binding_table", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "mode `m`'s bindings resolved through its fallback chain, one `<key>\t<command>` per line" },
     .{ .name = "wl_declare_action", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare an abstract action + its trampoline command" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, scoped by mode/lang/tool + priority" },
 
@@ -460,7 +462,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 227;
+const expected_import_count = 229;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

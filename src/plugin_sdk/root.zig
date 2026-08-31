@@ -163,6 +163,8 @@ extern "weft" fn wl_buffer_count() u32;
 extern "weft" fn wl_buffer_id(i: u32) i32;
 extern "weft" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_buffer_active(i: u32) u32;
+extern "weft" fn wl_mode_names(out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_binding_table(mode_ptr: u32, mode_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_buffer_readonly(i: u32) u32;
 extern "weft" fn wl_buffer_path(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_buffer_dirty(i: u32) i32;
@@ -1138,6 +1140,54 @@ pub fn offersCommit() void {
 /// nonapplicable — an empty table would still be a claim.
 pub fn offersRetract() void {
     wl_offers_retract();
+}
+
+// ── Reading the keymap tables ────────────────────────────────────────
+//
+// The head-scoped which-key reads are `menuBinding*`. These two read the
+// TABLES, with the mode named — which is the only way to answer "what key
+// runs this command" for a mode you are not standing in.
+//
+// Both write into `out` (caller-owned, so a listing survives the next read)
+// and answer null when it is too small, never a truncated listing.
+
+/// Every mode with a binding table, newline-joined.
+pub fn modeNames(out: []u8) ?[]const u8 {
+    const n = wl_mode_names(p(out.ptr), @intCast(out.len));
+    if (n < 0) return null;
+    return out[0..@intCast(n)];
+}
+
+/// Mode `mode`'s bindings resolved through its fallback chain, one
+/// `<key>\t<command>` per line. Walk it with `bindingRows`.
+pub fn bindingTable(mode: []const u8, out: []u8) ?[]const u8 {
+    const n = wl_binding_table(p(mode.ptr), @intCast(mode.len), p(out.ptr), @intCast(out.len));
+    if (n < 0) return null;
+    return out[0..@intCast(n)];
+}
+
+/// One row of `bindingTable`.
+pub const BindingRow = struct { key: []const u8, command: []const u8 };
+
+/// Split a `bindingTable` listing into rows. A line without a tab is skipped
+/// rather than guessed at.
+pub const BindingRows = struct {
+    rest: []const u8,
+
+    pub fn next(self: *BindingRows) ?BindingRow {
+        while (self.rest.len > 0) {
+            const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
+            const line = self.rest[0..nl];
+            self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            return .{ .key = line[0..tab], .command = line[tab + 1 ..] };
+        }
+        return null;
+    }
+};
+
+pub fn bindingRows(listing: []const u8) BindingRows {
+    return .{ .rest = listing };
 }
 
 pub fn bufferCount() usize {

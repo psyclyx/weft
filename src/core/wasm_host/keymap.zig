@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command_mod = @import("../command.zig");
 const input = @import("../input.zig");
+const Keymap = @import("../Keymap.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -31,7 +32,6 @@ pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer gpa.free(cmd);
     // A plugin binds at the plugin tier, owned by its name (so a config bind
     // shadows it and equal-tier collisions between two plugins are surfaced).
-    const Keymap = @import("../Keymap.zig");
     p.activeCtx().keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
 }
 
@@ -43,7 +43,6 @@ pub fn hBindKeys(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
-    const Keymap = @import("../Keymap.zig");
     const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(mode);
     const key = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
@@ -280,4 +279,145 @@ pub fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     p.activeCtx().keymap.markStickyMenu(p.gpa, mode) catch {};
+}
+
+// ── Reading the tables ───────────────────────────────────────────────
+//
+// `menu.zig`'s `wl_menu_binding_*` reads the current head's RESOLVED MENU
+// LIST — head-scoped, mode-scoped, and scoped to the chord being typed. It is
+// what which-key needs and it cannot answer "which key runs this command",
+// in this mode or any other, because it never sees a mode it is not standing
+// in.
+//
+// These two read the TABLES instead — the thing `Keymap.zig` says it owns
+// ("everything that describes what a mode IS"), with the mode named
+// explicitly rather than taken from a head.
+//
+// LISTINGS, not indexed accessors. Five indexed doors (mode_count/mode_name/
+// binding_count/binding_key/binding_cmd) would re-run `resolveBindingsInto`
+// — an allocating fallback-chain walk — once per index, which is O(n²) plus
+// a per-call allocation, and the only escape is a resolved-list cache in core
+// (what `Head` keeps for the menu doors). Two listing doors have neither
+// problem, and they put the parsing where the policy already is: a guest
+// deciding what "the key for this command" means.
+//
+// Both use `writeExact`, so a table too big for the caller's buffer says so
+// (-2) instead of silently arriving half-length. Half a keymap looks exactly
+// like a small keymap.
+
+/// Every mode with a binding table, newline-joined, in declaration order.
+/// Caller owns the bytes.
+pub fn modeNames(gpa: Allocator, km: *const Keymap) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (km.modes.keys(), 0..) |name, i| {
+        if (i > 0) try out.append(gpa, '\n');
+        try out.appendSlice(gpa, name);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Mode `mode`'s bindings RESOLVED through its fallback chain, one per line
+/// as `<key>\t<command>`. Caller owns the bytes.
+///
+/// The key is the DISPLAY form (`Keymap.displayKey`: `SPC g s`), matching
+/// `wl_menu_binding_key` exactly. The canonical stored form is deliberately
+/// not exposed: no consumer needs it, and shipping both spellings of one key
+/// through the membrane is an invitation to compare the wrong one.
+pub fn bindingTable(gpa: Allocator, km: *const Keymap, mode: []const u8) Allocator.Error![]u8 {
+    var bindings: std.ArrayList(Keymap.Binding) = .empty;
+    defer bindings.deinit(gpa);
+    var groups: std.ArrayList(bool) = .empty;
+    defer groups.deinit(gpa);
+    _ = try km.resolveBindingsInto(gpa, mode, &bindings, &groups);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var dbuf: [256]u8 = undefined;
+    for (bindings.items, 0..) |b, i| {
+        if (i > 0) try out.append(gpa, '\n');
+        try out.appendSlice(gpa, km.displayKey(&dbuf, b.key));
+        try out.append(gpa, '\t');
+        try out.appendSlice(gpa, b.command);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+pub fn hModeNames(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const listing = modeNames(p.gpa, p.activeCtx().keymap) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(listing);
+    shared.writeExact(caller, args, results, listing);
+}
+
+pub fn hBindingTable(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(mode);
+    const listing = bindingTable(gpa, p.activeCtx().keymap, mode) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(listing);
+    shared.writeExact(caller, args[2..], results, listing);
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+test "the binding table resolves the fallback chain, and a chord is one row" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    // `visual` falls back to `normal`: a reader standing in `visual` must see
+    // what `visual` would actually run, which includes what it inherits. This
+    // is the difference from `Keymap.bindingAt`, which sees one table.
+    try km.bind(gpa, "normal", "d", "delete", 0, "test");
+    try km.bind(gpa, "normal", "space g s", "git-status", 0, "test");
+    try km.bind(gpa, "visual", "y", "yank", 0, "test");
+    try km.setFallback(gpa, "visual", "normal");
+
+    const listing = try bindingTable(gpa, &km, "visual");
+    defer gpa.free(listing);
+
+    // A chord is ONE row carrying the whole sequence, not one row per key —
+    // "which key runs git-status" has a single answer and this is it.
+    try t.expect(std.mem.indexOf(u8, listing, "git-status") != null);
+    var saw_own = false;
+    var saw_inherited = false;
+    var expect_buf: [256]u8 = undefined;
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+        const cmd = line[tab + 1 ..];
+        if (std.mem.eql(u8, cmd, "yank")) saw_own = true;
+        if (std.mem.eql(u8, cmd, "delete")) saw_inherited = true;
+        if (std.mem.eql(u8, cmd, "git-status")) {
+            // The DISPLAY form, matching `wl_menu_binding_key` — a reader
+            // renders this, it never feeds it back to a lookup.
+            try t.expectEqualStrings(km.displayKey(&expect_buf, "space g s"), line[0..tab]);
+        }
+    }
+    try t.expect(saw_own);
+    try t.expect(saw_inherited);
+
+    // An undeclared mode is not an error: it inherits `global` and nothing
+    // else, which is honestly "no bindings here".
+    const none = try bindingTable(gpa, &km, "no-such-mode");
+    defer gpa.free(none);
+    try t.expectEqualStrings("", none);
+
+    const names = try modeNames(gpa, &km);
+    defer gpa.free(names);
+    try t.expect(std.mem.indexOf(u8, names, "normal") != null);
+    try t.expect(std.mem.indexOf(u8, names, "visual") != null);
 }

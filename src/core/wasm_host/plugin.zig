@@ -330,6 +330,35 @@ pub fn requireDispatch(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []co
     return false;
 }
 
+/// A two-pass, EXACT byte read: `cap == 0` reports the required length; a
+/// nonzero call either writes the complete value or returns -2. `args[0]` is
+/// the destination pointer, `args[1]` its capacity.
+///
+/// The generic `writeMemory` convention truncates silently at `cap`, which is
+/// the right answer for a value a guest can re-ask for in pieces and the
+/// WRONG one for a LISTING: half a keymap table looks exactly like a small
+/// keymap table. Any door whose payload is a set the caller will act on
+/// wholesale uses this instead. Lifted out of `pick.zig`, which invented it
+/// for `wl_pick_outcome_*` ("picker outcomes must never inherit the generic
+/// scratch-reader convention") and was its only user; the reasoning was never
+/// specific to picks.
+pub fn writeExact(caller: *wasm.Caller, args: []const i32, results: []i32, bytes: []const u8) void {
+    const cap: usize = @intCast(args[1]);
+    if (cap == 0) {
+        results[0] = std.math.cast(i32, bytes.len) orelse -2;
+        return;
+    }
+    if (cap < bytes.len) {
+        results[0] = -2;
+        return;
+    }
+    const written = caller.writeMemory(@intCast(args[0]), cap, bytes) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(written);
+}
+
 /// The parent process's environment, so a `proc` child inherits PATH (nix
 /// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at
 /// startup from `main`; empty in tests (the child falls back to sh's default

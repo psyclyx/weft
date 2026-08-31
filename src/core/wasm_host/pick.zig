@@ -189,25 +189,11 @@ pub fn hPickOutcomeQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     writeOutcomeBytes(caller, args, results, query);
 }
 
-/// A two-pass, exact byte read: cap=0 reports the required length; a nonzero
-/// call either writes the complete value or returns -2. Picker outcomes must
-/// never inherit the generic scratch-reader convention of silent truncation.
-fn writeOutcomeBytes(caller: *wasm.Caller, args: []const i32, results: []i32, bytes: []const u8) void {
-    const cap: usize = @intCast(args[1]);
-    if (cap == 0) {
-        results[0] = std.math.cast(i32, bytes.len) orelse -2;
-        return;
-    }
-    if (cap < bytes.len) {
-        results[0] = -2;
-        return;
-    }
-    const written = caller.writeMemory(@intCast(args[0]), cap, bytes) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(written);
-}
+/// A two-pass, exact byte read — `plugin.writeExact`. Picker outcomes must
+/// never inherit the generic scratch-reader convention of silent truncation;
+/// that reasoning turned out not to be specific to picks, so it lives beside
+/// the other shared door helpers now.
+const writeOutcomeBytes = shared.writeExact;
 
 pub fn hPickOutcomeIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
