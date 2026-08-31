@@ -28,47 +28,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
-const schema = weft.schema;
-
-// ── The slot's schema, mirrored from core/pick/annotate.zig ───────────
-//
-// Written out rather than imported: a plugin cannot reach into core's source
-// tree, which is the point — the SCHEMA is the contract, and this file
-// restates it exactly as any third-party annotator would have to. If the two
-// ever disagree the decode fails closed (a note is simply not produced),
-// because `enterVariant`/`field` validate against the tree they were handed.
-
-const str_ty: schema.Schema = .str;
-const u32_ty: schema.Schema = .{ .scalar = .u32 };
-
-const row_fields = [_]schema.Schema.Field{
-    .{ .name = "text", .ty = &str_ty },
-    .{ .name = "key", .ty = &str_ty },
-};
-const row_ty: schema.Schema = .{ .@"struct" = &row_fields };
-const rows_ty: schema.Schema = .{ .array = &row_ty };
-
-const ask_fields = [_]schema.Schema.Field{
-    .{ .name = "category", .ty = &str_ty },
-    .{ .name = "from", .ty = &u32_ty },
-    .{ .name = "rows", .ty = &rows_ty },
-};
-const ask_ty: schema.Schema = .{ .@"struct" = &ask_fields };
-
-const notes_ty: schema.Schema = .{ .array = &str_ty };
-const tell_fields = [_]schema.Schema.Field{
-    .{ .name = "from", .ty = &u32_ty },
-    .{ .name = "notes", .ty = &notes_ty },
-};
-const tell_ty: schema.Schema = .{ .@"struct" = &tell_fields };
-
-const cases = [_]schema.Schema.Case{
-    .{ .name = "ask", .ty = &ask_ty },
-    .{ .name = "tell", .ty = &tell_ty },
-};
-const annotate_schema: schema.Schema = .{ .variant = &cases };
-
-const tag_tell = 1;
+const annotate = @import("weft_annotate");
 
 // ── Config (`weft.set("marginalia", …)`), read once at init ───────────
 //
@@ -108,11 +68,7 @@ export fn init() void {
     // to decode the answers. A second declaration would be ignored anyway
     // (`Container.declareSlot` keeps the first), so binding is the honest
     // spelling of "I answer this".
-    //
-    // `.all` — not `.mode = "pick"` — because eligibility is by CATEGORY,
-    // which rides the payload, and a pick's facts always report mode "pick"
-    // regardless of what kind of pick it is.
-    weft.slotBind("ui/pick-annotate", .all, .plugin, 0);
+    annotate.bind();
 
     show_file = !std.mem.eql(u8, weft.config("file"), "off");
     show_buffer = !std.mem.eql(u8, weft.config("buffer"), "off");
@@ -139,24 +95,9 @@ fn enabled(c: Category) bool {
 }
 
 export fn on_slot_fire(session: i32) void {
-    const request = weft.payloadRead(@bitCast(session));
-    if (request.len == 0) return;
-
-    const cur = schema.decodeCursor(&annotate_schema, request);
-    const variant = cur.enterVariant() catch return;
-    // A `tell` reaching a provider means core asked the wrong question, or
-    // this is not the payload we think it is. Either way: say nothing.
-    if (variant.tag != 0) return;
-    const s = variant.selected().enterStruct() catch return;
-
-    const category_cur = (s.field("category") catch return) orelse return;
-    const category = categoryOf(category_cur.asStr() catch return);
+    var round = annotate.ask(@bitCast(session)) orelse return;
+    const category = categoryOf(round.category);
     if (!enabled(category)) return; // declined — not "answered with blanks"
-
-    const from_cur = (s.field("from") catch return) orelse return;
-    const from = from_cur.asU32() catch return;
-    const rows_cur = (s.field("rows") catch return) orelse return;
-    var rows = rows_cur.enterArray() catch return;
 
     // The command index is built ONCE per round, not once per row: it walks
     // every mode's whole table, so per-row would be O(rows × bindings).
@@ -164,27 +105,12 @@ export fn on_slot_fire(session: i32) void {
 
     note_used = 0;
     var n: usize = 0;
-    while (rows.next() catch return) |row| {
+    while (round.next()) |row| {
         if (n == notes_storage.len) break;
-        const rs = row.enterStruct() catch break;
-        const key_cur = (rs.field("key") catch break) orelse break;
-        const key = key_cur.asStr() catch break;
-        notes_storage[n] = store(noteFor(category, key, index));
+        notes_storage[n] = store(noteFor(category, row.key, index));
         n += 1;
     }
-
-    const values = weft.allocator.alloc(schema.Value, n) catch return;
-    defer weft.allocator.free(values);
-    for (values, notes_storage[0..n]) |*v, note| v.* = .{ .str = note };
-
-    const tell_values = [_]schema.Value{
-        .{ .scalar = .{ .u32 = from } },
-        .{ .array = values },
-    };
-    const tell: schema.Value = .{ .@"struct" = &tell_values };
-    weft.payloadPush(@bitCast(session), 1, &annotate_schema, .{
-        .variant = .{ .tag = tag_tell, .payload = &tell },
-    });
+    annotate.tell(@bitCast(session), round.from, notes_storage[0..n]);
 }
 
 /// Copy a note into the round's own storage — `note_buf` is reused by the

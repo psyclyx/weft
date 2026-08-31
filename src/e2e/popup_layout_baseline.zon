@@ -6,11 +6,11 @@
             .layout = .{
                 .x = 8,
                 .y = 63.875,
-                .w = 202.28906,
+                .w = 144.49219,
                 .h = 111.75,
                 .flipped_above = false,
                 .col_x = .{ 1, 11 },
-                .col_w = .{ 8, 9 },
+                .col_w = .{ 8, 3 },
                 .rows = .{
                     .{
                         .y = 63.875,
@@ -21,7 +21,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -36,7 +36,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -51,7 +51,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -66,7 +66,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -81,7 +81,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -96,7 +96,7 @@
                             .x = 17.632812,
                             .role = .normal,
                         }, .{
-                            .text = "var \xc2\xb7 i32",
+                            .text = "i32",
                             .column = 1,
                             .x = 113.96094,
                             .role = .annotation,
@@ -105,7 +105,7 @@
                 },
                 .info = null,
             },
-            .pixel_hash = 17589101528874187261,
+            .pixel_hash = 16058099202248010959,
         },
         .{
             .name = "flip_above_near_bottom",

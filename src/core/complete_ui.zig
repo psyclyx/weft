@@ -112,21 +112,26 @@ pub const CompletionUi = struct {
         if (fresh.len > 0) {
             const merged = try ctx.caps.mergedCompletion(ctx.gpa, id);
             defer ctx.gpa.free(merged);
-            const labels = try ctx.gpa.alloc([]const u8, merged.len);
-            defer ctx.gpa.free(labels);
-            const notes = try ctx.gpa.alloc([]const u8, merged.len);
-            defer {
-                for (notes) |n| ctx.gpa.free(n);
-                ctx.gpa.free(notes);
-            }
+            const entries = try ctx.gpa.alloc(pick_mod.Entry, merged.len);
+            defer ctx.gpa.free(entries);
             const infos = try ctx.gpa.alloc([]const u8, merged.len);
             defer ctx.gpa.free(infos);
             for (merged, 0..) |it, i| {
-                labels[i] = it.text;
-                notes[i] = try annotate(ctx.gpa, it);
+                entries[i] = .{
+                    .text = it.text,
+                    // The PROVIDER's own affixation — a type or signature it
+                    // chose to attach. Not a rendering of anything; core adds
+                    // nothing to it (see this file's module doc).
+                    .doc = it.detail,
+                    // The row's public key is its `CompletionItemKind`
+                    // number, so an annotator that understands that number
+                    // space can name it. Core carries the digits and reads
+                    // nothing into them.
+                    .key = kindKey(it.kind),
+                };
                 infos[i] = it.documentation; // borrowed from the session; refresh dupes
             }
-            try pick_mod.refresh(&ctx.head.pick, ctx.gpa, labels, notes, infos);
+            try pick_mod.refresh(&ctx.head.pick, ctx.gpa, entries, infos);
             changed = true;
         }
         if (s.done(task.nowNs())) {
@@ -147,34 +152,40 @@ pub const CompletionUi = struct {
         }
     }
 
-    /// A display-only annotation for a completion row: a short kind tag plus the
-    /// provider's detail (a type/signature), e.g. `fn · fn (i32) i32`. Owned by
-    /// the caller. The tag is the UI's reading of the LSP `CompletionItemKind`
-    /// number — core stores the number, the UI names it.
-    fn annotate(gpa: Allocator, it: *const capability.CompletionItem) ![]u8 {
-        const tag = kindTag(it.kind);
-        if (it.detail.len > 0 and tag.len > 0)
-            return std.fmt.allocPrint(gpa, "{s} · {s}", .{ tag, it.detail });
-        if (it.detail.len > 0) return gpa.dupe(u8, it.detail);
-        return gpa.dupe(u8, tag);
-    }
+    /// The decimal spelling of a completion item's kind, as its row KEY.
+    ///
+    /// This is all that remains of what used to be `kindTag` — a switch in
+    /// core that turned LSP's `CompletionItemKind` numbers into `"fn"`,
+    /// `"var"`, `"kw"`. That was an annotator, it understood a protocol's
+    /// number space, and it lived in core. It is now the `lsp` plugin's, which
+    /// is where that number space is already understood; core carries the
+    /// digits across and reads nothing into them.
+    ///
+    /// A static table rather than a format call: this runs per item per
+    /// refresh, and a refresh happens every time a provider answers.
+    /// Two digits is enough — `CompletionItemKind` is 1..25 and has been for
+    /// the life of the protocol; anything outside it keys as `"0"`, which an
+    /// annotator reads as "unknown" exactly like kind 0 itself.
+    const kind_digits = "0123456789";
+    var kind_key_bytes: [100 * 2]u8 = undefined;
+    var kind_keys: [100][]const u8 = undefined;
+    var kind_keys_ready = false;
 
-    fn kindTag(kind: u8) []const u8 {
-        return switch (kind) {
-            2, 3 => "fn", // Method, Function
-            4 => "new", // Constructor
-            5, 10 => "field", // Field, Property
-            6 => "var", // Variable
-            7, 22 => "type", // Class, Struct
-            8 => "iface", // Interface
-            9 => "mod", // Module
-            13, 20 => "enum", // Enum, EnumMember
-            14 => "kw", // Keyword
-            15 => "snip", // Snippet
-            21, 12 => "const", // Constant, Value
-            25 => "typaram", // TypeParameter
-            else => "", // Text/unknown → no tag
-        };
+    fn kindKey(kind: u8) []const u8 {
+        if (!kind_keys_ready) {
+            for (&kind_keys, 0..) |*s, i| {
+                const tens = i / 10;
+                const ones = i % 10;
+                kind_key_bytes[i * 2] = kind_digits[tens];
+                kind_key_bytes[i * 2 + 1] = kind_digits[ones];
+                s.* = if (tens == 0)
+                    kind_key_bytes[i * 2 + 1 .. i * 2 + 2]
+                else
+                    kind_key_bytes[i * 2 .. i * 2 + 2];
+            }
+            kind_keys_ready = true;
+        }
+        return kind_keys[if (kind < kind_keys.len) kind else 0];
     }
 
     fn accept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outcome) anyerror!void {

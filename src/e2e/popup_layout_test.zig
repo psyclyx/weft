@@ -260,6 +260,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(2).start;
 
+        // Column 1 is the PROVIDER's own detail (`i32`) and nothing else.
+        // `kind = 6` used to also render as a `var · ` prefix, from a switch
+        // in `complete_ui`; naming an LSP `CompletionItemKind` is the `lsp`
+        // plugin's now (doc/marginalia.md §5), and this fixture loads no
+        // plugins. The kind still rides the row as its annotation KEY — what
+        // changed is who is allowed to name it.
         var items = [_]capability.CompletionItem{
             .{ .text = @constCast("alpha"), .detail = @constCast("i32"), .kind = 6, .rank = 0 },
             .{ .text = @constCast("bravo"), .detail = @constCast("i32"), .kind = 6, .rank = 1 },

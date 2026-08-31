@@ -25,6 +25,7 @@ const std = @import("std");
 const weft = @import("weft");
 const rpc = @import("weft_jsonrpc");
 const prompt = @import("weft_prompt");
+const annotate = @import("weft_annotate");
 const session_mod = @import("session.zig");
 const request = @import("request.zig");
 
@@ -110,6 +111,58 @@ export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
     weft.provideCompletion();
     rename_prompt.install();
+    // …and annotate the completion rows this plugin's own answers produce.
+    // See `on_slot_fire` below for why the tag lives here and not in core.
+    annotate.bind();
+}
+
+// ── Naming a CompletionItemKind ──────────────────────────────────────
+//
+// `CompletionItemKind` is an LSP number, and this is the LSP plugin. Core
+// stores the number on a completion item and carries it across as a row key;
+// what "3" is called is protocol knowledge, and protocol knowledge belongs to
+// whoever speaks the protocol.
+//
+// It used to be `complete_ui.kindTag` — a switch in core, over a number space
+// core has no other reason to understand, producing display text core has no
+// business choosing. It moved here whole.
+
+var tag_storage: [256][]const u8 = undefined;
+
+export fn on_slot_fire(session: i32) void {
+    var round = annotate.ask(@bitCast(session)) orelse return;
+    // Only completion rows. Every other category names rows this plugin
+    // cannot resolve, and declining is cheaper than answering with blanks.
+    if (!std.mem.eql(u8, round.category, "complete")) return;
+
+    var n: usize = 0;
+    while (round.next()) |row| {
+        if (n == tag_storage.len) break;
+        // The row's key is the item's kind, in decimal — core carries the
+        // digits and reads nothing into them.
+        const kind = std.fmt.parseInt(u8, row.key, 10) catch 0;
+        tag_storage[n] = kindTag(kind);
+        n += 1;
+    }
+    annotate.tell(@bitCast(session), round.from, tag_storage[0..n]);
+}
+
+fn kindTag(kind: u8) []const u8 {
+    return switch (kind) {
+        2, 3 => "fn", // Method, Function
+        4 => "new", // Constructor
+        5, 10 => "field", // Field, Property
+        6 => "var", // Variable
+        7, 22 => "type", // Class, Struct
+        8 => "iface", // Interface
+        9 => "mod", // Module
+        13, 20 => "enum", // Enum, EnumMember
+        14 => "kw", // Keyword
+        15 => "snip", // Snippet
+        21, 12 => "const", // Constant, Value
+        25 => "typaram", // TypeParameter
+        else => "", // Text/unknown → no tag
+    };
 }
 
 /// Completion request (caps provider): send textDocument/completion for the

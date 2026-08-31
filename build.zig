@@ -51,6 +51,7 @@ const Library = enum {
     jsonrpc,
     output,
     files,
+    annotate,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -62,6 +63,7 @@ const Library = enum {
             .jsonrpc => "weft_jsonrpc",
             .output => "weft_output",
             .files => "weft_files",
+            .annotate => "weft_annotate",
         };
     }
 
@@ -317,7 +319,7 @@ const guests = [_]Guest{
     .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
-    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt } },
+    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
     .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
     .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
@@ -342,7 +344,7 @@ const guests = [_]Guest{
     .{ .name = "which_key", .import = "guest_which_key_wasm", .install = true },
     // Pick-row annotations (doc/marginalia.md): binds `ui/pick-annotate` and
     // answers with a note per row. No commands, no core privilege.
-    .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true },
+    .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
     .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{.ex} },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },

@@ -936,24 +936,21 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("..
 }
 
 /// Replace the item set of a live pick, preserving query and selection
-/// (race-and-refine consumers call this as results land).
-/// Replace the item set. `docs`, when non-empty, is a parallel array of
-/// display-only annotations (completion detail/kind) shown dimmed beside each
-/// item; `infos` likewise the full documentation body for the side popup. Pass
-/// `&.{}` for either. Matching/acceptance still see `items` only.
-pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []const []const u8, infos: []const []const u8) !void {
+/// (race-and-refine consumers call this as results land). `infos` is the full
+/// documentation body for the side popup, parallel to `entries`; pass `&.{}`
+/// for none. Matching and acceptance still see `Entry.text` only.
+///
+/// Takes `Entry` rather than parallel `items`/`docs`/`keys` arrays: the type
+/// that already describes a row is a better carrier than three arrays a
+/// caller has to keep the same length, and it stopped growing a parameter
+/// every time a row gained a field.
+pub fn refresh(p: *Pick, gpa: Allocator, entries: []const Entry, infos: []const []const u8) !void {
     if (!p.active) return;
     const keep = p.selection();
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
     defer if (keep_owned) |k| gpa.free(k);
     p.clearRows(gpa);
-    for (items, 0..) |it, i| {
-        try p.pushRow(
-            gpa,
-            .{ .text = it, .doc = if (i < docs.len) docs[i] else "" },
-            if (i < infos.len) infos[i] else "",
-        );
-    }
+    for (entries, 0..) |e, i| try p.pushRow(gpa, e, if (i < infos.len) infos[i] else "");
     try p.refilter(gpa);
     if (keep_owned) |k| {
         for (p.filtered.items, 0..) |idx, i| {
@@ -1615,7 +1612,7 @@ test "annotation: refresh drops stale notes rather than reattaching them to new 
     _ = try env.head.pick.tick(ctx);
     try t.expectEqualStrings("note:first", env.head.pick.annots.items[0]);
 
-    try refresh(&env.head.pick, gpa, &.{"second"}, &.{}, &.{});
+    try refresh(&env.head.pick, gpa, &.{.{ .text = "second" }}, &.{});
     try t.expectEqualStrings("", env.head.pick.annots.items[0]); // dropped, not rebased
     _ = try env.head.pick.tick(ctx);
     try t.expectEqualStrings("note:second", env.head.pick.annots.items[0]);
