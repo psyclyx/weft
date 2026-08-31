@@ -1,6 +1,8 @@
 # Pick annotation — and the introspection it actually needs
 
-Status: design. Nothing here is built.
+Status: in progress. Slices 1–3 (Phase 1, the read doors) are built and
+green; 4–8 remain. §6 is the live checklist. Where implementation revised a
+decision, the section says so rather than being quietly rewritten.
 
 ## 0. What this is
 
@@ -39,8 +41,8 @@ exist (§3.1).
 ## 2. Phase 1 — the read doors
 
 Three independent slices. Each lands and ships on its own; none depends on
-another or on Phase 2. Eleven doors total, `expected_import_count`
-221 → 232.
+another or on Phase 2. Eight doors total, `expected_import_count`
+221 → 229.
 
 ### 2a. `wl_fs_stat` — what a path is, beyond its kind
 
@@ -139,21 +141,36 @@ Bodies, all in `wasm_host/buffers.zig` over the existing `bufferAtIndex`:
   what lets an annotator tell "a file" from "a projection" before it says
   anything about either.
 
-**One structural fix, in the same slice.** `bufferAtIndex` is an `O(i)`
-iterator walk. With ten indexed doors, a plugin enumerating `n` buffers now
-does `10n` walks — `O(n²)`. Add a one-entry cursor memo to `WasmPlugin`
-(`last_index`, `last_buffer: ?Buffers.Ref`): a lookup for `i == last_index`
-or `i == last_index + 1` resumes instead of restarting, which makes
-sequential enumeration `O(n)` total and leaves random access exactly as it
-is. Invalidated by resolving through the `Ref`, so a buffer closed between
-calls falls back to the walk rather than answering about its replacement.
+**A cursor memo was specced here and deliberately NOT built.**
+`bufferAtIndex` is an `O(i)` walk, so ten indexed doors over `n` buffers is
+`O(n²)`. But `Buffers.slots` is a dense array with holes, the walk is a
+pointer skip, and a buffer pick is built ONCE at open over tens of entries. A
+memo on `WasmPlugin` would be core state bought with no measurement — the
+opposite of the direction this document argues for everywhere else. If a
+profile ever says otherwise, the dense view belongs on `Buffers`, not on the
+plugin.
 
-**Tests:** a two-buffer fixture where the *inactive* one is dirty, backed by
-a path, and holds text — every door must answer about it while a different
-buffer is active. That single assertion is the whole point of the slice, and
-it is the one that fails today.
+**What was built instead** is the reduction that was actually available: the
+ten indexed doors were ten copies of the same walk-then-bail dance, and are
+now three wrappers (`intDoor`/`boolDoor`/`bytesDoor`) over nine one-line
+bodies. `boolDoor` exists because `wl_buffer_active`/`readonly` declare `u32`
+results that their shims read as `!= 0` — a -1 there would make "no such
+buffer" report TRUE. The bodies take `anytype` for the principal (`edit.zig`'s
+shared-read-door pattern), so they are one implementation the JS plane can
+wrap, and callable from a test with no guest behind them.
 
-### 2c. Keymap introspection — five doors
+**Tests:** a two-buffer fixture where the *inactive* one is dirty, holds text,
+and has a language — every door must answer about it while a different buffer
+is active. That single assertion is the whole point of the slice. Plus a `git`
+projection that holds unsaved text and is still not dirty.
+
+These would have needed a fourth copy of the same test fixture, so instead
+`core/TestHost.zig` is now the one: `core/tests.zig`'s `TestHost` and
+`wasm_abi/tests.zig`'s `Env` were near-identical, each transcribing by hand
+the init ORDER that actually matters (`caps`/`actions`/`slot_host` borrow
+`&container` and may only be built once it sits at its final address).
+
+### 2c. Keymap introspection — two listing doors
 
 The missing lookup is command → key. `wl_menu_binding_*` cannot serve it: it
 reads the current head's *resolved menu list* (`head.completions` /
@@ -161,17 +178,23 @@ reads the current head's *resolved menu list* (`head.completions` /
 view. What is missing is a read of a **named mode's own table**.
 
 ```zig
-.{ .name = "wl_mode_count",    .params = &.{},                          .results = &.{.u32}, .group = .keymap, .doc = "how many modes have a binding table" },
-.{ .name = "wl_mode_name",     .params = &.{ .u32, .u32, .u32 },        .results = &.{.i32}, .group = .keymap, .doc = "the `i`-th mode's name, into guest memory" },
-.{ .name = "wl_binding_count", .params = &.{ .u32, .u32 },              .results = &.{.i32}, .group = .keymap, .doc = "how many bindings mode `m` resolves to, following its fallback chain" },
-.{ .name = "wl_binding_key",   .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "the `i`-th resolved binding's key chord in mode `m`, in config notation" },
-.{ .name = "wl_binding_cmd",   .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "the `i`-th resolved binding's command name in mode `m`" },
+.{ .name = "wl_mode_names",    .params = &.{ .u32, .u32 },              .results = &.{.i32}, .group = .keymap, .doc = "every mode with a binding table, newline-joined" },
+.{ .name = "wl_binding_table", .params = &.{ .u32, .u32, .u32, .u32 },  .results = &.{.i32}, .group = .keymap, .doc = "mode `m`'s bindings resolved through its fallback chain, one `<key>\\t<command>` per line" },
 ```
 
-`Keymap.modes` is a `StringArrayHashMapUnmanaged`, so it is already
-index-enumerable; `resolveBindingsInto(mode, …)` already walks the fallback
-chain and is what the menu doors call. These five are that pair exposed with
-the mode named explicitly instead of taken from the head.
+**Two listing doors, not five indexed ones** (revised during implementation).
+The indexed spelling — `mode_count`/`mode_name`/`binding_count`/
+`binding_key`/`binding_cmd` — would re-run `resolveBindingsInto` once per
+index. That is an allocating fallback-chain walk, so it is `O(n²)` plus an
+allocation per call, and the only escape is a resolved-list cache in core
+(exactly what `Head` keeps for the menu doors). Listings have neither
+problem, and they put the parsing where the policy already is.
+
+Both use the two-pass exact-read convention, so a table too big for the
+caller's buffer says so (-2) rather than silently arriving half-length: half
+a keymap looks exactly like a small keymap. That helper (`writeExact`) moved
+out of `pick.zig`, which had invented it for `wl_pick_outcome_*` and was its
+only user.
 
 **Key notation.** `wl_binding_key` returns the *display* form
 (`Keymap.displayKey` — `"SPC g s"`), matching `wl_menu_binding_key` exactly.
@@ -517,11 +540,11 @@ neither is a reason to build a second mechanism.
 | # | slice | doors | gate |
 | --- | --- | --- | --- |
 | 1 | `wl_fs_stat` | +1 (222) | symlink + `root="."` confinement tests pass; `files` plugin shows a size column |
-| 2 | buffer introspection | +5 (227) | every door answers about an **inactive** buffer; `O(n)` enumeration proven by the cursor memo test |
-| 3 | keymap introspection | +5 (232) | fallback chain and chords enumerate correctly from a named mode |
+| 2 | buffer introspection | +5 (227) | every door answers about an **inactive** buffer; a projection is never dirty |
+| 3 | keymap introspection | +2 (229) | fallback chain and chords enumerate correctly from a named mode |
 | 4 | `System` owns a `SlotHost`; `contextFor` wires it | 0 | the `badge`/`badge_consumer` fixtures run against the **real** session, not only the test harness |
 | 5 | slot trampoline `active_ctx` + no-`in_dispatch` | 0 | fixture guest is refused every head-gated door from `on_slot_fire` |
-| 6 | `Entry.key` / `Options.category` / 2 doors / the tick drive / rendering | +2 (234) | a fixture annotator decorates a static pick and a **streaming file pick**; git-confirm and acp picks are untouched with a provider bound |
+| 6 | `Entry.key` / `Options.category` / 2 doors / the tick drive / rendering | +2 (231) | a fixture annotator decorates a static pick and a **streaming file pick**; git-confirm and acp picks are untouched with a provider bound |
 | 7 | `marginalia` plugin | 0 | the three flagship categories annotate; `weft.set` turns each off |
 | 8 | `kindTag` out of core | 0 | `complete_ui.kindTag`/`annotate` deleted; completion rows still show `fn · fn (i32) i32` |
 
