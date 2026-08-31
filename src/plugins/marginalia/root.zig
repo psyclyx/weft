@@ -94,21 +94,42 @@ fn enabled(c: Category) bool {
     };
 }
 
+/// The round's row keys, collected before any note is built. Borrowed from
+/// the shim's payload scratch, which stays valid until the next
+/// `payloadRead` — so nothing here may read another payload mid-round.
+var keys_storage: [256][]const u8 = undefined;
+/// The round's stats, for the file categories: gathered in a first pass so
+/// ages can be relative to the NEWEST row in the round rather than to
+/// whichever row happened to come first (see `humanAge`).
+var stats_storage: [256]weft.FsStat = undefined;
+
 export fn on_slot_fire(session: i32) void {
     var round = annotate.ask(@bitCast(session)) orelse return;
     const category = categoryOf(round.category);
     if (!enabled(category)) return; // declined — not "answered with blanks"
 
-    // The command index is built ONCE per round, not once per row: it walks
-    // every mode's whole table, so per-row would be O(rows × bindings).
-    const index: ?[]const u8 = if (category == .command) commandIndex() else null;
-
-    note_used = 0;
     var n: usize = 0;
     while (round.next()) |row| {
-        if (n == notes_storage.len) break;
-        notes_storage[n] = store(noteFor(category, row.key, index));
+        if (n == keys_storage.len) break;
+        keys_storage[n] = row.key;
         n += 1;
+    }
+    const keys = keys_storage[0..n];
+
+    note_used = 0;
+    switch (category) {
+        .file, .dir => fileNotes(keys),
+        .buffer => for (keys, 0..) |key, i| {
+            notes_storage[i] = store(bufferNote(key));
+        },
+        // The command index is built ONCE per round, not once per row: it
+        // walks every mode's whole table, so per-row would be
+        // O(rows × bindings).
+        .command => {
+            const index = commandIndex() orelse "";
+            for (keys, 0..) |key, i| notes_storage[i] = store(commandNote(key, index));
+        },
+        .other => return,
     }
     annotate.tell(@bitCast(session), round.from, notes_storage[0..n]);
 }
@@ -124,34 +145,38 @@ fn store(note: []const u8) []const u8 {
     return dst;
 }
 
-fn noteFor(category: Category, key: []const u8, index: ?[]const u8) []const u8 {
-    return switch (category) {
-        .file, .dir => fileNote(key),
-        .buffer => bufferNote(key),
-        .command => commandNote(key, index orelse return ""),
-        .other => "",
-    };
-}
-
 // ── file ─────────────────────────────────────────────────────────────
 
-/// `12.4K  2h` — size and age. A directory shows no size (its `st_size` is a
-/// property of the directory entry, not of what is in it, and reporting it as
-/// though it were a byte count is the kind of thing that reads as a bug).
+/// `12.4K  2h` per row — size and age. A directory shows no size (its
+/// `st_size` is a property of the directory entry, not of what is in it, and
+/// reporting it as though it were a byte count reads as a bug).
+///
+/// TWO PASSES, and the reason is `humanAge`: age is relative to the newest
+/// row in the round, so every row has to be stat'ed before any is formatted.
+/// One pass would make the first row always read "now" and every age after it
+/// depend on the order they arrived in.
 ///
 /// Silent when the stat says absent: with no `fs_read` grant every path
-/// answers absent, so an ungranted marginalia annotates nothing rather than
-/// filling the column with a lie about a missing file.
-fn fileNote(path: []const u8) []const u8 {
-    const st = weft.fsStat(path);
-    return switch (st.kind) {
-        .none => "",
-        .dir => "dir",
-        .file, .other => std.fmt.bufPrint(&note_buf, "{s}  {s}", .{
-            humanSize(st.size),
-            humanAge(st.mtime_ns),
-        }) catch "",
-    };
+/// outside the dispatching place answers absent, so an unprivileged
+/// marginalia annotates nothing rather than filling the column with a lie
+/// about a missing file.
+fn fileNotes(keys: []const []const u8) void {
+    var newest: i64 = 0;
+    for (keys, 0..) |key, i| {
+        stats_storage[i] = weft.fsStat(key);
+        if (stats_storage[i].mtime_ns > newest) newest = stats_storage[i].mtime_ns;
+    }
+    for (keys, 0..) |_, i| {
+        const st = stats_storage[i];
+        notes_storage[i] = store(switch (st.kind) {
+            .none => "",
+            .dir => "dir",
+            .file, .other => std.fmt.bufPrint(&note_buf, "{s}  {s}", .{
+                humanSize(st.size),
+                humanAge(newest, st.mtime_ns),
+            }) catch "",
+        });
+    }
 }
 
 var size_buf: [16]u8 = undefined;
@@ -171,15 +196,15 @@ var age_buf: [16]u8 = undefined;
 
 /// A coarse age. Deliberately not a timestamp: the question a file row
 /// answers is "recent or not", and a full date costs more columns than it
-/// earns. Needs the wall clock, which a plugin has no door for — so it is
-/// derived from the NEWEST mtime seen this round, making it relative rather
-/// than absolute. Honest and useful: the newest file in a listing reads
-/// "now" and everything else reads as older than it.
-var newest_mtime: i64 = 0;
-
-fn humanAge(mtime_ns: i64) []const u8 {
-    if (mtime_ns > newest_mtime) newest_mtime = mtime_ns;
-    const delta_s = @divTrunc(newest_mtime - mtime_ns, std.time.ns_per_s);
+/// earns.
+///
+/// RELATIVE to `newest`, not to the wall clock, because a plugin has no
+/// wall-clock door. So the newest file in a round reads "now" and everything
+/// else reads as older than it. That is a real answer to the question people
+/// use this column for ("which of these did I touch last"), and it is stated
+/// here rather than dressed up as an absolute age.
+fn humanAge(newest: i64, mtime_ns: i64) []const u8 {
+    const delta_s = @divTrunc(newest - mtime_ns, std.time.ns_per_s);
     if (delta_s < 60) return "now";
     if (delta_s < 3600) return std.fmt.bufPrint(&age_buf, "{d}m", .{@divTrunc(delta_s, 60)}) catch "";
     if (delta_s < 86400) return std.fmt.bufPrint(&age_buf, "{d}h", .{@divTrunc(delta_s, 3600)}) catch "";
