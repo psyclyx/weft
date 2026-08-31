@@ -47,9 +47,9 @@
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const core = @import("weft_core");
-const view_mod = @import("../gfx/view.zig");
-const region = @import("../gfx/region.zig");
-const window_layout = @import("../gfx/window_layout.zig");
+const view_mod = @import("weft_gfx").view;
+const region = @import("weft_gfx").region;
+const window_layout = @import("weft_gfx").window_layout;
 const window_cmds = @import("window_cmds.zig");
 const wayland = @import("weft_platform").wayland;
 

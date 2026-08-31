@@ -9,7 +9,7 @@ const std = @import("std");
 const core = @import("weft_core");
 const frame = @import("frame.zig");
 const FrameBuilder = @import("frame_builder.zig").FrameBuilder;
-const cpu = @import("../gfx/harness.zig");
+const cpu = @import("weft_gfx").harness;
 
 pub const Frame = struct {
     pixels: []const u8,

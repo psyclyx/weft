@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const core = @import("weft_core");
-const window_layout = @import("../gfx/window_layout.zig");
+const window_layout = @import("weft_gfx").window_layout;
 const setEcho = @import("handler.zig").setEcho;
 const fs = @import("weft_fs");
 const fs_platform = @import("weft_fs_platform");

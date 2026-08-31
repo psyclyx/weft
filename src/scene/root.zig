@@ -275,7 +275,14 @@ test "scene: target colors are clamped at the renderer boundary" {
     const converted = linearToSrgbColor(.{ -0.5, 0.25, 2, 1.5 });
     try std.testing.expectEqual(@as(f32, 0), converted[0]);
     try std.testing.expect(converted[1] > 0 and converted[1] < 1);
-    try std.testing.expectEqual(@as(f32, 1), converted[2]);
+    // The subject here is the CLAMP, not float identity. 2 clamps to 1, and
+    // the transfer of 1 is `1.055 * pow(1, 1/2.4) - 0.055`, which in f32 is
+    // 0.99999994 — the same value the round-trip test above already accepts at
+    // 1e-6. Asserting exact equality asks the transfer function for a property
+    // it does not have and nothing downstream needs (at 8-bit quantization
+    // this is 255 either way). Alpha carries no transfer, so it IS exact.
+    try std.testing.expectApproxEqAbs(@as(f32, 1), converted[2], 1e-6);
+    try std.testing.expect(converted[2] <= 1);
     try std.testing.expectEqual(@as(f32, 1), converted[3]);
 }
 

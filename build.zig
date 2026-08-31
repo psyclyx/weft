@@ -451,6 +451,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     skia_mod.addImport("weft_scene", scene_mod);
+    // The compiled C++ shim rides with the module that DECLARES these externs,
+    // so it enters a link exactly once no matter how many modules import it.
+    // Attaching it per-consumer instead gives duplicate symbol definitions.
+    addSkia(b, skia_mod);
     const text_mod = b.createModule(.{
         .root_source_file = b.path("src/text/root.zig"),
         .target = target,
@@ -506,6 +510,21 @@ pub fn build(b: *std.Build) void {
     platform_mod.linkSystemLibrary("vulkan", .{});
     addWaylandProtocols(b, platform_mod);
 
+    // ONE Vulkan C import for the whole program. src/vk/root.zig's own doc
+    // comment states the invariant — "every module must use these types:
+    // separate @cImport blocks of the same header produce distinct opaque Zig
+    // types" — and a named module is the only way to keep it once gfx and app
+    // are separate modules, since a file shared by relative import would
+    // otherwise be compiled into each of them independently, producing exactly
+    // the incompatible types it warns about.
+    const vk_mod = b.createModule(.{
+        .root_source_file = b.path("src/vk/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vk_mod.linkSystemLibrary("vulkan", .{});
+
     // The editor kernel. It is graphics-free by construction now, not by
     // convention: `weft_core` is given no scene, text, font, skia, gfx, app or
     // platform edge, so `core/Head.zig`'s standing instruction — "core ... must
@@ -524,12 +543,35 @@ pub fn build(b: *std.Build) void {
     addWasm(b, core_mod);
     addQuickjs(b, core_mod);
 
+    // The editor's view layer, above core. What is genuinely below core —
+    // scene/text/font_provider/skia — is already separate; what is left here
+    // reads buffers, panes and heads, so it gets `weft_core` and the app does
+    // not get to reach past it into `view/`.
+    const gfx_mod = b.createModule(.{
+        .root_source_file = b.path("src/gfx/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    gfx_mod.addImport("weft_core", core_mod);
+    gfx_mod.addImport("weft_vk", vk_mod);
+    gfx_mod.addImport("weft_scene", scene_mod);
+    gfx_mod.addImport("weft_skia", skia_mod);
+    gfx_mod.addImport("weft_text", text_mod);
+    gfx_mod.addImport("weft_font_provider", font_provider_mod);
+    gfx_mod.addImport("weft_semantic", architecture.semantic);
+    gfx_mod.addImport("weft_view_runtime", architecture.view_runtime);
+    gfx_mod.addImport("stemma", stemma_dep.module("stemma"));
+    gfx_mod.linkSystemLibrary("vulkan", .{});
+
     // The dependency set the app tree (src/core + src/gfx + src/app) needs,
     // named once so the shipped binary and the tested one cannot be wired
     // differently by accident. See `configureAppModule`.
     const app_deps: AppDeps = .{
         .architecture = architecture,
         .core = core_mod,
+        .gfx = gfx_mod,
+        .vk = vk_mod,
         .platform = platform_mod,
         .fs_platform = fs_platform,
         .font_provider = font_provider_mod,
@@ -747,6 +789,16 @@ pub fn build(b: *std.Build) void {
     embedGuests(b, core_tests_mod);
     const core_tests = b.addTest(.{ .root_module = core_tests_mod });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
+    const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
+    test_step.dependOn(&b.addRunArtifact(gfx_tests).step);
+    // `weft_scene` (6 tests) and `weft_text` (4) have been named modules since
+    // before this refactor and never had a test binary — src/weft.zig's
+    // `_ = scene; _ = text_engine;` looked like coverage but a module's tests
+    // do not run in a dependent's binary, so they had never executed at all.
+    inline for (.{ scene_mod, text_mod }) |graphics_mod| {
+        const graphics_tests = b.addTest(.{ .root_module = graphics_mod });
+        test_step.dependOn(&b.addRunArtifact(graphics_tests).step);
+    }
 
     // A focused entry point for the whole-app spine narrative.  Keeping the
     // filter in the build graph makes the opt-in video command reproducible:
@@ -1036,6 +1088,8 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 const AppDeps = struct {
     architecture: ArchitectureModules,
     core: *std.Build.Module,
+    gfx: *std.Build.Module,
+    vk: *std.Build.Module,
     platform: *std.Build.Module,
     fs_platform: *std.Build.Module,
     font_provider: *std.Build.Module,
@@ -1063,6 +1117,8 @@ const AppDeps = struct {
 fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void {
     addArchitectureImports(mod, deps.architecture);
     mod.addImport("weft_core", deps.core);
+    mod.addImport("weft_gfx", deps.gfx);
+    mod.addImport("weft_vk", deps.vk);
     mod.addImport("weft_platform", deps.platform);
     mod.addImport("weft_fs_platform", deps.fs_platform);
     mod.addImport("weft_font_provider", deps.font_provider);
@@ -1078,7 +1134,6 @@ fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void
     addSyntax(b, mod);
     addWasm(b, mod);
     addQuickjs(b, mod);
-    addSkia(b, mod);
 }
 
 fn configureTestModule(

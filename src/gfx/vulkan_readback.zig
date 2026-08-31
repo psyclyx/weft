@@ -5,7 +5,7 @@
 //! own submission fence before asking this buffer for normalized RGBA bytes.
 
 const std = @import("std");
-const vk = @import("../vk.zig").c;
+const vk = @import("weft_vk").c;
 
 pub const Buffer = struct {
     device: vk.VkDevice,

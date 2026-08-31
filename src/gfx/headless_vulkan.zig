@@ -5,7 +5,7 @@
 //! transfer commands, and exposes only the completed RGBA frame.
 
 const std = @import("std");
-const vk = @import("../vk.zig").c;
+const vk = @import("weft_vk").c;
 const readback_mod = @import("vulkan_readback.zig");
 
 pub const Context = struct {

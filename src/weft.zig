@@ -13,10 +13,10 @@ pub const fs = @import("weft_fs");
 pub const font_provider = @import("weft_font_provider");
 pub const scene = @import("weft_scene");
 pub const text_engine = @import("weft_text");
-pub const view = @import("gfx/view.zig");
-pub const gfx_harness = @import("gfx/harness.zig");
-pub const region = @import("gfx/region.zig");
-pub const window_layout = @import("gfx/window_layout.zig");
+pub const view = @import("weft_gfx").view;
+pub const gfx_harness = @import("weft_gfx").harness;
+pub const region = @import("weft_gfx").region;
+pub const window_layout = @import("weft_gfx").window_layout;
 pub const window_cmds = @import("app/window_cmds.zig");
 pub const dispatch = @import("app/dispatch.zig"); // the general keypress interface
 pub const app_session = @import("app/session.zig");
@@ -39,16 +39,10 @@ pub const acp_js = @embedFile("acp_js");
 // end-to-end tests on top.
 const std = @import("std");
 test {
-    // Core's own tests run in the `weft_core` test binary now (build.zig) —
-    // a module's tests do not ride along in a dependent's.
-    _ = @import("gfx/stats.zig");
-    _ = @import("gfx/layout.zig");
-    _ = view;
-    _ = gfx_harness;
-    _ = scene;
-    _ = text_engine;
-    _ = region;
-    _ = window_layout;
+    // core, gfx, scene, text and platform each run their own tests in their own
+    // binary now (build.zig) — a module's tests do not ride along in a
+    // dependent's, so listing them here would be decoration, not coverage.
+    // What remains is what this module still OWNS: the app tree.
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
     _ = app_render_memory;

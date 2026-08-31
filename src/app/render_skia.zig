@@ -12,9 +12,9 @@
 //! SkCanvas calls.
 
 const std = @import("std");
-const vk = @import("../vk.zig").c;
+const vk = @import("weft_vk").c;
 const skia = @import("weft_skia");
-const stats_mod = @import("../gfx/stats.zig");
+const stats_mod = @import("weft_gfx").stats;
 const frame = @import("frame.zig");
 const FrameCtx = frame.FrameCtx;
 const Active = frame.Active;

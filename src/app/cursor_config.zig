@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const core = @import("weft_core");
-const view_mod = @import("../gfx/view.zig");
+const view_mod = @import("weft_gfx").view;
 
 pub const CursorConfig = struct {
     const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, blink: bool = false };

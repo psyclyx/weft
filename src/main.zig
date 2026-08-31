@@ -11,12 +11,12 @@
 const std = @import("std");
 const core = @import("weft_core");
 const build_options = @import("build_options");
-const view_mod = @import("gfx/view.zig");
-const region = @import("gfx/region.zig");
-const window_layout = @import("gfx/window_layout.zig");
-const stats_mod = @import("gfx/stats.zig");
+const view_mod = @import("weft_gfx").view;
+const region = @import("weft_gfx").region;
+const window_layout = @import("weft_gfx").window_layout;
+const stats_mod = @import("weft_gfx").stats;
 const stemma = @import("stemma");
-const vk = @import("vk.zig").c;
+const vk = @import("weft_vk").c;
 const font_provider = @import("weft_font_provider");
 
 const embedded_font = font_provider.defaultMono();

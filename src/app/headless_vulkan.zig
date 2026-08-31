@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const core = @import("weft_core");
-const Target = @import("../gfx/headless_vulkan.zig").Context;
+const Target = @import("weft_gfx").headless_vulkan.Context;
 const render_mod = @import("render.zig");
 
 pub const Head = struct {
