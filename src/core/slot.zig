@@ -34,6 +34,18 @@ pub const Request = struct {
     slot: []const u8,
     schema: *const Schema,
     payload: []const u8,
+    /// WHO fired, as an opaque token this host carries and never
+    /// dereferences — the same discipline `container.SlotDecl.schema` is held
+    /// under. In practice a `*command.Context`, which `wasm_host/slot.zig`
+    /// casts back to route a provider's `active_ctx` for the call.
+    ///
+    /// It exists because a provider is a DIFFERENT plugin from the firer, and
+    /// nothing else tells it which head it is answering for. Without it a
+    /// guest answering `badge_consumer`'s fire pushes through whichever head
+    /// it last ran under — invisible with one head, wrong with two, and
+    /// wrong for any fire that does not originate in a dispatch at all
+    /// (doc/marginalia.md §3.7).
+    ctx: ?*anyopaque = null,
 };
 
 pub const Provider = struct {
@@ -196,6 +208,10 @@ pub const SlotHost = struct {
 
     pub const FireOptions = struct {
         request: []const u8 = &.{},
+        /// Carried verbatim onto every `Request` this fire produces — see
+        /// `Request.ctx`. Null when the firer has no context to name (a
+        /// pure-unit test).
+        ctx: ?*anyopaque = null,
     };
 
     /// Fire `slot` at every eligible schema-provider — the Container's own
@@ -234,7 +250,7 @@ pub const SlotHost = struct {
         self.next_session += 1;
         try self.sessions.put(gpa, id, s);
 
-        const req: Request = .{ .session = id, .slot = slot, .schema = schema, .payload = opts.request };
+        const req: Request = .{ .session = id, .slot = slot, .schema = schema, .payload = opts.request, .ctx = opts.ctx };
         for (matched.items) |p| {
             p.handler(p.data, self, &req) catch |err| {
                 std.log.warn("slot {s}: provider {s} failed: {t}", .{ slot, p.owner, err });

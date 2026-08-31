@@ -73,6 +73,7 @@ const Head = @import("Head.zig");
 const capability = @import("capability.zig");
 const Caps = capability.Caps;
 const Actions = @import("action.zig");
+const SlotHost = @import("slot.zig").SlotHost;
 const kv = @import("kv.zig");
 const env_mod = @import("env.zig");
 const place_mod = @import("place.zig");
@@ -138,6 +139,19 @@ keymap: Keymap = .empty,
 container: container_mod.Container = undefined,
 caps: Caps,
 actions: Actions,
+/// D2's generic, schema-directed slot host (`core/slot.zig`) — `Caps`'s
+/// sibling for RUNTIME-declared `wl_slot_*` slots, binding into the SAME
+/// `container` as `caps`/`actions` do.
+///
+/// Nothing owned one before this. `Context.slot_host` defaults to `null` and
+/// `contextFor` never set it, so D2 shipped the membrane, the schema
+/// marshaller and an end-to-end proof while, in the running editor, every
+/// `wl_slot_*` door was a silent no-op: `wl_slot_fire` answered -1 and
+/// `wl_payload_push` dropped on the floor. The `badge`/`badge_consumer`
+/// fixtures passed throughout because the wasm-membrane test harness brought
+/// its own host. A plugin could declare, bind and fire a slot in the shipped
+/// binary and get nothing back, with no diagnostic anywhere.
+slot_host: SlotHost,
 /// Config-value store (`weft.set`) for THIS system's manifest — distinct
 /// from any other hosted system's, so `weft.set("acp", "cmd", ...)` in
 /// the editor's config.js can never leak into agent-ux's store or vice
@@ -231,6 +245,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .container = container_mod.Container.init(gpa),
         .caps = undefined,
         .actions = undefined,
+        .slot_host = undefined,
         .grants = grants_mod.HandleTable.init(gpa),
         .semantic = .init(.here),
         .filesystems = .init(gpa),
@@ -246,6 +261,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // heap-allocated) before anything points into it.
     self.caps = Caps.init(gpa, task.nowNs, &self.container);
     self.actions = Actions.init(gpa, &self.container);
+    self.slot_host = SlotHost.init(gpa, &self.container);
     try self.intent.init(gpa);
     errdefer self.intent.deinit(gpa);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
@@ -271,9 +287,10 @@ pub fn destroy(self: *System) void {
     self.filesystems.deinit();
     if (self.applied_manifest) |m| m.destroy();
     self.default_head.deinit(gpa);
+    self.slot_host.deinit();
     self.actions.deinit();
     self.caps.deinit();
-    // The shared Container outlives both borrowers above (neither `deinit`
+    // The shared Container outlives every borrower above (no `deinit`
     // touches it) — torn down here, once, by its owner. See `action.zig`'s/
     // `capability.zig`'s `deinit` docs for why the relative order is safe.
     self.container.deinit();
@@ -304,6 +321,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .keymap = &self.keymap,
         .actions = &self.actions,
         .caps = &self.caps,
+        .slot_host = &self.slot_host,
         .quit = &self.quit,
         .head = head,
         .grant_table = &self.grants,
@@ -574,6 +592,7 @@ pub const Host = struct {
         c.keymap = &to.keymap;
         c.actions = &to.actions;
         c.caps = &to.caps;
+        c.slot_host = &to.slot_host;
         c.quit = &to.quit;
         c.grant_table = &to.grants;
         c.semantic = &to.semantic;
@@ -702,6 +721,7 @@ pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, sy
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+const schema_mod = @import("weft_schema");
 
 fn testSystem(gpa: Allocator, pool: *task.Pool, name: []const u8) !*System {
     return System.create(gpa, pool, name, "user");
@@ -1067,6 +1087,56 @@ test "system: W4 slice 4 — grants-show lists every row, alive and dead, with i
     const echoed = sys.default_head.echo.items;
     try t.expect(std.mem.indexOf(u8, echoed, "notes/fs_read limit=none state=revoked") != null);
     try t.expect(std.mem.indexOf(u8, echoed, "git/fs_write limit=fs_root(repo) state=alive") != null);
+}
+
+test "a System-produced context can actually fire a slot" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try System.create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+    try sys.attachHead(gpa, &head);
+    var ctx = sys.contextFor(&head);
+
+    // The regression this slice exists for: `contextFor` set every other
+    // field and never this one, so the whole `wl_slot_*` surface was a
+    // no-op in the shipped binary while its fixtures — which bring their own
+    // host — passed. A null here means a plugin can declare, bind and fire
+    // and silently get nothing.
+    try t.expect(ctx.slot_host != null);
+    try t.expect(ctx.slot_host.? == &sys.slot_host);
+
+    // …and it is wired to the SAME container `caps`/`actions` bind into, so
+    // a slot name shares the one flat namespace rather than living in a
+    // parallel registry nothing else can see.
+    const str_ty: schema_mod.Schema = .str;
+    const schema: schema_mod.Schema = .{ .@"struct" = &[_]schema_mod.Schema.Field{
+        .{ .name = "label", .ty = &str_ty },
+    } };
+    try sys.container.declareSlot(.{
+        .name = "ui/probe",
+        .shape = .query,
+        .composition = .ordered_union,
+        .schema = &schema,
+    });
+    const Impl = struct {
+        fn handle(_: ?*anyopaque, h: *SlotHost, req: *const @import("slot.zig").Request) anyerror!void {
+            const vals = [_]schema_mod.Value{.{ .str = "answered" }};
+            const bytes = try schema_mod.encode(h.gpa, req.schema, .{ .@"struct" = &vals });
+            defer h.gpa.free(bytes);
+            try h.push(req.session, .{ .owner = "probe-provider" }, bytes);
+        }
+    };
+    try ctx.slot_host.?.register(.{ .slot = "ui/probe", .owner = "probe-provider", .handler = Impl.handle });
+
+    const id = (try ctx.slot_host.?.fire("ui/probe", .{}, "v0", .{})).?;
+    defer ctx.slot_host.?.finish(id);
+    const session = ctx.slot_host.?.session(id).?;
+    try t.expectEqual(@as(usize, 1), session.all().len);
+    try t.expectEqualStrings("probe-provider", session.all()[0].provider);
 }
 
 test {

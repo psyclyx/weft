@@ -130,12 +130,32 @@ pub fn hSlotBind(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 }
 
 /// The trampoline `SlotHost.fire` calls for a matched wasm provider: hands
-/// the guest the session and lets it own the answer, mirroring
-/// `capability.zig`'s `wpCompletionProvider` exactly (sync commit during the
+/// the guest the session and lets it own the answer (sync commit during the
 /// call, or a stashed session answered later off a poll).
+///
+/// **Routes `active_ctx`, and deliberately does NOT set `in_dispatch`.**
+/// Two halves of one rule, both load-bearing:
+///
+///   - Routing is what makes a fire from OUTSIDE a dispatch correct. Every
+///     fire used to originate in a command handler, where `active_ctx` was
+///     already the right head, so `wpCompletionProvider` never needed this
+///     and neither did this. A fire from the frame loop (`Pick.tick`'s
+///     annotation round — doc/marginalia.md §3.5) has no dispatch behind it,
+///     and a provider's `wl_payload_push` reaches `p.activeCtx()`: without
+///     the save/restore it would push through whichever head this plugin
+///     last ran under. Same three lines `wpPickAccept` uses.
+///   - Leaving `in_dispatch` FALSE is the protection, not an oversight. Every
+///     head-gated door (`requireDispatch`) refuses, so a provider physically
+///     cannot set a mode, open a pick, or echo from inside a fire. Answering
+///     a question conveys no authority — the guarantee
+///     `wasm_host/annotate.zig` makes for decorators, obtained here by never
+///     granting it rather than by checking for it afterwards.
 fn wpSlotProvider(data: ?*anyopaque, host: *slot_mod.SlotHost, req: *const slot_mod.Request) anyerror!void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const handle: i32 = @bitCast(@as(u32, @truncate(req.session)));
+    const saved_ctx = p.active_ctx;
+    if (req.ctx) |c| p.active_ctx = @ptrCast(@alignCast(c));
+    defer p.active_ctx = saved_ctx;
     contract.callOptionalExport("on_slot_fire", &p.instance, .{handle}) catch {
         host.decline(req.session);
     };
@@ -218,7 +238,10 @@ pub fn hSlotFire(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         break :blk ed.doc.version(gpa) catch break :blk &.{};
     };
     defer if (version.len > 0) gpa.free(version);
-    const id = host.fire(name, intent.factsFor(ctx), version, .{ .request = request }) catch return;
+    // `.ctx` is what lets a PROVIDER (a different plugin, whose `active_ctx`
+    // is whatever it last ran under) answer for the head that actually asked
+    // — see `wpSlotProvider`'s doc and `slot.Request.ctx`.
+    const id = host.fire(name, intent.factsFor(ctx), version, .{ .request = request, .ctx = ctx }) catch return;
     results[0] = @bitCast(@as(u32, @truncate(id orelse return)));
 }
 
