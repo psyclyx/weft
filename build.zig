@@ -278,6 +278,33 @@ fn createFilesPortableModules(
     };
 }
 
+/// The `files` library's SANDBOX ADAPTER — the half that needs the guest SDK,
+/// which is why it is a second named module rather than a decl of the facade
+/// (`createFilesPortableModules` builds only the portable four, which
+/// deliberately have no SDK dependency).
+///
+/// It is built for two different targets — the wasm32 guest and the darwin
+/// compile-only gate — and was previously written out at both sites with
+/// hand-copied imports. That made the darwin gate, whose whole job is catching
+/// portability drift, depend on a second copy of the wiring it was meant to
+/// check. One function, two callers.
+fn filesGuestAdapter(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    guest_sdk: *std.Build.Module,
+    facade: *std.Build.Module,
+) *std.Build.Module {
+    const adapter = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    adapter.addImport("weft", guest_sdk);
+    adapter.addImport("weft_files", facade);
+    return adapter;
+}
+
 fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
     mod.addImport("weft_wire", architecture.wire);
     mod.addImport("weft_schema", architecture.schema);
@@ -463,6 +490,20 @@ pub fn build(b: *std.Build) void {
     });
     fs_platform.addImport("weft_fs", architecture.fs);
 
+    // The dependency set the app tree (src/core + src/gfx + src/app) needs,
+    // named once so the shipped binary and the tested one cannot be wired
+    // differently by accident. See `configureAppModule`.
+    const app_deps: AppDeps = .{
+        .architecture = architecture,
+        .fs_platform = fs_platform,
+        .font_provider = font_provider_mod,
+        .scene = scene_mod,
+        .skia = skia_mod,
+        .text = text_mod,
+        .application = application_mod,
+        .stemma = stemma_dep.module("stemma"),
+    };
+
     // ── Desktop (Wayland) executable ──
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -470,23 +511,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    addArchitectureImports(exe_mod, architecture);
-    exe_mod.addImport("weft_fs_platform", fs_platform);
-    exe_mod.addImport("weft_font_provider", font_provider_mod);
-    exe_mod.addImport("weft_scene", scene_mod);
-    exe_mod.addImport("weft_skia", skia_mod);
-    exe_mod.addImport("weft_text", text_mod);
-    exe_mod.addImport("weft_application", application_mod);
-    exe_mod.addImport("stemma", stemma_dep.module("stemma"));
+    configureAppModule(b, exe_mod, app_deps);
+    // What only the desktop binary has: a compositor and a keymap library.
+    // Runtime font-family resolution is owned by `weft_font_provider`.
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
-    exe_mod.linkSystemLibrary("vulkan", .{});
-    // Runtime font-family resolution is owned by `weft_font_provider`.
     addWaylandProtocols(b, exe_mod);
-    addSyntax(b, exe_mod);
-    addWasm(b, exe_mod);
-    addQuickjs(b, exe_mod);
-    addSkia(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "weft",
@@ -530,31 +560,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    addArchitectureImports(weft_mod, architecture);
-    weft_mod.addImport("weft_fs_platform", fs_platform);
-    weft_mod.addImport("weft_font_provider", font_provider_mod);
-    weft_mod.addImport("weft_scene", scene_mod);
-    weft_mod.addImport("weft_skia", skia_mod);
-    weft_mod.addImport("weft_text", text_mod);
-    weft_mod.addImport("weft_application", application_mod);
-    weft_mod.addImport("stemma", stemma_dep.module("stemma"));
-    // Resident JS plugins are data dependencies of the full headless
-    // editor too. Route them through the module graph; the E2E config loader
-    // must not reach out of `src/` to impersonate the installed plugins.
+    configureAppModule(b, weft_mod, app_deps);
+    // What only the test-facing module has. Resident JS plugins are data
+    // dependencies of the full headless editor too: route them through the
+    // module graph, because the E2E config loader must not reach out of `src/`
+    // to impersonate the installed plugins.
     weft_mod.addAnonymousImport("dap_js", .{
         .root_source_file = b.path("config/plugins/dap.js"),
     });
     weft_mod.addAnonymousImport("acp_js", .{
         .root_source_file = b.path("config/plugins/acp.js"),
     });
-    // The authoritative E2E renderer uses ordinary offscreen Vulkan images;
-    // it deliberately has no WSI, compositor, or platform-input dependency.
-    weft_mod.linkSystemLibrary("vulkan", .{});
-    addSyntax(b, weft_mod);
-    addWasm(b, weft_mod);
     embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the guests
-    addQuickjs(b, weft_mod);
-    addSkia(b, weft_mod);
 
     // `test_mod` (the `test` step) and `instrument_mod` (the `e2e-latency` /
     // `e2e-popup-layout` steps, below) are two SEPARATE module objects, wired
@@ -719,13 +736,7 @@ pub fn build(b: *std.Build) void {
     darwin_guest_sdk.addImport("weft_scene_codec", darwin_architecture.scene_codec);
     darwin_guest_sdk.addImport("weft_fs", darwin_architecture.fs);
     darwin_guest_sdk.addImport("weft_fs_codec", darwin_architecture.fs_codec);
-    const darwin_files_guest = b.createModule(.{
-        .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
-        .target = darwin_target,
-        .optimize = optimize,
-    });
-    darwin_files_guest.addImport("weft", darwin_guest_sdk);
-    darwin_files_guest.addImport("weft_files", darwin_files_modules.facade);
+    const darwin_files_guest = filesGuestAdapter(b, darwin_target, optimize, darwin_guest_sdk, darwin_files_modules.facade);
     const darwin_gate_mod = b.createModule(.{
         .root_source_file = b.path("src/tests/darwin_architecture_gate.zig"),
         .target = darwin_target,
@@ -961,6 +972,52 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 /// hand-copied blocks eventually would. The one thing that may legitimately
 /// differ between callers is added AFTER this returns: which
 /// `latency_options`/`popup_layout_options` values they attach.
+/// Everything the app tree needs, gathered once so `configureAppModule` takes
+/// one argument instead of eight positional modules a caller could transpose.
+const AppDeps = struct {
+    architecture: ArchitectureModules,
+    fs_platform: *std.Build.Module,
+    font_provider: *std.Build.Module,
+    scene: *std.Build.Module,
+    skia: *std.Build.Module,
+    text: *std.Build.Module,
+    application: *std.Build.Module,
+    stemma: *std.Build.Module,
+};
+
+/// Wire the app tree (src/core + src/gfx + src/app) onto `mod`.
+///
+/// `exe_mod` (the shipped binary, rooted at src/main.zig) and `weft_mod` (the
+/// same source exposed to the e2e suite, rooted at src/weft.zig) are two module
+/// OBJECTS over ONE tree. Anything wired to one and not the other is, by
+/// definition, a difference between what ships and what is tested — so this is
+/// the ONLY place that wiring is written. Same doctrine as
+/// `configureTestModule` below; this is the pair where drift costs the most,
+/// and it had already started (the JS plugins reached `weft_mod` and not the
+/// exe).
+///
+/// What legitimately differs stays at the two call sites, where it is visible:
+/// the exe links a Wayland compositor + xkbcommon, and the test module embeds
+/// the wasm guests and the resident JS plugins.
+fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void {
+    addArchitectureImports(mod, deps.architecture);
+    mod.addImport("weft_fs_platform", deps.fs_platform);
+    mod.addImport("weft_font_provider", deps.font_provider);
+    mod.addImport("weft_scene", deps.scene);
+    mod.addImport("weft_skia", deps.skia);
+    mod.addImport("weft_text", deps.text);
+    mod.addImport("weft_application", deps.application);
+    mod.addImport("stemma", deps.stemma);
+    // Both binaries render through ordinary Vulkan images; the authoritative
+    // E2E renderer deliberately has no WSI, compositor, or platform-input
+    // dependency, which is why this is shared and the compositor link is not.
+    mod.linkSystemLibrary("vulkan", .{});
+    addSyntax(b, mod);
+    addWasm(b, mod);
+    addQuickjs(b, mod);
+    addSkia(b, mod);
+}
+
 fn configureTestModule(
     b: *std.Build,
     mod: *std.Build.Module,
@@ -1002,13 +1059,7 @@ fn libraryModule(
     if (cache[@intFromEnum(lib)]) |existing| return existing;
     if (lib == .files) {
         const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
-        const adapter = b.createModule(.{
-            .root_source_file = b.path("src/plugin_lib/files/adapter.zig"),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        });
-        adapter.addImport("weft", guest_sdk);
-        adapter.addImport("weft_files", files.facade);
+        const adapter = filesGuestAdapter(b, wasm_target, .ReleaseSmall, guest_sdk, files.facade);
         consumer.addImport("weft_files_adapter", adapter);
         cache[@intFromEnum(lib)] = files.facade;
         return files.facade;
