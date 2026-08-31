@@ -1,8 +1,8 @@
 # Pick annotation — and the introspection it actually needs
 
-Status: in progress. Slices 1–3 (Phase 1, the read doors) are built and
-green; 4–8 remain. §6 is the live checklist. Where implementation revised a
-decision, the section says so rather than being quietly rewritten.
+Status: BUILT. All eight slices in §6 are green. Where implementation
+revised a decision the section says so, rather than being quietly rewritten
+to match what shipped — the reasoning is the useful part.
 
 ## 0. What this is
 
@@ -18,8 +18,8 @@ is the point of the document.
 
 A census of every pick producer in the tree (appendix, §8) says the pick
 membrane can carry annotations with modest additions. But for the three
-highest-value categories the annotation doors would open onto an annotator
-that has nothing to say:
+highest-value categories the annotation doors would have opened onto an
+annotator with nothing to say. What a guest could read BEFORE this work:
 
 | target | what marginalia would show | what a guest can read today |
 | --- | --- | --- |
@@ -429,8 +429,9 @@ different arrays.
 
 ### 3.7 Three prerequisites, and one hazard
 
-**Prerequisite — nothing owns a `SlotHost` in the running editor.** This is
-the one that has to be checked before anything else in Phase 2 is costed.
+**Prerequisite — nothing owned a `SlotHost` in the running editor.** (Fixed
+in slice 4.) This is the one that had to be checked before anything else in
+Phase 2 was costed.
 `command.Context.slot_host` is `?*SlotHost` defaulting to `null`
 (`command.zig:128`), and `System.contextFor` (`System.zig:299`) sets every
 other field and never sets that one — `System` has no `SlotHost` member at
@@ -537,24 +538,48 @@ neither is a reason to build a second mechanism.
 
 ## 6. Sequence and gates
 
-| # | slice | doors | gate |
-| --- | --- | --- | --- |
-| 1 | `wl_fs_stat` | +1 (222) | symlink + `root="."` confinement tests pass; `files` plugin shows a size column |
-| 2 | buffer introspection | +5 (227) | every door answers about an **inactive** buffer; a projection is never dirty |
-| 3 | keymap introspection | +2 (229) | fallback chain and chords enumerate correctly from a named mode |
-| 4 | `System` owns a `SlotHost`; `contextFor` wires it | 0 | the `badge`/`badge_consumer` fixtures run against the **real** session, not only the test harness |
-| 5 | slot trampoline `active_ctx` + no-`in_dispatch` | 0 | fixture guest is refused every head-gated door from `on_slot_fire` |
-| 6 | `Entry.key` / `Options.category` / 2 doors / the tick drive / rendering | +2 (231) | a fixture annotator decorates a static pick and a **streaming file pick**; git-confirm and acp picks are untouched with a provider bound |
-| 7 | `marginalia` plugin | 0 | the three flagship categories annotate; `weft.set` turns each off |
-| 8 | `kindTag` out of core | 0 | `complete_ui.kindTag`/`annotate` deleted; completion rows still show `fn · fn (i32) i32` |
+All eight landed. `expected_import_count` 221 → 231.
 
-Slices 1–3 are independent of each other and of everything after; any of them
-can ship alone. 4 stands alone too and is worth doing regardless (§3.7). 5
-needs 4; 6 needs 5; 7 needs 1–3 and 6; 8 needs 6.
+| # | slice | doors | gate | ✓ |
+| --- | --- | --- | --- | --- |
+| 1 | `wl_fs_stat` | +1 (222) | a symlink out of the root is refused by stat exactly as by read; `root="."` confines it; absence is data | ✔ |
+| 2 | buffer introspection | +5 (227) | every door answers about an **inactive** buffer; a projection is never dirty | ✔ |
+| 3 | keymap introspection | +2 (229) | fallback chain resolves; a chord is one row | ✔ |
+| 4 | `System` owns a `SlotHost` | 0 | a `System`-produced context can actually fire a slot | ✔ |
+| 5 | slot trampoline routes `active_ctx`, withholds `in_dispatch` | 0 | the fire carries who asked; a provider gets no head authority | ✔ |
+| 6 | `Entry.key` / `Options.category` / 2 doors / tick drive / rendering | +2 (231) | static pick, **streaming** pick, `refresh`, two composing annotators, and a category-less pick left alone | ✔ |
+| 7 | `marginalia` plugin | 0 | a real guest annotates real rows through the whole membrane | ✔ |
+| 8 | `kindTag` out of core | 0 | `complete_ui.kindTag`/`annotate` deleted; the popup golden re-records to prove it | ✔ |
 
-Each slice bumps `expected_import_count` by hand and adds the guest extern in
-`src/plugin_sdk/root.zig` — the comptime tripwire fails the build otherwise,
-which is the intended way to be reminded.
+Plus the gate none of the fixtures could be: the **shipped** `config/config.js`
+boots, opens the palette, and its rows are annotated by the ordinary frame
+advance — with every note checked against the live keymap tables, so answers
+misaligned against their rows would fail even though they would still be
+non-empty.
+
+**Decomplections taken along the way**, each because the alternative was
+another copy of something that already existed:
+
+- `core/TestHost.zig` is the one test fixture. It was three near-identical
+  copies (`core/tests.zig`, `wasm_abi/tests.zig`, `pick/Pick.zig`) about to
+  become a fourth and a fifth, each hand-transcribing the init ORDER that
+  actually matters. It also terminates a live pick before teardown, so a test
+  that leaves one open no longer trips an assertion three frames away.
+- `plugin.writeExact` moved out of `pick.zig`, which invented it for
+  `wl_pick_outcome_*` and was its only user. Half a keymap table looks exactly
+  like a small keymap table.
+- `Pick.pushRow`/`clearRows`: five parallel arrays had three independent
+  append sites, and `infos` was already handled inconsistently between them.
+- `wasm_host/buffers.zig`: ten copies of the walk-then-bail dance became three
+  wrappers over nine one-line bodies.
+- `plugin_lib/annotate`: the guest half of the slot, shared by `marginalia`
+  and `lsp` instead of transcribed into both.
+- `refresh` takes `[]const Entry` instead of three parallel arrays.
+- `RootedFs.kind` is `(try stat(rel)).kind` — one statx, one symlink policy.
+
+**And one specced thing deliberately not built**: the `bufferAtIndex` cursor
+memo (§2b). Core state bought with no measurement is the thing this document
+argues against everywhere else.
 
 ## 7. Out of scope, said plainly
 
