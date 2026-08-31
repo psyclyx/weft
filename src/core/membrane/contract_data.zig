@@ -272,6 +272,11 @@ pub const imports = [_]Entry{
     .{ .name = "wl_buffer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th open buffer's name, into guest memory" },
     .{ .name = "wl_buffer_active", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is the active one" },
     .{ .name = "wl_buffer_readonly", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is read-only" },
+    .{ .name = "wl_buffer_path", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's file backing, into guest memory, or -1 when nothing backs it" },
+    .{ .name = "wl_buffer_dirty", .params = &.{.u32}, .results = &.{.i32}, .group = .buffers, .doc = "whether the `i`-th buffer holds edits its file never received; -1 when unanswerable (a projection is never dirty)" },
+    .{ .name = "wl_buffer_lang", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's language (`action.langOfName`: an extension sans dot), into guest memory" },
+    .{ .name = "wl_buffer_byte_len", .params = &.{.u32}, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's document byte length, or -1 when it holds no text" },
+    .{ .name = "wl_buffer_tool", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the projection the `i`-th buffer represents (`files`, `git`), or 0 bytes for a plain entry" },
 
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "start building a fuzzy pick with `prompt`, tagged `pick_id`" },
@@ -455,7 +460,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 222;
+const expected_import_count = 227;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

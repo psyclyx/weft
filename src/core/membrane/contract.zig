@@ -197,6 +197,11 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_buffer_name", .handler = buffers.hBufferName },
     .{ .name = "wl_buffer_active", .handler = buffers.hBufferActive },
     .{ .name = "wl_buffer_readonly", .handler = buffers.hBufferReadonly },
+    .{ .name = "wl_buffer_path", .handler = buffers.hBufferPath },
+    .{ .name = "wl_buffer_dirty", .handler = buffers.hBufferDirty },
+    .{ .name = "wl_buffer_lang", .handler = buffers.hBufferLang },
+    .{ .name = "wl_buffer_byte_len", .handler = buffers.hBufferByteLen },
+    .{ .name = "wl_buffer_tool", .handler = buffers.hBufferTool },
 
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .handler = pick.hPickBegin },

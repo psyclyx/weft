@@ -625,60 +625,7 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
 }
 
 // A compact editor environment for the membrane tests below.
-const Env = struct {
-    pool: *@import("../task.zig").Pool,
-    buffers: @import("../Buffers.zig"),
-    commands: command.Commands,
-    keymap: @import("../Keymap.zig"),
-    head: @import("../Head.zig"),
-    /// The ONE shared Container `caps`/`actions`/`slot_host` bind into (task
-    /// #19; D2 follows the same borrow convention from day one).
-    container: @import("../container.zig").Container,
-    caps: @import("../capability.zig").Caps,
-    actions: @import("../action.zig"),
-    /// D2's generic, schema-directed slot host (doc/d2-schema-payloads.md
-    /// §3.2, core/slot.zig) — `Caps`'s sibling, NOT a replacement; see that
-    /// file's module doc for why it's kept separate this slice.
-    slot_host: @import("../slot.zig").SlotHost,
-    quit: bool,
-    ctx: command.Context,
-
-    fn init(gpa: Allocator, self: *Env) !void {
-        const task = @import("../task.zig");
-        self.pool = try task.Pool.init(gpa, .{ .threads = 1 });
-        self.buffers = try @import("../Buffers.zig").init(gpa, self.pool, "user");
-        self.commands = .empty;
-        self.keymap = .empty;
-        self.head = .empty;
-        self.container = @import("../container.zig").Container.init(gpa);
-        self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &self.container);
-        self.actions = @import("../action.zig").init(gpa, &self.container);
-        self.slot_host = @import("../slot.zig").SlotHost.init(gpa, &self.container);
-        self.quit = false;
-        self.ctx = .{
-            .gpa = gpa,
-            .buffers = &self.buffers,
-            .commands = &self.commands,
-            .keymap = &self.keymap,
-            .actions = &self.actions,
-            .caps = &self.caps,
-            .quit = &self.quit,
-            .head = &self.head,
-            .slot_host = &self.slot_host,
-        };
-    }
-    fn deinit(self: *Env, gpa: Allocator) void {
-        self.slot_host.deinit();
-        self.actions.deinit();
-        self.caps.deinit();
-        self.container.deinit();
-        self.head.deinit(gpa);
-        self.keymap.deinit(gpa);
-        self.commands.deinit(gpa);
-        self.buffers.deinit(gpa);
-        self.pool.deinit();
-    }
-};
+const Env = @import("../TestHost.zig");
 
 test "wasm plugin: the edit plugin's duplicate-line lands through the membrane" {
     const gpa = t.allocator;

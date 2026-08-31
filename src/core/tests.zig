@@ -464,64 +464,23 @@ test "editor: save request round trip + dirty tracking" {
 
 // ── Plugins (milestone 5) ───────────────────────────────────────────
 
-const TestHost = struct {
-    pool: *task.Pool,
-    buffers: core.Buffers,
-    commands: core.command.Commands,
-    keymap: core.Keymap,
-    /// The ONE shared Container `caps`/`actions` bind into (task #19).
-    container: core.container.Container,
-    head: core.Head,
-    caps: core.Caps,
-    actions: core.Actions,
-    quit: bool,
-    ctx: core.command.Context,
+/// The shared fixture (`core/TestHost.zig`), which installs no commands.
+/// These tests exercise the BUILT-IN table (`save`, `quit`, the motions), so
+/// they install it themselves — what is bound in a test stays a property of
+/// the test, not of the harness (see `TestHost`'s module doc).
+const TestHost = @import("TestHost.zig");
 
-    fn init(gpa: Allocator, host: *TestHost) !void {
-        host.pool = try task.Pool.init(gpa, .{ .threads = 1 });
-        host.buffers = try core.Buffers.init(gpa, host.pool, "user");
-        host.commands = .empty;
-        host.keymap = .empty;
-        host.head = .empty;
-        host.container = core.container.Container.init(gpa);
-        host.caps = core.Caps.init(gpa, core.task.nowNs, &host.container);
-        host.actions = core.Actions.init(gpa, &host.container);
-        host.quit = false;
-        host.ctx = .{
-            .gpa = gpa,
-            .buffers = &host.buffers,
-            .commands = &host.commands,
-            .keymap = &host.keymap,
-            .actions = &host.actions,
-            .caps = &host.caps,
-            .quit = &host.quit,
-            .head = &host.head,
-        };
-        try core.builtins.install(gpa, &host.commands, &host.keymap, &host.head, &host.actions);
-    }
-
-    fn editor(host: *TestHost) *Editor {
-        return host.buffers.active().textEditor().?;
-    }
-
-    fn deinit(host: *TestHost, gpa: Allocator) void {
-        host.actions.deinit();
-        host.caps.deinit();
-        host.container.deinit();
-        host.head.deinit(gpa);
-        host.keymap.deinit(gpa);
-        host.commands.deinit(gpa);
-        host.buffers.deinit(gpa);
-        host.pool.deinit();
-    }
-};
+fn testHost(gpa: Allocator, host: *TestHost) !void {
+    try TestHost.init(gpa, host);
+    try core.builtins.install(gpa, &host.commands, &host.keymap, &host.head, &host.actions);
+}
 
 // ── Authority: attribution + the grade gate (plan 01, phases 1–2) ───
 
 test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
 
     host.editor().doc.my_grant = .view;
@@ -549,7 +508,7 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
 test "entries: a view carries no editor — text ops refuse politely, undo is a no-op" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
 
     const view = try host.buffers.createView(gpa, "files: /tmp", "files");
@@ -858,7 +817,7 @@ fn neverAnswers(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Requ
 test "capability: race, refine, merge-ranked composition, dead provider" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "alpha beta gamma");
 
@@ -904,7 +863,7 @@ fn definesHere(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Reque
 test "capability: stamped results rebase through later edits or discard" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "xx target yy");
 
@@ -929,7 +888,7 @@ test "capability: stamped results rebase through later edits or discard" {
 test "syntax: instant-tier definition + symbols providers race through registry" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     try host.editor().adoptPath(gpa, "demo.zig");
     try host.editor().insertText(gpa,
@@ -987,7 +946,7 @@ test "capability: two languages' tree-sitter providers bind without collision an
     // exactly that two-language scenario.
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
 
     var doc_zig = try Document.init(gpa, "user");
@@ -1033,7 +992,7 @@ test "capability: two languages' tree-sitter providers bind without collision an
 test "syntax: highlight feed publishes stamped bulk into its layer" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     try host.editor().insertText(gpa, "const x = 1;\n");
 
@@ -1144,7 +1103,7 @@ test "editor: shell backing — guarded save, external change poll, stale retry"
 test "buffers: switch restores modes, close/create keep the set sane" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     const run = core.command.run;
 
@@ -1198,7 +1157,7 @@ test "buffers: switch restores modes, close/create keep the set sane" {
 test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
     const run = core.command.run;
 
@@ -1303,7 +1262,7 @@ test "editor: loaded content is anchorable — every open, not just small ones" 
 test "completion UI: source-driven fold into the pick; accept replaces the prefix" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
 
     var comp: core.complete_ui.CompletionUi = .empty;
@@ -1334,7 +1293,7 @@ test "completion UI: source-driven fold into the pick; accept replaces the prefi
 test "completion UI: switching buffers dismisses the originating session" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
+    try testHost(gpa, &host);
     defer host.deinit(gpa);
 
     var comp: core.complete_ui.CompletionUi = .empty;

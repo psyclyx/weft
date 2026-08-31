@@ -164,6 +164,11 @@ extern "weft" fn wl_buffer_id(i: u32) i32;
 extern "weft" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_buffer_active(i: u32) u32;
 extern "weft" fn wl_buffer_readonly(i: u32) u32;
+extern "weft" fn wl_buffer_path(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_buffer_dirty(i: u32) i32;
+extern "weft" fn wl_buffer_lang(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_buffer_byte_len(i: u32) i32;
+extern "weft" fn wl_buffer_tool(i: u32, out_ptr: u32, out_cap: u32) i32;
 // Fuzzy pick (built incrementally, then opened; accept dispatches back to the
 // guest's on_pick_accept export).
 extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
@@ -1152,6 +1157,39 @@ pub fn bufferActive(i: usize) bool {
 }
 pub fn bufferReadOnly(i: usize) bool {
     return wl_buffer_readonly(@intCast(i)) != 0;
+}
+/// The `i`-th buffer's file backing, or null when nothing backs it (a
+/// scratch, a projection, an entry holding no text). Lands in the shared read
+/// scratch — copy it out before the next read call.
+pub fn bufferPath(i: usize) ?[]const u8 {
+    const n = wl_buffer_path(@intCast(i), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
+}
+/// Whether the `i`-th buffer holds edits its file never received. Null when
+/// unanswerable. A tool projection is never dirty — it has no file to write.
+pub fn bufferDirty(i: usize) ?bool {
+    const d = wl_buffer_dirty(@intCast(i));
+    return if (d < 0) null else d != 0;
+}
+/// The `i`-th buffer's language (an extension sans dot), "" when it has none.
+/// Shared read scratch.
+pub fn bufferLang(i: usize) ?[]const u8 {
+    const n = wl_buffer_lang(@intCast(i), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
+}
+/// The `i`-th buffer's document length, or null when it holds no text.
+pub fn bufferByteLen(i: usize) ?usize {
+    const n = wl_buffer_byte_len(@intCast(i));
+    return if (n < 0) null else @intCast(n);
+}
+/// The projection the `i`-th buffer represents (`files`, `git`), "" for a
+/// plain entry. Shared read scratch.
+pub fn bufferTool(i: usize) ?[]const u8 {
+    const n = wl_buffer_tool(@intCast(i), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
 }
 
 // ── Instanced tool buffers ───────────────────────────────────────────
