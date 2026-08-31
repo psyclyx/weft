@@ -2,7 +2,7 @@
 //! compiled to a wasm32-wasi reactor; see build.zig `addQuickjs`). This is
 //! plan 06B: the sample config, reborn from Fennel as `config.js`, evaluated
 //! inside the sandbox and driving weft ONLY through the `weft.*` host imports
-//! the shim (src/quickjs/weft_qjs.c) installs as a JS global. The same
+//! the shim (core/quickjs/weft_qjs.c) installs as a JS global. The same
 //! membrane discipline as a `.wasm` plugin — strings cross through the guest's
 //! linear memory, no host pointer leaks — one layer down, under the JS engine.
 //!
@@ -3166,7 +3166,7 @@ test "quickjs: R2 — Date.now()/Math.random() are SEALED (fixed, deterministic 
     // weft.set — exactly the leak review R2 flagged (the .config `weft.*`
     // surface itself has none of these, but Date/Math.random are QuickJS
     // built-ins the qjs_contract audit can't see). `weft_eval`'s seal
-    // prelude (src/quickjs/weft_qjs.c) overrides both before this source
+    // prelude (core/quickjs/weft_qjs.c) overrides both before this source
     // ever runs; if it didn't, `Date.now()` (wall clock) or `Math.random()`
     // would differ between the two evals below and the hashes would too.
     const cfg =

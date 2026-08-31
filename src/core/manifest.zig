@@ -44,7 +44,7 @@
 //!
 //! QuickJS-ng's own BUILT-IN `Date`/`Math.random` (engine features, not
 //! `weft.*` imports — the qjs_contract audit above can't see them) are
-//! CLOSED too (M3 review R2): `src/quickjs/weft_qjs.c`'s `weft_eval`
+//! CLOSED too (M3 review R2): `src/core/quickjs/weft_qjs.c`'s `weft_eval`
 //! evaluates a fixed seal prelude (`SEAL_PRELUDE`) immediately after
 //! installing the `weft.*` globals and BEFORE any user source ever runs —
 //! it overrides `Date`, `Date.now`, and `Math.random` with fixed-seed
@@ -219,7 +219,7 @@ pub const ManifestGrantDecl = struct {
 /// **Scope note, disclosed (D2 slice report)**: this type, its hash
 /// participation, and its `applyDecls` wiring ARE built and tested here —
 /// what is NOT built in this slice is the `weft.slot(...)` JS SURFACE
-/// itself (a `qjs_slot_declare` C-shim import in src/quickjs/weft_qjs.c
+/// itself (a `qjs_slot_declare` C-shim import in src/core/quickjs/weft_qjs.c
 /// that walks a JS schema-literal object tree into a `Schema` value, the
 /// way `js_grant`/`js_status_segment` flatten their own JS args today). That
 /// C-side JS-object-tree walk is a real, separate unit of work with no new

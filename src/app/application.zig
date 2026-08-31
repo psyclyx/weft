@@ -6,7 +6,7 @@
 //! platform nor a test harness is allowed to select lifecycle phases.
 
 const std = @import("std");
-const application = @import("weft_application");
+const lifecycle_mod = @import("weft_lifecycle");
 const core = @import("weft_core");
 const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
@@ -34,7 +34,7 @@ pub const Application = struct {
     last_activate_len: usize = 0,
     last_active: core.Buffers.Id,
     which_key_delay_ns: u64,
-    lifecycle: application.Lifecycle,
+    lifecycle: lifecycle_mod.Lifecycle,
 
     before_async: Hook = .{},
     services: Hook = .{},
@@ -147,8 +147,8 @@ pub const Application = struct {
         self.view_dirty = true;
     }
 
-    pub const AdvanceOptions = application.AdvanceOptions;
-    pub const AdvanceResult = application.AdvanceResult;
+    pub const AdvanceOptions = lifecycle_mod.AdvanceOptions;
+    pub const AdvanceResult = lifecycle_mod.AdvanceResult;
 
     /// Advance one complete application wake through an arbitrary production
     /// renderer. This is the only application-owned route to `buildFrame`:

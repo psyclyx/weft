@@ -470,8 +470,12 @@ pub fn build(b: *std.Build) void {
     // concrete app adapter supplies phases; this build edge makes it
     // impossible for sequencing policy to reach into core, gfx, plugins, or a
     // platform implementation.
-    const application_mod = b.createModule(.{
-        .root_source_file = b.path("src/application/root.zig"),
+    // The pure phase-order + caret-blink policy. Its type is `Lifecycle`, and
+    // now so are its directory and module name — it was `src/application/`
+    // beside `src/app/application.zig`, its own concrete host, with the field
+    // reading `lifecycle: application.Lifecycle`.
+    const lifecycle_mod = b.createModule(.{
+        .root_source_file = b.path("src/lifecycle/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -591,7 +595,7 @@ pub fn build(b: *std.Build) void {
         .scene = scene_mod,
         .skia = skia_mod,
         .text = text_mod,
-        .application = application_mod,
+        .lifecycle = lifecycle_mod,
         .stemma = stemma_dep.module("stemma"),
     };
 
@@ -776,9 +780,9 @@ pub fn build(b: *std.Build) void {
     // A green gate leaves a fresh zig-out: install rides along.
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_tests.step);
-    const application_tests = b.addTest(.{ .root_module = application_mod });
-    const run_application_tests = b.addRunArtifact(application_tests);
-    test_step.dependOn(&run_application_tests.step);
+    const lifecycle_tests = b.addTest(.{ .root_module = lifecycle_mod });
+    const run_lifecycle_tests = b.addRunArtifact(lifecycle_tests);
+    test_step.dependOn(&run_lifecycle_tests.step);
     // A module owns its own tests. Before `weft_platform` was a module its
     // seam test rode along in the `weft` binary; a module's tests do not run
     // just because a dependent references it, so this is the edge that keeps
@@ -832,7 +836,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");
-    contract_step.dependOn(&run_application_tests.step);
+    contract_step.dependOn(&run_lifecycle_tests.step);
     inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_codec, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
@@ -1116,7 +1120,7 @@ const AppDeps = struct {
     scene: *std.Build.Module,
     skia: *std.Build.Module,
     text: *std.Build.Module,
-    application: *std.Build.Module,
+    lifecycle: *std.Build.Module,
     stemma: *std.Build.Module,
 };
 
@@ -1146,7 +1150,7 @@ fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void
     mod.addImport("weft_scene", deps.scene);
     mod.addImport("weft_skia", deps.skia);
     mod.addImport("weft_text", deps.text);
-    mod.addImport("weft_application", deps.application);
+    mod.addImport("weft_lifecycle", deps.lifecycle);
     mod.addImport("stemma", deps.stemma);
     // Both binaries render through ordinary Vulkan images; the authoritative
     // E2E renderer deliberately has no WSI, compositor, or platform-input
@@ -1371,7 +1375,7 @@ const js_plugins = [_][]const u8{ "acp.js", "dap.js" };
 /// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the
 /// runtime behind user `config.js`. We invoke the same `zig cc` that builds
 /// weft on the pinned quickjs-ng source (`WEFT_QUICKJS_NG_SRC`, an unpacked
-/// srcOnly tree) plus our embedding shim (src/quickjs/weft_qjs.c), following
+/// srcOnly tree) plus our embedding shim (src/core/quickjs/weft_qjs.c), following
 /// quickjs-ng's own WASI recipe, and embed the resulting module. Reactor
 /// model: exports `weft_eval`/`malloc`/`free`/`memory`, imports only
 /// `wasi_snapshot_preview1` (the host provides those through wasmtime).
@@ -1391,7 +1395,7 @@ fn addQuickjs(b: *std.Build, host_mod: *std.Build.Module) void {
         cc.addArg(b.pathJoin(&.{ ng, f }));
     }
     // Our embedding shim (tracked — rebuilds when it changes).
-    cc.addFileArg(b.path("src/quickjs/weft_qjs.c"));
+    cc.addFileArg(b.path("src/core/quickjs/weft_qjs.c"));
     cc.addArgs(&.{
         "-lwasi-emulated-process-clocks",
         "-lwasi-emulated-signal",

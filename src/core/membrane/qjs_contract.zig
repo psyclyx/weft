@@ -26,7 +26,7 @@
 //!
 //! Same `Entry`-data shape as `membrane/root.zig` (name/params/results/
 //! group/doc), deliberately NOT unified with it: this is a different
-//! marshalling path (QuickJS-ng's own C shim, `src/quickjs/weft_qjs.c`,
+//! marshalling path (QuickJS-ng's own C shim, `src/core/quickjs/weft_qjs.c`,
 //! calls these — not a Zig guest with externs to verify), and the plugin-
 //! plane names are bound to TWO different handler sets depending on
 //! context (generic reject-stubs on the config linker, real handlers on a
