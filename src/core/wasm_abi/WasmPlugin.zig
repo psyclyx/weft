@@ -25,6 +25,7 @@ const net_session = @import("../net_session.zig");
 const proc_stream = @import("../proc_stream.zig");
 const Pool = @import("../task.zig").Pool;
 const grants_mod = @import("../grants.zig");
+const handles = @import("../handles.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
 const semantic_model = @import("weft_semantic");
 const fs_runtime = @import("weft_fs_runtime");
@@ -310,29 +311,28 @@ result_buf: std.ArrayList(u8) = .empty,
 retired_result_bufs: std.ArrayList(std.ArrayList(u8)) = .empty,
 dispatch_depth: usize = 0,
 
-/// Guest-visible live ranges keyed by monotonic, never-recycled capabilities.
-/// A stale release can therefore never hit a later range (no handle ABA).
-/// Ephemeral entries die at the next command dispatch, while a tool may
-/// explicitly retain an entry across asynchronous UI callbacks. The table
-/// owns every document anchor until release or plugin teardown.
-ranges: std.AutoHashMapUnmanaged(u32, RangeSlot) = .empty,
-next_range_handle: u32 = 0,
+// The three guest-handle tables. Monotonic issuance, never-recycled numbers
+// and fail-closed exhaustion are `handles.Handles`'s, stated once there
+// instead of three times here; what stays below is the only thing that
+// genuinely differs — what each `T` is, and who releases it.
+
+/// Guest-visible live ranges. Ephemeral entries die at the next command
+/// dispatch, while a tool may explicitly retain an entry across asynchronous
+/// UI callbacks. The table owns every document anchor until release or
+/// plugin teardown.
+ranges: handles.Handles(RangeSlot) = .empty,
 /// Issuance log for dispatch-scoped handles. Retention leaves an entry here;
 /// the next top-level dispatch skips retained/live capabilities and clears the
 /// log in one pass. This keeps cleanup O(handles issued), not a table rescan.
 ephemeral_range_handles: std.ArrayList(u32) = .empty,
 
-/// Guest-owned equality witnesses for document snapshots. Handles are
-/// monotonic and never recycled, so a late release cannot target a new
-/// frontier.
-doc_snapshots: std.AutoHashMapUnmanaged(u32, DocSnapshotSlot) = .empty,
-next_doc_snapshot_handle: u32 = 0,
+/// Guest-owned equality witnesses for document snapshots.
+doc_snapshots: handles.Handles(DocSnapshotSlot) = .empty,
 
 /// Annotation targets this plugin holds open (§11.7): entries it decorates
-/// but does not own. Monotonic handles, never recycled. Teardown releases
-/// every layer they claimed — unloading a decorator removes its paint.
-annotations: std.AutoHashMapUnmanaged(u32, AnnotationSlot) = .empty,
-next_annotation_handle: u32 = 1,
+/// but does not own. Teardown releases every layer they claimed — unloading
+/// a decorator removes its paint.
+annotations: handles.Handles(AnnotationSlot) = .empty,
 
 /// The captures from the guest's most recent `syntax.query`, read back by
 /// index. Reset at the start of each query; each entry owns its name.
@@ -469,19 +469,12 @@ pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
     errdefer doc.removeAnchor(a);
     const b = try doc.addAnchor(self.gpa, end, .left);
     errdefer doc.removeAnchor(b);
-    const slot: RangeSlot = .{
+    const handle = try self.ranges.open(self.gpa, .{
         .buffer = buffer.ref(),
         .start = a,
         .end = b,
-    };
-    // The wasm ABI reserves negative i32 results for failure, so the positive
-    // half of its 32-bit space is the capability budget. Exhaustion fails
-    // closed; recycling would let a late release or callback target new state.
-    if (self.next_range_handle > std.math.maxInt(i32)) return error.RangeHandlesExhausted;
-    const handle = self.next_range_handle;
-    self.next_range_handle += 1;
-    try self.ranges.putNoClobber(self.gpa, handle, slot);
-    errdefer _ = self.ranges.remove(handle);
+    });
+    errdefer _ = self.ranges.take(handle);
     try self.ephemeral_range_handles.append(self.gpa, handle);
     return handle;
 }
@@ -494,14 +487,10 @@ pub fn docSnapshot(self: *WasmPlugin) !u32 {
     const editor = buffer.textEditor() orelse return error.InvalidRange;
     const frontier = try editor.doc.version(self.gpa);
     errdefer self.gpa.free(frontier);
-    if (self.next_doc_snapshot_handle > std.math.maxInt(i32)) return error.DocSnapshotHandlesExhausted;
-    const handle = self.next_doc_snapshot_handle;
-    self.next_doc_snapshot_handle += 1;
-    try self.doc_snapshots.putNoClobber(self.gpa, handle, .{
+    return self.doc_snapshots.open(self.gpa, .{
         .buffer = buffer.ref(),
         .frontier = frontier,
     });
-    return handle;
 }
 
 /// Return true only when the handle still names this call's entry and its
@@ -520,8 +509,8 @@ pub fn docSnapshotIsCurrent(self: *WasmPlugin, handle: u32) bool {
 /// Release one document snapshot witness. Stale or repeated releases are
 /// harmless.
 pub fn releaseDocSnapshot(self: *WasmPlugin, handle: u32) void {
-    const removed = self.doc_snapshots.fetchRemove(handle) orelse return;
-    self.gpa.free(removed.value.frontier);
+    const removed = self.doc_snapshots.take(handle) orelse return;
+    self.gpa.free(removed.frontier);
 }
 
 /// Open an annotation target on the entry with compact id `entry_id`: capture
@@ -534,10 +523,7 @@ pub fn openAnnotation(self: *WasmPlugin, entry_id: Buffers.Id, name: []const u8)
     _ = try self.activeCtx().caps.layers.claimAnnotation(self.gpa, &editor.doc, name, self.name);
     const layer = try self.gpa.dupe(u8, name);
     errdefer self.gpa.free(layer);
-    const handle = self.next_annotation_handle;
-    self.next_annotation_handle += 1;
-    try self.annotations.putNoClobber(self.gpa, handle, .{ .buffer = buffer.ref(), .layer = layer });
-    return handle;
+    return self.annotations.open(self.gpa, .{ .buffer = buffer.ref(), .layer = layer });
 }
 
 /// The document an annotation handle names, or null once that entry is gone
@@ -560,10 +546,10 @@ pub fn annotationLayer(self: *WasmPlugin, handle: u32) ?*layers.Layer {
 /// Close one target: its paint goes, nothing else does. Repeated closes are
 /// harmless.
 pub fn closeAnnotation(self: *WasmPlugin, handle: u32) void {
-    const removed = self.annotations.fetchRemove(handle) orelse return;
-    if (self.annotationDocOf(removed.value)) |doc|
-        self.activeCtx().caps.layers.release(self.gpa, doc, removed.value.layer, self.name);
-    self.gpa.free(removed.value.layer);
+    const removed = self.annotations.take(handle) orelse return;
+    if (self.annotationDocOf(removed)) |doc|
+        self.activeCtx().caps.layers.release(self.gpa, doc, removed.layer, self.name);
+    self.gpa.free(removed.layer);
 }
 
 fn annotationDocOf(self: *WasmPlugin, slot: AnnotationSlot) ?*Document {
@@ -573,11 +559,11 @@ fn annotationDocOf(self: *WasmPlugin, slot: AnnotationSlot) ?*Document {
 }
 
 pub fn clearAnnotations(self: *WasmPlugin) void {
-    var it = self.annotations.iterator();
-    while (it.next()) |e| {
-        if (self.annotationDocOf(e.value_ptr.*)) |doc|
-            self.activeCtx().caps.layers.release(self.gpa, doc, e.value_ptr.layer, self.name);
-        self.gpa.free(e.value_ptr.layer);
+    var it = self.annotations.valueIterator();
+    while (it.next()) |slot| {
+        if (self.annotationDocOf(slot.*)) |doc|
+            self.activeCtx().caps.layers.release(self.gpa, doc, slot.layer, self.name);
+        self.gpa.free(slot.layer);
     }
     self.annotations.clearRetainingCapacity();
 }
@@ -629,8 +615,8 @@ fn destroyRange(self: *WasmPlugin, s: RangeSlot) void {
 }
 
 fn releaseRangeAt(self: *WasmPlugin, handle: u32) void {
-    const removed = self.ranges.fetchRemove(handle) orelse return;
-    self.destroyRange(removed.value);
+    const removed = self.ranges.take(handle) orelse return;
+    self.destroyRange(removed);
 }
 
 /// Release the dispatch-scoped entries while preserving explicitly retained
