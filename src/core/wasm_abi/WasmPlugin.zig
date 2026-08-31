@@ -20,12 +20,12 @@ const position = @import("../position.zig");
 const layers = @import("../layers.zig");
 const Document = @import("../Document.zig");
 const capability = @import("../capability.zig");
-const repl_session = @import("../repl_session.zig");
-const net_session = @import("../net_session.zig");
-const proc_stream = @import("../proc_stream.zig");
-const Pool = @import("../task.zig").Pool;
+// The live-resource types (repl sessions, connections, proc streams) and the
+// pool their readers run on are `plugin_resources.Resources`' business now,
+// not this file's.
 const grants_mod = @import("../grants.zig");
 const handles = @import("../handles.zig");
+const plugin_resources = @import("../plugin_resources.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
 const semantic_model = @import("weft_semantic");
 const fs_runtime = @import("weft_fs_runtime");
@@ -342,23 +342,12 @@ query_caps: std.ArrayList(QueryCap) = .empty,
 /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
 cur_activate_path: []const u8 = &.{},
 
-/// The task pool interactive REPL sessions run their reader on (design
-/// §6.3). Null → repl-start is unavailable.
-pool: ?*Pool = null,
-// The three live-resource registries. Stable never-reused indices, the
-// negative-handle refusal and teardown-stops-everything are `handles.Slots`'s;
-// what differs between them is only what the resource IS.
-
-/// Live persistent subprocess sessions this plugin started. The frame loop
-/// drains their output; `deinit` tears them down.
-sessions: handles.Slots(repl_session.Session) = .empty,
-/// Live network connections this plugin opened (design §6.5).
-net_sessions: handles.Slots(net_session.Session) = .empty,
-/// Raw persistent subprocess streams (`wl_proc_spawn`). Unlike `sessions`
-/// (which stream into a buffer), these hand raw stdout bytes back to the
-/// guest via `wl_proc_read` — the transport an in-guest protocol client (the
-/// `lsp` plugin) deframes.
-proc_streams: handles.Slots(proc_stream.ProcStream) = .empty,
+/// The live external resources this plugin holds by handle — subprocesses,
+/// REPL sessions, connections — plus the pool their readers run on and the
+/// environment their children inherit. `JsPlugin` embeds the SAME block, so
+/// the shared proc bodies address it directly instead of through a duck type
+/// spelled once per plane (`core/plugin_resources.zig`).
+resources: plugin_resources.Resources,
 
 // ── Pick (built incrementally between begin/end, then opened) ──
 pick_prompt: std.ArrayList(u8) = .empty,
@@ -677,36 +666,6 @@ pub fn activeCtx(self: *WasmPlugin) *command.Context {
     return self.active_ctx;
 }
 
-// ── The plugin-plane proc door's duck type (doc/place.md §4.1a) ──────
-//
-// `wasm_host/proc.zig`'s `spawnBody`/`sendBody`/`readBody`/`closeBody` are ONE
-// implementation reached by two transports — the `.wasm` guest membrane and
-// the resident JS one (`quickjs.zig`'s `JsPlugin`, which declares the same
-// three names). The bodies name a plugin's proc state through these accessors
-// rather than through a field, so neither plane has to be spelled into the
-// other's layout; the same `anytype`-over-named-methods contract `hasPerm`
-// established a few files over.
-
-/// The task pool a spawned stream's reader runs on, or null when this plugin
-/// was built without one (a bare unit-test fixture) — the door answers -1.
-pub fn procPool(self: *WasmPlugin) ?*Pool {
-    return self.pool;
-}
-
-/// This plugin's handle-indexed proc streams.
-pub fn procStreams(self: *WasmPlugin) *handles.Slots(proc_stream.ProcStream) {
-    return &self.proc_streams;
-}
-
-/// What a spawned child inherits absent a place overlay: the parent process's
-/// environment, set once at startup (`wasm_host.setEnviron`). The JS plane
-/// holds the SAME value in a field, handed to it by `config_load.zig` as
-/// `wasm_host.hostEnviron()`.
-pub fn baseEnviron(self: *WasmPlugin) std.process.Environ {
-    _ = self;
-    return wasm_host.hostEnviron();
-}
-
 pub const SemanticScope = struct {
     services: *semantic_runtime.Services,
     owner: semantic_model.owner.Id,
@@ -841,9 +800,7 @@ pub fn deinit(self: *WasmPlugin) void {
         gpa.destroy(wc);
     }
     self.commands.deinit(gpa);
-    self.sessions.deinit(gpa); // kill + join each
-    self.net_sessions.deinit(gpa); // shut + join each
-    self.proc_streams.deinit(gpa); // kill + join each
+    self.resources.deinit(); // kill/shut + join every live child and socket
     self.clearAllRanges();
     self.ranges.deinit(gpa);
     self.ephemeral_range_handles.deinit(gpa);

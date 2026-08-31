@@ -280,6 +280,31 @@ pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bo
     return false;
 }
 
+/// Bind one SHARED plugin-plane body (`wasm_host/proc.zig`'s four,
+/// `wasm_host/edit.zig`'s `read_doors`) onto the `.wasm` guest membrane: cast
+/// `data` to the plugin, run `gate`'s possession check if the door has one —
+/// trapping the guest's call on denial, `requirePerm`'s discipline unchanged
+/// — then hand the body its `Door`.
+///
+/// ONE generator for both families, here in the shared leaf rather than a
+/// near-identical copy in each file. The read doors are simply the `gate =
+/// null` case; when they had their own trampoline, "ungated" was a different
+/// SHAPE of function rather than a value, which is what let the two drift
+/// apart in the first place. `quickjs.zig`'s `jsDoor` is the same function
+/// for the other transport, differing only in how `data` is cast, where the
+/// dispatching context comes from, and how a denial is spelled.
+pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+            if (gate) |perm| {
+                if (!requirePerm(p, caller, perm)) return;
+            }
+            body(.{ .resources = &p.resources, .ctx = p.activeCtx() }, caller, args, results);
+        }
+    }.f;
+}
+
 /// The membrane's SECOND deny path (task #19 item 4, alongside `requirePerm`
 /// above): every import that MUTATES per-head interaction state (mode/
 /// pending/pick/echo — `Head.zig`'s module doc; NOT mode/menu/action TABLE

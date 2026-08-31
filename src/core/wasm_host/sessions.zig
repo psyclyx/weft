@@ -23,7 +23,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (!requirePerm(p, caller, .proc)) return;
     if (!requirePerm(p, caller, .timer)) return;
-    const pool = p.pool orelse {
+    const pool = p.resources.pool orelse {
         results[0] = -1;
         return;
     };
@@ -67,7 +67,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         s.adoptEnviron();
         env_owned = false;
     }
-    const handle = p.sessions.open(gpa, s) catch {
+    const handle = p.resources.sessions.open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
@@ -79,7 +79,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 pub fn hReplSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const s = p.sessions.at(args[0]) orelse return;
+    const s = p.resources.sessions.at(args[0]) orelse return;
     const line = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(line);
     s.send(line);
@@ -90,19 +90,19 @@ pub fn hReplQuit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.sessions.close(args[0]);
+    p.resources.sessions.close(args[0]);
 }
 
 /// Frame-thread: drain every session's streamed output into its buffer.
 /// Returns true if anything was written (the view repaints).
 pub fn drainReplSessions(p: *WasmPlugin) bool {
     var any = false;
-    for (p.sessions.slice()) |maybe| {
+    for (p.resources.sessions.slice()) |maybe| {
         if (maybe) |s| {
             if (s.drain()) any = true;
         }
     }
-    for (p.net_sessions.slice()) |maybe| {
+    for (p.resources.net_sessions.slice()) |maybe| {
         if (maybe) |s| {
             if (s.drain()) any = true;
         }
@@ -118,7 +118,7 @@ const net_session = @import("../net_session.zig");
 pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (!requirePerm(p, caller, .net)) return;
-    const pool = p.pool orelse {
+    const pool = p.resources.pool orelse {
         results[0] = -1;
         return;
     };
@@ -142,7 +142,7 @@ pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         results[0] = -1;
         return;
     };
-    const handle = p.net_sessions.open(gpa, s) catch {
+    const handle = p.resources.net_sessions.open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
@@ -153,7 +153,7 @@ pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 pub fn hNetSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const s = p.net_sessions.at(args[0]) orelse return;
+    const s = p.resources.net_sessions.at(args[0]) orelse return;
     const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(bytes);
     s.send(bytes);
@@ -163,5 +163,5 @@ pub fn hNetClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.net_sessions.close(args[0]);
+    p.resources.net_sessions.close(args[0]);
 }

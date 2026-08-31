@@ -17,6 +17,7 @@ const command = @import("command.zig");
 const task = @import("task.zig");
 const proc_stream = @import("proc_stream.zig");
 const handles = @import("handles.zig");
+const plugin_resources = @import("plugin_resources.zig");
 const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
@@ -347,15 +348,12 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
 pub const JsPlugin = struct {
     gpa: Allocator,
     ctx: *command.Context,
-    pool: *task.Pool,
     /// This plugin's name (its config namespace — what `weft.set(name, …)` and
     /// `weft.config(key)` key on).
     name: []u8,
     /// Read-only config data the config plane staged for this plugin, read via
     /// `weft.config(key)`. Null in tests.
     config_store: ?*kv.Store,
-    /// The child environment agent subprocesses inherit (so they resolve PATH).
-    environ: std.process.Environ,
     /// This plugin's authority, in `wasm_host/plugin.zig`'s `hasPerm` duck
     /// type (same three field names, so the JS plane runs literally the same
     /// check the wasm plane does — see that file's `hasPerm` doc for the
@@ -374,11 +372,11 @@ pub const JsPlugin = struct {
     /// Owned command trampolines (one per `weft.command`), kept for teardown;
     /// each carries the id the host dispatches by and owns its command name.
     cmds: std.ArrayList(*Cmd) = .empty,
-    /// Proc streams this plugin spawned, indexed by the handle the JS holds.
-    /// The same `handles.Slots` the wasm plane's registry is — one shape, so
-    /// a JS plugin's handle cannot be bounds-checked differently from a wasm
-    /// plugin's.
-    streams: handles.Slots(proc_stream.ProcStream) = .empty,
+    /// The live external resources this plugin holds by handle. The SAME
+    /// block `WasmPlugin` embeds — a JS plugin is code inside a wasm guest,
+    /// so its subprocess cannot be addressed, bounds-checked or reaped
+    /// differently from any other guest's (`core/plugin_resources.zig`).
+    resources: plugin_resources.Resources,
     /// Handles whose child's exit has already been announced — an exit is an
     /// EDGE, reported exactly once, never a level the plugin re-reads every
     /// frame. Grown by `tick`, not by the spawn door: spawning is
@@ -431,36 +429,16 @@ pub const JsPlugin = struct {
         }
     };
 
-    // ── The plugin-plane proc door's duck type (doc/place.md §4.1a) ──
-    //
-    // `wasm_host/proc.zig`'s four bodies ARE this plane's proc doors; these
-    // are the four names they reach a plugin's proc state by, declared here
-    // under exactly the names `WasmPlugin` declares them, so neither type has
-    // to be spelled into the other. Same contract as `hasPerm`'s duck type a
-    // few fields up — one implementation, two transports.
-
     /// The DISPATCHING entry's context, where a spawned child's place and
     /// environment are read from. The bridge's optional-with-fallback is the
-    /// JS plane's spelling of `WasmPlugin.active_ctx`.
+    /// JS plane's spelling of `WasmPlugin.active_ctx`; `jsDoor` hands it to
+    /// `wasm_host/proc.zig`'s shared bodies alongside `&self.resources`
+    /// (doc/place.md §4.1a). The four accessors that used to sit here —
+    /// `procPool`/`procStreams`/`baseEnviron`, the duck type those bodies
+    /// reached a plugin's proc state through — are gone: both planes embed
+    /// the one `Resources` block now, so there is nothing left to duck-type.
     pub fn activeCtx(self: *JsPlugin) *command.Context {
         return self.bridge.activeCtx();
-    }
-
-    /// A JS plugin always has a pool (`load` takes one) — the optional is the
-    /// wasm plane's, whose bare test fixtures may have none.
-    pub fn procPool(self: *JsPlugin) ?*task.Pool {
-        return self.pool;
-    }
-
-    pub fn procStreams(self: *JsPlugin) *handles.Slots(proc_stream.ProcStream) {
-        return &self.streams;
-    }
-
-    /// The environment a spawned child inherits absent a place overlay. Held
-    /// in a field here rather than read from `wasm_host`'s global, but it is
-    /// the same value: `config_load.zig` passes `wasm_host.hostEnviron()`.
-    pub fn baseEnviron(self: *JsPlugin) std.process.Environ {
-        return self.environ;
     }
 
     /// The conversation projecting into `name`, or null if none was opened.
@@ -497,26 +475,34 @@ pub const JsPlugin = struct {
     pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
+        // Hoisted out of the struct literal so each owned value gets its
+        // errdefer BEFORE the next fallible field runs: a `compileCached`
+        // failure used to leak the name it had already duped, because the
+        // literal's own cleanup could only be registered after every field in
+        // it had succeeded.
+        const name_dup = try gpa.dupe(u8, name);
+        errdefer gpa.free(name_dup);
+        var module = try engine.compileCached(quickjs_wasm);
+        errdefer module.deinit();
         self.* = .{
             .gpa = gpa,
             .ctx = ctx,
-            .pool = pool,
-            .name = try gpa.dupe(u8, name),
+            .name = name_dup,
             .config_store = config_store,
-            .environ = environ,
             .grant_table = ctx.grant_table,
+            // The pool and the child environment live in the resource block
+            // now, which is where the shared proc bodies read them from —
+            // exactly as they do on the wasm plane. `name` is BORROWED there;
+            // the block is embedded in this plugin, so it cannot outlive it.
+            .resources = .init(gpa, name_dup, pool, environ),
             // LIVE mode (`manifest` left null) — see Bridge's doc: a resident
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
             .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
-            .module = try engine.compileCached(quickjs_wasm),
+            .module = module,
             .linker = undefined,
             .instance = undefined,
         };
-        errdefer {
-            gpa.free(self.name);
-            self.module.deinit();
-        }
         if (self.grant_table) |table| perm_gate.adoptGrantHandles(table, self.name, &self.grant_handles);
         self.linker = try wasm.Linker.init(engine);
         errdefer self.linker.deinit();
@@ -580,8 +566,8 @@ pub const JsPlugin = struct {
     pub fn tick(self: *JsPlugin) bool {
         var fired = false;
         var h: usize = 0;
-        while (h < self.streams.len()) : (h += 1) {
-            if (self.streams.slice()[h]) |s| {
+        while (h < self.resources.streams.len()) : (h += 1) {
+            if (self.resources.streams.slice()[h]) |s| {
                 if (s.pending() > 0) {
                     self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
                     fired = true;
@@ -589,7 +575,7 @@ pub const JsPlugin = struct {
             }
             // Re-read the slot: the handler above may have closed this very
             // stream (`weft.procClose`), which frees it and nulls the slot.
-            const s = self.streams.slice()[h] orelse continue;
+            const s = self.resources.streams.slice()[h] orelse continue;
             // The child's exit, AFTER its last bytes: a peer that dies mid
             // conversation is news the plugin must act on (answer what it left
             // pending, free the slot), not a silence it has to poll for. Once
@@ -681,7 +667,7 @@ pub const JsPlugin = struct {
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
         gpa.free(self.name);
-        self.streams.deinit(gpa); // kill + join each
+        self.resources.deinit(); // kill + join every live child
         self.exits_reported.deinit(gpa);
         for (self.conversations.items) |c| c.deinit(gpa);
         self.conversations.deinit(gpa);
@@ -734,7 +720,7 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
                     return;
                 }
             }
-            body(self, caller, args, results);
+            body(.{ .resources = &self.resources, .ctx = self.activeCtx() }, caller, args, results);
         }
     }.f;
 }

@@ -208,7 +208,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .semantic_owner = semantic_owner,
         .store = opts.kv,
         .config_store = opts.config,
-        .pool = opts.pool,
+        .resources = .init(gpa, name_dup, opts.pool, wasm_host.hostEnviron()),
         .syntax_of = opts.syntax_of,
         .subbuffers = opts.subbuffers,
         .register = opts.register,

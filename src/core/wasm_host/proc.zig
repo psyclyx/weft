@@ -71,31 +71,35 @@ const ShellJob = struct {
 // once carried and `wl_proc_spawn` never had is not merely removed, it is
 // unrepresentable: there is no second body to grow one in.
 //
-// Each body is duck-typed over the plugin exactly the way `plugin.zig`'s
-// `hasPerm` is ("one contract, two transports"), and needs only what BOTH
-// planes can supply:
+// Each body takes a `Door` — the plugin's `Resources` (its pool, the
+// environment its children inherit, its handle-indexed streams) plus the
+// DISPATCHING entry's `Context` (where the child runs and with what, via
+// `resolveSpawnAtCtx`/`resolveSpawnEnvCtx`) — and nothing about which plane
+// asked.
 //
-//   gpa            the plugin's allocator
-//   name           the principal, for a refusal message
-//   activeCtx()    the DISPATCHING entry's context — where the child runs and
-//                  with what (`resolveSpawnAtCtx`/`resolveSpawnEnvCtx`)
-//   procPool()     the task pool the stream's reader runs on, or null
-//   procStreams()  the handle-indexed stream list
-//   baseEnviron()  the environment a child inherits absent a place overlay
+// These used to be reached through an `anytype` duck type — `procPool()`,
+// `procStreams()`, `baseEnviron()`, declared under identical names on
+// `WasmPlugin` and `JsPlugin`. That was never an abstraction, only the
+// symptom of one kind of state living on two instance types; both embed the
+// same `Resources` block now, so the bodies name it outright.
 //
 // What is genuinely per-transport stays in the trampoline generators
-// (`wasmDoor` here, `jsDoor` in quickjs.zig): how `data` is cast, and how a
-// denial is spelled — a trap for a `.wasm` guest, a logged `qjs_contract.
-// denied` for the RESIDENT JS runtime, which a trap would tear down.
+// (`wasmDoor` here, `jsDoor` in quickjs.zig): how `data` is cast, where the
+// dispatching context comes from, and how a denial is spelled — a trap for a
+// `.wasm` guest, a logged `qjs_contract.denied` for the RESIDENT JS runtime,
+// which a trap would tear down.
 const proc_stream = @import("../proc_stream.zig");
+const plugin_resources = @import("../plugin_resources.zig");
+const Resources = plugin_resources.Resources;
+const Door = plugin_resources.Door;
 
 const Perm = shared.Perm;
 
 /// A handle's live stream, or null for a negative/out-of-range/closed slot.
 /// The check itself lives in `handles.Slots.at`, shared with the repl and net
 /// registries that get their handles from the same untrusted place.
-fn streamAt(p: anytype, h: i32) ?*proc_stream.ProcStream {
-    return p.procStreams().at(h);
+fn streamAt(r: *Resources, h: i32) ?*proc_stream.ProcStream {
+    return r.streams.at(h);
 }
 
 /// `procSpawn(cmd) -> handle` (or -1 if unavailable). Spawns a persistent
@@ -104,9 +108,11 @@ fn streamAt(p: anytype, h: i32) ?*proc_stream.ProcStream {
 /// `procRead`. Returns -1 when the place cannot host a local child, rather
 /// than falling back to the editor's own directory — the whole point of
 /// asking the place instead of taking a directory from the guest.
-pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const gpa = p.gpa;
-    const pool = p.procPool() orelse {
+pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const r = d.resources;
+    const ctx = d.ctx;
+    const gpa = r.gpa;
+    const pool = r.pool orelse {
         results[0] = -1;
         return;
     };
@@ -115,7 +121,6 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
         return;
     };
     defer gpa.free(cmd);
-    const ctx = p.activeCtx();
     // `ProcStream.start` dups the cwd it is given, so this one is ours to free.
     const at = shared.resolveSpawnAtCtx(ctx, gpa);
     defer switch (at) {
@@ -126,7 +131,7 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(r.name, why);
             results[0] = -1;
             return;
         },
@@ -134,7 +139,7 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
     const spawn_env = shared.resolveSpawnEnvCtx(ctx, gpa);
     var env_owned = true;
     defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
-    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse p.baseEnviron()) catch {
+    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse r.environ) catch {
         results[0] = -1;
         return;
     };
@@ -144,7 +149,7 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
         s.adoptEnviron();
         env_owned = false;
     }
-    const handle = p.procStreams().open(gpa, s) catch {
+    const handle = r.streams.open(gpa, s) catch {
         s.deinit();
         results[0] = -1;
         return;
@@ -153,26 +158,30 @@ pub fn spawnBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
 }
 
 /// `procSend(handle, bytes)`: write to the subprocess's stdin.
-pub fn sendBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn sendBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const s = streamAt(p, args[0]) orelse return;
-    const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer p.gpa.free(bytes);
+    // No `d.ctx`: addressing an already-started child resolves no place.
+    const r = d.resources;
+    const s = streamAt(r, args[0]) orelse return;
+    const bytes = caller.readMemory(r.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer r.gpa.free(bytes);
     s.send(bytes);
 }
 
 /// `procRead(handle, out, cap) -> n`: drain up to `cap` buffered stdout bytes.
-pub fn readBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const s = streamAt(p, args[0]) orelse {
+pub fn readBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    // No `d.ctx`: draining an already-started child resolves no place.
+    const r = d.resources;
+    const s = streamAt(r, args[0]) orelse {
         results[0] = 0;
         return;
     };
     const cap: usize = @intCast(args[2]);
-    const buf = p.gpa.alloc(u8, cap) catch {
+    const buf = r.gpa.alloc(u8, cap) catch {
         results[0] = 0;
         return;
     };
-    defer p.gpa.free(buf);
+    defer r.gpa.free(buf);
     const n = s.read(buf);
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
 }
@@ -180,28 +189,20 @@ pub fn readBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []
 /// `procClose(handle)`: kill the subprocess; the slot stays null for stability.
 /// Deliberately ungated on BOTH planes: it only RELEASES authority, and
 /// denying it would strand a live subprocess with no way to reap it.
-pub fn closeBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn closeBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
-    p.procStreams().close(args[0]);
+    // No `d.ctx`: releasing a child resolves no place.
+    d.resources.streams.close(args[0]);
 }
 
-/// Bind one shared body onto the `.wasm` guest membrane: cast `data` to the
-/// plugin, run `gate`'s possession check if the door has one (trapping the
-/// guest's call on denial — `requirePerm`'s discipline, unchanged), then the
-/// body. There is no other way to spell a `wl_proc_*` handler, so a hand-
-/// written one would fail the `doors` gate in `e2e/demolition_test.zig`.
-pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
-    return struct {
-        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-            const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-            if (gate) |perm| {
-                if (!requirePerm(p, caller, perm)) return;
-            }
-            body(p, caller, args, results);
-        }
-    }.f;
-}
+/// Bind one shared body onto the `.wasm` guest membrane. Re-exported from
+/// `plugin.zig` rather than written here: the read doors need exactly the
+/// same trampoline with `gate = null`, and two copies of it is how the two
+/// families would drift. There is no other way to spell a `wl_proc_*`
+/// handler, so a hand-written one fails the `doors` gate in
+/// `e2e/demolition_test.zig`.
+pub const wasmDoor = shared.wasmDoor;
 
 pub const hProcSpawn = wasmDoor(spawnBody, .proc);
 pub const hProcSend = wasmDoor(sendBody, null);

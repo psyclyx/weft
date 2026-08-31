@@ -219,20 +219,15 @@ pub const PluginStreamCtx = struct {
 
 const plugin_stream_interval_ns: u64 = 8 * std.time.ns_per_ms;
 
-fn anyOpenStream(items: anytype) bool {
-    for (items) |maybe| if (maybe != null) return true;
-    return false;
-}
-
+/// Whether any loaded plugin still holds a live child or socket. Both planes
+/// answer through the same `Resources.hasLiveStream`, so the JS plane is no
+/// longer asked a NARROWER question than the wasm one: it used to be checked
+/// for proc streams only, because `JsPlugin` had no session registries to
+/// check. It has them now (empty until those doors are shared), so sharing a
+/// door will not silently leave the frame loop asleep on it.
 fn hasLiveStream(self: *const PluginStreamCtx) bool {
-    for (self.plugins.items) |p| {
-        if (anyOpenStream(p.proc_streams.slice())) return true;
-        if (anyOpenStream(p.sessions.slice())) return true;
-        if (anyOpenStream(p.net_sessions.slice())) return true;
-    }
-    for (self.js_plugins.items) |jp| {
-        if (anyOpenStream(jp.streams.slice())) return true;
-    }
+    for (self.plugins.items) |p| if (p.resources.hasLiveStream()) return true;
+    for (self.js_plugins.items) |jp| if (jp.resources.hasLiveStream()) return true;
     return false;
 }
 

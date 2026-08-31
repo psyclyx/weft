@@ -11,17 +11,20 @@ const Editor = @import("../Editor.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const Door = @import("../plugin_resources.zig").Door;
 
 /// The entry this call is about (`command.Context.entry` — the active one, or
 /// the entry a background delivery captured), for the handlers that have
 /// nothing to answer without an editor: a guest asking about text in an entry
 /// that holds none gets the same reply it gets for an empty document.
 ///
-/// `anytype` because these bodies are SHARED with the resident JS membrane
-/// (see `read_doors`): a `*JsPlugin` has `activeCtx()` and `gpa` too, and a
-/// body that uses only those is one body, not two that can drift.
-fn activeEditor(p: anytype) ?*Editor {
-    return (p.activeCtx().entry() orelse return null).textEditor();
+/// Takes the CONTEXT, not a plugin: these bodies are shared with the resident
+/// JS membrane (see `read_doors`), and "the entry this call is about" is a
+/// property of the dispatch, not of which guest runtime dispatched it. The
+/// non-shared handlers below pass `p.activeCtx()`; the shared ones pass
+/// `d.ctx`, which is the same value arriving by the same route.
+fn activeEditor(ctx: *command.Context) ?*Editor {
+    return (ctx.entry() orelse return null).textEditor();
 }
 
 fn opaqueHandle(raw: i32) ?u32 {
@@ -40,19 +43,18 @@ fn opaqueHandle(raw: i32) ?u32 {
 // type, and `e2e/demolition_test.zig` proves by function pointer that neither
 // plane grew a second copy.
 
-/// Wrap a shared body as a `wl_*` handler: the `*WasmPlugin` cast, nothing else.
+/// Wrap a shared body as a `wl_*` handler. The read doors carry no authority,
+/// so this is `plugin.zig`'s one trampoline with no gate — the same function
+/// the proc doors bind through, called with `null` instead of being a second,
+/// subtly different generator that happens to omit the check.
 pub fn wasmDoor(comptime body: anytype) wasm.Linker.HostFn {
-    return struct {
-        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-            body(@as(*WasmPlugin, @ptrCast(@alignCast(data.?))), caller, args, results);
-        }
-    }.f;
+    return shared.wasmDoor(body, null);
 }
 
-pub fn cursorBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn cursorBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const ed = activeEditor(p) orelse {
+    const ed = activeEditor(d.ctx) orelse {
         results[0] = 0;
         return;
     };
@@ -60,10 +62,10 @@ pub fn cursorBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: 
 }
 pub const hCursor = wasmDoor(cursorBody);
 
-pub fn byteLenBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn byteLenBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const ed = activeEditor(p) orelse {
+    const ed = activeEditor(d.ctx) orelse {
         results[0] = 0;
         return;
     };
@@ -104,8 +106,8 @@ pub fn hDocSnapshotRelease(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
     if (opaqueHandle(args[0])) |handle| p.releaseDocSnapshot(handle);
 }
 
-pub fn sliceBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const ed = activeEditor(p) orelse {
+pub fn sliceBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const ed = activeEditor(d.ctx) orelse {
         results[0] = 0;
         return;
     };
@@ -117,11 +119,11 @@ pub fn sliceBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
         results[0] = 0;
         return;
     }
-    const buf = p.gpa.alloc(u8, e - s) catch {
+    const buf = d.resources.gpa.alloc(u8, e - s) catch {
         results[0] = 0;
         return;
     };
-    defer p.gpa.free(buf);
+    defer d.resources.gpa.free(buf);
     var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
     sr.interface.readSliceAll(buf) catch {
         results[0] = 0;
@@ -132,9 +134,9 @@ pub fn sliceBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: [
 }
 pub const hSlice = wasmDoor(sliceBody);
 
-pub fn lineAtBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn lineAtBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const rope = (activeEditor(p) orelse return).text();
+    const rope = (activeEditor(d.ctx) orelse return).text();
     const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
     const line = rope.lineRange(row);
     const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
@@ -142,8 +144,8 @@ pub fn lineAtBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: 
 }
 pub const hLineAt = wasmDoor(lineAtBody);
 
-pub fn selectionBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const ed = activeEditor(p) orelse {
+pub fn selectionBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const ed = activeEditor(d.ctx) orelse {
         results[0] = 0;
         return;
     };
@@ -157,8 +159,8 @@ pub fn selectionBody(p: anytype, caller: *wasm.Caller, args: []const i32, result
 }
 pub const hSelection = wasmDoor(selectionBody);
 
-pub fn pathBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const ed = activeEditor(p) orelse {
+pub fn pathBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const ed = activeEditor(d.ctx) orelse {
         results[0] = -1;
         return;
     };
@@ -256,10 +258,10 @@ pub fn hRender(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     p.activeCtx().render(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
 }
 
-pub fn jumpBody(p: anytype, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+pub fn jumpBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
-    const ed = activeEditor(p) orelse return;
+    const ed = activeEditor(d.ctx) orelse return;
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
 }
 pub const hJump = wasmDoor(jumpBody);
@@ -274,7 +276,7 @@ pub fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const from: usize = @intCast(args[0]);
     const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
     const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
-    const ed = activeEditor(p) orelse {
+    const ed = activeEditor(p.activeCtx()) orelse {
         results[0] = @intCast(from);
         return;
     };
@@ -288,7 +290,7 @@ pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = activeEditor(p) orelse return;
+    const ed = activeEditor(p.activeCtx()) orelse return;
     const len = ed.text().byteLen();
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
     ed.setMark(p.gpa) catch {};

@@ -959,9 +959,9 @@ test "wasm plugin: a handle the guest never got is refused, not fatal to the hos
 
     // Nothing was opened, so nothing can have been closed: a bogus handle
     // must never have found a slot to null.
-    try t.expectEqual(@as(usize, 0), plugin.sessions.len());
-    try t.expectEqual(@as(usize, 0), plugin.net_sessions.len());
-    try t.expectEqual(@as(usize, 0), plugin.proc_streams.len());
+    try t.expectEqual(@as(usize, 0), plugin.resources.sessions.len());
+    try t.expectEqual(@as(usize, 0), plugin.resources.net_sessions.len());
+    try t.expectEqual(@as(usize, 0), plugin.resources.streams.len());
 }
 
 // ── task #19 item 4: closing the `activeCtx()` background escape hatch ─────
