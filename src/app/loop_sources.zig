@@ -204,9 +204,10 @@ pub fn pluginLoopDue(ctx: ?*anyopaque, now: u64) ?u64 {
 // too, so any real config would arm this at ~125 wakes/s FOREVER, worse
 // than the vsync loop it replaced, and it was masking the lost-wakeup
 // bug by accident). A plugin is "streaming" only while it holds an open
-// raw-proc, REPL, or net session — `proc_streams`/`sessions`/
-// `net_sessions` (host-side) and `streams` (quickjs) are stable-index
-// slot arrays; a non-null entry is an OPEN handle, independent of
+// raw-proc, REPL, or net session — the three `handles.Slots` registries
+// in its `plugin_resources.Resources`, which BOTH planes carry now, so
+// this asks each the same question; a non-null entry is an OPEN handle,
+// independent of
 // whether it currently has pending bytes (that's what the 8ms poll is
 // FOR — to notice bytes arriving on an otherwise-quiet handle). A
 // plugin with no open stream (the common case — most plugins never open
