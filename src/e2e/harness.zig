@@ -27,15 +27,18 @@ const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
 pub const window_cmds = weft.window_cmds;
-const app_buffers_cmds = weft.app_buffers_cmds;
+const app_buffers_cmds = weft.app.buffers_cmds;
 pub const dispatch = weft.dispatch;
-pub const app_session = weft.app_session;
-pub const app_providers = weft.app_providers;
-pub const app_collab = weft.app_collab;
-pub const app_collab_cmds = weft.app_collab_cmds;
-const app_application = weft.app_application;
-const app_render_memory = weft.app_render_memory;
-const app_headless_vulkan = weft.app_headless_vulkan;
+/// The app layer, reached as one namespace now that src/app/ has a root of its
+/// own. Was four `app_`-prefixed aliases standing in for the missing facade.
+pub const app = weft.app;
+const app_session = weft.app.session;
+const app_providers = weft.app.providers;
+const app_collab = weft.app.collab;
+const app_collab_cmds = weft.app.collab_cmds;
+const app_application = weft.app.application;
+const app_render_memory = weft.app.render_memory;
+const app_headless_vulkan = weft.app.headless_vulkan;
 pub const region = weft.region;
 
 // Re-exports so the per-concern test files can alias what they need from this

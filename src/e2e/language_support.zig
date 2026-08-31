@@ -15,7 +15,7 @@ pub const cases = [_]Case{
 
 pub fn attachedSyntax(ed: *h.Editor) ?*h.core.syntax.Syntax {
     const buf = ed.buffers.active();
-    const at: *h.app_providers.Attach = @ptrCast(@alignCast(buf.frontend orelse return null));
+    const at: *h.app.providers.Attach = @ptrCast(@alignCast(buf.frontend orelse return null));
     return at.syntax;
 }
 

@@ -12,9 +12,9 @@ const region = h.region;
 const window_layout = h.window_layout;
 const window_cmds = h.window_cmds;
 const harness = h.gfx_harness;
-const app_providers = h.app_providers;
-const app_session = h.app_session;
-const app_collab = h.app_collab;
+const app_providers = h.app.providers;
+const app_session = h.app.session;
+const app_collab = h.app.collab;
 
 const Editor = h.Editor;
 const Loopback = h.Loopback;

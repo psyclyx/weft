@@ -564,12 +564,25 @@ pub fn build(b: *std.Build) void {
     gfx_mod.addImport("stemma", stemma_dep.module("stemma"));
     gfx_mod.linkSystemLibrary("vulkan", .{});
 
-    // The dependency set the app tree (src/core + src/gfx + src/app) needs,
-    // named once so the shipped binary and the tested one cannot be wired
-    // differently by accident. See `configureAppModule`.
+    // The editor assembled — the only layer that knows core AND gfx AND
+    // platform, which is why it is the top of the enforced graph. Nothing below
+    // is given an edge to it, so `core -> app` (which existed, as one test) is
+    // now `error: import of file outside module path`.
+    const app_mod = b.createModule(.{
+        .root_source_file = b.path("src/app/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    // The dependency set the app tree needs, named once so the shipped binary
+    // and the tested one cannot be wired differently by accident. See
+    // `configureAppModule` — `app_mod` takes the same set, because main.zig and
+    // weft.zig are thin roots over it.
     const app_deps: AppDeps = .{
         .architecture = architecture,
         .core = core_mod,
+        .app = app_mod,
         .gfx = gfx_mod,
         .vk = vk_mod,
         .platform = platform_mod,
@@ -583,6 +596,8 @@ pub fn build(b: *std.Build) void {
     };
 
     // ── Desktop (Wayland) executable ──
+    configureAppModule(b, app_mod, app_deps);
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -791,6 +806,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
     test_step.dependOn(&b.addRunArtifact(gfx_tests).step);
+    // app/config_load.zig's tests @embedFile the guests, as core's do.
+    embedGuests(b, app_mod);
+    const app_tests = b.addTest(.{ .root_module = app_mod });
+    test_step.dependOn(&b.addRunArtifact(app_tests).step);
     // `weft_scene` (6 tests) and `weft_text` (4) have been named modules since
     // before this refactor and never had a test binary — src/weft.zig's
     // `_ = scene; _ = text_engine;` looked like coverage but a module's tests
@@ -1088,6 +1107,7 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 const AppDeps = struct {
     architecture: ArchitectureModules,
     core: *std.Build.Module,
+    app: *std.Build.Module,
     gfx: *std.Build.Module,
     vk: *std.Build.Module,
     platform: *std.Build.Module,
@@ -1117,6 +1137,7 @@ const AppDeps = struct {
 fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void {
     addArchitectureImports(mod, deps.architecture);
     mod.addImport("weft_core", deps.core);
+    if (mod != deps.app) mod.addImport("weft_app", deps.app);
     mod.addImport("weft_gfx", deps.gfx);
     mod.addImport("weft_vk", deps.vk);
     mod.addImport("weft_platform", deps.platform);
