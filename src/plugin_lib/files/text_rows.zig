@@ -85,18 +85,55 @@ pub const Line = struct {
     }
 };
 
+/// A FILENAME IS BYTES; a text buffer is UTF-8. The scene plane could hold a
+/// raw-byte name in a field, and a document cannot — so a listing that simply
+/// wrote the name would either produce an invalid document or, worse, skip the
+/// row and HIDE a file from a file manager.
+///
+/// Invalid bytes are shown as U+FFFD. The row is still there, still keyed by
+/// its id, and still navigable; what it cannot do is be RENAMED by typing,
+/// because what the user sees is not what the name is — `renamable` says so and
+/// `applyEdits` refuses out loud rather than renaming to the replacement
+/// character.
+pub fn renamable(row: model.Row) bool {
+    return std.unicode.utf8ValidateSlice(row.draft.name);
+}
+
+fn writeName(name: []const u8, out: []u8) usize {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < name.len) {
+        const len = std.unicode.utf8ByteSequenceLength(name[i]) catch {
+            if (w + 3 > out.len) return w;
+            @memcpy(out[w..][0..3], "\u{FFFD}");
+            w += 3;
+            i += 1;
+            continue;
+        };
+        if (i + len > name.len or !std.unicode.utf8ValidateSlice(name[i..][0..len])) {
+            if (w + 3 > out.len) return w;
+            @memcpy(out[w..][0..3], "\u{FFFD}");
+            w += 3;
+            i += 1;
+            continue;
+        }
+        if (w + len > out.len) return w;
+        @memcpy(out[w..][0..len], name[i..][0..len]);
+        w += len;
+        i += len;
+    }
+    return w;
+}
+
 /// Render `row` into `out`. The shape is `<indent><glyph> <name>` — the name
 /// LAST, so everything before it is fixed-width per row and a name containing
 /// anything at all cannot be confused for structure.
 pub fn lineOf(rows: []const model.Row, row: model.Row, out: []u8) ?Line {
     const depth = @min(depthOf(rows, row) * indent_cells, indent_spaces.len);
     const glyph = glyphOf(row);
-    const text = std.fmt.bufPrint(out, "{s}{s} {s}", .{
-        indent_spaces[0..depth],
-        glyph,
-        row.draft.name,
-    }) catch return null;
-    return .{ .text = text, .name_at = depth + glyph.len + 1 };
+    const head = std.fmt.bufPrint(out, "{s}{s} ", .{ indent_spaces[0..depth], glyph }) catch return null;
+    const w = head.len + writeName(row.draft.name, out[head.len..]);
+    return .{ .text = out[0..w], .name_at = head.len };
 }
 
 /// A row's key: its model id, which is the identity the draft already uses.
@@ -202,4 +239,31 @@ test "files rows: a role says what a row is, and dirt outranks kind" {
     // person needs from the listing.
     r.name_dirty = true;
     try t.expectEqualStrings(role_dirty, roleOf(r));
+}
+
+test "files rows: a raw-byte filename is SHOWN, not hidden, and not renamable" {
+    // A filename is bytes; a document is UTF-8. The scene plane could hold a
+    // raw name in a field and a buffer cannot, so this is the one place the
+    // text projection genuinely gives something up — and what it must NOT do
+    // is drop the row, because a file manager that hides a file is worse than
+    // one that cannot rename it.
+    var raw = [_]u8{ 'b', 'a', 'd', 0xff, 0xfe, '.', 't', 'x', 't' };
+    const rows = [_]model.Row{mkRow(1, null, &raw, .regular)};
+
+    var buf: [256]u8 = undefined;
+    const line = lineOf(&rows, rows[0], &buf).?;
+    // Valid UTF-8, so it can go in a document at all.
+    try t.expect(std.unicode.utf8ValidateSlice(line.text));
+    // The row is THERE, and the parts that were readable still read.
+    try t.expect(std.mem.indexOf(u8, line.text, "bad") != null);
+    try t.expect(std.mem.indexOf(u8, line.text, ".txt") != null);
+    // Two bad bytes, two replacement characters — not one, and not a run.
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, line.text, "\u{FFFD}"));
+
+    // And it says so: what is displayed is not what the name IS, so a rename
+    // typed here would rename to the replacement character.
+    try t.expect(!renamable(rows[0]));
+    var ok = "fine.txt".*;
+    const good = [_]model.Row{mkRow(1, null, &ok, .regular)};
+    try t.expect(renamable(good[0]));
 }

@@ -287,6 +287,103 @@ pub const Session = struct {
     apply_committed: bool = false,
     scene_revision: u32 = 1,
 
+    /// The instanced buffer this listing projects into (`*files*`, `*files:2*`).
+    ///
+    /// A listing is a BUFFER, and that is the whole of what makes a sidebar
+    /// trivial: a viewport presents a resource by running `open` and putting
+    /// the resulting buffer in the pane, so a listing that is a buffer docks
+    /// with no sidebar-specific code anywhere.
+    buf_name: [64]u8 = undefined,
+    buf_len: usize = 0,
+
+    pub fn bufferName(self: *const Session) []const u8 {
+        return self.buf_name[0..self.buf_len];
+    }
+
+    /// Take this listing's own instanced buffer, once — and give focus BACK.
+    /// Creating a buffer focuses it, and a listing that steals focus whenever
+    /// its model moves would yank the user out of whatever they were doing on
+    /// every background refresh.
+    fn ensureBuffer(self: *Session) void {
+        if (self.buf_len == 0) {
+            var n: u32 = 1;
+            while (n < 64) : (n += 1) {
+                var buf: [64]u8 = undefined;
+                const candidate = weft.instanceName("files", n, &buf) orelse return;
+                if (weft.bufferNamed(candidate)) continue;
+                self.buf_len = @min(candidate.len, self.buf_name.len);
+                @memcpy(self.buf_name[0..self.buf_len], candidate[0..self.buf_len]);
+                break;
+            }
+        }
+        if (self.buf_len == 0) return;
+        if (weft.bufferNamed(self.bufferName())) return;
+        var prev: [64]u8 = undefined;
+        const was = weft.activeBufferName(&prev);
+        weft.runStr("buffer-create", self.bufferName());
+        weft.toolBacking("files");
+        if (was) |name| _ = weft.focusBuffer(name);
+    }
+
+    /// The draft as a TEXT PROJECTION — the same rows the scene shows, in the
+    /// form a viewport can hold. Every row is EDITABLE: a rename is typing on
+    /// its line, and `applyEdits` reads them back BY KEY.
+    fn publishRows(self: *Session, staged: *const files.Model) void {
+        self.ensureBuffer();
+        const name = self.bufferName();
+        if (name.len == 0) return;
+        const b = weft.project(name) orelse return;
+        for (staged.rows.items) |row| {
+            var key_buf: [24]u8 = undefined;
+            var text_buf: [1024]u8 = undefined;
+            const line = files.text_rows.lineOf(staged.rows.items, row, &text_buf) orelse continue;
+            const node = b.add(.{
+                .key = files.text_rows.keyOf(row.id, &key_buf),
+                .role = files.text_rows.roleOf(row),
+                .text = line.text,
+                .foldable = row.draft.kind == .directory,
+                .focusable = true,
+                .editable = true,
+            }) orelse continue;
+            b.span(node, line.name_at, line.nameEnd(), files.text_rows.role_name);
+        }
+        _ = b.commit();
+    }
+
+    /// What the user typed IS the rename. Each row comes back under the KEY it
+    /// was published with, so what it says NOW is compared against the draft's
+    /// own name for that row — nothing positional, so an edit that shifted
+    /// every line below it changes nothing about which row is which.
+    ///
+    /// The rename lands as a typed FS PLAN like any other draft change, so a
+    /// rename typed here and one made through an action are the same operation
+    /// reaching the filesystem by the same route.
+    pub fn applyEdits(self: *Session) !bool {
+        var rows: [512]weft.ProjectionRow = undefined;
+        const live = weft.projectionRows(&rows);
+        var changed = false;
+        for (live) |r| {
+            const id = files.text_rows.idOf(r.key) orelse continue;
+            const now = files.text_rows.nameIn(r.text);
+            if (now.len == 0) continue; // a blanked row is not a rename
+            const found = for (self.draft.rows.items) |row| {
+                if (row.id == id) break row;
+            } else continue;
+            if (std.mem.eql(u8, now, found.draft.name)) continue;
+            // Its DISPLAYED name is not its real one (raw bytes shown as
+            // U+FFFD), so what was typed cannot be turned back into a name.
+            // Refused out loud rather than renamed to the replacement.
+            if (!files.text_rows.renamable(found)) {
+                weft.echo("files: this name is not text — rename it another way");
+                continue;
+            }
+            try self.draft.rename(id, now);
+            changed = true;
+        }
+        if (!changed) return false;
+        return self.applyConfirmed();
+    }
+
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
             .plugin = plugin,
@@ -316,6 +413,7 @@ pub const Session = struct {
         self.controller = .init(self.plugin.gpa, &self.draft, self.view_ref);
         self.loaded = true;
         self.retireRowTargets();
+        self.publishRows(&self.draft);
     }
 
     fn deinit(self: *Session) void {
@@ -639,6 +737,7 @@ pub const Session = struct {
         errdefer self.rollbackFields(old_fields_len);
         var scene = try self.project(staged);
         defer scene.deinit();
+        self.publishRows(staged);
 
         var updated_fields: std.ArrayList(usize) = .empty;
         defer updated_fields.deinit(self.plugin.gpa);
