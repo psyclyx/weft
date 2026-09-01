@@ -392,7 +392,7 @@ pub const imports = [_]Entry{
 
     // ── projection.zig — a node tree rendered into a text buffer ──────
     .{ .name = "wl_proj_begin", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "open a projection build over the named buffer; the entry is captured now so nothing can redirect where it lands" },
-    .{ .name = "wl_proj_node", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "append (key, role, text, parent ordinal or -1, flags) to the open build; returns its ordinal" },
+    .{ .name = "wl_proj_node", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32, .u32, .i32, .i32 }, .results = &.{.i32}, .group = .edit, .doc = "append (key, role, text, parent ordinal or -1, flags, editable span start/end) to the open build; returns its ordinal" },
     .{ .name = "wl_proj_span", .params = &.{ .i32, .i32, .i32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "style [start,end) of node `node`'s OWN text with `role` (offsets are into the text the plugin passed, never the document)" },
     .{ .name = "wl_proj_rows", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "what every EDITABLE row says now, as `key\\0text\\0` pairs; found by anchors the document shifted, so neither side names a position" },
     .{ .name = "wl_proj_select", .params = &.{ .i32, .i32, .i32 }, .results = &.{}, .group = .edit, .doc = "select [start,end) of node `node`'s OWN text (node-relative, never the document)" },

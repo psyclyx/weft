@@ -88,7 +88,7 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .parent = parent,
         .foldable = (args[7] & 1) != 0,
         .focusable = (args[7] & 2) != 0,
-        .editable = (args[7] & 4) != 0,
+        .editable = if ((args[7] & 4) != 0) .{ .start = @intCast(@max(args[8], 0)), .end = @intCast(@max(args[9], 0)) } else null,
     }) catch return;
     results[0] = @intCast(ordinal);
 }
@@ -282,10 +282,17 @@ fn anchorEditableRows(view: *projection.View, doc: anytype) void {
         if (n.anchor_end) |h| doc.removeAnchor(@enumFromInt(h));
         n.anchor_start = null;
         n.anchor_end = null;
-        if (!n.editable or n.text.len == 0) continue;
-        const line_end = @min(n.start + n.text.len, doc.text().byteLen());
-        const a = doc.addAnchor(view.gpa, n.start, .left) catch continue;
-        const b = doc.addAnchor(view.gpa, line_end, .right) catch {
+        const edit = n.editable orelse continue;
+        if (n.text.len == 0) continue;
+        // The anchors bracket the EDITABLE SPAN, not the whole row: text typed
+        // outside it is not part of the field, so a keystroke on the indent or
+        // the glyph cannot rename anything.
+        const total = doc.text().byteLen();
+        const lo = @min(n.start + edit.start, total);
+        const hi = @min(n.start + edit.end, total);
+        if (lo >= hi) continue;
+        const a = doc.addAnchor(view.gpa, lo, .left) catch continue;
+        const b = doc.addAnchor(view.gpa, hi, .right) catch {
             doc.removeAnchor(a);
             continue;
         };

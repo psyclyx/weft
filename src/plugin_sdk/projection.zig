@@ -53,11 +53,14 @@ pub const Node = struct {
     /// Whether the cursor may REST here. Structure rows (a title, a header)
     /// leave this false so a fresh render lands on something a verb can act on.
     focusable: bool = false,
-    /// Whether the user may TYPE into this row. `projectionRows` then says what
-    /// each such row has become — doc/plugin-api.md §F2's fork closed from the
-    /// text side: a row that is text AND has an identity, so a rebase plan or an
-    /// in-place rename does not have to leave the text plane to be editable.
-    editable: bool = false,
+    /// WHICH PART of this row the user may type into, or null for none.
+    ///
+    /// A span, not a flag: a row is not all name. `  ▸ src` is an indent, a
+    /// glyph and a name, and only the last is the user.s to change — whole-row
+    /// editing let a keystroke at the row start turn the glyph into text and
+    /// rename the entry to something nobody typed. `projectionRows` reports
+    /// this span, and nothing else.
+    editable: ?struct { start: usize, end: usize } = null,
 };
 
 /// A build in progress. Open one with `begin`, `add` rows, then `commit`.
@@ -68,7 +71,7 @@ pub const Builder = struct {
         _ = self;
         const flags: u32 = (if (node.foldable) @as(u32, 1) else 0) |
             (if (node.focusable) @as(u32, 2) else 0) |
-            (if (node.editable) @as(u32, 4) else 0);
+            (if (node.editable != null) @as(u32, 4) else 0);
         const parent: i32 = if (node.parent) |ord| @intCast(ord) else -1;
         const ordinal = e.wl_proj_node(
             p(node.key.ptr),
@@ -79,6 +82,8 @@ pub const Builder = struct {
             @intCast(node.text.len),
             parent,
             flags,
+            if (node.editable) |e2| @intCast(e2.start) else 0,
+            if (node.editable) |e2| @intCast(e2.end) else 0,
         );
         return if (ordinal < 0) null else @intCast(ordinal);
     }

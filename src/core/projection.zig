@@ -53,6 +53,10 @@ pub const Span = struct {
     role: []u8,
 };
 
+/// The stretch of a row the user may type into. No role: it is not a styling
+/// decision, it is which bytes are a FIELD.
+pub const Edit = struct { start: u32, end: u32 };
+
 /// What a node contributes to the projection.
 pub const Node = struct {
     /// The plugin's own identity for this row. Owned. Stable across rebuilds
@@ -77,16 +81,20 @@ pub const Node = struct {
     /// subjects; only the second kind is somewhere a verb can act, so only the
     /// second kind is where a fresh render should land.
     focusable: bool = false,
-    /// Whether the user may TYPE into this row, and the producer wants to know
-    /// what it says afterwards.
+    /// WHICH PART of this row the user may type into, or null for none.
     ///
-    /// This is doc/plugin-api.md §F2's fork, closed from the text side. The two
+    /// A span, not a flag, because a row is not all name: `  ▸ src` is an
+    /// indent, a glyph and a name, and only the last is the user.s to change.
+    /// Whole-row editing let a keystroke at the row start turn the glyph into
+    /// text and silently rename the entry to something nobody typed.
+    ///
+    /// This is doc/plugin-api.md §F2.s fork closed from the text side. The two
     /// planes divided as "text, or identity-and-fields": a producer wanting a
     /// row the user edits in place — a rebase plan, a rename in a directory
     /// listing — had to leave the text plane and give up search, yank and
-    /// selection to get it. A row is text AND has an identity here, so editing
-    /// one is an ordinary edit, and `editedRows` says what each one now says.
-    editable: bool = false,
+    /// selection to get it. A row is text AND has an identity here, and the
+    /// part of it that is a FIELD is this span.
+    editable: ?Edit = null,
     /// Styled stretches inside this node's own text. Owned.
     spans: std.ArrayList(Span) = .empty,
 
@@ -174,7 +182,7 @@ pub const View = struct {
         parent: ?u32,
         foldable: bool,
         focusable: bool = false,
-        editable: bool = false,
+        editable: ?Edit = null,
     }) !u32 {
         if (!self.open) return error.NoBuild;
         // A parent must already exist, so the tree cannot describe a cycle or

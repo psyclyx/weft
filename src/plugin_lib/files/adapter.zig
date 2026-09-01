@@ -523,7 +523,9 @@ pub const Session = struct {
                 .text = line.text,
                 .foldable = row.draft.kind == .directory,
                 .focusable = true,
-                .editable = true,
+                // Only the NAME is the user.s to change: the indent and the
+                // glyph are structure, and a keystroke on them is not a rename.
+                .editable = .{ .start = line.name_at, .end = line.nameEnd() },
             }) orelse continue;
             b.span(node, line.name_at, line.nameEnd(), files.text_rows.role_name);
         }

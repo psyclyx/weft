@@ -129,6 +129,24 @@ pub const Buffer = struct {
     /// through different code. That duplication predates this and is not fixed
     /// here; what is avoided is making it a THIRD place that has to agree
     /// about what a role is.
+    /// Is point inside a row.s EDITABLE span?
+    ///
+    /// A listing is `structural` — rows you navigate — and the NAME in the row
+    /// under point is a FIELD. That is not a contradiction: the posture is a
+    /// question about where point is, and a projection answers it per row.
+    /// Without this, a grammar refuses insert over a listing ("this entry takes
+    /// no text") and a rename can never be typed.
+    pub fn fieldAtPoint(self: *Buffer) bool {
+        const view = self.projection orelse return false;
+        const ed = self.textEditor() orelse return false;
+        const at = ed.cursorOffset();
+        for (view.nodes.items) |n| {
+            const edit = n.editable orelse continue;
+            if (at >= n.start + edit.start and at <= n.start + edit.end) return true;
+        }
+        return false;
+    }
+
     pub fn focusedRole(self: *Buffer) []const u8 {
         const view = self.projection orelse return "";
         const ed = self.textEditor() orelse return "";

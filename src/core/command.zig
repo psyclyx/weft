@@ -263,7 +263,10 @@ pub const Context = struct {
     /// pair is read, so a grammar (`weft.posture()`), a builtin, and the
     /// resting-mode restore all see the same answer.
     pub fn posture(self: *Context) @import("weft_input").Posture {
-        return self.buffer().posture(self.head.semantic_focus.field != null);
+        const b = self.buffer();
+        // A focused semantic FIELD, or point inside a projection row.s editable
+        // span — the same question asked of either plane.
+        return b.posture(self.head.semantic_focus.field != null or b.fieldAtPoint());
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the

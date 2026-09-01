@@ -119,9 +119,11 @@ const plan_view = "*plan*";
 fn plan() void {
     weft.focusOrCreateBuffer(plan_view);
     const b = weft.project(plan_view) orelse return;
-    _ = b.add(.{ .key = "a", .role = "plan.step", .text = "pick aaa first", .focusable = true, .editable = true });
-    _ = b.add(.{ .key = "b", .role = "plan.step", .text = "pick bbb second", .focusable = true, .editable = true });
-    _ = b.add(.{ .key = "c", .role = "plan.step", .text = "pick ccc third", .focusable = true, .editable = true });
+    // The WHOLE row is the field here: a plan step is its own text, with no
+    // structure in front of it to protect.
+    _ = b.add(.{ .key = "a", .role = "plan.step", .text = "pick aaa first", .focusable = true, .editable = .{ .start = 0, .end = "pick aaa first".len } });
+    _ = b.add(.{ .key = "b", .role = "plan.step", .text = "pick bbb second", .focusable = true, .editable = .{ .start = 0, .end = "pick bbb second".len } });
+    _ = b.add(.{ .key = "c", .role = "plan.step", .text = "pick ccc third", .focusable = true, .editable = .{ .start = 0, .end = "pick ccc third".len } });
     // NOT editable: a comment is structure, and must not come back as a row.
     _ = b.add(.{ .key = "note", .role = "plan.note", .text = "# reorder me" });
     _ = b.commit();

@@ -3415,16 +3415,16 @@ test "projection: an edited row is found by its ANCHORS, not by where it was ren
     var v: projection.View = .init(t.allocator);
     defer v.deinit();
     v.begin();
-    const a = try v.add(.{ .key = "c1", .role = "git.commit", .text = "pick aaa one", .parent = null, .foldable = false, .editable = true });
-    const b = try v.add(.{ .key = "c2", .role = "git.commit", .text = "pick bbb two", .parent = null, .foldable = false, .editable = true });
+    const a = try v.add(.{ .key = "c1", .role = "git.commit", .text = "pick aaa one", .parent = null, .foldable = false, .editable = .{ .start = 0, .end = 12 } });
+    const b = try v.add(.{ .key = "c2", .role = "git.commit", .text = "pick bbb two", .parent = null, .foldable = false, .editable = .{ .start = 0, .end = 12 } });
     _ = try v.add(.{ .key = "hdr", .role = "git.header", .text = "# a comment", .parent = null, .foldable = false });
     _ = try v.commit();
 
     // Editable is not focusable and not foldable: three independent axes, and a
     // row that is one is not thereby the others.
-    try t.expect(v.nodes.items[a].editable);
-    try t.expect(v.nodes.items[b].editable);
-    try t.expect(!v.nodes.items[2].editable);
+    try t.expect(v.nodes.items[a].editable != null);
+    try t.expect(v.nodes.items[b].editable != null);
+    try t.expect(v.nodes.items[2].editable == null);
     try t.expect(!v.nodes.items[a].focusable);
 
     // Rendered positions are what the anchors are PLACED at, once. After this

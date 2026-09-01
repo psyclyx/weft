@@ -244,41 +244,43 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
-test "files: semantic field editing keeps the view focused and returns to normal" {
+test "files: editing a listing row is ordinary text editing, and leaves you where you were" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
 
-    // Open the current directory through the ordinary provider-aware `open`
-    // command. The sandboxed files plugin claims it through the generic
-    // target-handler ABI; there is no files buffer or files mode involved.
+    // Open the current directory through the ordinary provider-aware `open`.
+    // The files plugin claims it through the generic target-handler ABI and
+    // publishes its listing as a TEXT PROJECTION — no files buffer of core's
+    // making, and no files mode.
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    const view = ed.session.system.semantic.views.get(view_ref).?;
-    try t.expectEqualStrings("files", view.scene.role);
-    const leaf = ed.head.semantic_focus.path().?.leaf().?;
-    const field_ref = view.node(leaf).?.content.field.ref;
-    var before = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-    defer before.deinit();
-    try t.expectEqualStrings("note.txt", before.value.bytes);
+    const listing = ed.buffers.active_id;
+    try t.expect(ed.buffers.get(listing).?.projection != null);
+    try focusFilesRow(ed, gpa, "note.txt");
 
-    // Enter the ordinary Vim insert posture on the focused semantic field,
-    // type through the generic field provider, then leave it. The plugin owns
-    // the draft; Vim owns only the editing posture.
+    // Enter the ordinary Vim insert posture ON THE ROW and type. Renaming is
+    // editing text now — which is the half the scene plane could not give,
+    // and why the plugin needs no field editor of its own.
     ed.press("i", "");
     ed.typeText("x");
     ed.press("Escape", "");
     try t.expectEqualStrings("normal", ed.mode());
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
-    var after = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-    defer after.deinit();
-    try t.expectEqualStrings("xnote.txt", after.value.bytes);
+    try t.expectEqual(listing, ed.buffers.active_id);
+    {
+        // What the user SEES — the document — not the last published tree.
+        // A projection is republished from the model; the typing that has not
+        // been applied yet lives in the buffer, which is the whole point of an
+        // editable row.
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "xnote.txt") != null);
+    }
 }
 
-test "files: Vim Return and minus follow generic target relations" {
+test "files: Return and minus follow the listing's own hierarchy" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -287,28 +289,17 @@ test "files: Vim Return and minus follow generic target relations" {
 
     try core.file.writeBytesMakingDirs(gpa, "child", "child/note.txt", "hello\n");
     ed.runStr("open", ".");
-    const parent_view = ed.head.semantic_focus.path().?.view;
-    const parent = ed.session.system.semantic.views.get(parent_view).?;
-    var child_name: ?semantic.scene.NodeId = null;
-    for (parent.scene.content.container.children) |row| {
-        const node = row.content.container.children[2];
-        var snapshot = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, "child")) child_name = node.id;
-    }
-    _ = try ed.session.system.semantic.focusView(ed.head, gpa, parent_view, child_name orelse return error.TestExpectedEqual);
+    try focusFilesRow(ed, gpa, "child");
 
-    // Vim supplies only its ordinary Return interaction. Core follows the
-    // focused typed link and the directory plugin happens to claim the target.
+    // Vim supplies only its ordinary Return interaction (`std.target.activate`).
+    // The listing claims that intention against what the ROW IS, so neither
+    // names the other — and descending is the same `open` a picker runs.
     ed.press("Return", "");
-    const child_view = ed.head.semantic_focus.path().?.view;
-    try t.expect(!child_view.eql(parent_view));
-    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(child_view).?.scene.role);
+    try t.expect((try filesRowNamed(ed, gpa, "note.txt")) != null);
 
-    // `-` likewise follows the open `container` relation. The child target's
-    // publisher supplies that edge; Vim and files do not import one another.
+    // `minus` is `std.hierarchy.step-out`, claimed the same way.
     ed.press("minus", "");
-    try t.expectEqual(parent_view, ed.head.semantic_focus.path().?.view);
+    try t.expect((try filesRowNamed(ed, gpa, "child")) != null);
     try t.expectEqualStrings("normal", ed.mode());
 }
 
@@ -322,21 +313,17 @@ test "files: configured working-target action changes locus without opening a vi
     try core.file.writeBytesMakingDirs(gpa, "workspace/child", "workspace/child/.seed", "");
     core.file.deleteFile(gpa, "workspace/child/.seed");
     ed.runStr("open", "workspace");
-    const parent_view_ref = ed.head.semantic_focus.path().?.view;
-    const parent_view = ed.session.system.semantic.views.get(parent_view_ref).?;
-    try t.expectEqual(@as(usize, 1), parent_view.scene.content.container.children.len);
-    const child = parent_view.scene.content.container.children[0];
-    const child_target = child.target orelse return error.TestExpectedEqual;
+    const listing = ed.buffers.active_id;
+    try focusFilesRow(ed, gpa, "child");
     try t.expect(ed.head.working_target == null);
 
-    // Config knows only the open semantic action name. The files provider
-    // returns an exact target request, core validates it, and the dispatching
-    // head records it without opening/focusing another tool view.
+    // Config knows only the open semantic action name. It reaches the listing
+    // through the ACTION PLANE now (the listing `provide`s the same name), the
+    // provider returns an exact target request, and the dispatching head
+    // records it without opening another view or leaving this entry.
     ed.chord("SPC v c");
-    try t.expectEqual(parent_view_ref, ed.head.semantic_focus.path().?.view);
-    const working = (try ed.session.system.semantic.workingTarget(ed.head)).?;
-    try t.expectEqual(child_target.target, working.target);
-    try t.expectEqual(child_target.revision, working.revision);
+    try t.expectEqual(listing, ed.buffers.active_id);
+    try t.expect((try ed.session.system.semantic.workingTarget(ed.head)) != null);
     try t.expectEqualStrings("normal", ed.mode());
 }
 
@@ -2304,11 +2291,13 @@ fn filesName(row_text: []const u8) []const u8 {
     return std.mem.trimEnd(u8, row_text[i..], " \t\r");
 }
 
-/// Put POINT on the row named `want` — an ordinary cursor placement, because
-/// the row is ordinary text.
+/// Put POINT on the NAME of the row named `want` — an ordinary cursor
+/// placement, because the row is ordinary text, and on the name because that is
+/// the part of it a person edits (the row.s EDITABLE span).
 fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
     const node = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
-    ed.buffers.active().textEditor().?.placeCursor(node.start);
+    const at = if (node.editable) |e2| node.start + e2.start else node.start;
+    ed.buffers.active().textEditor().?.placeCursor(at);
 }
 
 test "authoring/files: Vim Tab folds a directory open in place and back shut" {
