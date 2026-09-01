@@ -449,7 +449,7 @@ const preserve_register = blk: {
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept }).exportAll();
 }
 
 /// The dispatch epilogue: a stray count or a named slot must not leak into an
@@ -460,7 +460,7 @@ fn settle(index: usize) void {
     if (!preserve_count[index]) pending_count = 0;
     if (!preserve_register[index]) selected_register = 0;
 }
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     if (pick_id != file_pick) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);

@@ -33,7 +33,14 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     defer gpa.free(prompt);
     p.pick_prompt.clearRetainingCapacity();
     p.pick_prompt.appendSlice(gpa, prompt) catch {};
-    p.pick_id = @intCast(args[2]);
+    // BITCAST, not `@intCast`. A pick id is an OPAQUE tag the guest chooses and
+    // the host only ever echoes back to it, so every one of the 2^32 words it
+    // can send is a legitimate id — including the ones whose top bit is set,
+    // which arrive here as a negative `i32`. `@intCast` panicked on those, so
+    // any guest that used the high half of its own id space — deliberately or
+    // by accident — took the HOST down. Same sign-bit class as the handle
+    // tables (`core/handles.zig`), at a door that carries no permission at all.
+    p.pick_id = @bitCast(args[2]);
     p.pick_free_text = false; // each pick opts in for itself
     p.pick_category.clearRetainingCapacity(); // …and so does annotation
 }
@@ -334,7 +341,11 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;
     }
-    try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @intCast(bp.pick_id))});
+    // BITCAST on the way back out too — the mirror of `hPickBegin`'s. The id is
+    // the guest's own word and must return to it unchanged; `@intCast` panicked
+    // on exactly the ids `hPickBegin` had just been taught to accept, so the
+    // crash simply moved from the ask to the answer.
+    try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @bitCast(bp.pick_id))});
 }
 
 fn wpPickCleanup(data: ?*anyopaque, gpa: Allocator) void {

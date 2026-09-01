@@ -156,6 +156,17 @@ pub const ExecStream = @import("exec.zig").Stream;
 pub const exec = @import("exec.zig").exec;
 pub const execWith = @import("exec.zig").execWith;
 
+// ── ask: a question with a continuation, not a pick id to demux ───────
+// See `ask.zig`. `weft.plugin` exports `on_pick_accept`, routing the SDK's
+// own ids here and everything else to the manifest's `pick` hook.
+pub const AskSpec = @import("ask.zig").Spec;
+pub const AskCandidate = @import("ask.zig").Candidate;
+pub const Answer = @import("ask.zig").Answer;
+pub const ask = @import("ask.zig").ask;
+pub const askWith = @import("ask.zig").askWith;
+pub const confirm = @import("ask.zig").confirm;
+pub const confirmWith = @import("ask.zig").confirmWith;
+
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
     return e.wl_cursor();

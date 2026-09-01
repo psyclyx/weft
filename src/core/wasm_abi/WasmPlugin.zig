@@ -127,6 +127,19 @@ pub const PendingItem = struct {
     buffer: ?Buffers.Ref = null,
 };
 
+/// Cancel a pick this plugin has open, so nothing outlives it holding a
+/// pointer to it. Reached only from `deinit`; a pick bound to a DIFFERENT
+/// plugin is left alone, because unloading one plugin must not answer
+/// another's question.
+fn cancelOwnPick(self: *WasmPlugin) void {
+    const open_pick = &self.ctx.head.pick;
+    if (!open_pick.active) return;
+    const acceptor = open_pick.acceptor orelse return;
+    const bound: *WasmBoundPick = @ptrCast(@alignCast(acceptor.data orelse return));
+    if (bound.plugin != self) return;
+    open_pick.cancelActive(self.ctx);
+}
+
 /// An open pick's binding: which plugin + which of its picks (the guest's
 /// `pick_id`, dispatched to `on_pick_accept`), plus the accept keys taken in
 /// one bulk transfer at open. Freed by the pick's cleanup.
@@ -740,6 +753,16 @@ pub fn principal(self: *WasmPlugin) command.Principal {
 
 pub fn deinit(self: *WasmPlugin) void {
     const gpa = self.gpa;
+    // An OPEN PICK holds a `WasmBoundPick` whose `.plugin` is this pointer, and
+    // the head cancels its pick when IT is torn down — which, for a plugin
+    // unloaded first, is after this memory is gone. The cancellation then
+    // dispatched `on_pick_accept` into a freed instance.
+    //
+    // Same rule as every revocation below it: a resource holding a pointer into
+    // this plugin is released while the plugin is still alive. Cancelling here
+    // runs the guest's own cancel path (it is still loaded, and a cancel is an
+    // ordinary answer), then the acceptor's cleanup frees the binding.
+    self.cancelOwnPick();
     // Semantic resources hold provider pointers into this plugin. Revoke the
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.

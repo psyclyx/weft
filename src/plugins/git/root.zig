@@ -1076,20 +1076,26 @@ fn stageSection(sec: Section, stage: bool) void {
 }
 
 // ── Discard (destructive — always confirmed) ────────────────────────────────
+/// What a discard was armed against: the repository, and the row as it was
+/// named at the moment the question was asked. Carried through the question, so
+/// the answer acts on THIS target and no later one.
+const Armed = struct { session: u32, target: Target };
+
 /// Arm a destructive verb: capture WHAT it targets now, ask, act later.
 fn gitDiscard() void {
     const t = nodeAtCursor();
     const n = liveNode(t, "discard") orelse return;
-    cur().pending_target = t;
+    const armed: Armed = .{ .session = cur().id, .target = t };
     switch (n.kind) {
-        .file => confirmPick(.discard, "discard changes to this file?"),
-        .hunk => confirmPick(.discard, "discard this hunk?"),
+        .file => _ = weft.confirmWith(Armed, armed, "discard changes to this file?", gitDiscardDo),
+        .hunk => _ = weft.confirmWith(Armed, armed, "discard this hunk?", gitDiscardDo),
         // `x` on a recent commit → the reset transient, scoped to that OID.
         .commit => {
+            cur().pending_target = t;
             weft.echo("reset: s soft  m mixed  h hard");
             weft.setMode("git-reset-menu");
         },
-        .section => confirmPick(.discard, "discard the whole section?"),
+        .section => _ = weft.confirmWith(Armed, armed, "discard the whole section?", gitDiscardDo),
         .none => {},
     }
 }
@@ -1097,9 +1103,10 @@ fn gitDiscard() void {
 /// question was asked, re-resolved against the live model — a target the model
 /// no longer names (a background re-gather landed under the prompt) destroys
 /// nothing.
-fn gitDiscardDo() void {
-    const t = cur().pending_target;
-    cur().pending_target = .{};
+fn gitDiscardDo(yes: bool, armed: Armed) void {
+    if (!route_to(armed.session)) return;
+    if (!yes) return weft.echo("cancelled");
+    const t = armed.target;
     const n = resolve(t) orelse {
         weft.echo("discard refused: the target moved since you asked");
         return;
@@ -1430,55 +1437,46 @@ fn gitBlame() void {
 
 // ── Confirmation is an interaction, not a mode ─────────────────────────────
 // A destructive verb asks through the pick membrane: the question is the
-// prompt, the two candidates are the answer, and the pick id says which
-// question was answered. No mode of git's own stands between the two.
+// prompt, the two candidates are the answer. No mode of git's own stands
+// between the two — and, since `weft.confirmWith`, no `u32` either.
+//
+// What the packed id used to carry — which question this was, and which
+// repository asked it — now travels WITH the question as an ordinary value. So
+// does the thing being confirmed. That closes the gap this file used to have to
+// bridge with module state: `pending_target` for a discard, and a per-session
+// `confirm_cmd` buffer for a staged mutation, both written before the question
+// and read after it, with an unrelated background re-gather able to land in
+// between. A carried value cannot be overwritten by the next question.
 
-/// Which question a pick answers.
-const Confirm = enum(u32) { discard = 1, staged = 2, close = 3 };
+/// A confirmed mutation, composed from refs and OIDs — durable, so it needs no
+/// re-resolution against a working tree that may have moved.
+const StagedCmd = struct {
+    session: u32,
+    len: usize,
+    buf: [1 << 12]u8,
+};
 
-/// Ask, safe answer first, so accepting the leading candidate changes nothing.
-/// The id carries the session as well as the question, exactly as a fill token
-/// does: repository 2's answer can only ever act on repository 2.
-fn confirmPick(which: Confirm, question: []const u8) void {
-    weft.pickBegin(question, @intFromEnum(which) | (cur().id << 8));
-    weft.pickAdd("no", "leave it alone");
-    weft.pickAdd("yes", "go ahead");
-    weft.pickEnd();
-}
-
-/// Stage a full mutation behind that confirmation.
+/// Ask before running `cmd`. Safe answer first (`confirmSpec`), so accepting
+/// the leading candidate changes nothing.
 fn confirmThen(cmd: []const u8, question: []const u8) void {
-    cur().confirm_len = @min(cmd.len, cur().confirm_cmd.len);
-    @memcpy(cur().confirm_cmd[0..cur().confirm_len], cmd[0..cur().confirm_len]);
-    confirmPick(.staged, question);
+    var staged: StagedCmd = .{ .session = cur().id, .len = @min(cmd.len, 1 << 12), .buf = undefined };
+    @memcpy(staged.buf[0..staged.len], cmd[0..staged.len]);
+    _ = weft.confirmWith(StagedCmd, staged, question, runStaged);
 }
 
-export fn on_pick_accept(pick_id: u32) void {
-    // An id we never issued answers nothing.
-    const s = sessionById(pick_id >> 8) orelse return;
-    const question = std.enums.fromInt(Confirm, pick_id & 0xff) orelse return;
+fn runStaged(yes: bool, staged: StagedCmd) void {
+    if (!route_to(staged.session)) return;
+    if (!yes) return weft.echo("cancelled");
+    gatherAfterSeq(staged.buf[0..staged.len]);
+}
+
+/// Route a carried answer back to the repository that asked. A session that
+/// closed while the question was open answers nothing — the check the packed
+/// id's `sessionById` used to make, at the same seam.
+fn route_to(session: u32) bool {
+    const s = sessionById(session) orelse return false;
     model.routed = s;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const answer = switch (outcome) {
-        .candidate => |c| c.text,
-        .input => |typed| typed,
-        .cancelled => "",
-    };
-    if (!std.mem.eql(u8, answer, "yes")) {
-        weft.echo("cancelled");
-        return;
-    }
-    switch (question) {
-        // A discard acts on the target it captured, resolved against the live
-        // model — `resolve` is the whole rule (a file re-resolves, a hunk is
-        // snapshot-scoped), so nothing coarser belongs here.
-        .discard => gitDiscardDo(),
-        // The staged command is composed from refs and OIDs — durable.
-        .staged => gatherAfterSeq(cur().confirm_cmd[0..cur().confirm_len]),
-        // The entry the question was asked in is still the active one.
-        .close => weft.run("buffer-close"),
-    }
+    return true;
 }
 
 /// `close` in a draft or a rebase plan: its text is written work with no file
@@ -1489,7 +1487,12 @@ fn gitDraftClose() void {
         weft.run("buffer-close");
         return;
     }
-    confirmPick(.close, "discard this draft?");
+    _ = weft.confirm("discard this draft?", closeIfConfirmed);
+}
+
+/// The entry the question was asked in is still the active one.
+fn closeIfConfirmed(yes: bool) void {
+    if (yes) weft.run("buffer-close") else weft.echo("cancelled");
 }
 
 // ── Show / cherry-pick / revert / reset on the commit under point ───────────

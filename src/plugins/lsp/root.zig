@@ -234,7 +234,7 @@ export fn on_activate() void {
 /// A pick entry was chosen — a location jump. The picker is a PICKER again:
 /// its one job here is choosing among references and symbols, which are
 /// candidates. Typing a new name is `rename_prompt`'s.
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     if (pick_id != pick_id_results) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
@@ -916,5 +916,5 @@ fn asInt(v: rpc.Value) ?i64 {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .pick = onPickAccept }).exportAll();
 }

@@ -20,7 +20,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "buf-scratch", .call = bufScratch },
 };
 
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     if (pick_id != buf_pick) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
@@ -79,5 +79,5 @@ fn bufScratch() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
 }

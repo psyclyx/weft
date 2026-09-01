@@ -110,7 +110,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "yank", .call = yank },
 };
 
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     if (pick_id != file_pick) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
@@ -189,5 +189,5 @@ fn initExtra() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
 }

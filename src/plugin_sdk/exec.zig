@@ -168,7 +168,7 @@ pub fn execWith(
     };
     const held = weft.allocator.create(Ctx) catch return false;
     held.* = ctx;
-    if (!submit(spec, .{ .thunk = Shim.call, .ctx = held, .release = Shim.release })) {
+    if (!submit(spec, .{ .thunk = Shim.call, .ctx = @ptrCast(held), .release = Shim.release })) {
         weft.allocator.destroy(held);
         return false;
     }

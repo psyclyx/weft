@@ -197,11 +197,12 @@ pub const RepoSession = struct {
     /// What a DEFERRED verb acts on — the destructive confirmations and the
     /// reset transient, which fire after the question. Captured when the verb
     /// is armed, re-resolved when it fires.
+    /// The commit `x` armed the reset transient with. Not a confirmation stash:
+    /// a menu is a mode, and the leaf that reads this runs while it is still
+    /// open. What a CONFIRMED verb acts on travels with its question instead.
     pending_target: Target = .{},
     /// A full mutation staged behind a confirmation (branch delete, stash
     /// drop, reset --hard) — run verbatim once the answer comes back `yes`.
-    confirm_cmd: [1 << 12]u8 = undefined,
-    confirm_len: usize = 0,
     /// WHICH question the open prompt is asking. The typed TEXT is the
     /// prompt library's, not ours — a session used to carry a copy of it
     /// (`input_name`) because the answer had to survive a round trip through

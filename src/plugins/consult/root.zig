@@ -61,7 +61,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "consult-imenu", .call = consultImenu },
 };
 
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     if (pick_id != line_pick and pick_id != sym_pick) return;
     defer releaseTargets();
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
@@ -186,5 +186,5 @@ fn consultImenu() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
 }

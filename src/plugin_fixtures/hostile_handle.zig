@@ -42,6 +42,12 @@ export fn on_command(id: u32) void {
         weft.procSend(h, "x");
         _ = weft.procRead(h, &scratch);
         weft.procClose(h);
+        // A PICK ID is not a handle — it is an opaque tag the host only echoes
+        // back — so every word is legitimate, including the ones whose top bit
+        // is set. `hPickBegin` used to `@intCast` those and take the host down
+        // from a door that carries no permission at all.
+        weft.pickBegin("hostile", h);
+        weft.pickEnd();
     }
     // Reached only if every call above was refused rather than fatal.
     weft.echo("survived");

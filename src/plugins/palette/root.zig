@@ -167,7 +167,7 @@ fn status() void {
     }
 }
 
-export fn on_pick_accept(pick_id: u32) void {
+fn onPickAccept(pick_id: u32) void {
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
     if (pick_id == pick_commands) {
@@ -197,7 +197,7 @@ export fn on_pick_accept(pick_id: u32) void {
     }
 }
 
-const manifest = weft.plugin(&cmds, .{ .init = initExtra });
+const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept });
 comptime {
     manifest.exportAll();
 }

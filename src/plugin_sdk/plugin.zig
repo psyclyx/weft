@@ -62,6 +62,10 @@ pub const Hooks = struct {
     /// other end of the same funnel (vim clears its pending count and selected
     /// register after every verb that does not preserve them).
     after: ?*const fn (index: usize) void = null,
+    /// A pick this plugin opened through the RAW doors, with an id of its own
+    /// choosing. `weft.ask`'s continuations are routed first and never reach
+    /// here; ids with the top bit set are the SDK's.
+    pick: ?*const fn (pick_id: u32) void = null,
 };
 
 /// Generate the three exports for `cmds`. Call `exportAll` from a `comptime`
@@ -137,11 +141,20 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             @import("exec.zig").deliver(token);
         }
 
+        /// A pick was accepted (or cancelled). `weft.ask`'s own questions are
+        /// answered here; anything else is this plugin's raw pick and goes to
+        /// the `pick` hook.
+        fn onPickAccept(pick_id: u32) callconv(.c) void {
+            if (@import("ask.zig").deliver(pick_id)) return;
+            if (hooks.pick) |f| f(pick_id);
+        }
+
         pub fn exportAll() void {
             @export(&describeFn, .{ .name = "describe" });
             @export(&initFn, .{ .name = "init" });
             @export(&onCommand, .{ .name = "on_command" });
             @export(&onExec, .{ .name = "on_exec" });
+            @export(&onPickAccept, .{ .name = "on_pick_accept" });
         }
 
         /// The host id for a command this plugin declared, by name — for the
