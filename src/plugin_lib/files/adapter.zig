@@ -226,12 +226,22 @@ pub fn provideRowVerbs() void {
     // `bindActionGroup`. Two spellings of one verb is the vocabulary.s doing,
     // not this plugin.s — it claims both so a grammar reaches the listing
     // whichever way it asks.
+    // Folding is offered on a DIRECTORY row and nowhere else. Offered for the
+    // whole tool it would be "available" on a file row and then fail, which
+    // turns "nothing offers this here" into an error message — absence is
+    // nonapplicable (§9.3), and a row that cannot be opened simply does not
+    // offer opening.
+    weft.provide(
+        "std.hierarchy.toggle-expanded",
+        .{ .role = files.text_rows.role_directory },
+        actionCommandName(semantic.action.standard.toggle_expanded),
+        0,
+    );
     inline for (.{
-        .{ "std.hierarchy.toggle-expanded", semantic.action.standard.toggle_expanded },
         .{ "std.transfer.yank", semantic.action.standard.copy },
         .{ "std.transfer.delete-to-register", semantic.action.standard.cut },
         .{ "std.transfer.paste", semantic.action.standard.paste_after },
-    }) |pair| weft.provide(pair[0], in_files, actionCommandName(pair[1]), 0);
+    }) |pair| weft.provide(pair[0], on_row, actionCommandName(pair[1]), 0);
     // Saving a listing is applying what was typed into it — the same
     // `std.persistence.save` a text buffer resolves, scoped to this tool.
     weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
@@ -240,7 +250,15 @@ pub fn provideRowVerbs() void {
     // which plane answers is core.s question, not the user.s — see
     // `builtins.invokeSemanticAction`.
     const in_listing: weft.Predicate = .{ .tool = "files" };
-    inline for (action_verbs) |verb| weft.provide(verb, in_listing, actionCommandName(verb), 0);
+    inline for (action_verbs) |verb| {
+        // The row-scoped verbs only where a row can answer them; the rest are
+        // about the LISTING and apply wherever it is focused.
+        const when: weft.Predicate = if (std.mem.eql(u8, verb, semantic.action.standard.toggle_expanded))
+            .{ .role = files.text_rows.role_directory }
+        else
+            in_listing;
+        weft.provide(verb, when, actionCommandName(verb), 0);
+    }
 }
 
 /// One command per standard verb, each running it against the row under point.
@@ -293,9 +311,7 @@ pub fn actOnListing(self: *Plugin, name: []const u8) void {
         // own root node stands for "this listing", the same node the scene
         // handed such an action.
         .subject = subjectRow(session) orelse files.rootNodeId(),
-    }) catch {
-        weft.echo("files: that does not apply here");
-    };
+    }) catch {};
 }
 
 /// The session whose listing is focused, if any.

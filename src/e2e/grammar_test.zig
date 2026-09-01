@@ -430,7 +430,9 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.navigation.down"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.navigation.down", r.intention);
-            try t.expectEqualStrings("core.view", r.provider);
+            // Moving in a tool entry is core.s answer now, from the ACTION
+            // plane, where the scene used to offer it from a focused node.
+            try t.expectEqualStrings("core", r.provider);
         },
         else => return error.TestExpectedReady,
     }
@@ -442,7 +444,9 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.hierarchy.toggle-expanded", r.intention);
-            try t.expectEqualStrings("core.view", r.provider);
+            // The LISTING offers folding, attributed to the plugin that binds
+            // it — a derived offer names its author (`catalog.Offer.attribution`).
+            try t.expectEqualStrings("plugin.files", r.provider);
         },
         else => return error.TestExpectedReady,
     }
