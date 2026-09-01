@@ -58,7 +58,7 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
-    const view = p.projection orelse return;
+    const view = openBuild(p) orelse return;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
     const role = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
@@ -72,6 +72,7 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .text = text,
         .parent = parent,
         .foldable = (args[7] & 1) != 0,
+        .focusable = (args[7] & 2) != 0,
     }) catch return;
     results[0] = @intCast(ordinal);
 }
@@ -84,7 +85,7 @@ pub fn hProjCommit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     _ = args;
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const view = p.projection orelse return;
+    const view = openBuild(p) orelse return;
     results[0] = repaint(p, view, .commit) orelse -1;
 }
 
@@ -175,7 +176,7 @@ fn paintFolds(p: *WasmPlugin, view: *Projection, doc: anytype) void {
 /// identity — never the offset that produced it.
 pub fn hProjAtCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const view = p.projection orelse {
+    const view = activeView(p) orelse {
         results[0] = -1;
         return;
     };
@@ -203,7 +204,7 @@ pub fn hProjToggle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
-    const view = p.projection orelse return;
+    const view = activeView(p) orelse return;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
     if (view.value.byKey(key) == null) return; // a row the tree does not name
@@ -226,7 +227,7 @@ pub fn hProjSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
     results[0] = -1;
-    const view = p.projection orelse return;
+    const view = activeView(p) orelse return;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
     const entry = p.activeCtx().buffers.resolve(view.target) orelse return;
@@ -252,18 +253,16 @@ pub const Projection = struct {
     name: []u8,
 };
 
-/// Find-or-create this plugin's projection for `name`. One per plugin for now:
-/// a second buffer replaces the first, which is the honest shape until a
-/// producer needs two at once (and `wl_exec`'s `at` already shows how a second
-/// would be addressed — by the buffer it is about).
+/// Find-or-create this plugin.s projection for `name`.
+///
+/// A plugin may hold SEVERAL — one per entry it projects. Not generality for
+/// its own sake: git opens a session per repository, each with its own entry
+/// (`*git*`, `*git:2*`, …), and a single slot meant the second repository.s
+/// projection evicted the first.s, taking its fold state and node tree with it.
 fn viewFor(p: *WasmPlugin, name: []const u8) ?*Projection {
     const gpa = p.gpa;
-    if (p.projection) |existing| {
+    for (p.projections.items) |existing| {
         if (std.mem.eql(u8, existing.name, name)) return existing;
-        existing.value.deinit();
-        gpa.free(existing.name);
-        gpa.destroy(existing);
-        p.projection = null;
     }
     const owned = gpa.dupe(u8, name) catch return null;
     const created = gpa.create(Projection) catch {
@@ -271,16 +270,44 @@ fn viewFor(p: *WasmPlugin, name: []const u8) ?*Projection {
         return null;
     };
     created.* = .{ .value = .init(gpa), .target = undefined, .name = owned };
-    p.projection = created;
+    p.projections.append(gpa, created) catch {
+        created.value.deinit();
+        gpa.free(owned);
+        gpa.destroy(created);
+        return null;
+    };
     return created;
 }
 
-/// Release a plugin's projection. Called from `WasmPlugin.deinit`, with the
-/// same rule as every other resource holding state on the plugin's behalf.
+/// The projection with a build OPEN — `node` and `commit` are about the build
+/// `begin` started, which is unambiguous because a build is not concurrent.
+fn openBuild(p: *WasmPlugin) ?*Projection {
+    for (p.projections.items) |view| {
+        if (view.value.open) return view;
+    }
+    return null;
+}
+
+/// The projection the QUERY doors are about: the one whose entry is active.
+/// A verb asks what the cursor is on, and the cursor is in exactly one entry —
+/// so which projection answers is a fact about focus, not a guess and not
+/// last-one-wins.
+fn activeView(p: *WasmPlugin) ?*Projection {
+    const bufs = p.activeCtx().buffers;
+    for (p.projections.items) |view| {
+        const entry = bufs.resolve(view.target) orelse continue;
+        if (entry.id == bufs.active_id) return view;
+    }
+    return null;
+}
+
+/// Release a plugin.s projections. Called from `WasmPlugin.deinit`, with the
+/// same rule as every other resource holding state on the plugin.s behalf.
 pub fn release(p: *WasmPlugin) void {
-    const view = p.projection orelse return;
-    view.value.deinit();
-    p.gpa.free(view.name);
-    p.gpa.destroy(view);
-    p.projection = null;
+    for (p.projections.items) |view| {
+        view.value.deinit();
+        p.gpa.free(view.name);
+        p.gpa.destroy(view);
+    }
+    p.projections.deinit(p.gpa);
 }

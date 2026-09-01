@@ -124,7 +124,6 @@ pub fn after(argv: []const []const u8) void {
 /// git names no path it writes and cleans up nothing, which is why it still
 /// holds no filesystem capability at all.
 pub fn afterInput(argv: []const []const u8, input: ?[]const u8) void {
-    markRestore();
     const s = cur();
     // Provisional from the moment the MUTATION is in flight, not from when its
     // re-gather starts. The fused shell line made these one command, so one
@@ -142,7 +141,6 @@ pub fn afterInput(argv: []const []const u8, input: ?[]const u8) void {
 /// stderr is git's own words, and its status is git's own verdict; neither has
 /// to be recovered from a marker in stdout.
 pub fn afterNoted(argv: []const []const u8, input: ?[]const u8) void {
-    markRestore();
     const s = cur();
     s.gathering = true;
     _ = weft.execWith(AfterOf, .{ .session = s.id, .note = true }, .{
@@ -223,14 +221,6 @@ pub const Argv = struct {
         return self.items[0..self.n];
     }
 };
-
-/// Preserve the cursor spot across the coming re-render: capture the node
-/// identity (re-found in the new model) plus the raw offset as a fallback.
-pub fn markRestore() void {
-    cur().restore_cursor = true;
-    cur().pending_cursor = weft.cursor();
-    cur().restore_target = nodeAtCursor();
-}
 
 /// Focus the named tool entry and fill it with one command's stdout — the
 /// read-only views (`git log`, `git show`, a blame) that own their own buffer

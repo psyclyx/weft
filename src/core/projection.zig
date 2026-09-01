@@ -48,8 +48,13 @@ pub const Node = struct {
     /// Ordinal of the enclosing node, or null at the root. A child is rendered
     /// after its parent and inside its parent's range.
     parent: ?u32 = null,
-    /// Whether this node's children may be hidden.
+    /// Whether this node.s children may be hidden.
     foldable: bool = false,
+    /// Whether the cursor should be able to REST here. A producer emits rows
+    /// that are structure (a title, a branch header) and rows that are
+    /// subjects; only the second kind is somewhere a verb can act, so only the
+    /// second kind is where a fresh render should land.
+    focusable: bool = false,
 
     // ── Filled by `render`; display and only display ──────────────────
     /// The node's whole rendered extent, children included.
@@ -121,6 +126,7 @@ pub const View = struct {
         text: []const u8,
         parent: ?u32,
         foldable: bool,
+        focusable: bool = false,
     }) !u32 {
         if (!self.open) return error.NoBuild;
         // A parent must already exist, so the tree cannot describe a cycle or
@@ -141,6 +147,7 @@ pub const View = struct {
             .text = text,
             .parent = node.parent,
             .foldable = node.foldable,
+            .focusable = node.focusable,
         });
         return @intCast(self.building.items.len - 1);
     }
@@ -253,6 +260,12 @@ pub const View = struct {
     pub fn focusOffset(self: *const View) usize {
         if (self.focus.len > 0) {
             if (self.byKey(self.focus)) |n| return n.start;
+        }
+        // No remembered row: the first row a verb could act on, not merely the
+        // first row. Landing on a header would leave every verb with nothing
+        // under point, which reads as the projection being inert.
+        for (self.nodes.items) |n| {
+            if (n.focusable) return n.start;
         }
         return if (self.nodes.items.len == 0) 0 else self.nodes.items[0].start;
     }

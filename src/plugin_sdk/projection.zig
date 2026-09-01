@@ -48,8 +48,11 @@ pub const Node = struct {
     /// container: it occupies no row and folds its children.
     text: []const u8 = "",
     parent: ?Ordinal = null,
-    /// Whether this row's children may be hidden.
+    /// Whether this row.s children may be hidden.
     foldable: bool = false,
+    /// Whether the cursor may REST here. Structure rows (a title, a header)
+    /// leave this false so a fresh render lands on something a verb can act on.
+    focusable: bool = false,
 };
 
 /// A build in progress. Open one with `begin`, `add` rows, then `commit`.
@@ -58,7 +61,7 @@ pub const Builder = struct {
     /// the host refused it (no open build, or a parent that does not exist).
     pub fn add(self: Builder, node: Node) ?Ordinal {
         _ = self;
-        const flags: u32 = if (node.foldable) 1 else 0;
+        const flags: u32 = (if (node.foldable) @as(u32, 1) else 0) | (if (node.focusable) @as(u32, 2) else 0);
         const parent: i32 = if (node.parent) |ord| @intCast(ord) else -1;
         const ordinal = e.wl_proj_node(
             p(node.key.ptr),

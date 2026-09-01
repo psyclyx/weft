@@ -1983,34 +1983,53 @@ test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
 }
 
 test "e2e/git: no verb reads a rendered byte range to choose its target" {
-    // By construction, not by review — and the construction is now a FILE
-    // BOUNDARY rather than a marker comment. §14.3's rule is that a verb names
-    // a row by the identity it carries, never by scraping the projection; that
-    // used to be enforced by splitting one 2900-line file at a comment and
-    // scanning below it. `render.zig` is that split, made structural: the
-    // display tables and the projection buffer live there and nowhere else, so
-    // "a verb read a rendered offset" now requires importing a module to do it
-    // in, instead of just being written a few hundred lines further down.
+    // §14.3's rule is that a verb names a row by the identity it carries, never
+    // by scraping the projection. This gate has been enforced three ways, each
+    // stronger than the last: a marker comment with a scan below it; then a
+    // FILE BOUNDARY (`render.zig`) holding the display tables, so reading an
+    // offset meant importing a module to do it in; and now the MEMBRANE, which
+    // is where it should have been all along.
+    //
+    // git does not own a rendered byte range any more, because there is none to
+    // own. It publishes a node tree and the host lays it out; the projection
+    // doors take no offset and return none (asserted at the contract table in
+    // `wasm_abi/tests.zig`). So the whole class — a display table drifting from
+    // the text, a stale offset naming a row that moved, a hit-test scanning a
+    // parallel array — is not something this plugin got right. It is something
+    // it can no longer express.
     const verbs = @embedFile("../plugins/git/root.zig");
-    for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "sec_body", "render_buf" }) |banned| {
-        try t.expect(std.mem.indexOf(u8, verbs, banned) == null);
-    }
-    // Same for the parser and the patch builder: they are about raw bytes and
-    // the model, and a rendered offset means nothing to either.
-    for ([_][]const u8{ @embedFile("../plugins/git/parse.zig"), @embedFile("../plugins/git/patch.zig") }) |src| {
-        for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "render_buf" }) |banned| {
+    const projection = @embedFile("../plugins/git/render.zig");
+    const parse = @embedFile("../plugins/git/parse.zig");
+    const patch = @embedFile("../plugins/git/patch.zig");
+
+    // The display tables are gone from every file, including the one that used
+    // to be allowed to hold them.
+    for ([_][]const u8{ verbs, projection, parse, patch }) |src| {
+        for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "sec_body", "render_buf" }) |banned| {
             try t.expect(std.mem.indexOf(u8, src, banned) == null);
         }
     }
-    // And targeting has exactly ONE door, now on the far side of the file
-    // boundary: `nodeAt` and `nodeAtCursor` are declared once each in
-    // `render.zig`, with the tables they read, and the verbs file names
-    // neither — it asks for a `Target` and cannot ask for anything else.
-    const projection = @embedFile("../plugins/git/render.zig");
-    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "nodeAt("));
-    try t.expectEqual(@as(usize, 1), std.mem.count(u8, projection, "pub fn nodeAt("));
+
+    // Targeting still has exactly ONE door, DEFINED once, and it now answers
+    // from the host.s hit-test rather than from a table this plugin
+    // maintained. The verbs file calls it freely — that is the point of it
+    // being the only way to ask.
+    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "fn nodeAtCursor("));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, projection, "pub fn nodeAtCursor("));
-    try t.expect(std.mem.indexOf(u8, projection, "nodeAt(weft.cursor())") == null);
+    try t.expect(std.mem.indexOf(u8, projection, "weft.projectionAtCursor()") != null);
+
+    // The verbs file names no offset door at all. `weft.cursor()` is how a
+    // producer used to ask where point was in order to hit-test it itself; the
+    // question a verb asks now is which KEY, and the answer is an identity.
+    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.cursor()"));
+
+    // The projection paints no spans by offset. `weft.style`/`weft.fold`
+    // survive in `render.zig` for the read-only VIEWS (`git show`, `git log`),
+    // which are one command's output shown verbatim — no model, no rows to
+    // name — and that distinction is the reason they are still legitimate.
+    try t.expect(std.mem.indexOf(u8, projection, "styleView") != null);
+    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.style("));
+    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.fold("));
 }
 
 // ── Places: two projects open at once (doc/place.md) ──────────────────

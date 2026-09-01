@@ -358,7 +358,7 @@ cur_activate_path: []const u8 = &.{},
 /// This plugin.s node-tree projection over a text buffer, if it has published
 /// one (`wasm_host/projection.zig`). Held here, released in `deinit`, like
 /// every other thing that outlives a single call on this plugin.s behalf.
-projection: ?*@import("../wasm_host/projection.zig").Projection = null,
+projections: std.ArrayList(*@import("../wasm_host/projection.zig").Projection) = .empty,
 
 /// The live external resources this plugin holds by handle — subprocesses,
 /// REPL sessions, connections — plus the pool their readers run on and the

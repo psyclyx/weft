@@ -18,7 +18,6 @@ const countLines = @import("render.zig").countLines;
 /// The parser needs to find an already-recorded file to attach a hunk to.
 /// `findFile` lives with the display tables it also serves.
 const findFile = @import("render.zig").findFile;
-const isCollapsed = @import("render.zig").isCollapsed;
 
 // ── Parse ──────────────────────────────────────────────────────────────────
 pub fn parse() void {
@@ -46,7 +45,8 @@ pub fn parse() void {
     cur().recent_start = b[@intFromEnum(model.Part.staged)];
     cur().recent_end = b[@intFromEnum(model.Part.recent)];
     // Re-apply the remembered file-fold state (files rebuilt default-expanded).
-    for (cur().files[0..cur().file_count]) |*f| f.folded = isCollapsed(f.path_());
+    // Fold state is the HOST.s now, keyed by row and unbounded — this file no
+    // longer carries a per-file `folded` flag to re-apply.
     // Present iff non-empty (recent by commit lines).
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);

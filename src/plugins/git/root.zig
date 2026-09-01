@@ -93,9 +93,6 @@ const sessions = &model.sessions;
 const Target = model.Target;
 const Lines = model.Lines;
 const RAW_CAP = model.RAW_CAP;
-const nodeAt = render_mod.nodeAt;
-const setCollapsed = render_mod.setCollapsed;
-const isCollapsed = render_mod.isCollapsed;
 const findFile = render_mod.findFile;
 const buildPatch = patch_mod.buildPatch;
 const transient = @import("transient.zig");
@@ -106,19 +103,10 @@ const after = gather_mod.after;
 const afterInput = gather_mod.afterInput;
 const afterNoted = gather_mod.afterNoted;
 const Argv = gather_mod.Argv;
-const markRestore = gather_mod.markRestore;
 const selectedLines = render_mod.selectedLines;
-const hashTokenAt = render_mod.hashTokenAt;
-const offsetOf = render_mod.offsetOf;
-const commitRow = render_mod.commitRow;
 const nodeAtCursor = render_mod.nodeAtCursor;
 const nameFile = render_mod.nameFile;
 const fileTarget = render_mod.fileTarget;
-const publishStyles = render_mod.publishStyles;
-const publishFolds = render_mod.publishFolds;
-const renderFile = render_mod.renderFile;
-const toggleFileFold = render_mod.toggleFile;
-const lineEnd = render_mod.lineEnd;
 const countLines = render_mod.countLines;
 const Kind = model.Kind;
 const Node = model.Node;
@@ -546,12 +534,12 @@ fn paintOwnEntry() void {
 }
 
 fn onViewFilled(style: model.ViewStyle) void {
-    switch (style) {
-        .none => {},
-        .diff => classify(styleDiffLine),
-        .log => classify(styleLogLine),
-        .rebase_todo => rebaseTodoFill(),
-    }
+    // Colouring a read-only view is `render.zig`.s, beside the projection it
+    // is deliberately NOT: a view is one command.s output shown verbatim, with
+    // no model behind it and no rows to name, which is why it still paints
+    // spans by offset and the projection never does.
+    render_mod.styleView(style);
+    if (style == .rebase_todo) rebaseTodoFill();
 }
 
 /// A buffer took focus. One offer table is live for the `git` tool identity,
@@ -727,20 +715,13 @@ fn absolute(pth: []const u8, here: []const u8) []const u8 {
 /// owns every step, including the write — this is the name a verb calls.
 const repaint = render_mod.repaint;
 
-/// Model → projection, over whatever `raw` currently holds.
+/// Model → projection. Landing the cursor is the HOST.s: it remembered which
+/// ROW point was on before the rebuild and puts it back there by key, so the
+/// captured target, the fallback offset, and the home offset this used to
+/// juggle are all gone.
 fn renderStatus() void {
     parser.parse();
     repaint();
-    // Land the cursor: re-find the captured target after a mutation (so point
-    // tracks the file/hunk/commit even when it moved), else the clamped offset,
-    // else home.
-    const landing = if (cur().restore_cursor)
-        (offsetOf(cur().restore_target) orelse @min(cur().pending_cursor, cur().out))
-    else
-        cur().home_off;
-    weft.jump(weft.lineAt(landing).start);
-    cur().restore_cursor = false;
-    cur().restore_target = .{};
     // A new model is a new offer table: the previous one described rows that
     // no longer exist, and its ordinal is now stale at the door.
     publishOffers();
@@ -921,7 +902,6 @@ fn gitPrevRow() void {
 }
 
 fn gitStatus() void {
-    cur().restore_cursor = false;
     gather_mod.gather();
     weft.setMode("git");
 }
@@ -933,11 +913,9 @@ fn gitStatus() void {
 /// every other mutation (no git-init special-casing); after init, GATHER's
 /// `git status --branch` renders the fresh `Branch: main` header.
 fn gitInit() void {
-    cur().restore_cursor = false;
     after(&.{ "git", "init" });
 }
 fn gitRefresh() void {
-    markRestore();
     gather_mod.gather();
     weft.setMode("git");
 }
@@ -948,40 +926,28 @@ fn gitToggleFold() void {
     const t = nodeAtCursor();
     const n = resolve(t) orelse return;
     // The head to keep point on, named by identity — it survives the re-render.
-    const head: Target = switch (n.kind) {
-        .section => blk: {
-            cur().sec_folded[n.idx] = !cur().sec_folded[n.idx];
-            break :blk t;
-        },
-        .file => blk: {
-            toggleFile(n.idx);
-            break :blk t;
-        },
-        // Fold the parent file (hunk-granularity folds are a later phase).
-        .hunk => blk: {
-            const fi = cur().hunks[n.idx].file;
-            toggleFile(fi);
-            break :blk fileTarget(fi);
-        },
+    // A fold is the HOST.s: it flips the collapsed set for that key, re-lays
+    // the tree it already holds, and keeps point on the row. No producer is
+    // consulted and the revision does not move — a fold changes the view, not
+    // the model — so a decision made before it is still about the same model.
+    //
+    // A hunk row folds its parent FILE (hunk-granularity folds are a later
+    // phase), which is now a matter of naming a different key rather than of
+    // recomputing an offset to jump back to.
+    const fold_key = switch (n.kind) {
+        .section, .file => render_mod.keyOf(t),
+        .hunk => render_mod.keyOf(fileTarget(cur().hunks[n.idx].file)),
         else => return,
     };
-    repaint();
-    weft.jump(weft.lineAt(offsetOf(head) orelse 0).start);
-    publishOffers(); // every node moved; point landed on a header
+    render_mod.toggleFold(fold_key);
+    publishOffers();
 }
 
-fn toggleFile(fi: usize) void {
-    cur().files[fi].folded = !cur().files[fi].folded;
-    setCollapsed(cur().files[fi].path_(), cur().files[fi].folded); // persist
-}
-
-/// Repaint the buffer from the model in hand — no re-gather, the model is
-/// intact (a refused stale action showing what IS current). Authoring the whole
-/// buffer moves point, so it lands back on its line.
+/// Repaint from the model in hand — no re-gather, the model is intact (a
+/// refused stale action showing what IS current). Point keeps its ROW without
+/// being saved and restored, because the host remembers which row it was on.
 fn rerender() void {
-    const at = weft.cursor();
     repaint();
-    weft.jump(weft.lineAt(@min(at, cur().out)).start);
 }
 
 fn gitVisit() void {
@@ -1291,7 +1257,6 @@ fn gitCommitSave() void {
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
     cur().committing = slot;
-    cur().restore_cursor = false;
     // `{}` is the SPOOLED message: the host writes it, `git commit -F` reads
     // it, and the host removes it whether or not the commit was accepted.
     var argv: Argv = .{};
@@ -1689,7 +1654,6 @@ fn gitRebaseSave() void {
     @memcpy(msg_buf[0..n], text[0..n]);
     const v = &slot.value;
     cur().sequencing = slot;
-    cur().restore_cursor = false;
     // `{}` is the SPOOLED plan, substituted INSIDE the config value: git runs
     // `sequence.editor <todo>` while `git rebase -i` is still in flight, so the
     // temp is alive exactly when the `cp` needs it and gone the moment the
@@ -1737,55 +1701,3 @@ fn gitRebaseSkip() void {
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────
-fn classify(line_fn: *const fn (base: usize, line: []const u8) void) void {
-    weft.styleClear();
-    const text = weft.slice(0, weft.byteLen());
-    var i: usize = 0;
-    while (i < text.len) {
-        var e = i;
-        while (e < text.len and text[e] != '\n') e += 1;
-        line_fn(i, text[i..e]);
-        i = e + 1;
-    }
-}
-
-fn styleDiffLine(base: usize, line: []const u8) void {
-    if (line.len == 0) return;
-    const cls: weft.StyleClass = if (std.mem.startsWith(u8, line, "diff --git") or
-        std.mem.startsWith(u8, line, "index "))
-        .muted
-    else if (std.mem.startsWith(u8, line, "+++ ") or std.mem.startsWith(u8, line, "--- "))
-        .muted
-    else if (std.mem.startsWith(u8, line, "@@"))
-        .header
-    else switch (line[0]) {
-        '+' => .added,
-        '-' => .removed,
-        else => .normal,
-    };
-    if (cls != .normal) weft.style(base, base + line.len, cls);
-}
-
-fn styleLogLine(base: usize, line: []const u8) void {
-    var i: usize = 0;
-    while (i < line.len and isGraph(line[i])) i += 1;
-    var h = i;
-    while (h < line.len and isHex(line[h])) h += 1;
-    if (h == i) return;
-    weft.style(base + i, base + h, .location);
-    var j = h;
-    while (j < line.len and line[j] == ' ') j += 1;
-    if (j < line.len and line[j] == '(') {
-        var k = j;
-        while (k < line.len and line[k] != ')') k += 1;
-        if (k < line.len) k += 1;
-        weft.style(base + j, base + k, .header);
-    }
-}
-
-fn isGraph(c: u8) bool {
-    return c == '*' or c == '|' or c == '/' or c == '\\' or c == ' ' or c == '_' or c == '.';
-}
-fn isHex(c: u8) bool {
-    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
-}

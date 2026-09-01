@@ -20,7 +20,6 @@ pub const weft = @import("weft");
 pub const MAX_FILES = 128;
 pub const MAX_HUNKS = 512;
 pub const RAW_CAP = 1 << 18; // 256 KiB of raw git output (paged in via `slice`)
-pub const RENDER_CAP = 1 << 18; // the pretty projection
 pub const PATCH_CAP = 1 << 16; // a synthesized one-hunk patch
 
 pub var cmd_buf: [1 << 13]u8 = undefined;
@@ -112,12 +111,6 @@ pub const File = struct {
     header_len: usize = 0,
     first_hunk: usize = 0,
     n_hunks: usize = 0,
-    folded: bool = false,
-    // Rendered byte ranges (recorded each render): whole block, and the offset
-    // its body (first hunk) begins so a fold keeps the file header visible.
-    r_start: usize = 0,
-    r_end: usize = 0,
-    body: usize = 0, // == first hunk r_start; 0 when n_hunks == 0
     pub fn path_(self: *const File) []const u8 {
         return self.path[0..self.plen];
     }
@@ -127,17 +120,7 @@ pub const Hunk = struct {
     file: usize,
     at: usize, // `@@` line through end of body, in `raw`
     len: usize,
-    r_start: usize = 0, // rendered verbatim, so raw↔render is a fixed shift
-    r_end: usize = 0,
 };
-
-/// FILE fold state persists across gathers — but files rebuild each gather, so
-/// we can't carry a bool on the struct. Instead remember a bounded set of
-/// COLLAPSED file paths; a file the user folds stays folded through refreshes.
-/// Past the cap we echo and stop recording (degrade loud, never silently drop).
-/// Keyed by path only, so the same path partially staged in two sections shares
-/// fold state.
-pub const MAX_COLLAPSED = 64;
 
 /// One repository's whole world: its model, its projection, its buffer, its
 /// in-flight interaction. Nothing here is shared, so two repositories open at
@@ -185,8 +168,6 @@ pub const RepoSession = struct {
     effect_ok: bool = false,
     effect_note: [512]u8 = undefined,
     effect_note_len: usize = 0,
-    render_buf: [RENDER_CAP]u8 = undefined,
-    out: usize = 0,
 
     branch: [256]u8 = undefined,
     branch_len: usize = 0,
@@ -202,26 +183,8 @@ pub const RepoSession = struct {
     /// collapsed Recent stays collapsed through a refresh/stage. Recent
     /// defaults EXPANDED so a commit is directly actionable (RET/A/V/x/fixup)
     /// on a fresh `*git*` without a TAB first; TAB still toggles it.
-    sec_folded: [4]bool = @splat(false),
     sec_present: [4]bool = @splat(false),
-    sec_rstart: [4]usize = @splat(0),
-    sec_rend: [4]usize = @splat(0),
-    sec_body: [4]usize = @splat(0), // fold start: just past the header newline
     sec_count: [4]usize = @splat(0),
-
-    collapsed_paths: [MAX_COLLAPSED][256]u8 = undefined,
-    collapsed_plen: [MAX_COLLAPSED]usize = undefined,
-    collapsed_count: usize = 0,
-
-    // Cursor restoration across a re-gather: a correlation HINT, never
-    // authority (§14.3). We remember the target the node under point named and
-    // the status fill re-finds it in the NEW model, landing on its rendered
-    // start. `pending_cursor` is the fallback when the node is gone (e.g. the
-    // file was fully staged away). `home_off` is where a fresh open lands.
-    restore_cursor: bool = false,
-    pending_cursor: usize = 0,
-    home_off: usize = 0,
-    restore_target: Target = .{},
 
     dropped_files: bool = false,
     dropped_hunks: bool = false,
