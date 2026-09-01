@@ -379,20 +379,29 @@ disappear. The `u32` token packing, `on_fill_token`, `on_pick_accept`, the
 
 ## 6. Magit, before and after
 
-| Concern | Now | After | Why |
-|---|---|---|---|
-| Parse status/diff/log | `parse.zig` 169 | **169** | Real git work. Unchanged. |
-| Synthesize a partial patch | `patch.zig` 133 | **133** | Real git work. Unchanged. |
-| Domain model | `model.zig` 412 | **~110** | Sessions, targets, snapshots, render tables, fixed caps → a plain arena-built tree. |
-| Projection | `render.zig` 425 | **~70** | A pure `Model -> Node` function. |
-| Shell orchestration | `gather.zig` 127 | **~15** | Four wrappers and a sentinel protocol → `exec`. |
-| Transients | `transient.zig` 131 + ~60 binding lines | **~55** | Declarative, and covers *every* command instead of three. |
-| Commands, verbs, offers, drafts, rebase, confirm, routing | `root.zig` 1790 | **~330** | Manifest, affordances, futures, and host-owned identity. |
-| **Total** | **3,187** | **≈ 880** | |
+| Concern | Before | Estimated | **Actual** | Why |
+|---|---|---|---|---|
+| Parse status/diff/log | `parse.zig` 169 | 169 | **151** | Real git work. Unchanged. |
+| Synthesize a partial patch | `patch.zig` 133 | 133 | **133** | Real git work. Unchanged. |
+| Domain model | `model.zig` 412 | ~110 | **313** | Sessions and targets left; the render tables and fixed caps went. |
+| Projection | `render.zig` 425 | ~70 | **445** | A `Model -> Node` function, plus the diff/log role vocabulary. |
+| Shell orchestration | `gather.zig` 127 | ~15 | **237** | The sentinel protocol went; the continuations that replaced it are longer than the estimate and clearer. |
+| Transients | `transient.zig` 131 + ~60 binding lines | ~55 | **170** | Declarative, and covers *every* flag menu instead of three. |
+| Commands, verbs, offers, drafts, rebase, confirm, routing | `root.zig` 1790 | ~330 | **1418** | Manifest, affordances, futures, host-owned identity. |
+| **Total** | **3,187** | ≈ 880 | **2,867** | |
 
-That is the estimate, and it is an estimate — but the load-bearing part is not
-the ratio, it is *which* lines vanish: everything in the "after" column that
-shrinks is generic code that ten other plugins also have to write.
+**The estimate was wrong, and it is worth saying how.** 880 assumed the whole
+of what remained would be data. What actually remained is git's verbs — forty
+of them, each a few lines of "resolve what point is on, then run git" — plus a
+per-command table that is the plugin's public surface. Those are not generic
+and do not compress; the estimate counted them as if they would.
+
+What the estimate got right is *which* lines vanish. Everything that left was
+code ten other plugins also have to write: the sentinel protocol, the token
+packing, three hand-rolled menu implementations, the offset arithmetic and the
+parallel node table, a bounded collapsed-set, the focus dance around every
+repaint, and a key parser whose safety rule was a comment. That is the claim
+worth keeping, and it held.
 
 And the functionality goes **up**, not down:
 
@@ -448,27 +457,40 @@ Per `structural-impossibility` — these are bug *classes* deleted, not patched:
 ## 9. Phasing
 
 Each phase compiles and leaves the tree green; each is useful alone.
+**All nine have landed.**
 
-1. **`plugin` manifest** (SDK-only comptime). Delete the three-export ceremony
-   across 41 plugins. No host change. Cheap, immediate, low risk.
-2. **`exec`** (host + SDK). argv, cwd, stdin, status/stdout/stderr, futures.
-   Migrate git and `make`/`run`/`grep`. Deletes `gather.zig` and the sentinel
-   protocol; retires 72 `bufPrint` sites' worst offenders.
-3. **`ask` / futures.** `confirm`, `prompt`, `pick` as futures; background echo.
-   Deletes the token packing in git and lsp.
-4. **Text projection for semantic views.** The core work: render a node tree to
-   buffer rows, fold and style by node, hit-test, reconcile focus, report
-   selection as node + ordinals. Prove it by porting **one** view — `debug` (94
-   lines) or `grep` (116) — end to end.
-5. **Affordances on nodes** + intention resolution against the node under point.
-   Prove it with a third-party verb on the ported view's rows.
-6. **`transient`.** Prove it by replacing git's seven menu modes.
-7. **Port magit.** The 3,187 → ~880 rewrite, as the acceptance test for all six.
-8. **Port dired** onto the same text projection, retiring the fork in F2.
-9. **Theme table behind roles** — K becomes expressible.
+1. ✅ **`plugin` manifest** (SDK-only comptime). Delete the three-export
+   ceremony across 41 plugins. No host change.
+2. ✅ **`exec`** (host + SDK). argv, cwd, stdin, status/stdout/stderr, futures.
+   git and `make`/`run`/`grep` migrated; the sentinel protocol is gone.
+3. ✅ **`ask` / futures.** `confirm`, `prompt`, `pick` as continuations that
+   carry what they are about. The token packing in git and lsp is gone.
+4. ✅ **Text projection for semantic views.** A node tree rendered to buffer
+   rows, folded and styled by node, hit-tested by key, focus reconciled by key,
+   selection reported as node + ordinals.
+5. ✅ **Affordances on nodes** + intention resolution against the node under
+   point — and, since phase 8, against the *part* of a row under point.
+6. ✅ **`transient`.** git's flag menus are declarations.
+7. ✅ **Port magit** — with the estimate corrected in §6. It is the acceptance
+   test for all six, and it passed: nothing generic is left in it.
+8. ✅ **Port dired** onto the same text projection, retiring the fork in F2. A
+   listing is an ordinary buffer, so a sidebar is a viewport with one in it —
+   the two are not two implementations.
+9. ✅ **Theme table behind roles.** `weft.set("theme", <leaf>, <class>)` binds
+   the slot core paints with, so one line restyles every producer that calls
+   its rows the same thing.
 
-Steps 1–3 are worth doing whatever happens to the rest: they are small, they are
-pure deletion, and they do not depend on step 4.
+Steps 1–3 were worth doing whatever happened to the rest: small, pure deletion,
+and independent of step 4.
+
+### What is deliberately NOT extracted
+
+`gather.zig`'s shape — "run a command, re-read the world, republish" — is
+generic, and every plugin that projects an external authority will want it. It
+stays in git because there is one consumer. A library written against a single
+caller encodes that caller's accidents as its interface; the second one is what
+tells you which parts were the shape and which were git. Same for the "resolve
+what point is on, then act by kind" funnel.
 
 See [[plugins-not-core]], [[structural-impossibility]], [[magit-rebuild]],
 [[mode-leak-class]], [[rendering-decomplection]], `architecture.md`,
