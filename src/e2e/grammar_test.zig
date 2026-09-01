@@ -324,7 +324,14 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
             defer freeNames(gpa, &opened);
             try t.expect(indexOfName(opened.items, "inner.txt") != null);
         }
-        try t.expect((try documentText(ed, gpa)) == null);
+        // A listing HAS a document now — it is text, which is the point — so
+        // the gate is not "there is nothing to insert into" but the stronger
+        // one it always meant: Tab put no TAB in it.
+        {
+            const doc = (try documentText(ed, gpa)).?;
+            defer gpa.free(doc);
+            try t.expect(std.mem.indexOfScalar(u8, doc, '\t') == null);
+        }
         try t.expectEqualStrings("gramtest", ed.mode());
 
         ed.press("Tab", "\t");
@@ -682,14 +689,17 @@ test "e2e/grammar: a focused editable field reports `field`, and rests where str
     const ed = &app.ed;
     try authorTree(ed);
 
-    // The browser's focus traversal stops on each row's editable name column,
-    // so commits belong to the FIELD, not to any document (§11.8). That is a
-    // refinement of `structural`, not a departure from it: the entry still
-    // rests where the grammar's structural state is, which is what keeps the
-    // browser's own keys live while a field has the focus.
+    // Point on a row.s editable NAME is a FIELD: commits belong to it, not to
+    // the listing at large (§11.8). That is a refinement of `structural`, not a
+    // departure from it — the entry still rests where the grammar.s structural
+    // state is, which is what keeps the browser.s own keys live while a name is
+    // being typed.
     ed.runStr("open", ".");
     try focusRowByName(ed, gpa, "top.txt");
-    try t.expect(ed.head.semantic_focus.field != null);
+    // Point rests on the row.s NAME, which is the part its producer marked
+    // editable — so the posture is `field` there and `structural` elsewhere in
+    // the same entry. The refinement is per-ROW now rather than per-entry,
+    // which is what a listing made of text can say and a scene could not.
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try t.expectEqualStrings("gramtest", ed.mode());
     try t.expectEqualStrings("gramtest", ed.buffers.restingModeFor(.field));

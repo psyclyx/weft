@@ -298,6 +298,55 @@ fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Move point to the next/previous ROW of a projection, landing where that row
+/// is ACTIONABLE — the start of its editable span when it has one, its own
+/// start otherwise.
+///
+/// A listing is text, so plain `cursor-down` works on it; what plain cursor
+/// motion cannot do is land you on the NAME. Column 0 of `  ▸ src` is an
+/// indent, and a grammar asking "may I insert here" gets `structural` there and
+/// `field` two characters along — so navigating a listing with `cursor-down`
+/// leaves you somewhere you cannot type. Rows are the unit of a projection;
+/// this moves in that unit.
+fn moveRow(ctx: *Context, delta: enum { next, prev }) anyerror!Value {
+    const entry = ctx.buffers.active();
+    const view = entry.projection orelse {
+        // Not a projection: the ordinary line step, so one binding serves both.
+        return if (delta == .next) cCursorDown(ctx, .{}) else cCursorUp(ctx, .{});
+    };
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    // Anchored on the ROW point is in, not on point itself: from inside a row,
+    // "the previous row" measured against the caret finds that row again,
+    // because its own start is behind the caret.
+    const here = view.subjectAt(ed.cursorOffset());
+    const at = if (here) |n| n.start else ed.cursorOffset();
+    var best: ?*const @import("projection.zig").Node = null;
+    for (view.nodes.items) |*n| {
+        if (!n.focusable) continue;
+        switch (delta) {
+            .next => if (n.start > at and (best == null or n.start < best.?.start)) {
+                best = n;
+            },
+            .prev => if (n.start < at and (best == null or n.start > best.?.start)) {
+                best = n;
+            },
+        }
+    }
+    const target = best orelse return ok;
+    ed.placeCursor(target.start + if (target.editable) |e| e.start else 0);
+    return ok;
+}
+
+fn cRowDown(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return moveRow(ctx, .next);
+}
+
+fn cRowUp(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return moveRow(ctx, .prev);
+}
+
 // Word/WORD/line/doc motions and match-bracket moved to the `motions` plugin
 // (design §6.1 — they return a `range` an operator awaits). Core keeps only the
 // grapheme/line step primitive (`editor.step`, exposed via cursor-*) and the
@@ -611,6 +660,8 @@ const table = [_]command.Command{
     command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
     command.define("cursor-up", "Move the cursor up one line.", cCursorUp),
     command.define("cursor-down", "Move the cursor down one line.", cCursorDown),
+    command.define("row-down", "Move to the next projection row, on its actionable part.", cRowDown),
+    command.define("row-up", "Move to the previous projection row, on its actionable part.", cRowUp),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),
     command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
@@ -658,8 +709,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // rendered geometry, which `cursor-down` is not), so core answering there
     // would quietly replace it.
     inline for (.{
-        .{ "std.navigation.down", "cursor-down" },
-        .{ "std.navigation.up", "cursor-up" },
+        .{ "std.navigation.down", "row-down" },
+        .{ "std.navigation.up", "row-up" },
     }) |pair| try actions.provide(.{
         .action = pair[0],
         .predicate = .{ .locus = .tool },
