@@ -122,8 +122,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_style", .handler = layers.hStyle },
     .{ .name = "wl_fold_clear", .handler = layers.hFoldClear },
     .{ .name = "wl_fold", .handler = layers.hFold },
-    .{ .name = "wl_readonly_clear", .handler = layers.hReadOnlyClear },
-    .{ .name = "wl_readonly_span", .handler = layers.hReadOnlySpan },
     .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },
     .{ .name = "wl_decorate", .handler = layers.hDecorate },
     .{ .name = "wl_breakpoint_toggle", .handler = layers.hBreakpointToggle },
@@ -166,7 +164,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
     .{ .name = "wl_mode_names", .handler = keymap.hModeNames },
     .{ .name = "wl_binding_table", .handler = keymap.hBindingTable },
-    .{ .name = "wl_declare_action", .handler = keymap.hDeclareAction },
     .{ .name = "wl_provide", .handler = keymap.hProvide },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
@@ -211,7 +208,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_pick_free_text", .handler = pick.hPickFreeText },
     .{ .name = "wl_pick_category", .handler = pick.hPickCategory },
     .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
-    .{ .name = "wl_pick_add_keyed", .handler = pick.hPickAddKeyed },
     .{ .name = "wl_pick_add_buffer", .handler = pick.hPickAddBuffer },
     .{ .name = "wl_pick_end", .handler = pick.hPickEnd },
     .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
@@ -255,8 +251,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_node_children", .handler = syntax.hNodeChildren },
     .{ .name = "wl_claim_subbuffer", .handler = syntax.hClaimSubbuffer },
     .{ .name = "wl_subbuffer_put_fact", .handler = syntax.hSubbufferPutFact },
-    .{ .name = "wl_subbuffer_clear", .handler = syntax.hSubbufferClear },
-    .{ .name = "wl_subbuffer_fact_at", .handler = syntax.hSubbufferFactAt },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
@@ -271,8 +265,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_paste_at", .handler = register.hPasteAt },
 
     // ── semantic.zig — generic focused-view actions ───────────────────
-    .{ .name = "wl_semantic_active", .handler = semantic.hSemanticActive },
-    .{ .name = "wl_semantic_working_target", .handler = semantic.hSemanticWorkingTarget },
     .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },
     .{ .name = "wl_semantic_interaction_open", .handler = semantic.hSemanticInteractionOpen },
     .{ .name = "wl_semantic_interaction_close", .handler = semantic.hSemanticInteractionClose },
@@ -307,8 +299,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_relation_request", .handler = semantic_relation.hRequest },
     .{ .name = "wl_semantic_relation_respond", .handler = semantic_relation.hRespond },
     .{ .name = "wl_semantic_transfer_capture", .handler = transfer_attachment.hCapture },
-    .{ .name = "wl_semantic_transfer_retain", .handler = transfer_attachment.hRetain },
-    .{ .name = "wl_semantic_transfer_release", .handler = transfer_attachment.hRelease },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },
@@ -320,7 +310,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_place_id", .handler = proc.hPlaceId },
     .{ .name = "wl_place_has", .handler = proc.hPlaceHas },
     .{ .name = "wl_env_publish", .handler = env_host.hEnvPublish },
-    .{ .name = "wl_env_retract", .handler = env_host.hEnvRetract },
     .{ .name = "wl_proc_to_buffer", .handler = proc.hProcToBuffer },
     .{ .name = "wl_proc_append_buffer", .handler = proc.hProcAppendBuffer },
     .{ .name = "wl_proc_spool", .handler = proc.hProcSpool },
@@ -352,7 +341,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_fs_write", .handler = fs.hFsWrite },
     .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
-    .{ .name = "wl_fs_list_async", .handler = fs.hFsListAsync },
     .{ .name = "wl_semantic_fs_publish_child_directory", .handler = semantic_fs.hPublishChildDirectory },
     .{ .name = "wl_semantic_fs_publish_child_file", .handler = semantic_fs.hPublishChildFile },
     .{ .name = "wl_semantic_fs_capabilities", .handler = semantic_fs.hCapabilities },
@@ -523,7 +511,6 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_fs_write", .perm = .fs_write }, // fs.zig hFsWrite: .fs_write
     .{ .name = "wl_fs_append", .perm = .fs_write }, // fs.zig hFsAppend: .fs_write
     .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read
-    .{ .name = "wl_fs_list_async", .perm = .fs_read }, // fs.zig hFsListAsync: .fs_read
     .{ .name = "wl_semantic_fs_publish_child_directory", .perm = .fs_read }, // semantic_fs.zig hPublishChildDirectory: .fs_read
     .{ .name = "wl_semantic_fs_publish_child_file", .perm = .fs_read }, // semantic_fs.zig hPublishChildFile: .fs_read
     .{ .name = "wl_semantic_fs_capabilities", .perm = .fs_read }, // semantic_fs.zig hCapabilities: .fs_read
@@ -531,7 +518,6 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
     .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
     .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
-    .{ .name = "wl_env_retract", .perm = .env }, // env.zig hEnvRetract: .env
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {
@@ -579,7 +565,6 @@ const head_gated_list = [_][]const u8{
     "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
-    "wl_semantic_working_target", // semantic.zig hSemanticWorkingTarget
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
     "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose

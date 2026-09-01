@@ -80,24 +80,6 @@ pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     addItem(data, caller, args, null, "");
 }
 
-/// `wl_pick_add_keyed`: `wl_pick_add` plus an uninterpreted PUBLIC key an
-/// annotator can resolve when the label is not one. Core never parses it.
-///
-/// No producer in the tree needs this today — the ones whose label is not a
-/// key are `wl_pick_add_buffer` (which supplies its own, below) and the
-/// intrinsic pickers, whose rows no outside annotator can resolve at all. It
-/// ships anyway because without it the annotation membrane would be usable
-/// only by core producers and by whichever shipped plugins someone edits,
-/// which is the opposite of the point. Speculative, and said so here so it is
-/// not later misremembered as demand.
-pub fn hPickAddKeyed(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const key = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
-    defer p.gpa.free(key);
-    addItem(data, caller, args, null, key);
-}
-
 /// `wl_pick_add_buffer`: like `wl_pick_add`, but the candidate carries the
 /// identity of the `args[4]`-th open buffer as its ACCEPT KEY. Identity
 /// travels WITH the row, so no parallel table and no label parsing can go

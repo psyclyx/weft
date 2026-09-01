@@ -46,18 +46,3 @@ pub fn hEnvPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     };
     results[0] = @intCast(@min(revision, @as(u64, std.math.maxInt(i32))));
 }
-
-/// `envRetract() -> 1|0` (perm env, trap on deny): withdraw THIS plugin's
-/// overlay for the dispatching place. Owner-scoped, so one publisher can never
-/// drop another's.
-pub fn hEnvRetract(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!requirePerm(p, caller, .env)) return;
-    const ctx = p.activeCtx();
-    const envs = ctx.environments orelse {
-        results[0] = 0;
-        return;
-    };
-    results[0] = if (envs.retract(ctx.place(), p.name)) 1 else 0;
-}

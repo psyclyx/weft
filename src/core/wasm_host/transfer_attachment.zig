@@ -390,24 +390,6 @@ pub fn hCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     results[0] = 36;
 }
 
-pub fn hRetain(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: []i32) void {
-    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    plugin.semantic_attachments.retain(attachmentFromArgs(args)) catch {
-        results[0] = 0;
-        return;
-    };
-    results[0] = 1;
-}
-
-pub fn hRelease(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: []i32) void {
-    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    plugin.semantic_attachments.release(attachmentFromArgs(args)) catch {
-        results[0] = 0;
-        return;
-    };
-    results[0] = 1;
-}
-
 test "attachment ownership spans clipboard replacement and pending paste" {
     var provider: TestProvider = .{};
     var router = fs_runtime.Router.init(std.testing.allocator);

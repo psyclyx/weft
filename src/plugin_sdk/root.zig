@@ -300,15 +300,6 @@ pub fn foldClear() void {
 pub fn fold(start: usize, end: usize) void {
     e.wl_fold(@intCast(start), @intCast(end));
 }
-/// Reclaim + empty the read-only-span layer (republish the full set after).
-pub fn readOnlyClear() void {
-    e.wl_readonly_clear();
-}
-/// Mark `[start, end)` read-only: an interactive edit overlapping it is refused
-/// at the edit door (a comint's produced output vs its editable input line).
-pub fn readOnlySpan(start: usize, end: usize) void {
-    e.wl_readonly_span(@intCast(start), @intCast(end));
-}
 
 /// How a decoration is placed beside the text (never in the document).
 pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
@@ -711,13 +702,6 @@ pub const When = struct {
     /// `save`/etc. providers by this so they win in its buffer in any mode.
     tool: ?[]const u8 = null,
 };
-
-/// Declare an abstract intent `name` a key can bind to (and register its
-/// trampoline command). Providers registered with `provide` resolve it by
-/// context at fire time — the synthetic bind. Late-bound like `declareCommand`.
-pub fn declareAction(name: []const u8) void {
-    e.wl_declare_action(p(name.ptr), @intCast(name.len));
-}
 
 /// Register `cmd` as a provider for `action` under the predicate `when`, at
 /// `prio` (higher wins; ties break toward the more specific `when`). Auto-
@@ -1209,11 +1193,6 @@ pub fn pickCategory(category: []const u8) void {
 pub fn pickAdd(text: []const u8, doc: []const u8) void {
     e.wl_pick_add(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len));
 }
-/// `pickAdd` plus a public KEY an annotator can resolve — for a row whose
-/// label is not itself a name (`"3: foo.zig [ro] *"`). Core never parses it.
-pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
-    e.wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
-}
 /// Add one item ABOUT the `i`-th open buffer. The candidate carries that
 /// buffer's identity, read back as `PickCandidate.buffer` — so the accept
 /// never has to index a parallel table or parse its own label, and a buffer
@@ -1528,19 +1507,7 @@ pub fn claimSubbuffer(start: usize, end: usize) ?u32 {
 pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
     e.wl_subbuffer_put_fact(handle, p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
 }
-/// Release every subbuffer this plugin claimed — a projection clears before it
-/// re-claims a fresh id-span per row each render, so stale spans never linger.
-pub fn subbufferClear() void {
-    e.wl_subbuffer_clear();
-}
 var subfact_scratch: [512]u8 = undefined;
-/// Read fact `key` off the innermost subbuffer covering `offset` (in the shared
-/// service — so it finds an id-span the register re-stamped on paste), or null.
-/// The reconcile read-back: a row's hidden id → its original identity.
-pub fn subbufferFactAt(offset: usize, key: []const u8) ?[]const u8 {
-    const n = e.wl_subbuffer_fact_at(@intCast(offset), p(key.ptr), @intCast(key.len), p(&subfact_scratch), subfact_scratch.len);
-    return if (n < 0) null else subfact_scratch[0..@intCast(n)];
-}
 
 /// Mark the active buffer as this plugin's tool projection (its content is
 /// plugin-regenerated). A save then resolves the `save` action to a provider
@@ -1574,11 +1541,6 @@ pub fn registerTextIn(name: u8) []const u8 {
     const n = e.wl_register_text(p(&reg_scratch), reg_scratch.len, name);
     return reg_scratch[0..@intCast(n)];
 }
-/// Whether the register holds a linewise yank (the editor's paste-positioning
-/// policy stays its own).
-pub fn registerLinewise() bool {
-    return registerLinewiseIn(0);
-}
 pub fn registerLinewiseIn(name: u8) bool {
     return e.wl_register_linewise(name) != 0;
 }
@@ -1593,23 +1555,6 @@ pub fn pasteAtIn(name: u8, base: usize) void {
 }
 
 // ── Generic semantic views ────────────────────────────────────────────
-/// Whether the dispatching head currently focuses a live semantic view.
-/// Editor plugins use this to translate their normal interaction model into
-/// open actions; no tool identity or mode crosses this boundary.
-pub fn semanticActive() bool {
-    return e.wl_semantic_active() != 0;
-}
-
-/// Copy the dispatching head's validated working target. The returned value
-/// owns its canonical decode and remains provider-neutral.
-pub fn semanticWorkingTarget(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!?semantic_codec.target.OwnedLocated {
-    const result = e.wl_semantic_working_target(p(&scratch), scratch.len);
-    if (result == 0) return null;
-    if (result < 0) return error.Rejected;
-    const len: usize = @intCast(result);
-    if (len > scratch.len) return error.Rejected;
-    return try semantic_codec.target.decodeLocated(gpa, scratch[0..len]);
-}
 
 /// Attach a retained semantic view to this head. NodeId is canonically split
 /// into two wasm32 words; the explicit presence bit keeps an absent preference
@@ -2193,11 +2138,6 @@ pub fn envPublish(vars: []const u8) i32 {
     return e.wl_env_publish(p(vars.ptr), @intCast(vars.len));
 }
 
-/// Withdraw this plugin's overlay for this place. Owner-scoped.
-pub fn envRetract() bool {
-    return e.wl_env_retract() == 1;
-}
-
 pub fn placeRoot() []const u8 {
     const n = e.wl_place_root(p(&scratch), scratch.len);
     return if (n <= 0) "" else scratch[0..@intCast(n)];
@@ -2394,13 +2334,6 @@ pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
     const n = e.wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
-}
-/// Asynchronously list a REMOTE directory ("peer"): the listing is delivered
-/// into the `dest` buffer a few frames later (no blocking round-trip). Returns
-/// true if queued (a connected session exists), false otherwise. For local
-/// listings use the synchronous `fsList("here", …)`.
-pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) bool {
-    return e.wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
 }
 
 /// Typed status returned by the target-scoped filesystem membrane.  A
@@ -2643,16 +2576,6 @@ pub fn semanticTransferCapture(
             },
         },
     };
-}
-
-pub fn semanticTransferRetain(attachment: semantic.transfer.Attachment) bool {
-    const wire = attachment.toWire();
-    return e.wl_semantic_transfer_retain(wire.authority, wire.slot, wire.generation) == 1;
-}
-
-pub fn semanticTransferRelease(attachment: semantic.transfer.Attachment) bool {
-    const wire = attachment.toWire();
-    return e.wl_semantic_transfer_release(wire.authority, wire.slot, wire.generation) == 1;
 }
 
 // ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────

@@ -672,42 +672,6 @@ pub fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     results[0] = @intCast(caller.writeMemory(@intCast(args[4]), @intCast(args[5]), listing) catch 0);
 }
 
-/// `fs.list_async(authority, path, dest)` (perm fs_read, trap on deny) → 0
-/// queued / -1. The async remote door: for a `"peer"` authority, queue a LIST
-/// that the frame loop posts over the connected session and delivers into the
-/// `dest` buffer (round-2 D1 — never a blocking round-trip on the frame
-/// thread). A local authority uses the synchronous `fs.list` instead, so this
-/// returns -1 for it.
-pub fn hFsListAsync(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!requirePerm(p, caller, .fs_read)) return;
-    const auth = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(auth);
-    const path = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(path);
-    const dest = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(dest);
-    const bridge = g_peer_fs orelse {
-        results[0] = -1;
-        return;
-    };
-    if (!std.mem.eql(u8, auth, "peer")) {
-        results[0] = -1;
-        return;
-    }
-    bridge.enqueue(path, dest);
-    results[0] = 0;
-}
-
 /// Find-or-create the named buffer and replace its whole content with `content`,
 /// authored as `author` (grade-gated) — the shared delivery used by proc output
 /// and the async `.peer` fs listing. Frame-thread only.

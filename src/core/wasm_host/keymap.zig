@@ -60,18 +60,6 @@ pub fn hBindKeys(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     p.activeCtx().keymap.bindArms(gpa, mode, key, cmds[0..n], Keymap.prio_plugin, p.name) catch {};
 }
 
-/// wl_declare_action(name) — a plugin declares an abstract intent + its
-/// trampoline command, so a key can bind to `name` and dispatch by context.
-pub fn hDeclareAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(name);
-    const command = @import("../command.zig");
-    command.registerAction(gpa, p.activeCtx().commands, p.activeCtx().actions, name, .pick) catch {};
-}
-
 /// wl_provide(action, mode, lang, tool, cmd, prio) — a plugin registers a
 /// provider for `action`, owned by its name (so teardown drops it and equal-
 /// tier collisions are attributable). Empty mode/lang/tool = "don't care".

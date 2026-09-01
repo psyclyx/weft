@@ -58,6 +58,35 @@ const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8
     .{ .spelling = "weft.cwd(", .reason = "the process-directory guest shim is retired — use weft.placeRoot() (doc/place.md)" },
 };
 
+/// Doors that were DECLARED AND NEVER CALLED — by any plugin, any shared
+/// library, any fixture, the config plane, or the JS plane. Twelve of them,
+/// found by a census rather than by suspicion.
+///
+/// They are gated together because they are one failure, not twelve: a
+/// mechanism shipped ahead of its consumer, and the consumer never arrived.
+/// Four are semantic-plane surface built for a client that does not exist;
+/// `wl_readonly_span` let a guest mark ranges read-only in a projection that
+/// now declares its own read-only-ness; `wl_declare_action` is the intent
+/// half of a `provide` story whose two live actions never needed it.
+///
+/// The rule this gate exists to hold: a door earns its place by having a
+/// caller. Re-adding any of these means bringing its consumer with it in the
+/// same change — which is the discipline whose absence put them here.
+const retired_dead_doors = [_][]const u8{
+    "wl_declare_action",
+    "wl_env_retract",
+    "wl_fs_list_async",
+    "wl_pick_add_keyed",
+    "wl_readonly_clear",
+    "wl_readonly_span",
+    "wl_semantic_active",
+    "wl_semantic_working_target",
+    "wl_subbuffer_clear",
+    "wl_subbuffer_fact_at",
+    "wl_semantic_transfer_retain",
+    "wl_semantic_transfer_release",
+};
+
 const Violation = struct {
     path: []const u8,
     line: usize,
@@ -164,6 +193,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
                 try scan.record(rel_path, line_no, gone.reason);
         }
 
+        for (retired_dead_doors) |gone| {
+            if (std.mem.indexOf(u8, line, gone) != null)
+                try scan.record(rel_path, line_no, "a door retired for having no caller — bring its consumer in the same change or leave it out");
+        }
+
         if (std.mem.indexOf(u8, line, "fn semanticActive") != null) {
             try scan.semantic_active_defs.append(scan.gpa, .{
                 .path = try scan.gpa.dupe(u8, rel_path),
@@ -242,12 +276,13 @@ test "demolition: §19 checklist absences hold over src/" {
         try scanFile(&scan, rel_path, contents);
     }
 
-    // `semanticActive` (doc §19: "`semanticActive` branches") has exactly one
-    // definition site left: the guest ABI shim (src/plugin_sdk/root.zig). Anything
-    // else means a second implementation snuck back in, bypassing the shim.
-    if (scan.semantic_active_defs.items.len != 1 or
-        !std.mem.eql(u8, scan.semantic_active_defs.items[0].path, "src/plugin_sdk/root.zig"))
-    {
+    // `semanticActive` (doc §19: "`semanticActive` branches") has NO definition
+    // site left. It used to have exactly one — the guest ABI shim — and this
+    // gate admitted that one. The door behind it had no caller in any plugin,
+    // shared library, fixture, config, or the JS plane, so it went with the
+    // rest of the dead surface (see `retired_dead_doors`), and the gate
+    // tightened from "exactly one, in the shim" to "none anywhere."
+    if (scan.semantic_active_defs.items.len != 0) {
         for (scan.semantic_active_defs.items) |v|
             std.debug.print("demolition: unexpected semanticActive definition at {s}:{d}\n", .{ v.path, v.line });
         try t.expect(false);

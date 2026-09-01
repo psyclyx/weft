@@ -117,7 +117,7 @@ pub const Entry = struct {
     /// else, in particular:
     ///   - mode/menu TABLE declarations (`wl_menu_mode`,
     ///     `wl_resting_mode`, `wl_sticky_menu`, `wl_set_fallback`,
-    ///     `wl_bind_key`, `wl_text_input`, `wl_declare_action`, `wl_provide`)
+    ///     `wl_bind_key`, `wl_text_input`, `wl_provide`)
     ///     — these declare what a mode/action IS, system-scoped (Keymap
     ///     owns the tables; Head owns only the CURSOR into them — see
     ///     Head.zig's "THE SPLIT"), legal from `init`.
@@ -196,8 +196,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_style", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "paint `[start,end)` of the active buffer's styles bulk with `class`" },
     .{ .name = "wl_fold_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's fold layer and empty it" },
     .{ .name = "wl_fold", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "hide `[start,end)` as an invisible/folded span" },
-    .{ .name = "wl_readonly_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's read-only-span layer and empty it" },
-    .{ .name = "wl_readonly_span", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "mark `[start,end)` read-only (edit-door defense in depth)" },
     .{ .name = "wl_decorate_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's decorations layer and empty it" },
     .{ .name = "wl_decorate", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "place a display-only decoration (virtual text) anchored at `anchor`" },
     .{ .name = "wl_breakpoint_toggle", .params = &.{.u32}, .results = &.{.i32}, .group = .layers, .doc = "toggle an ANCHORED breakpoint at `offset` in the active document; 1 if now set" },
@@ -240,7 +238,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
     .{ .name = "wl_mode_names", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "every mode with a binding table, newline-joined; cap=0 reports the length, short destinations return -2" },
     .{ .name = "wl_binding_table", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "mode `m`'s bindings resolved through its fallback chain, one `<key>\t<command>` per line" },
-    .{ .name = "wl_declare_action", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare an abstract action + its trampoline command" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, scoped by mode/lang/tool + priority" },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
@@ -285,7 +282,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pick_free_text", .params = &.{.u32}, .results = &.{}, .group = .pick, .doc = "let the pick being built accept the typed query, not only a listed candidate" },
     .{ .name = "wl_pick_category", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "declare the KIND of the pick being built (`file`/`buffer`/`command`); empty — the default — means it is never annotated" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
-    .{ .name = "wl_pick_add_keyed", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying an uninterpreted public key an annotator can resolve when the label is not one" },
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
@@ -329,8 +325,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_node_children", .params = &.{.u32}, .results = &.{.i32}, .group = .syntax, .doc = "the named children of the smallest node at `off` (structural descent)" },
     .{ .name = "wl_claim_subbuffer", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "claim `[start,end)` as a subbuffer (a projection row's hidden identity)" },
     .{ .name = "wl_subbuffer_put_fact", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .syntax, .doc = "attach a key/value fact to a claimed subbuffer" },
-    .{ .name = "wl_subbuffer_clear", .params = &.{}, .results = &.{}, .group = .syntax, .doc = "release every subbuffer this plugin claimed" },
-    .{ .name = "wl_subbuffer_fact_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "read fact `key` off the innermost subbuffer covering `offset`" },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "the path of the buffer taking focus (host→guest activation, borrowed)" },
@@ -345,8 +339,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
-    .{ .name = "wl_semantic_active", .params = &.{}, .results = &.{.u32}, .group = .semantic, .doc = "whether this head currently focuses a live semantic view" },
-    .{ .name = "wl_semantic_working_target", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "copy this head's validated exact working target, return zero when absent" },
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
     .{ .name = "wl_semantic_interaction_open", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "decode and open a bounded interaction definition on this head, writing its typed ref" },
     .{ .name = "wl_semantic_interaction_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .head_gated = true, .doc = "close the active head-local interaction named by a typed ref" },
@@ -381,8 +373,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_relation_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical relation query" },
     .{ .name = "wl_semantic_relation_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer one relation query with no edge, a canonical located edge, or a typed failure" },
     .{ .name = "wl_semantic_transfer_capture", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .perm = .fs_read, .doc = "capture an authorized filesystem entry into an owner-scoped semantic transfer attachment" },
-    .{ .name = "wl_semantic_transfer_retain", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "retain an owner-scoped semantic transfer attachment" },
-    .{ .name = "wl_semantic_transfer_release", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "release an owner-scoped semantic transfer attachment" },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
@@ -394,7 +384,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_place_id", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "a dense opaque id for the dispatching place; compare it, never interpret it" },
     .{ .name = "wl_place_has", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "what `<the dispatching place>/<rel>` is (absent/file/dir/other), resolved BENEATH the place root — a question about the place you are in, not filesystem access" },
     .{ .name = "wl_env_publish", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "publish this plugin's environment overlay (NUL-separated KEY=VALUE) for the dispatching place" },
-    .{ .name = "wl_env_retract", .params = &.{}, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "withdraw this plugin's environment overlay for the dispatching place" },
     .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
     .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
     .{ .name = "wl_proc_spool", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer`, but write `<input>` to a HOST-NAMED temp file, substitute it for `{}` in `<cmd>`, and delete it afterwards — a subprocess gets a real path without the guest holding fs_write" },
@@ -426,7 +415,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_fs_write", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "replace a file's contents" },
     .{ .name = "wl_fs_append", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "append to a file (capture)" },
     .{ .name = "wl_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list a local directory (locus-routed; remote authorities degrade to -1)" },
-    .{ .name = "wl_fs_list_async", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "queue an async `.peer` directory listing, delivered to a buffer" },
     .{ .name = "wl_semantic_fs_publish_child_directory", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "derive and publish one provider-confined direct child directory from a canonical guarded request" },
     .{ .name = "wl_semantic_fs_publish_child_file", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "publish one provider-guarded direct child ordinary file from a canonical guarded request" },
     .{ .name = "wl_semantic_fs_capabilities", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "query provider capabilities for a live semantic target revision" },
@@ -475,7 +463,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 240;
+const expected_import_count = 228;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
