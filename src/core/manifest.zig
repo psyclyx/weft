@@ -64,6 +64,7 @@ const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const builtins = @import("builtins.zig");
 const kv = @import("kv.zig");
+const framed = @import("framed.zig");
 const container_mod = @import("container.zig");
 const facts = @import("weft_facts");
 const Keymap = @import("Keymap.zig");
@@ -821,6 +822,13 @@ pub const Manifest = struct {
                 continue;
             }
             if (actx.config) |store| store.put(gpa, d.owner, d.key, d.value) catch {};
+            // A THEME VALUE IS A BINDING. `theme/<leaf>` is what core resolves
+            // when it paints a projection row, so a theme that only reached the
+            // value store reached nothing: the table was overridable in
+            // principle and unreachable in practice, which was the whole of
+            // what phase 9 had left.
+            if (std.mem.eql(u8, d.owner, "theme"))
+                applyTheme(actx.ctx, d.key, d.value, self.owner, self.tier);
         }
         for (self.echoes.items) |d| {
             actx.ctx.head.echo.clearRetainingCapacity();
@@ -1317,6 +1325,53 @@ fn ownerIsKnown(owner: []const u8, known_plugins: *const std.StringHashMapUnmana
     if (known_plugins.contains(owner)) return true;
     for (core_value_namespaces) |ns| if (std.mem.eql(u8, owner, ns)) return true;
     return false;
+}
+
+/// `weft.set("theme", <leaf>, <class>)` — bind the style class core resolves
+/// for every role whose LAST dotted segment is `<leaf>`, so one line themes
+/// `git.hunk`, `fs.hunk`, and anything else that calls its rows hunks.
+///
+/// Only a DECLARED leaf binds. The slot family is core's (`projection
+/// .declareTheme`), and a name outside it would need a slot nobody declared —
+/// refused out loud rather than accepted and silently doing nothing.
+///
+/// A value that is not a class name is left alone: the palette entries
+/// (`accent`, `cursor`, `syn_comment`) share this namespace and are read by the
+/// renderer, not by the container.
+fn applyTheme(
+    ctx: *command.Context,
+    leaf: []const u8,
+    class: []const u8,
+    owner: []const u8,
+    tier: container_mod.Tier,
+) void {
+    const projection = @import("projection.zig");
+    // The staged value is FRAMED (`weft.set` carries a list, one record for a
+    // plain string), which is why the binding takes the record and not the
+    // blob: `resolveOne`'s consumer compares the class by name, and a
+    // length-prefixed "emphasis" is not one.
+    const value = framed.first(class) orelse return;
+    const parsed = std.meta.stringToEnum(projection.Class, value) orelse return;
+    inline for (projection.default_theme) |row| {
+        if (std.mem.eql(u8, row.leaf, leaf)) {
+            ctx.actions.container.bind(.{
+                .slot = projection.theme_slot_prefix ++ row.leaf,
+                // `@tagName`, not the manifest's bytes: the container BORROWS a
+                // provider's payload, and the manifest is destroyed as soon as
+                // it has been applied. A class name is one of a closed set, so
+                // there is a static spelling of it to point at.
+                .provider = .{ .value = @tagName(parsed) },
+                .predicate = .{ .all = &.{} },
+                .tier = tier,
+                .owner = owner,
+            }) catch {};
+            return;
+        }
+    }
+    std.log.warn(
+        "config: weft.set(\"theme\", \"{s}\", \"{s}\") — no such theme leaf; it is not a row role core knows",
+        .{ leaf, class },
+    );
 }
 
 /// `weft.menu(name)` application (see quickjs.zig's old `cMenu` doc — same

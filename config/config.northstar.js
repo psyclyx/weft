@@ -374,6 +374,13 @@ weft.set("theme", "selection", "#3c4a5e");
 weft.set("theme", "syn_comment", "#7c6f64");
 weft.set("theme", "diag_error", "#fb4934");
 
+// A ROW ROLE is themed by its last dotted segment, so one line covers every
+// producer that calls its rows the same thing: `git.hunk` and `fs.hunk` are
+// both hunks, and neither plugin chose a colour or knew about this file. The
+// value is a style CLASS, not a hex — what the row IS. Core reads a hunk as
+// `muted`; this says a hunk header is worth finding.
+weft.set("theme", "hunk", "emphasis");
+
 // The one imperative survivor, explicitly a startup-context effect (the
 // `startup` transient scope exists exactly for lines like this):
 weft.echo("weft: config.js loaded");

@@ -310,6 +310,38 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // The config ran to completion (its last line echoes this).
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "config.js loaded") != null);
 
+    // THE THEME IS A TABLE, AND THE CONFIG REACHES IT. `weft.set("theme",
+    // "hunk", …)` binds the slot core resolves when it paints a projection
+    // row, so every producer that calls its rows hunks is restyled by ONE
+    // line — and neither of them chose a colour or knows this file exists.
+    //
+    // Asserted through `styleForIn`, which is the function the renderer calls:
+    // a theme table that only reached the value store would pass a test that
+    // read the store and change nothing on screen.
+    {
+        const container = ed.ctx.actions.container;
+        const no_facts: core.facts.Facts = .{};
+        try t.expectEqual(
+            core.projection.Class.emphasis,
+            core.projection.styleForIn(container, no_facts, "git.hunk"),
+        );
+        // One leaf, every producer: `fs.hunk` was never mentioned.
+        try t.expectEqual(
+            core.projection.Class.emphasis,
+            core.projection.styleForIn(container, no_facts, "fs.hunk"),
+        );
+        // A leaf the config left alone still reads as core bound it.
+        try t.expectEqual(
+            core.projection.Class.added,
+            core.projection.styleForIn(container, no_facts, "git.diff.added"),
+        );
+        // A role nobody themed is plain text, not a guess.
+        try t.expectEqual(
+            core.projection.Class.normal,
+            core.projection.styleForIn(container, no_facts, "some.plugin.thing"),
+        );
+    }
+
     // Every open structured-view action exposed by the sample configuration
     // is a real semantic command, not merely an unvalidated keymap string.
     // This keeps the config surface honest for any plugin-owned scene: a
