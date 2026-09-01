@@ -251,9 +251,11 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // its contents. The grammar names neither the plugin nor the kind.
     const browser_entry = ed.buffers.active().id;
     ed.press("Return", "\r");
-    // Descending re-lists IN PLACE: one listing entry, a new tree in it, which
-    // is what keeps a docked sidebar from growing a buffer per directory.
-    try t.expectEqual(browser_entry, ed.buffers.active().id);
+    // A directory is its own LISTING, in its own instanced entry — the same
+    // shape the scene had (a view per directory), now spelled as a buffer per
+    // directory, which is what lets any of them be docked.
+    try t.expect(ed.buffers.active().id != browser_entry);
+    try t.expect(ed.buffers.active().projection != null);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
