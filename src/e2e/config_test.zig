@@ -1392,8 +1392,14 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
 
     // Presenting the subject opened it through the ordinary `open`, into the
     // panel, and left the focus (and the editor's own entry) alone.
+    //
+    // The panel holds the LISTING BUFFER the files plugin publishes — not a
+    // buffer core made to carry a scene. That is the whole of why docking one
+    // is trivial: `presentIn` runs `open` and puts the resulting buffer in the
+    // pane, so a listing that IS a buffer needs no sidebar-specific path.
     const browser = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
-    try t.expect(std.mem.startsWith(u8, browser.name, "files: "));
+    try t.expect(std.mem.startsWith(u8, browser.name, "*files"));
+    try t.expect(browser.projection != null);
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expect(primary.pane().buffer_id != panel.pane().buffer_id);
 }

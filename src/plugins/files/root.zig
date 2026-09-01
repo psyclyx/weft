@@ -14,6 +14,7 @@ var plugin: files_guest.Plugin = undefined;
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "files", .call = browse },
+    .{ .name = "files-show", .call = files_guest.showPending },
     .{ .name = "files-list", .call = filesList, .summary = "List this place as an editable buffer." },
     .{ .name = "files-enter", .call = filesEnter, .summary = "Descend into, or open, the row under point." },
     .{ .name = "files-up", .call = filesUp, .summary = "List the parent directory." },

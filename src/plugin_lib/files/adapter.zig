@@ -87,6 +87,9 @@ pub const Plugin = struct {
         }
         for (self.sessions.items) |session| {
             if (session.target.eql(request.value.target) and session.target_revision == request.value.revision) {
+                // The listing is a BUFFER; opening one means looking at it.
+                pending_show = session;
+                weft.run("files-show");
                 _ = weft.semanticTargetHandlerOpenView(session.view_ref);
                 return;
             }
@@ -121,8 +124,15 @@ pub const Plugin = struct {
             _ = weft.semanticTargetHandlerOpenError(error.Failed);
             return;
         };
-        if (!weft.semanticTargetHandlerOpenProvisional(session.view_ref))
+        if (!weft.semanticTargetHandlerOpenProvisional(session.view_ref)) {
             _ = self.removeSession(session.view_ref);
+            return;
+        }
+        // OPENING a directory means looking at it, and what you look at is the
+        // listing BUFFER. The host used to attach the scene to a buffer of its
+        // own here (`session.zig`.s `attachFocusedSemanticView`).
+        pending_show = session;
+        weft.run("files-show");
     }
 
     /// Settle only sessions created by a provisional open. Existing retained
@@ -272,6 +282,15 @@ const RowTarget = struct {
     fresh: bool = false,
 };
 
+/// The session whose listing the next `files-show` is for. Set immediately
+/// before the nested `weft.run` that consumes it, and cleared by it.
+///
+/// A nested `wl_run` IS a dispatching entry for its duration, which is the only
+/// way a target handler — invocable from a background entry — may touch head
+/// state at all (creating a buffer, declaring its posture). The same door git
+/// defers its drop notices through.
+var pending_show: ?*Session = null;
+
 pub const Session = struct {
     plugin: *Plugin,
     target: semantic.target.Ref,
@@ -304,7 +323,12 @@ pub const Session = struct {
     /// Creating a buffer focuses it, and a listing that steals focus whenever
     /// its model moves would yank the user out of whatever they were doing on
     /// every background refresh.
-    fn ensureBuffer(self: *Session) void {
+    /// Take this listing.s buffer and SHOW it. Called only from the display
+    /// path (`targetOpen`), never from a refresh: creating a buffer and
+    /// declaring its posture are head state, which a background delivery may
+    /// not touch — and a listing resolved to answer "which project is this
+    /// file in" must not materialise a buffer nobody asked to see.
+    pub fn showBuffer(self: *Session) void {
         if (self.buf_len == 0) {
             var n: u32 = 1;
             while (n < 64) : (n += 1) {
@@ -317,21 +341,26 @@ pub const Session = struct {
             }
         }
         if (self.buf_len == 0) return;
-        if (weft.bufferNamed(self.bufferName())) return;
-        var prev: [64]u8 = undefined;
-        const was = weft.activeBufferName(&prev);
-        weft.runStr("buffer-create", self.bufferName());
-        weft.toolBacking("files");
-        if (was) |name| _ = weft.focusBuffer(name);
+        if (!weft.bufferNamed(self.bufferName())) {
+            weft.runStr("buffer-create", self.bufferName());
+            weft.toolBacking("files");
+            // HOW it rests, not WHICH MODE. A listing is rows you navigate, so
+            // it rests `structural`; the GRAMMAR says what that means in its
+            // own vocabulary. The browser owns no keymap — the property the
+            // scene plane had, kept.
+            weft.declarePosture(.structural);
+        } else _ = weft.focusBuffer(self.bufferName());
+        self.publishRows(&self.draft);
     }
 
     /// The draft as a TEXT PROJECTION — the same rows the scene shows, in the
     /// form a viewport can hold. Every row is EDITABLE: a rename is typing on
     /// its line, and `applyEdits` reads them back BY KEY.
+    /// Republish into the listing buffer IF it exists. A refresh never creates
+    /// one: a model that moved while nobody was looking has nothing to show.
     fn publishRows(self: *Session, staged: *const files.Model) void {
-        self.ensureBuffer();
         const name = self.bufferName();
-        if (name.len == 0) return;
+        if (name.len == 0 or !weft.bufferNamed(name)) return;
         const b = weft.project(name) orelse return;
         for (staged.rows.items) |row| {
             var key_buf: [24]u8 = undefined;
@@ -413,7 +442,6 @@ pub const Session = struct {
         self.controller = .init(self.plugin.gpa, &self.draft, self.view_ref);
         self.loaded = true;
         self.retireRowTargets();
-        self.publishRows(&self.draft);
     }
 
     fn deinit(self: *Session) void {
@@ -1046,4 +1074,16 @@ fn respondOutcome(outcome: semantic.action.Outcome) !void {
         .open_relation => |request| try weft.semanticActionOpenRelation(request),
         .set_working_target => |located| try weft.semanticActionSetWorkingTarget(located),
     }
+}
+
+/// `files-show`: display the listing whose session was just opened.
+///
+/// It exists to BE a dispatching entry. A target handler may be invoked from a
+/// background delivery, and creating a buffer or declaring its posture is head
+/// state — so the open hands the work to this command through a nested
+/// `weft.run` rather than doing it where it may not.
+pub fn showPending() void {
+    const session = pending_show orelse return;
+    pending_show = null;
+    session.showBuffer();
 }

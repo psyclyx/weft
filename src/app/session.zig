@@ -753,8 +753,23 @@ const LocalDirectoryRelations = struct {
 
 fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref) anyerror!void {
     const services = ctx.semantic orelse return error.SemanticUnavailable;
+    // A handler that SHOWED you something keeps it. `files` publishes its
+    // listing as an ordinary text buffer and focuses that, which is what lets a
+    // viewport hold it — core attaching a scene-backed buffer on top would be
+    // the second display path all over again. A handler that only published a
+    // scene still gets core.s default presentation, below.
+    const before = ctx.buffers.active_id;
     switch (try core.target_open.openAndFocus(services, ctx.head, ctx.gpa, target)) {
         .opened => {
+            if (ctx.buffers.active_id != before) {
+                // The handler showed its own BUFFER, so the scene it published
+                // for the open protocol is not what your keys are about. Left
+                // focused, `std.navigation.down` would resolve to a semantic
+                // move and `j` would do nothing to the cursor — two
+                // presentations of one listing, fighting.
+                ctx.head.semantic_focus.clear();
+                return;
+            }
             const descriptor = services.targets.get(target) orelse return error.StaleTarget;
             const base = std.fs.path.basename(descriptor.display_name);
             const name = try std.fmt.allocPrint(ctx.gpa, "files: {s}", .{if (base.len == 0) descriptor.display_name else base});

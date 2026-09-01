@@ -1312,24 +1312,31 @@ test "e2e/regression: a >256-byte buffer name reaches a plugin whole" {
     defer app.deinit();
     const ed = &app.ed;
 
-    // A directory named to NAME_MAX: its `files:` view buffer is named past
-    // the 256-byte scratch the tool plugins used to copy a name into.
-    const dir_name = try gpa.alloc(u8, 255);
-    defer gpa.free(dir_name);
-    @memset(dir_name, 'd');
+    // A FILE named to NAME_MAX: its buffer is named past the 256-byte scratch
+    // the tool plugins used to copy a name into.
+    //
+    // It used to be a DIRECTORY, whose `files: <path>` view buffer was long for
+    // the same reason. That buffer is the files plugin's own `*files*` listing
+    // now — a listing is a buffer the producer owns, which is what lets a
+    // viewport hold it — so the long name has to come from somewhere that
+    // still has one. The subject is unchanged: a name longer than any fixed
+    // scratch, crossing the membrane whole.
+    const stem = try gpa.alloc(u8, 250);
+    defer gpa.free(stem);
+    @memset(stem, 'd');
+    const file_name = try std.fmt.allocPrint(gpa, "{s}.js", .{stem});
+    defer gpa.free(file_name);
     {
-        const cmd = try std.fmt.allocPrint(gpa, "mkdir -- '{s}' && printf 'const a = 1;\\n' > '{s}'/app.js", .{ dir_name, dir_name });
+        const cmd = try std.fmt.allocPrint(gpa, "printf 'const a = 1;\\n' > '{s}'", .{file_name});
         defer gpa.free(cmd);
         const out = try app.proj.oracle(cmd);
         gpa.free(out);
     }
 
-    ed.runStr("open", dir_name);
+    ed.runStr("open", file_name);
     const view_name = try gpa.dupe(u8, ed.bufferName());
     defer gpa.free(view_name);
-    try t.expect(view_name.len > 256);
-    try t.expectEqualStrings("files: ", view_name[0..7]);
-    try t.expectEqualStrings(dir_name, view_name[7..]);
+    try t.expectEqualStrings(file_name, view_name);
 
     // The buffer picker is a plugin reading every buffer's name across the
     // membrane: the long one arrives whole, so picking it lands back on it.
@@ -1395,60 +1402,60 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     ed.runStr("run-command", "node app.js");
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
-
     // ── 4. Browse the project through the provider-aware `open` command. ──
     // The app Session publishes a typed directory target and the composed files
-    // plugin claims it as an ordinary semantic view attached to a real tool
-    // buffer. The input posture remains Vim's; the browser owns no keymap.
+    // plugin claims it — publishing the listing as its OWN BUFFER, a text
+    // projection. That is what lets a viewport hold it (`presentIn` runs `open`
+    // and puts the resulting buffer in the pane), and it is why browsing is
+    // ordinary text: searchable, yankable, selectable. The input posture
+    // remains Vim's; the browser owns no keymap.
     const prior_buffer = ed.buffers.active().id;
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    const scene = ed.session.system.semantic.views.get(view_ref).?.scene;
-    try t.expectEqualStrings("files", scene.role);
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
     try t.expectEqualStrings("files", ed.buffers.active().tool);
+    const listing = ed.buffers.active();
+    try t.expect(listing.projection != null);
 
-    const children = switch (scene.content) {
-        .container => |container| container.children,
-        else => return error.FilesSceneNotContainer,
-    };
-    try t.expectEqual(@as(usize, 2), children.len);
-    try t.expectEqualStrings("files.row", children[0].role);
-    try t.expectEqualStrings("files.row", children[1].role);
-    var saw_app = false;
-    var saw_index = false;
-    for (children) |row| {
-        const field_ref = row.content.container.children[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        saw_app = saw_app or std.mem.eql(u8, snapshot.value.bytes, "app.js");
-        saw_index = saw_index or std.mem.eql(u8, snapshot.value.bytes, "index.html");
+    // The entries are ROWS with identity: keyed by the model id, roled by what
+    // they are, and readable as text.
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "app.js") != null);
+        try t.expect(std.mem.indexOf(u8, text, "index.html") != null);
     }
-    try t.expect(saw_app and saw_index);
+    var saw_file_role = false;
+    for (listing.projection.?.nodes.items) |node|
+        saw_file_role = saw_file_role or std.mem.eql(u8, node.role, "fs.file");
+    try t.expect(saw_file_role);
 
-    // Vim's ordinary j/k motions consume the generic semantic focus protocol;
-    // the plugin does not need to know that the caller happens to be Vim.
-    const first_focus = ed.head.semantic_focus.path().?.leaf().?;
+    // Vim's ordinary j/k motions move point between rows. The plugin does not
+    // need to know that the caller happens to be Vim — and neither does the
+    // caller need to know it is driving a listing rather than a file, which is
+    // the half the scene plane could not give.
+    const rowKey = struct {
+        fn of(b: *core.Buffers.Buffer) []const u8 {
+            const node = b.projection.?.subjectAt(b.textEditor().?.cursorOffset()) orelse return "";
+            return node.key;
+        }
+    }.of;
+    // Point rests on a row, and the row it rests on is an IDENTITY — which is
+    // what the text plane used to lack and the reason a browser had to be a
+    // scene to have one.
+    try t.expect(listing.focusedRole().len > 0);
+    const start_key = rowKey(listing);
+    const start_off = listing.textEditor().?.cursorOffset();
     ed.press("j", "");
-    const second_focus = ed.head.semantic_focus.path().?.leaf().?;
-    try t.expect(first_focus != second_focus);
+    try t.expect(!std.mem.eql(u8, start_key, rowKey(listing)));
     ed.press("k", "");
-    try t.expectEqual(first_focus, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqualStrings(start_key, rowKey(listing));
     try t.expectEqualStrings("normal", ed.mode());
-
-    // The same view can be refreshed through the generic action endpoint. It
-    // remains retained and focused, rather than being reconstructed as a tool
-    // buffer or dropping the head back into a files mode.
-    ed.run("view-refresh");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(view_ref).?.scene.role);
     proj.shot(&ed, "web-3-files");
 
     // Vim maps q to the generic navigate-back action. The file browser knows
     // neither that key nor Vim, and buffer history performs the transition.
     ed.press("q", "");
     try t.expectEqual(prior_buffer, ed.buffers.active().id);
-    try t.expect(ed.head.semantic_focus.path() == null);
 }
 
 // Two of an instantiable tool stay isolated. A stateful session belongs to the
