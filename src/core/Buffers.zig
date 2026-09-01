@@ -121,6 +121,21 @@ pub const Buffer = struct {
     /// why capture can never be a one-way door.
     pre_capture: ?Posture = null,
 
+    /// WHAT the focused row is, when this entry is a projection: the `role`
+    /// its producer gave the node under point. Empty otherwise.
+    ///
+    /// A method on the ENTRY because two fact builders need it —
+    /// `intent.factsFor` and `Ctx.capture`, which build the same facts twice
+    /// through different code. That duplication predates this and is not fixed
+    /// here; what is avoided is making it a THIRD place that has to agree
+    /// about what a role is.
+    pub fn focusedRole(self: *Buffer) []const u8 {
+        const view = self.projection orelse return "";
+        const ed = self.textEditor() orelse return "";
+        const node = view.nodeAt(ed.cursorOffset()) orelse return "";
+        return node.role;
+    }
+
     pub fn ref(self: *const Buffer) Ref {
         return .{ .id = self.id, .generation = self.generation };
     }

@@ -351,29 +351,10 @@ pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
         .mode = ctx.head.currentMode(),
         .lang = Actions.langOfName(entry.name),
         .tool = entry.tool,
-        .role = roleAt(entry),
+        .role = entry.focusedRole(),
         .locality = localityOf(entry),
         .pane = ctx.head.focused_pane,
     };
-}
-
-/// WHAT the focused row is, when this entry is a projection.
-///
-/// The axis a third party binds a verb against. `tool` says which producer the
-/// entry belongs to; `role` says what the ROW under point is, which is the
-/// difference between "a verb for git buffers" and "a verb for unstaged files
-/// wherever they appear". The producer publishes the role as part of its tree
-/// and never enumerates what its rows afford, so an extension it has never
-/// heard of can `provide` against one.
-///
-/// Empty for an ordinary entry, and empty when point is on a row the tree does
-/// not name — both of which read as "no row-specific verb applies", which is
-/// the honest answer.
-fn roleAt(entry: anytype) []const u8 {
-    const view = entry.projection orelse return "";
-    const editor = entry.textEditor() orelse return "";
-    const node = view.nodeAt(editor.cursorOffset()) orelse return "";
-    return node.role;
 }
 
 /// WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable

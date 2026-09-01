@@ -35,7 +35,14 @@ const cur = model.cur;
 /// Roles. The producer says what a row IS; how that reads is the host's
 /// (`projection.styleFor`), which is what will let a theme restyle a diff
 /// without this file changing.
-const role_section = "git.section";
+fn roleSection(sec: Section) []const u8 {
+    return switch (sec) {
+        .untracked => "git.section.untracked",
+        .unstaged => "git.section.unstaged",
+        .staged => "git.section.staged",
+        .recent => "git.section.recent",
+    };
+}
 /// Roles are SECTION-SPECIFIC (`git.file.unstaged`, `git.file.staged`, …).
 ///
 /// That is what lets eligibility be a predicate rather than a reason string:
@@ -205,7 +212,7 @@ pub fn repaint() void {
         if (!cur().sec_present[idx]) continue;
         const head = b.addFmt(.{
             .key = keyOf(.{ .kind = .section, .section = sec }),
-            .role = role_section,
+            .role = roleSection(sec),
             .foldable = true,
             // NOT focusable: a section header is structure. A fresh render
             // lands on the first row a verb can act on, which is what the

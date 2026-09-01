@@ -315,6 +315,7 @@ pub const Ctx = struct {
             .name = buf.name,
             .lang = action_mod.langOfName(buf.name),
             .tool = buf.tool,
+            .role = buf.focusedRole(),
             .locality = localityOf(buf),
         } });
         self.scopes.append(.{ .kind = .subbuffer });
