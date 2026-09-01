@@ -778,7 +778,26 @@ pub const Session = struct {
         const field = self.fieldFor(row, .name) orelse return error.MissingField;
         field.selection = .{ .anchor = 0, .caret = @intCast(name.len) };
         try self.updateField(field, &self.draft, field.revision);
+        // In the LISTING, the same thing: point lands on the new row with its
+        // placeholder SELECTED, so the next keystroke replaces `new-file`
+        // rather than appending to it. The selection is over the row.s own
+        // text, which is the only kind of position a producer may name.
+        self.selectRowName(row);
         return files.nameNodeId(row);
+    }
+
+    /// Put point on `id`.s row and select its NAME.
+    fn selectRowName(self: *Session, id: files.NodeId) void {
+        const name = self.bufferName();
+        if (name.len == 0 or !weft.bufferNamed(name)) return;
+        const view = self.draft;
+        for (view.rows.items, 0..) |r, ordinal| {
+            if (r.id != id) continue;
+            var buf: [1024]u8 = undefined;
+            const line = files.text_rows.lineOf(view.rows.items, r, &buf) orelse return;
+            weft.projectionSelect(@intCast(ordinal), line.name_at, line.nameEnd());
+            return;
+        }
     }
 
     fn applyConfirmation(self: *const Session) semantic.interaction.Definition {

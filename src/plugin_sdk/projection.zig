@@ -214,3 +214,14 @@ pub fn rows(out: []Row) []const Row {
     }
     return out[0..count];
 }
+
+/// Select `[start,end)` of `node`'s OWN text — the companion to
+/// `Builder.span`, and the thing a producer needs right after creating a row:
+/// the new name is a PLACEHOLDER, so the next keystroke should replace it
+/// rather than append to it.
+///
+/// Node-relative, like every other position here. A selection named in document
+/// coordinates would be the stale-offset hazard wearing a different hat.
+pub fn select(node: Ordinal, start: usize, end: usize) void {
+    e.wl_proj_select(@intCast(node), @intCast(start), @intCast(end));
+}

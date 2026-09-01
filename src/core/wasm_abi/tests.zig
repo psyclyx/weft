@@ -3388,9 +3388,13 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
     for (contract.imports) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "wl_proj_")) continue;
         found += 1;
-        if (std.mem.eql(u8, entry.name, "wl_proj_span")) {
+        if (std.mem.eql(u8, entry.name, "wl_proj_span") or
+            std.mem.eql(u8, entry.name, "wl_proj_select"))
+        {
             // Pinned so the exception cannot quietly widen into the rule: the
-            // paragraph above is true only while this is what the door means.
+            // paragraph above is true only while these are what the doors mean.
+            // Both index the NODE.S OWN TEXT — one to style a stretch of it,
+            // one to select one — and the host adds the rendered start.
             try t.expect(std.mem.indexOf(u8, entry.doc, "never the document") != null);
             spans_seen = true;
             continue;
@@ -3398,7 +3402,7 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
         try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
     }
     try t.expect(spans_seen);
-    try t.expectEqual(@as(usize, 8), found);
+    try t.expectEqual(@as(usize, 9), found);
 }
 
 test "projection: an edited row is found by its ANCHORS, not by where it was rendered" {

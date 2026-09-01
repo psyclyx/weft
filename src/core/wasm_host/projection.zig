@@ -117,6 +117,32 @@ pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     open.view.span(@intCast(args[0]), start, end, role) catch {};
 }
 
+/// `wl_proj_select(node, start, end)`: select `[start,end)` of node `node`.s OWN
+/// text.
+///
+/// The companion to `wl_proj_span`, and for the same reason: a producer that
+/// just created a row wants its name SELECTED so the next keystroke replaces
+/// the placeholder rather than appending to it. Naming that range in document
+/// coordinates would be the stale-offset hazard; naming it in the node.s own
+/// text is naming bytes the producer wrote.
+pub fn hProjSelect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().buffers.active();
+    const view = entry.projection orelse return;
+    if (!std.mem.eql(u8, view.owner, p.name)) return;
+    const editor = entry.textEditor() orelse return;
+    if (args[0] < 0 or @as(usize, @intCast(args[0])) >= view.nodes.items.len) return;
+    const n = view.nodes.items[@intCast(args[0])];
+    const lo = @min(n.start + @as(usize, @intCast(@max(args[1], 0))), n.body);
+    const hi = @min(n.start + @as(usize, @intCast(@max(args[2], 0))), n.body);
+    if (lo >= hi) return;
+    editor.placeCursor(lo);
+    editor.setMark(p.gpa) catch return;
+    editor.placeCursor(hi);
+}
+
 /// `wl_proj_rows(out, cap) -> i32`: what every EDITABLE row says NOW, as
 /// `key\0text\0` pairs in rendered order. Returns bytes written, or -1.
 ///
