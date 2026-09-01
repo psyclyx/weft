@@ -12,9 +12,9 @@
 //! The buffer is written as the plugin's own peer through the same
 //! `command.renderInto` door `wl_edit` uses, so a projection is authored under
 //! the same authority as any other plugin edit and shows up in the same
-//! history. The style and fold layers are claimed exactly as `wl_style_clear`
-//! and `wl_fold_clear` claim them, so a projection composes with everything
-//! already reading those layers rather than needing a second painting path.
+//! history. The style and fold layers are claimed exactly as `wl_fold_clear`
+//! claims its own, so a projection composes with everything already reading
+//! those layers rather than needing a second painting path.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,8 +26,8 @@ const projection = @import("../projection.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
-/// The layer names the projection paints into — the SAME two `wl_style_clear`
-/// and `wl_fold_clear` claim. A projection is not a second rendering path.
+/// The layer names the projection paints into — the same two every other
+/// layer-claiming door uses. A projection is not a second rendering path.
 const styles_layer_name = "styles";
 const folds_layer_name = "folds";
 
@@ -97,7 +97,8 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 ///
 /// The offsets are into the text this plugin passed to `wl_proj_node`, not into
 /// the document — which is why this door exists at all rather than a tool view
-/// reaching for `wl_style`. A producer naming bytes it wrote one call ago is
+/// reaching for a door that paints the focused buffer at document
+/// coordinates. A producer naming bytes it wrote one call ago is
 /// naming something it knows; the same producer naming a document offset is
 /// naming something the next render moves. Nothing here can be turned into a
 /// document offset by the guest: the node's rendered start is added on this

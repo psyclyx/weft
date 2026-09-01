@@ -286,16 +286,16 @@ pub const StyleClass = enum(u32) {
     muted = 6,
 };
 
-/// Drop the active buffer's style spans and re-baseline them to `.normal` over
-/// the whole buffer — call before repopulating with `style`.
-pub fn styleClear() void {
-    e.wl_style_clear();
-}
-/// Paint `[start, end)` of the active buffer with `class` (clamped to the buffer;
-/// a no-op if `styleClear` wasn't called first this round).
-pub fn style(start: usize, end: usize, class: StyleClass) void {
-    e.wl_style(@intCast(start), @intCast(end), @intFromEnum(class));
-}
+// `styleClear`/`style` are RETIRED (doc §19). They painted the ACTIVE buffer by
+// byte offset — whichever buffer that happened to be — which is two problems
+// wearing one coat: a plugin naming a position in a rendering it did not
+// produce, and a plugin repainting a document that is not its own.
+//
+// Both have doors that cannot do either. A tool view publishes a PROJECTION
+// and styles it by ROLE, with `ProjectionBuilder.span` for a stretch inside a
+// row it wrote; a service plugin marking up someone else's document opens an
+// ANNOTATION layer, which is scoped, named, and revocable. The last caller of
+// the offset door went with git's read-only views.
 
 // ── Folding: hide byte ranges of the active buffer (rows collapse; vertical
 // motion skips them). A general primitive — status/files/grep/outline plugins

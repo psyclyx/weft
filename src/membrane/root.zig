@@ -123,7 +123,7 @@ pub const Entry = struct {
     ///     Head.zig's "THE SPLIT"), legal from `init`.
     ///   - buffer/editor-owned state post-W2a (`wl_jump`, `wl_set_selection`,
     ///     `wl_editor_step`, every `wl_edit*`/anchored-range import,
-    ///     `wl_flash`, every `wl_style*`/`wl_fold*`/`wl_readonly*`/
+    ///     `wl_flash`, every `wl_fold*`/`wl_readonly*`/
     ///     `wl_decorate*`) — cursor/selection/document content live on
     ///     `Editor`, not `Head`; flash/styles/folds are buffer layers.
     ///   - reads of head state (`wl_menu_binding_*`) and callback-local
@@ -192,8 +192,6 @@ pub const imports = [_]Entry{
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw" },
-    .{ .name = "wl_style_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's styles layer and baseline it to `.normal`" },
-    .{ .name = "wl_style", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "paint `[start,end)` of the active buffer's styles bulk with `class`" },
     .{ .name = "wl_fold_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's fold layer and empty it" },
     .{ .name = "wl_fold", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "hide `[start,end)` as an invisible/folded span" },
     .{ .name = "wl_decorate_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's decorations layer and empty it" },
@@ -464,7 +462,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 229;
+const expected_import_count = 227;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

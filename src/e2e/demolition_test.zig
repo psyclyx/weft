@@ -73,6 +73,16 @@ const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8
 /// caller. Re-adding any of these means bringing its consumer with it in the
 /// same change — which is the discipline whose absence put them here.
 const retired_dead_doors = [_][]const u8{
+    // These two are not "no caller" like the rest — they had callers until the
+    // last of them stopped needing to name a byte of a buffer it did not
+    // produce. `wl_style`/`wl_style_clear` painted the ACTIVE document by
+    // offset, whichever document that was. What replaced them says what a row
+    // IS (a projection role), or what stretch of a row the producer wrote
+    // (`wl_proj_span`), or marks up someone else's document through a scoped
+    // annotation layer. Re-adding either means re-admitting "paint whatever is
+    // focused, at coordinates from a rendering you didn't do".
+    "wl_style_clear",
+    "wl_style",
     "wl_declare_action",
     "wl_env_retract",
     "wl_fs_list_async",

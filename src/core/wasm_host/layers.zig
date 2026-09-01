@@ -27,50 +27,6 @@ pub fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     g_flash = .{ .start = @min(start, end), .end = @max(start, end), .gen = g_flash.gen + 1 };
 }
 
-/// The single per-buffer styles feed layer name (one styler per tool buffer,
-/// last claim wins — the registry discipline). Read by the view as bulk paint.
-const styles_layer_name = "styles";
-
-/// `style.clear()`: (re)claim the ACTIVE buffer's styles layer for this plugin
-/// and baseline it to `.normal` — a zeroed class-per-byte bulk spanning the
-/// whole buffer. The guest calls this before repainting spans with `wl_style`.
-/// Targets the active document, exactly like `wl_edit`.
-pub fn hStyleClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const doc = p.activeCtx().document() orelse return;
-    const len = doc.text().byteLen();
-    const layer = p.activeCtx().caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
-    const zeros = gpa.alloc(u8, len) catch return;
-    defer gpa.free(zeros);
-    @memset(zeros, 0);
-    const version = doc.version(gpa) catch return;
-    defer gpa.free(version);
-    layer.publishBulk(gpa, version, 0, zeros) catch {};
-}
-
-/// `style(start, end, class)`: paint the active buffer's styles bulk with
-/// `class` over `[start, end)` (clamped), mutating the published array in place
-/// so a whole classify pass is O(bytes), not O(spans²). A no-op when
-/// `wl_style_clear` hasn't run this round (no bulk to paint into).
-pub fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const doc = p.activeCtx().document() orelse return;
-    const layer = p.activeCtx().caps.layers.find(doc, styles_layer_name) orelse return;
-    if (layer.bulk) |*b| {
-        const start = @min(@as(usize, @intCast(@as(u32, @bitCast(args[0])))), b.classes.len);
-        const end = @min(@as(usize, @intCast(@as(u32, @bitCast(args[1])))), b.classes.len);
-        if (start >= end) return;
-        const class: u8 = @truncate(@as(u32, @bitCast(args[2])));
-        @memset(b.classes[start..end], class);
-    }
-}
-
 const folds_layer_name = "folds";
 pub const readonly_layer_name = "readonly";
 const decorations_layer_name = "decorations";
@@ -174,7 +130,7 @@ pub fn hBreakpointOffsets(data: ?*anyopaque, caller: *wasm.Caller, args: []const
 
 /// `fold.clear()`: (re)claim the ACTIVE buffer's fold layer for this plugin and
 /// empty it — the guest republishes its full fold set (a `fold` per range)
-/// after. Targets the active document, like `wl_style_clear`.
+/// after. Targets the active document, as every layer-claiming door does.
 pub fn hFoldClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;

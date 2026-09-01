@@ -118,8 +118,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .handler = layers.hFlash },
-    .{ .name = "wl_style_clear", .handler = layers.hStyleClear },
-    .{ .name = "wl_style", .handler = layers.hStyle },
     .{ .name = "wl_fold_clear", .handler = layers.hFoldClear },
     .{ .name = "wl_fold", .handler = layers.hFold },
     .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },

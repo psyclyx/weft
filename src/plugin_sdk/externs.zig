@@ -53,8 +53,6 @@ pub extern "weft" fn wl_edit_as(agent: u32, agent_len: u32, start: u32, end: u32
 pub extern "weft" fn wl_register(ptr: u32, len: u32) u32;
 pub extern "weft" fn wl_jump(offset: u32) void;
 pub extern "weft" fn wl_flash(start: u32, end: u32) void;
-pub extern "weft" fn wl_style_clear() void;
-pub extern "weft" fn wl_style(start: u32, end: u32, class: u32) void;
 pub extern "weft" fn wl_fold_clear() void;
 pub extern "weft" fn wl_fold(start: u32, end: u32) void;
 pub extern "weft" fn wl_decorate_clear() void;
