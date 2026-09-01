@@ -1200,7 +1200,9 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     try t.expect(decl.schema != null);
     try t.expectEqual(@import("../container.zig").Shape.query, decl.shape);
     try t.expectEqual(@import("../container.zig").Composition.ordered_union, decl.composition);
-    try t.expectEqual(@as(usize, 1), env.slot_host.providers.items.len);
+    // Two bindings: the unconstrained one above, and `ui/badge-docs`'s
+    // disjunction, exercised at the end of this test.
+    try t.expectEqual(@as(usize, 2), env.slot_host.providers.items.len);
 
     // Fire it — the SlotHost/Container race, exactly like `Caps.fire` for
     // completion, but through the generic verbs, and with an explicit fired
@@ -1223,6 +1225,27 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     const cur = try schema_mod.decodeCursor(schema_tree, result.payload).enterStruct();
     try t.expectEqualStrings("3 failing", try (try cur.field("text")).?.asStr());
     try t.expectEqual(@as(u32, 3), try (try cur.field("count")).?.asU32());
+
+    // ── The guest's predicate crossed WHOLE, and the host evaluates it ──
+    // `ui/badge-docs` is bound `any(ext=".md", ext=".txt")`. Under the wire
+    // this replaced, a binding was a single leaf and a disjunction could not
+    // be spelled at all — so a provider with this interest bound everything
+    // and filtered inside itself, where the host could neither see it, gate
+    // it, nor explain it. Both sides now encode and decode through the same
+    // function (`facts.encode`/`facts.decode`), so there is no format for
+    // them to disagree about.
+    {
+        const md = (try env.slot_host.fire("ui/badge-docs", .{ .path = "notes.md" }, fired_version, .{})).?;
+        try t.expectEqual(@as(usize, 1), env.slot_host.session(md).?.all().len);
+
+        const txt = (try env.slot_host.fire("ui/badge-docs", .{ .path = "a/b.txt" }, fired_version, .{})).?;
+        try t.expectEqual(@as(usize, 1), env.slot_host.session(txt).?.all().len);
+
+        // The other arm of the disjunction is what proves the host is really
+        // evaluating it rather than matching everything.
+        const rs = (try env.slot_host.fire("ui/badge-docs", .{ .path = "main.rs" }, fired_version, .{}));
+        if (rs) |no_match| try t.expectEqual(@as(usize, 0), env.slot_host.session(no_match).?.all().len);
+    }
 
     // `where` is an effect-path locator: it rides through UNCHANGED, because
     // an anchor is resolved, not restamped (§4); this slice records it,

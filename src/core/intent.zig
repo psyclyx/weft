@@ -360,7 +360,7 @@ pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
 /// only now that an entry has a place. A tool entry is `.tool` first: its
 /// content is a projection, so "are the files real here" is not a question
 /// about it.
-fn localityOf(entry: anytype) @import("facts.zig").Locality {
+fn localityOf(entry: anytype) @import("weft_facts").Locality {
     return if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
 }
 

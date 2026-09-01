@@ -2603,42 +2603,34 @@ pub fn slotDeclare(name: []const u8, shape: SlotShape, composition: SlotComposit
 /// `wasm_host/slot.zig`'s `parsePredicate` decodes (see that file's module
 /// doc for why this is deliberately not a full self-hosted `facts.Predicate`
 /// yet — a disclosed, bounded simplification, not the end state).
-pub const SlotPredicate = union(enum) { all, mode: []const u8, ext: []const u8, lang: []const u8, tool: []const u8 };
-
-fn putUvLocal(buf: []u8, v: u64) usize {
-    var x = v;
-    var i: usize = 0;
-    while (true) {
-        const b: u8 = @intCast(x & 0x7f);
-        x >>= 7;
-        if (x == 0) {
-            buf[i] = b;
-            return i + 1;
-        }
-        buf[i] = b | 0x80;
-        i += 1;
-    }
-}
+/// THE predicate — the host's own `facts.Predicate`, not a guest mirror of a
+/// subset of it.
+///
+/// There used to be two narrower spellings on this side of the membrane: a
+/// `SlotPredicate` union of five cases for `slotBind`, and a `When` struct of
+/// three optional strings for `provide`. Neither could express a disjunction,
+/// a glob, a tag, or a locality, so a provider whose interest was any of those
+/// carried the test inside itself — and interest the host cannot see is
+/// interest the host cannot route, gate, or explain.
+///
+/// One type, shared as a module (`weft_facts`) exactly as `weft_input` and
+/// `weft_membrane` are, for exactly the same reason: it is imported by core
+/// AND compiled into every guest, so it may never acquire a host-only
+/// dependency. `std` is its only import.
+pub const Predicate = @import("weft_facts").Predicate;
+pub const Facts = @import("weft_facts").Facts;
+pub const Locality = @import("weft_facts").Locality;
 
 /// Bind a provider for an already-declared slot (`wl_slot_bind`).
-pub fn slotBind(name: []const u8, pred: SlotPredicate, tier: SlotTier, priority: i32) void {
-    var buf: [512]u8 = undefined;
-    var len: usize = 0;
-    const leaf: ?struct { tag: u8, s: []const u8 } = switch (pred) {
-        .all => null,
-        .mode => |s| .{ .tag = 1, .s = s },
-        .ext => |s| .{ .tag = 2, .s = s },
-        .lang => |s| .{ .tag = 3, .s = s },
-        .tool => |s| .{ .tag = 4, .s = s },
-    };
-    if (leaf) |lf| {
-        buf[0] = lf.tag;
-        len = 1;
-        len += putUvLocal(buf[len..], lf.s.len);
-        @memcpy(buf[len..][0..lf.s.len], lf.s);
-        len += lf.s.len;
-    }
-    e.wl_slot_bind(p(name.ptr), @intCast(name.len), p(&buf), @intCast(len), @intFromEnum(tier), priority);
+pub fn slotBind(name: []const u8, pred: Predicate, tier: SlotTier, priority: i32) void {
+    // Encoded by the SAME function the host decodes with (`weft_facts`), so
+    // there is no format for the two sides to disagree about. The old path
+    // hand-rolled a four-tag blob here and a four-tag parser there; a
+    // combinator was unrepresentable, so a provider that needed one filtered
+    // inside itself and the host never learned what it was interested in.
+    const bytes = @import("weft_facts").encode(allocator, pred) catch return;
+    defer allocator.free(bytes);
+    e.wl_slot_bind(p(name.ptr), @intCast(name.len), p(bytes.ptr), @intCast(bytes.len), @intFromEnum(tier), priority);
 }
 
 /// Push one schema-encoded payload for a fired `session` (`wl_payload_push`).

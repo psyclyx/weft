@@ -461,7 +461,11 @@ caps_builder_session: u64 = 0,
 // `container.SlotDecl.schema`'s doc — so whichever side allocated it owns
 // the free; here, that's this plugin).
 declared_schemas: std.ArrayList(*const @import("weft_schema").Schema) = .empty,
-slot_predicate_strs: std.ArrayList([]u8) = .empty,
+/// Decoded predicate TREES, not leaf strings. A bound predicate used to be a
+/// single leaf whose one string this list held; it is now whatever
+/// `facts.decode` produced — children and all — so the thing that must be
+/// released is the tree, through `facts.free`.
+slot_predicates: std.ArrayList(@import("weft_facts").Predicate) = .empty,
 
 /// Anchor `[start, end)` in the CRDT document of the entry this call is about
 /// (`command.Context.entry`: the active one, or the entry a background delivery
@@ -817,8 +821,8 @@ pub fn deinit(self: *WasmPlugin) void {
     if (self.ctx.slot_host) |host| host.unregisterByOwnerPrefix(self.name);
     for (self.declared_schemas.items) |s| @import("weft_schema").freeSchema(gpa, s);
     self.declared_schemas.deinit(gpa);
-    for (self.slot_predicate_strs.items) |s| gpa.free(s);
-    self.slot_predicate_strs.deinit(gpa);
+    for (self.slot_predicates.items) |pred| @import("weft_facts").free(gpa, pred);
+    self.slot_predicates.deinit(gpa);
     for (self.commands.items) |wc| {
         if (self.ctx.commands.find(wc.name)) |n| {
             if (self.ctx.commands.lookup(n)) |cmd| {

@@ -224,6 +224,172 @@ fn sameAxisDisjoint(a: Predicate, b: Predicate) bool {
     };
 }
 
+// ── The wire form ────────────────────────────────────────────────────
+//
+// A predicate has to cross the membrane, and until now it crossed as one of
+// two DIFFERENT narrowings of itself: `wl_slot_bind`'s four-tag blob (no
+// combinators at all, so `any(ext=".zig", ext=".rs")` was unencodable) and
+// `wl_provide`'s three fixed string parameters. Two lossy projections of one
+// type is how vocabularies drift apart, which is the condition this module
+// was created to end — and it had merely been moved to the membrane.
+//
+// So the codec lives HERE, beside the type, and both planes call it. Not a
+// shared format that two implementations agree to honour: one function, used
+// twice. There is nothing for a mirror to get wrong because there is no
+// mirror.
+//
+// The uvarint is written out longhand rather than imported from `weft_wire`,
+// to keep this file's only dependency `std` (see the module doc — it must
+// compile wherever any plane runs).
+
+/// Wire tags. Explicitly numbered: these are a format, and a reordering of
+/// the union above must not silently renumber them.
+pub const Tag = enum(u8) {
+    all = 0,
+    any = 1,
+    not = 2,
+    ext = 3,
+    shebang = 4,
+    glob = 5,
+    tag = 6,
+    mode = 7,
+    lang = 8,
+    tool = 9,
+    locus = 10,
+};
+
+/// How deep a decoded predicate may nest. A guest supplies these bytes, and
+/// decoding recurses — so without a ceiling a hostile blob is a host stack
+/// overflow through a door that carries no permission. Far above anything an
+/// author would write by hand.
+pub const max_depth: usize = 32;
+
+pub const DecodeError = error{ Malformed, TooDeep } || std.mem.Allocator.Error;
+
+fn putUv(out: *std.ArrayList(u8), gpa: std.mem.Allocator, v: usize) !void {
+    var x = v;
+    while (true) {
+        const byte: u8 = @intCast(x & 0x7f);
+        x >>= 7;
+        try out.append(gpa, if (x == 0) byte else byte | 0x80);
+        if (x == 0) break;
+    }
+}
+
+fn getUv(cur: *[]const u8) DecodeError!usize {
+    var v: usize = 0;
+    var shift: u6 = 0;
+    while (true) {
+        if (cur.len == 0) return error.Malformed;
+        const byte = cur.*[0];
+        cur.* = cur.*[1..];
+        v |= @as(usize, byte & 0x7f) << shift;
+        if (byte & 0x80 == 0) return v;
+        shift = std.math.add(u6, shift, 7) catch return error.Malformed;
+    }
+}
+
+/// Encode `pred` into freshly-allocated bytes the caller owns.
+pub fn encode(gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try encodeInto(&out, gpa, pred);
+    return out.toOwnedSlice(gpa);
+}
+
+fn encodeInto(out: *std.ArrayList(u8), gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error!void {
+    switch (pred) {
+        .all, .any => |kids| {
+            try out.append(gpa, @intFromEnum(@as(Tag, if (pred == .all) .all else .any)));
+            try putUv(out, gpa, kids.len);
+            for (kids) |k| try encodeInto(out, gpa, k);
+        },
+        .not => |k| {
+            try out.append(gpa, @intFromEnum(Tag.not));
+            try encodeInto(out, gpa, k.*);
+        },
+        .locus => |l| {
+            try out.append(gpa, @intFromEnum(Tag.locus));
+            try out.append(gpa, @intFromEnum(l));
+        },
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s, kind| {
+            try out.append(gpa, @intFromEnum(@field(Tag, @tagName(kind))));
+            try putUv(out, gpa, s.len);
+            try out.appendSlice(gpa, s);
+        },
+    }
+}
+
+/// Decode bytes into a predicate whose strings and children are owned by
+/// `gpa` — release with `free`. Empty input is the unconstrained predicate,
+/// which is what "this provider did not narrow" means.
+pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) DecodeError!Predicate {
+    if (bytes.len == 0) return .{ .all = &.{} };
+    var cur = bytes;
+    const pred = try decodeOne(gpa, &cur, 0);
+    return pred;
+}
+
+fn decodeOne(gpa: std.mem.Allocator, cur: *[]const u8, depth: usize) DecodeError!Predicate {
+    if (depth >= max_depth) return error.TooDeep;
+    if (cur.len == 0) return error.Malformed;
+    const raw = cur.*[0];
+    cur.* = cur.*[1..];
+    const tag = std.enums.fromInt(Tag, raw) orelse return error.Malformed;
+    switch (tag) {
+        .all, .any => {
+            const n = try getUv(cur);
+            // Each child costs at least one byte, so a length that cannot
+            // possibly be backed by the remaining input is malformed — this
+            // refuses a blob claiming a billion children before allocating.
+            if (n > cur.len) return error.Malformed;
+            const kids = try gpa.alloc(Predicate, n);
+            var built: usize = 0;
+            errdefer {
+                for (kids[0..built]) |k| free(gpa, k);
+                gpa.free(kids);
+            }
+            while (built < n) : (built += 1) kids[built] = try decodeOne(gpa, cur, depth + 1);
+            return if (tag == .all) .{ .all = kids } else .{ .any = kids };
+        },
+        .not => {
+            const kid = try gpa.create(Predicate);
+            errdefer gpa.destroy(kid);
+            kid.* = try decodeOne(gpa, cur, depth + 1);
+            return .{ .not = kid };
+        },
+        .locus => {
+            if (cur.len == 0) return error.Malformed;
+            const l = std.enums.fromInt(Locality, cur.*[0]) orelse return error.Malformed;
+            cur.* = cur.*[1..];
+            return .{ .locus = l };
+        },
+        inline else => |kind| {
+            const n = try getUv(cur);
+            if (n > cur.len) return error.Malformed;
+            const owned = try gpa.dupe(u8, cur.*[0..n]);
+            cur.* = cur.*[n..];
+            return @unionInit(Predicate, @tagName(kind), owned);
+        },
+    }
+}
+
+/// Release a predicate produced by `decode`.
+pub fn free(gpa: std.mem.Allocator, pred: Predicate) void {
+    switch (pred) {
+        .all, .any => |kids| {
+            for (kids) |k| free(gpa, k);
+            gpa.free(kids);
+        },
+        .not => |k| {
+            free(gpa, k.*);
+            gpa.destroy(k);
+        },
+        .locus => {},
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s| gpa.free(s),
+    }
+}
+
 /// Iterative `*`/`?` glob with backtracking over a path. Lives here rather
 /// than in a sibling because `Predicate.glob` is its only caller.
 pub fn globMatch(pattern: []const u8, text: []const u8) bool {
@@ -281,6 +447,58 @@ test "facts: predicates match merged buffer + interaction facts" {
     // eligibility (review A1/A3); an ordinary predicate here.
     try t.expect((Predicate{ .all = &.{ .{ .mode = "normal" }, .{ .ext = ".rs" } } }).matches(f));
     try t.expect(!(Predicate{ .all = &.{ .{ .mode = "insert" }, .{ .ext = ".rs" } } }).matches(f));
+}
+
+test "facts: a predicate survives the wire whole, combinators included" {
+    const gpa = t.allocator;
+    // The shape the OLD wire could not express at all: a disjunction over
+    // extensions, which is exactly what a language server's file filter is.
+    const zig: Predicate = .{ .ext = ".zig" };
+    const rs: Predicate = .{ .ext = ".rs" };
+    const langs: Predicate = .{ .any = &.{ zig, rs } };
+    const normal: Predicate = .{ .mode = "normal" };
+    const pred: Predicate = .{ .all = &.{ langs, normal, .{ .locus = .local } } };
+
+    const bytes = try encode(gpa, pred);
+    defer gpa.free(bytes);
+    const back = try decode(gpa, bytes);
+    defer free(gpa, back);
+
+    const zig_local: Facts = .{ .path = "a/b.zig", .mode = "normal", .locality = .local };
+    const rs_local: Facts = .{ .path = "a/b.rs", .mode = "normal", .locality = .local };
+    const py_local: Facts = .{ .path = "a/b.py", .mode = "normal", .locality = .local };
+    const zig_insert: Facts = .{ .path = "a/b.zig", .mode = "insert", .locality = .local };
+    for ([_]Predicate{ pred, back }) |p| {
+        try t.expect(p.matches(zig_local));
+        try t.expect(p.matches(rs_local));
+        try t.expect(!p.matches(py_local));
+        try t.expect(!p.matches(zig_insert));
+    }
+    // Specificity must survive too — it is what orders competing bindings.
+    try t.expectEqual(pred.specificity(), back.specificity());
+}
+
+test "facts: a hostile blob is refused, not obeyed and not fatal" {
+    const gpa = t.allocator;
+    // Empty is the unconstrained predicate — "this provider did not narrow".
+    const empty = try decode(gpa, "");
+    try t.expectEqual(@as(usize, 0), empty.all.len);
+
+    // A tag the format does not define.
+    try t.expectError(error.Malformed, decode(gpa, &.{99}));
+    // A string claiming more bytes than were sent — the classic over-read.
+    try t.expectError(error.Malformed, decode(gpa, &.{ @intFromEnum(Tag.ext), 200, 'a' }));
+    // A container claiming more children than could possibly be backed,
+    // refused BEFORE it allocates for them.
+    try t.expectError(error.Malformed, decode(gpa, &.{ @intFromEnum(Tag.all), 250 }));
+    // Nesting past the ceiling: a guest cannot recurse the host off its
+    // stack through a door that carries no permission.
+    var deep: std.ArrayList(u8) = .empty;
+    defer deep.deinit(gpa);
+    for (0..max_depth + 2) |_| try deep.append(gpa, @intFromEnum(Tag.not));
+    try deep.append(gpa, @intFromEnum(Tag.locus));
+    try deep.append(gpa, @intFromEnum(Locality.local));
+    try t.expectError(error.TooDeep, decode(gpa, deep.items));
 }
 
 test "facts: glob backtracks, and arrived here with its coverage" {

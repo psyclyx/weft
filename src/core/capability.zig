@@ -61,7 +61,7 @@ const assert = std.debug.assert;
 const Document = @import("Document.zig");
 const layers_mod = @import("layers.zig");
 const position = @import("position.zig");
-const facts = @import("facts.zig");
+const facts = @import("weft_facts");
 const container_mod = @import("container.zig");
 
 pub const Shape = enum { query, feed, action };

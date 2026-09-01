@@ -140,7 +140,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const facts_mod = @import("facts.zig");
+const facts_mod = @import("weft_facts");
 const graph = @import("graph.zig");
 const Document = @import("Document.zig");
 

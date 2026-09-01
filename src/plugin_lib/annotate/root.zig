@@ -63,7 +63,7 @@ const tag_tell = 1;
 /// `"pick"` whatever kind of pick it is — so a mode predicate would either
 /// match everything or nothing.
 pub fn bind() void {
-    weft.slotBind(slot, .all, .plugin, 0);
+    weft.slotBind(slot, .{ .all = &.{} }, .plugin, 0);
 }
 
 /// One round's question. `rows` walks the offered rows in order.

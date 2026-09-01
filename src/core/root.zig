@@ -113,6 +113,6 @@ test {
     _ = @import("tests.zig");
     _ = @import("markdown.zig");
     _ = @import("identity.zig");
-    _ = @import("facts.zig");
+    _ = @import("weft_facts");
     _ = @import("container.zig");
 }

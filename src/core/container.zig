@@ -48,7 +48,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const facts_mod = @import("facts.zig");
+const facts_mod = @import("weft_facts");
 const schema_mod = @import("weft_schema");
 
 pub const Facts = facts_mod.Facts;

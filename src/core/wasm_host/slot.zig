@@ -12,27 +12,30 @@
 //! host's questions but had to ask its own as untyped `wl_run` command
 //! strings.
 //!
-//! `wl_slot_bind`'s predicate crosses as a small, DELIBERATELY MINIMAL wire
-//! micro-format, not a full schema-encoded `facts.Predicate` (doc/
-//! d2-schema-payloads.md §3.2 names "facts.Predicate has a schema too —
-//! self-hosting again" as the aspirational end state; giving `Predicate`
-//! itself a `Schema` and marshalling it generically is real added surface
-//! this slice's scope doesn't need — the disclosed simplification is exactly
-//! this file's `parsePredicate`, documented at its definition below).
-//! Format: `[]` (empty) = match-everything (`.all = &.{}`); `[tag: u8][uv
-//! len][bytes]` = a single leaf (`1`=mode, `2`=ext, `3`=lang, `4`=tool) —
-//! covers every case this repo's providers actually construct today
-//! (`capability.zig`'s own `predicateFromExtensions` never needs more than a
-//! single-axis leaf or an OR of same-axis leaves either).
+//! `wl_slot_bind`'s predicate crosses WHOLE: the guest builds a
+//! `facts.Predicate` — the host's own type, shared as the `weft_facts` module
+//! for the same reason `weft_input` and `weft_membrane` are — and encodes it
+//! with the same function this side decodes with (`facts.encode` /
+//! `facts.decode`). One codec, called twice; there is no format for the two
+//! planes to drift on because there is no second implementation.
+//!
+//! It used to cross as a "deliberately minimal" micro-format carrying a
+//! SINGLE LEAF — `1`=mode, `2`=ext, `3`=lang, `4`=tool — justified on the
+//! grounds that it covered every case the repo's providers then constructed.
+//! It did, and that was the problem: a provider whose interest was a
+//! disjunction, a glob, a tag, or a locality could not say so, so it bound
+//! everything and tested inside itself. Interest the host cannot decode is
+//! interest it cannot route, gate, or `explain` — which is the whole reason
+//! eligibility is host-side. The simplification was not in the wire; it was
+//! in what providers were then willing to want.
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const contract = @import("../membrane/contract.zig");
 const container_mod = @import("../container.zig");
-const facts_mod = @import("../facts.zig");
+const facts_mod = @import("weft_facts");
 const schema_mod = @import("weft_schema");
 const slot_mod = @import("../slot.zig");
-const wire_mod = @import("weft_wire");
 const intent = @import("../intent.zig");
 
 const shared = @import("plugin.zig");
@@ -72,28 +75,32 @@ pub fn hSlotDeclare(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     host.container.declareSlot(.{ .name = name, .shape = shape, .composition = composition, .schema = schema }) catch {};
 }
 
-/// The DELIBERATELY MINIMAL predicate wire format — see this file's module
-/// doc. Returns `.all = &.{}` (match everything) for an empty/malformed
-/// blob rather than trapping: a predicate is a NARROWING, never an
-/// authority grant, so degrading to "matches everywhere" on a bad blob is
-/// safe in the same sense an unrecognized `.ext` filter defaulting to "no
-/// filter" would be — a permissive default, not a silent security hole.
+/// Decode a bound predicate through the ONE codec (`core/facts.zig`), which
+/// is the same function the guest encoded with — not a second implementation
+/// of an agreed format.
+///
+/// What this replaces is worth naming, because it was the shape of the
+/// problem: a four-tag blob carrying exactly one leaf, so `mode`, `ext`,
+/// `lang`, or `tool` — and nothing else the type can express. No `glob`, no
+/// `tag`, no `locus`, and no combinators at all, which meant a language
+/// server's own file filter (`any(ext=".zig", ext=".rs", …)`) was not
+/// encodable and had to live inside the guest as a self-filter. A predicate
+/// that cannot be written is a predicate the host cannot evaluate, which is
+/// how interest ends up back on the wrong side of the membrane.
+///
+/// A malformed blob still degrades to `.all = &.{}` rather than trapping: a
+/// predicate is a NARROWING, never an authority grant, so "matches
+/// everywhere" is a permissive default and not a silent hole. What is NOT
+/// tolerated is a blob that would cost something to refuse late — an
+/// over-long child count or a nesting depth that would recurse the host off
+/// its stack — both of which `facts.decode` rejects before allocating.
 fn parsePredicate(p: *WasmPlugin, bytes: []const u8) !facts_mod.Predicate {
-    if (bytes.len < 1) return .{ .all = &.{} };
-    const tag = bytes[0];
-    var cur = bytes[1..];
-    const n = wire_mod.getUv(&cur) catch return .{ .all = &.{} };
-    if (n > cur.len) return .{ .all = &.{} };
-    const owned = try p.gpa.dupe(u8, cur[0..@intCast(n)]);
-    errdefer p.gpa.free(owned);
-    try p.slot_predicate_strs.append(p.gpa, owned);
-    return switch (tag) {
-        1 => .{ .mode = owned },
-        2 => .{ .ext = owned },
-        3 => .{ .lang = owned },
-        4 => .{ .tool = owned },
-        else => .{ .all = &.{} },
+    const pred = facts_mod.decode(p.gpa, bytes) catch return .{ .all = &.{} };
+    p.slot_predicates.append(p.gpa, pred) catch {
+        facts_mod.free(p.gpa, pred);
+        return .{ .all = &.{} };
     };
+    return pred;
 }
 
 /// `wl_slot_bind(name_ptr, name_len, predicate_ptr, predicate_len, tier,

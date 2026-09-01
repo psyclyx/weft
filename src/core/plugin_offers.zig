@@ -30,7 +30,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const catalog = @import("catalog.zig");
 const command = @import("command.zig");
-const facts = @import("facts.zig");
+const facts = @import("weft_facts");
 const intent = @import("intent.zig");
 
 /// §9.3's sanitized human fallback: the reason CODE is the plugin's, the

@@ -88,6 +88,7 @@ const ArchitectureModules = struct {
     wire: *std.Build.Module,
     schema: *std.Build.Module,
     input: *std.Build.Module,
+    facts: *std.Build.Module,
     membrane: *std.Build.Module,
     semantic: *std.Build.Module,
     scene_codec: *std.Build.Module,
@@ -122,6 +123,11 @@ fn createArchitectureModules(
     // root is what keeps that true by construction rather than by review.
     const input = b.createModule(.{
         .root_source_file = b.path("src/input/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const facts = b.createModule(.{
+        .root_source_file = b.path("src/facts/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -201,6 +207,7 @@ fn createArchitectureModules(
         .wire = wire,
         .schema = schema,
         .input = input,
+        .facts = facts,
         .membrane = membrane,
         .semantic = semantic,
         .scene_codec = scene_codec,
@@ -309,6 +316,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_wire", architecture.wire);
     mod.addImport("weft_schema", architecture.schema);
     mod.addImport("weft_input", architecture.input);
+    mod.addImport("weft_facts", architecture.facts);
     mod.addImport("weft_membrane", architecture.membrane);
     mod.addImport("weft_semantic", architecture.semantic);
     mod.addImport("weft_scene_codec", architecture.scene_codec);
@@ -1293,8 +1301,14 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    const facts = b.createModule(.{
+        .root_source_file = b.path("src/facts/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
     guest_sdk.addImport("weft_membrane", contract_data);
     guest_sdk.addImport("weft_input", input);
+    guest_sdk.addImport("weft_facts", facts);
     guest_sdk.addImport("weft_schema", schema);
     const semantic = b.createModule(.{
         .root_source_file = b.path("src/semantic_model/root.zig"),

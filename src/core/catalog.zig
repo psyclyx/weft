@@ -50,7 +50,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const facts_mod = @import("facts.zig");
+const facts_mod = @import("weft_facts");
 const container = @import("container.zig");
 
 pub const Facts = facts_mod.Facts;

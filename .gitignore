@@ -9,3 +9,4 @@ perf.data
 perf.data.old
 .direnv/
 CLAUDE.md
+.claude/worktrees/agent-*/

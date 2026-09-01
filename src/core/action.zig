@@ -73,7 +73,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const facts = @import("facts.zig");
+const facts = @import("weft_facts");
 const container_mod = @import("container.zig");
 
 const Actions = @This();

@@ -29,7 +29,19 @@ export fn describe() void {}
 
 export fn init() void {
     weft.slotDeclare("ui/badge", .query, .ordered_union, &badge_schema);
-    weft.slotBind("ui/badge", .all, .plugin, 0);
+    weft.slotBind("ui/badge", .{ .all = &.{} }, .plugin, 0);
+
+    // A second slot, bound with a predicate the old wire could not carry: a
+    // DISJUNCTION over two axes' worth of leaves. Under the four-tag format a
+    // binding was one leaf — `mode`, `ext`, `lang`, or `tool` — so a provider
+    // that cared about "markdown or plain text" had to bind everything and
+    // test inside itself, which put its interest on the wrong side of the
+    // membrane. The host evaluates this one.
+    weft.slotDeclare("ui/badge-docs", .query, .ordered_union, &badge_schema);
+    weft.slotBind("ui/badge-docs", .{ .any = &.{
+        .{ .ext = ".md" },
+        .{ .ext = ".txt" },
+    } }, .plugin, 0);
 }
 
 export fn on_slot_fire(session: i32) void {
