@@ -87,9 +87,8 @@ const Hunk = model.Hunk;
 const RepoSession = model.RepoSession;
 const render_order = model.render_order;
 const cur = model.cur;
-const sessionById = model.sessionById;
+const sessionById = model.Repos.byId;
 const focusBuffer = model.focusBuffer;
-const sessions = &model.sessions;
 const Target = model.Target;
 const Lines = model.Lines;
 const RAW_CAP = model.RAW_CAP;
@@ -148,89 +147,143 @@ const Route = enum { repo, focus, carried };
 ///                 answer may then do is the target it captured (see `resolve`).
 const Scope = enum { durable, snapshot, arm };
 
+/// WHAT A VERB DOES, when what it does is one of the shapes most of git's verbs
+/// share. Nearly every entry below was a three-line function whose whole body
+/// was one of these calls — `fn gitStashPop() void { after(&.{"git","stash",
+/// "pop"}); }` — so the table listed the name and a function that listed the
+/// command. Naming it once, here, makes the table the complete statement of
+/// what git's verbs ARE.
+///
+/// `.call` is the escape hatch and stays populated for every verb that really
+/// does something: staging resolves a target, the draft verbs re-seat a buffer,
+/// the rebase verbs read the working tree. This is not a DSL trying to express
+/// those — it is the observation that a third of the table was not expressing
+/// anything.
+const Do = union(enum) {
+    /// A function, for a verb that is not one of the shapes below.
+    call: *const fn () void,
+    /// Run this, then re-gather. The largest family by far.
+    run: []const []const u8,
+    /// Show this command's output in a read-only view of its own.
+    view: struct { argv: []const []const u8, name: []const u8, style: model.ViewStyle },
+    /// Ask for a branch name, then run `before ++ &.{name}`.
+    branch: struct { before: []const []const u8, label: []const u8, confirm: bool = false },
+    /// Open a commit draft with these `git commit` flags, seeded from `prefill`.
+    draft: struct { flags: []const u8, prefill: []const []const u8 = &.{} },
+};
+
 /// git's own metadata, one entry per command, PARALLEL to the manifest table:
 /// the SDK's `Entry` holds the name and the call, this holds what the funnel
 /// (`dispatch`, below) needs before it runs.
 const Cmd = struct {
     name: []const u8,
-    handler: *const fn () void,
+    do: Do,
     route: Route = .focus,
     scope: Scope = .durable,
 };
+
+/// The `fn () void` for one table entry — the shape's implementation, closed
+/// over that entry's data at comptime.
+fn callFor(comptime i: usize) *const fn () void {
+    const d = cmds[i].do;
+    return switch (d) {
+        .call => |f| f,
+        .run => |argv| struct {
+            fn go() void {
+                after(argv);
+            }
+        }.go,
+        .view => |v| struct {
+            fn go() void {
+                show(v.argv, v.name, v.style);
+            }
+        }.go,
+        .branch => |b| struct {
+            fn go() void {
+                askBranch(.{ .before = b.before, .confirm = b.confirm }, b.label);
+            }
+        }.go,
+        .draft => |c| struct {
+            fn go() void {
+                _ = openDraft(c.flags, c.prefill);
+            }
+        }.go,
+    };
+}
 const base_cmds = [_]Cmd{
-    .{ .name = "git-status", .handler = gitStatus, .route = .repo },
-    .{ .name = "git-init", .handler = gitInit, .route = .repo },
-    .{ .name = "git-refresh", .handler = gitRefresh },
-    .{ .name = "git-toggle-fold", .handler = gitToggleFold },
+    .{ .name = "git-status", .do = .{ .call = gitStatus }, .route = .repo },
+    .{ .name = "git-init", .do = .{ .run = &.{ "git", "init" } }, .route = .repo },
+    .{ .name = "git-refresh", .do = .{ .call = gitRefresh } },
+    .{ .name = "git-toggle-fold", .do = .{ .call = gitToggleFold } },
     // Row motion: core's cursor move, then republish — the offers describe
     // the row under point, so moving point is a new eligibility fact.
-    .{ .name = "git-next-row", .handler = gitNextRow },
-    .{ .name = "git-prev-row", .handler = gitPrevRow },
-    .{ .name = "git-stage", .handler = gitStage, .scope = .snapshot },
-    .{ .name = "git-unstage", .handler = gitUnstage, .scope = .snapshot },
-    .{ .name = "git-stage-all", .handler = gitStageAll },
-    .{ .name = "git-unstage-all", .handler = gitUnstageAll },
-    .{ .name = "git-discard", .handler = gitDiscard, .scope = .arm },
-    .{ .name = "git-visit", .handler = gitVisit },
-    .{ .name = "git-commit", .handler = gitCommit },
+    .{ .name = "git-next-row", .do = .{ .call = gitNextRow } },
+    .{ .name = "git-prev-row", .do = .{ .call = gitPrevRow } },
+    .{ .name = "git-stage", .do = .{ .call = gitStage }, .scope = .snapshot },
+    .{ .name = "git-unstage", .do = .{ .call = gitUnstage }, .scope = .snapshot },
+    .{ .name = "git-stage-all", .do = .{ .run = &.{ "git", "add", "-A" } } },
+    .{ .name = "git-unstage-all", .do = .{ .run = &.{ "git", "reset", "-q", "HEAD" } } },
+    .{ .name = "git-discard", .do = .{ .call = gitDiscard }, .scope = .arm },
+    .{ .name = "git-visit", .do = .{ .call = gitVisit } },
+    .{ .name = "git-commit", .do = .{ .draft = .{ .flags = "" } } },
     // Saving a draft entry IS its commit; the settle runs on the fill's way
     // back. A draft names its own repository (`currentDraft` routes to it), so
     // both stay `.carried` — never "whatever git buffer was focused".
-    .{ .name = "git-commit-save", .handler = gitCommitSave, .route = .carried },
-    .{ .name = "git-commit-settle", .handler = gitCommitSettle, .route = .carried },
+    .{ .name = "git-commit-save", .do = .{ .call = gitCommitSave }, .route = .carried },
+    .{ .name = "git-commit-settle", .do = .{ .call = gitCommitSettle }, .route = .carried },
     // Commit dispatch (the `c` transient): each opens a draft for the commit it
     // means; fixup/squash resolve the commit under point into its message.
-    .{ .name = "git-amend", .handler = gitAmend },
-    .{ .name = "git-extend", .handler = gitExtend },
-    .{ .name = "git-reword", .handler = gitReword },
-    .{ .name = "git-fixup", .handler = gitFixup },
-    .{ .name = "git-squash", .handler = gitSquash },
+    .{ .name = "git-amend", .do = .{ .draft = .{ .flags = "--amend", .prefill = head_message } } },
+    .{ .name = "git-extend", .do = .{ .run = &.{ "git", "commit", "--amend", "--no-edit" } } },
+    .{ .name = "git-reword", .do = .{ .draft = .{ .flags = "--amend --only", .prefill = head_message } } },
+    .{ .name = "git-fixup", .do = .{ .call = gitFixup } },
+    .{ .name = "git-squash", .do = .{ .call = gitSquash } },
     // The draft entry's own offers — they re-seat the draft under point.
-    .{ .name = "git-draft-close", .handler = gitDraftClose, .route = .carried },
-    .{ .name = "git-draft-amend", .handler = gitDraftAmend, .route = .carried },
-    .{ .name = "git-draft-reword", .handler = gitDraftReword, .route = .carried },
-    .{ .name = "git-draft-fixup", .handler = gitDraftFixup, .route = .carried },
-    .{ .name = "git-draft-squash", .handler = gitDraftSquash, .route = .carried },
+    .{ .name = "git-draft-close", .do = .{ .call = gitDraftClose }, .route = .carried },
+    .{ .name = "git-draft-amend", .do = .{ .call = gitDraftAmend }, .route = .carried },
+    .{ .name = "git-draft-reword", .do = .{ .call = gitDraftReword }, .route = .carried },
+    .{ .name = "git-draft-fixup", .do = .{ .call = gitDraftFixup }, .route = .carried },
+    .{ .name = "git-draft-squash", .do = .{ .call = gitDraftSquash }, .route = .carried },
     // Commit-scoped verbs on a recent-commit node.
-    .{ .name = "git-show", .handler = gitShow },
-    .{ .name = "git-cherry-pick", .handler = gitCherryPick },
-    .{ .name = "git-revert", .handler = gitRevert },
-    .{ .name = "git-reset-soft", .handler = gitResetSoft },
-    .{ .name = "git-reset-mixed", .handler = gitResetMixed },
-    .{ .name = "git-reset-hard", .handler = gitResetHard },
+    .{ .name = "git-show", .do = .{ .call = gitShow } },
+    .{ .name = "git-cherry-pick", .do = .{ .call = gitCherryPick } },
+    .{ .name = "git-revert", .do = .{ .call = gitRevert } },
+    .{ .name = "git-reset-soft", .do = .{ .call = gitResetSoft } },
+    .{ .name = "git-reset-mixed", .do = .{ .call = gitResetMixed } },
+    .{ .name = "git-reset-hard", .do = .{ .call = gitResetHard } },
     // Branch transient.
-    .{ .name = "git-branch-checkout", .handler = gitBranchCheckout },
-    .{ .name = "git-branch-create", .handler = gitBranchCreate },
-    .{ .name = "git-branch-new", .handler = gitBranchNew },
-    .{ .name = "git-branch-delete", .handler = gitBranchDelete },
-    .{ .name = "git-branch-rename", .handler = gitBranchRename },
+    .{ .name = "git-branch-checkout", .do = .{ .branch = .{ .before = &.{ "git", "checkout" }, .label = "checkout branch: " } } },
+    .{ .name = "git-branch-create", .do = .{ .branch = .{ .before = &.{ "git", "checkout", "-b" }, .label = "create & checkout branch: " } } },
+    .{ .name = "git-branch-new", .do = .{ .branch = .{ .before = &.{ "git", "branch" }, .label = "new branch: " } } },
+    .{ .name = "git-branch-delete", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-d" }, .label = "delete branch: ", .confirm = true } } },
+    .{ .name = "git-branch-rename", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-m" }, .label = "rename current branch to: " } } },
     // Stash transient.
-    .{ .name = "git-stash-save", .handler = gitStashSave },
-    .{ .name = "git-stash-pop", .handler = gitStashPop },
-    .{ .name = "git-stash-apply", .handler = gitStashApply },
-    .{ .name = "git-stash-list", .handler = gitStashList },
-    .{ .name = "git-stash-drop", .handler = gitStashDrop },
+    .{ .name = "git-stash-save", .do = .{ .run = &.{ "git", "stash", "push" } } },
+    .{ .name = "git-stash-pop", .do = .{ .run = &.{ "git", "stash", "pop" } } },
+    .{ .name = "git-stash-apply", .do = .{ .run = &.{ "git", "stash", "apply" } } },
+    .{ .name = "git-stash-list", .do = .{ .view = .{ .argv = &.{ "git", "stash", "list" }, .name = "*git-stash*", .style = .none } } },
+    .{ .name = "git-stash-drop", .do = .{ .call = gitStashDrop } },
     // Log transient.
-    .{ .name = "git-log-all", .handler = gitLogAll },
+    .{ .name = "git-log-all", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, .name = "*git-log*", .style = .log } } },
     // Push/pull/fetch are TRANSIENTS: their open/toggle/run/cancel commands are
     // generated from the declarations in `transient.zig` and spliced in below
     // (`transient_cmds`), so there is nothing to list here.
     // Interactive rebase: the plan is an entry; saving it runs the rebase.
-    .{ .name = "git-rebase-interactive", .handler = gitRebaseInteractive },
-    .{ .name = "git-rebase-continue", .handler = gitRebaseContinue },
-    .{ .name = "git-rebase-abort", .handler = gitRebaseAbort },
-    .{ .name = "git-rebase-skip", .handler = gitRebaseSkip },
-    .{ .name = "git-rebase-save", .handler = gitRebaseSave, .route = .carried },
-    .{ .name = "git-rebase-settle", .handler = gitRebaseSettle, .route = .carried },
-    .{ .name = "git-menu-cancel", .handler = transient.gitMenuCancel },
+    .{ .name = "git-rebase-interactive", .do = .{ .call = gitRebaseInteractive } },
+    .{ .name = "git-rebase-continue", .do = .{ .run = &.{ "git", "-c", "core.editor=true", "rebase", "--continue" } } },
+    .{ .name = "git-rebase-abort", .do = .{ .run = &.{ "git", "rebase", "--abort" } } },
+    .{ .name = "git-rebase-skip", .do = .{ .run = &.{ "git", "rebase", "--skip" } } },
+    .{ .name = "git-rebase-save", .do = .{ .call = gitRebaseSave }, .route = .carried },
+    .{ .name = "git-rebase-settle", .do = .{ .call = gitRebaseSettle }, .route = .carried },
+    .{ .name = "git-menu-cancel", .do = .{ .call = transient.gitMenuCancel } },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
-    .{ .name = "git-log", .handler = gitLog },
-    .{ .name = "git-diff", .handler = gitDiff },
-    .{ .name = "git-diff-staged", .handler = gitDiffStaged },
-    .{ .name = "git-blame", .handler = gitBlame },
+    .{ .name = "git-log", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "-30" }, .name = "*git-log*", .style = .log } } },
+    .{ .name = "git-diff", .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } } },
+    .{ .name = "git-diff-staged", .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } } },
+    .{ .name = "git-blame", .do = .{ .call = gitBlame } },
     // Internal: the deferred half of `noteDrops` (task #19 item 4) — not a
     // user-facing verb, invoked only via `weft.run` from `on_fill_token`.
-    .{ .name = "git-note-drops-deliver", .handler = gitNoteDropsDeliver, .route = .carried },
+    .{ .name = "git-note-drops-deliver", .do = .{ .call = gitNoteDropsDeliver }, .route = .carried },
 };
 
 /// The shared prompt's five editing commands (`input`, below), mapped into
@@ -240,7 +293,7 @@ const base_cmds = [_]Cmd{
 /// buffer had to work around by carrying the session in `input_action`.
 const input_cmds: [input.commands.len]Cmd = blk: {
     var arr: [input.commands.len]Cmd = undefined;
-    for (input.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+    for (input.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .do = .{ .call = c.handler } };
     break :blk arr;
 };
 
@@ -251,7 +304,7 @@ const input_cmds: [input.commands.len]Cmd = blk: {
 /// current render.
 const transient_cmds: [transient.commands.len]Cmd = blk: {
     var arr: [transient.commands.len]Cmd = undefined;
-    for (transient.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.call };
+    for (transient.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .do = .{ .call = c.call } };
     break :blk arr;
 };
 
@@ -261,7 +314,7 @@ const cmds = base_cmds ++ input_cmds ++ transient_cmds;
 /// index reaches the same entry's route and scope.
 const entries: [cmds.len]weft.CommandEntry = blk: {
     var arr: [cmds.len]weft.CommandEntry = undefined;
-    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = callFor(i) };
     break :blk arr;
 };
 
@@ -402,14 +455,14 @@ fn initExtra() void {
 fn dispatch(index: usize) bool {
     const c = cmds[index];
     const s = route(c.route) orelse return false;
-    model.routed = s;
+    model.Repos.routed = s;
     switch (c.scope) {
         .durable => {},
-        .snapshot => if (!s.fresh()) {
+        .snapshot => if (!s.value.fresh()) {
             refuseStale();
             return false;
         },
-        .arm => if (!s.fresh()) {
+        .arm => if (!s.value.fresh()) {
             refuseStale();
             return false;
         },
@@ -423,7 +476,7 @@ fn refuseStale() void {
     weft.echo("git: stale — refreshed");
     // A gather in flight repaints on its own; otherwise show what IS current,
     // and only in the session's own buffer (never author someone else's).
-    if (cur().fresh() and focusedSession() == model.routed) rerender();
+    if (cur().fresh() and focusedSession() == model.Repos.routed) rerender();
 }
 
 // ── What runs when a gather settles, and when a view's text lands ──────────
@@ -462,9 +515,9 @@ fn onGathered() void {
 fn paintOwnEntry() void {
     var prev_buf: [64]u8 = undefined;
     const prev = weft.activeBufferName(&prev_buf);
-    if (!model.focusBuffer(cur().name())) return; // the entry went away mid-flight
+    if (!model.focusBuffer(model.curSession().name())) return; // the entry went away mid-flight
     defer if (prev) |name| {
-        if (!std.mem.eql(u8, name, cur().name())) _ = model.focusBuffer(name);
+        if (!std.mem.eql(u8, name, model.curSession().name())) _ = model.focusBuffer(name);
     };
     renderStatus();
 }
@@ -479,166 +532,32 @@ fn onViewFilled(style: model.ViewStyle) void {
 /// so it has to describe the repository the user is now looking at — this is
 /// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
 export fn on_activate() void {
-    if (focusedSession()) |s| model.routed = s;
+    if (focusedSession()) |s| model.Repos.routed = s;
 }
 
-// ── Repository sessions: root detection, minting, routing ──────────────────
-/// The session whose projection buffer is focused, if any — a command pressed
-/// in `*git:2*` is about repository 2, whatever ran before it.
-fn focusedSession() ?*RepoSession {
-    var buf: [64]u8 = undefined;
-    const active = weft.activeBufferName(&buf) orelse return null;
-    for (sessions.items) |s| {
-        if (std.mem.eql(u8, s.name(), active)) return s;
-    }
-    return null;
-}
+// ── Repository sessions: routing, and where a command runs ─────────────────
+//
+// This was 160 lines: find-or-mint by root, mint the next free instance name
+// against both the live sessions and the open buffers, refuse for the two
+// reasons a mint can fail, and route each command by whether it means the place
+// it is in, the buffer it is in, or the session its caller chose. None of it
+// was about git — any plugin projecting a per-place authority (a build tree, a
+// test suite, a language server's workspace) writes exactly the same thing —
+// so it is `weft_sessions` now, and what is left here is the two names git
+// spells differently.
 
-/// The session already open for `root`, or null. The find half of
-/// `sessionFor`, without the mint -- so a caller can prefer "the session for
-/// where I am" without that preference itself opening a repository.
-fn openSessionFor(root: []const u8) ?*RepoSession {
-    if (root.len == 0) return null;
-    for (sessions.items) |s| {
-        if (std.mem.eql(u8, s.root, root)) return s;
-    }
-    return null;
-}
+const focusedSession = model.Repos.focused;
+const activeRoot = model.Repos.here;
+const activePathAbs = model.Repos.pathHere;
 
-/// Find-or-mint the session for `root`, taking the next free instance name.
-fn sessionFor(root: []const u8) ?*RepoSession {
-    // No local directory to be a repository in (`doc/place.md`: a peer place,
-    // or a container that went away). Refuse by name rather than mint a
-    // session whose `cd` guard would fall through to wherever this process
-    // happens to be.
-    if (root.len == 0) {
-        weft.echo("git: this place has no local repository");
-        return null;
-    }
-    if (openSessionFor(root)) |s| return s;
-    var name_buf: [64]u8 = undefined;
-    const name = mintName(&name_buf) orelse return null;
-    const alloc = weft.allocator;
-    sessions.ensureUnusedCapacity(alloc, 1) catch return refuseNoMemory();
-    const owned_root = alloc.dupe(u8, root) catch return refuseNoMemory();
-    const s = alloc.create(RepoSession) catch {
-        alloc.free(owned_root);
-        return refuseNoMemory();
-    };
-    s.* = .{ .id = model.next_session_id, .root = owned_root };
-    model.next_session_id += 1;
-    s.name_len = @min(name.len, s.name_buf.len);
-    @memcpy(s.name_buf[0..s.name_len], name[0..s.name_len]);
-    sessions.appendAssumeCapacity(s);
-    return s;
-}
-
-/// The one refusal a mint has left. Where the old refusal named a cap nobody
-/// chose, this names the only thing that can actually stop us — and says so,
-/// rather than opening the wrong repository's session.
-fn refuseNoMemory() ?*RepoSession {
-    weft.echo("git: out of memory — could not open this repository");
-    return null;
-}
-
-/// The lowest instance name (`*git*`, `*git:2*`, …) neither a buffer nor a
-/// live session already answers to — a new session's identity. Needs no
-/// ceiling: an ordinal is held only by a buffer or a live session, both finite,
-/// so one of the first `buffers + sessions + 1` is always free.
-fn mintName(out: []u8) ?[]const u8 {
-    var n: u32 = 1;
-    while (true) : (n += 1) {
-        const candidate = weft.instanceName(buf_base, n, out) orelse return null;
-        if (weft.bufferNamed(candidate)) continue;
-        if (nameTaken(candidate)) continue;
-        return candidate;
-    }
-}
-
-fn nameTaken(name: []const u8) bool {
-    for (sessions.items) |s| {
-        if (std.mem.eql(u8, s.name(), name)) return true;
-    }
-    return false;
-}
-
-/// Which session this command is about.
+/// Which session this command is about. git's `Route` is the library's, with
+/// `.repo` as the name git gives `.place` — the door into a second repository.
 fn route(kind: Route) ?*RepoSession {
-    if (kind == .carried) return model.routed;
-    // `.repo` asks the LOCUS, never what is focused: that is the whole door
-    // into a second repository, and it must open one from a git buffer too.
-    if (kind == .repo) return sessionFor(activeRoot());
-    if (focusedSession()) |s| return s; // a git buffer names its own session
-    // Then a session for the place we are actually in, if one is already open.
-    // Falling straight through to `cur` meant the MOST RECENT session won, and
-    // "most recent" tracks the last thing you touched anywhere — so a git
-    // command run from a file in one repository routinely acted on another.
-    // Same rung, same reason, as `weft.Instances.current`'s place link.
-    //
-    // Deliberately a lookup and not `sessionFor`: this must not MINT a session
-    // where it previously did not, which would change when a second repository
-    // silently opens.
-    if (openSessionFor(activeRoot())) |s| return s;
-    return if (sessions.items.len == 0) sessionFor(activeRoot()) else model.routed;
-}
-
-/// The repository root this command is about: WHERE it runs (`doc/place.md`).
-/// Absolute, so the same repository always keys one session.
-///
-/// **The climb is gone, and with it git's last filesystem grant.** The host
-/// detects a place when a file is opened by walking exactly the markers this
-/// plugin used to walk itself (`app/session.zig`'s `project_markers`) — up
-/// from the file, stopping at a floor, `.git` counting whatever kind it is —
-/// so climbing again here was a SECOND detector of one fact, running on a
-/// grant that reached the whole filesystem to answer a question about the
-/// user's own project. The focused buffer's path is not consulted either: an
-/// entry's place is derived from its path, so asking the place already asks
-/// about that file.
-///
-/// It also makes the marker rule right by construction rather than by care.
-/// The place is where the project's OWN marker is, and this plugin can no
-/// longer walk up out of it: a project rooted at a `.jj` or `.hg` top stays
-/// its own root instead of resolving to whatever enclosing `.git` checkout
-/// happens to contain it — the "must not claim a foreign repository" property,
-/// held by DELETING the climb rather than by adding a check to it.
-///
-/// Note what is deliberately NOT asked here: whether the place holds `.git`.
-/// That question has its own door (`weft.placeHas`) and a real caller
-/// (`rebaseInProgress`), but it cannot pick a root, because both answers pick
-/// the SAME directory. A place without a repository is where `git-init`
-/// creates one, and the gather renders the honest "Not a git repository."
-/// until it does — so a `.git` probe here would decide nothing.
-///
-/// Empty is the one refusal (a peer place, or a container that went away);
-/// `sessionFor` names it.
-fn activeRoot() []const u8 {
-    return placeDir();
-}
-
-/// The focused buffer's file, absolute, or null for a tool buffer (or for a
-/// place with no local directory to name it against).
-fn activePathAbs() ?[]const u8 {
-    const here = placeDir();
-    const abs = absolute(weft.path() orelse return null, here);
-    return if (abs.len == 0) null else abs;
-}
-
-/// WHERE this dispatch runs (`doc/place.md`), copied off the shim's shared read
-/// scratch. Empty when the place has no local directory at all, which every
-/// caller below treats as a refusal rather than as "here".
-fn placeDir() []const u8 {
-    const root = weft.placeRoot();
-    const n = @min(root.len, base_buf.len);
-    @memcpy(base_buf[0..n], root[0..n]);
-    return base_buf[0..n];
-}
-
-/// `pth` made absolute against this dispatch's place — a buffer path may be
-/// relative, a repository root never is. `weft.placePath` owns the join,
-/// because a path spelled relative to the launch directory and a place below
-/// it share components neither spelling admits to (see its doc).
-fn absolute(pth: []const u8, here: []const u8) []const u8 {
-    return weft.placePath(here, pth, &probe_buf);
+    return model.Repos.route(switch (kind) {
+        .repo => .place,
+        .focus => .focus,
+        .carried => .carried,
+    });
 }
 
 /// Pull the buffer's raw bytes into `raw` (paged in `slice`-sized windows, since
@@ -812,9 +731,6 @@ fn gitStatus() void {
 /// the repo — you had to drop to a shell. Reuses the same gather scaffolding as
 /// every other mutation (no git-init special-casing); after init, GATHER's
 /// `git status --branch` renders the fresh `Branch: main` header.
-fn gitInit() void {
-    after(&.{ "git", "init" });
-}
 fn gitRefresh() void {
     gather_mod.gather();
     weft.setMode("git");
@@ -862,7 +778,7 @@ fn gitVisit() void {
         },
         else => return,
     };
-    weft.runStr("open", cur().inRepo(cur().files[fi].path_()));
+    weft.runStr("open", model.inRepo(model.curSession(), cur().files[fi].path_()));
 }
 
 // ── Staging: file / hunk / region, resolved from the node under point ───────
@@ -920,13 +836,6 @@ fn gitUnstage() void {
     }
 }
 
-fn gitStageAll() void {
-    after(&.{ "git", "add", "-A" });
-}
-fn gitUnstageAll() void {
-    after(&.{ "git", "reset", "-q", "HEAD" });
-}
-
 /// Stage/unstage every file of a section (a section header operation).
 ///
 /// One command with one argument per file — where this used to build a shell
@@ -956,7 +865,7 @@ const Armed = struct { session: u32, target: Target };
 fn gitDiscard() void {
     const t = nodeAtCursor();
     const n = liveNode(t, "discard") orelse return;
-    const armed: Armed = .{ .session = cur().id, .target = t };
+    const armed: Armed = .{ .session = model.curSession().id, .target = t };
     switch (n.kind) {
         .file => _ = weft.confirmWith(Armed, armed, "discard changes to this file?", gitDiscardDo),
         .hunk => _ = weft.confirmWith(Armed, armed, "discard this hunk?", gitDiscardDo),
@@ -995,7 +904,7 @@ fn gitDiscardDo(yes: bool, armed: Armed) void {
             switch (f.section) {
                 // `rm` has no `-C`, so it gets the path made absolute against the
                 // session's root — the same join `open` already uses for a row.
-                .untracked => after(&.{ "rm", "--", cur().inRepo(f.path_()) }),
+                .untracked => after(&.{ "rm", "--", model.inRepo(model.curSession(), f.path_()) }),
                 .unstaged => after(&.{ "git", "checkout", "--", f.path_() }),
                 // `checkout HEAD --` restores index AND worktree in one
                 // command. The pair it replaces (`reset -q HEAD` then
@@ -1031,7 +940,7 @@ fn discardSection(sec: Section) void {
         if (cur().files[fi].section != sec) continue;
         // `rm` runs with no `-C`, so its paths are absolute; git's are
         // repository-relative, which is what git wants.
-        argv.push(if (sec == .untracked) cur().inRepo(cur().files[fi].path_()) else cur().files[fi].path_());
+        argv.push(if (sec == .untracked) model.inRepo(model.curSession(), cur().files[fi].path_()) else cur().files[fi].path_());
     }
     if (argv.n == before) {
         weft.setMode("git");
@@ -1100,7 +1009,7 @@ fn openDraft(flags: []const u8, prefill: []const []const u8) ?*Drafts.Slot {
         weft.echo("git: out of memory — could not open another commit draft");
         return null;
     };
-    slot.value = .{ .session = cur().id };
+    slot.value = .{ .session = model.curSession().id };
     setFlags(slot, flags);
     weft.toolBacking(draft_tool);
     seedDraft(slot, prefill);
@@ -1130,7 +1039,7 @@ fn currentDraft() ?*Drafts.Slot {
         weft.echo("no commit draft here");
         return null;
     };
-    model.routed = sessionById(slot.value.session) orelse return null;
+    model.Repos.routed = sessionById(slot.value.session) orelse return null;
     return slot;
 }
 
@@ -1170,7 +1079,7 @@ fn gitCommitSettle() void {
     // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
     drafts.close(slot);
-    _ = focusBuffer(cur().name());
+    _ = focusBuffer(model.curSession().name());
     weft.echo("committed");
 }
 
@@ -1207,21 +1116,9 @@ fn reseatOnto(kind: []const u8) void {
 }
 
 // ── Opening a draft from the status buffer ─────────────────────────────────
-fn gitCommit() void {
-    _ = openDraft("", &.{});
-}
 /// Amend: edit the current message (pre-filled), include staged changes.
-fn gitAmend() void {
-    _ = openDraft("--amend", head_message);
-}
 /// Reword: amend the MESSAGE ONLY (`--only`) — staged changes stay staged.
-fn gitReword() void {
-    _ = openDraft("--amend --only", head_message);
-}
 /// Extend: fold staged changes into HEAD, keep the message (no draft).
-fn gitExtend() void {
-    after(&.{ "git", "commit", "--amend", "--no-edit" });
-}
 fn gitFixup() void {
     openOnto("fixup");
 }
@@ -1241,15 +1138,6 @@ fn openOnto(kind: []const u8) void {
 }
 
 // ── The SPC-g read-only views (unchanged behavior) ──────────────────────────
-fn gitLog() void {
-    show(&.{ "git", "log", "--oneline", "--graph", "-30" }, "*git-log*", .log);
-}
-fn gitDiff() void {
-    show(&.{ "git", "diff" }, "*git-diff*", .diff);
-}
-fn gitDiffStaged() void {
-    show(&.{ "git", "diff", "--staged" }, "*git-diff-staged*", .diff);
-}
 fn gitBlame() void {
     // Absolute: the command runs in the repository, the buffer path may not be
     // spelled relative to it.
@@ -1293,7 +1181,7 @@ const Staged = struct {
 /// Ask before running `verb`. Safe answer first (`confirmSpec`), so accepting
 /// the leading candidate changes nothing.
 fn confirmThen(verb: @FieldType(Staged, "verb"), arg: []const u8, question: []const u8) void {
-    var staged: Staged = .{ .session = cur().id, .verb = verb };
+    var staged: Staged = .{ .session = model.curSession().id, .verb = verb };
     staged.arg_len = @min(arg.len, staged.arg.len);
     @memcpy(staged.arg[0..staged.arg_len], arg[0..staged.arg_len]);
     _ = weft.confirmWith(Staged, staged, question, runStaged);
@@ -1314,7 +1202,7 @@ fn runStaged(yes: bool, staged: Staged) void {
 /// id's `sessionById` used to make, at the same seam.
 fn route_to(session: u32) bool {
     const s = sessionById(session) orelse return false;
-    model.routed = s;
+    model.Repos.routed = s;
     return true;
 }
 
@@ -1378,32 +1266,8 @@ fn gitResetHard() void {
 }
 
 // ── Branch transient (names come from the `*git-input*` prompt) ─────────────
-fn gitBranchCheckout() void {
-    askBranch(.{ .before = &.{ "git", "checkout" } }, "checkout branch: ");
-}
-fn gitBranchCreate() void {
-    askBranch(.{ .before = &.{ "git", "checkout", "-b" } }, "create & checkout branch: ");
-}
-fn gitBranchNew() void {
-    askBranch(.{ .before = &.{ "git", "branch" } }, "new branch: ");
-}
-fn gitBranchDelete() void {
-    askBranch(.{ .before = &.{ "git", "branch", "-d" }, .confirm = true }, "delete branch: ");
-}
-fn gitBranchRename() void {
-    askBranch(.{ .before = &.{ "git", "branch", "-m" } }, "rename current branch to: ");
-}
 
 // ── Stash transient ─────────────────────────────────────────────────────────
-fn gitStashSave() void {
-    after(&.{ "git", "stash", "push" });
-}
-fn gitStashPop() void {
-    after(&.{ "git", "stash", "pop" });
-}
-fn gitStashApply() void {
-    after(&.{ "git", "stash", "apply" });
-}
 fn gitStashList() void {
     show(&.{ "git", "stash", "list" }, "*git-stash*", .none);
     weft.setMode("git-view");
@@ -1510,7 +1374,7 @@ fn startRebase(nstr: []const u8) void {
         weft.echo("git: out of memory — could not open another rebase plan");
         return;
     };
-    slot.value = .{ .session = cur().id };
+    slot.value = .{ .session = model.curSession().id };
     const base = std.fmt.bufPrint(&slot.value.base, "HEAD~{s}", .{nstr}) catch return;
     slot.value.base_len = base.len;
     weft.toolBacking(todo_tool);
@@ -1545,7 +1409,7 @@ fn gitRebaseSave() void {
         weft.echo("no rebase plan here");
         return;
     };
-    model.routed = sessionById(slot.value.session) orelse return; // a plan names its own repository
+    model.Repos.routed = sessionById(slot.value.session) orelse return; // a plan names its own repository
     const text = weft.slice(0, weft.byteLen());
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
@@ -1584,17 +1448,8 @@ fn gitRebaseSettle() void {
     // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
     todos.close(slot);
-    _ = focusBuffer(cur().name());
+    _ = focusBuffer(model.curSession().name());
     weft.echo("rebased");
-}
-fn gitRebaseContinue() void {
-    after(&.{ "git", "-c", "core.editor=true", "rebase", "--continue" });
-}
-fn gitRebaseAbort() void {
-    after(&.{ "git", "rebase", "--abort" });
-}
-fn gitRebaseSkip() void {
-    after(&.{ "git", "-c", "core.editor=true", "rebase", "--skip" });
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────

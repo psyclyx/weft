@@ -60,7 +60,8 @@ pub fn gather() void {
     // The projection entry has to EXIST before anything is gathered into it:
     // `repaint` authors it. Created here, not by the fill door — which used to
     // do it as a side effect of being handed a buffer name to write into.
-    if (!model.focusBuffer(s.name())) weft.runStr("buffer-create", s.name());
+    const sess = model.curSession();
+    if (!model.focusBuffer(sess.name())) weft.runStr("buffer-create", sess.name());
     weft.toolBacking(tool);
     s.gathering = true;
     s.raw_len = 0;
@@ -68,7 +69,7 @@ pub fn gather() void {
     for (0..model.part_count) |i| {
         const part: Part = @enumFromInt(i);
         s.bounds[i] = 0;
-        _ = weft.execWith(PartOf, .{ .session = s.id, .part = part }, .{
+        _ = weft.execWith(PartOf, .{ .session = model.curSession().id, .part = part }, .{
             .argv = rootedArgv(model.argvFor(part)),
         }, partLanded);
     }
@@ -78,8 +79,9 @@ pub fn gather() void {
 /// of arrival order, so the parser's view is deterministic even though four
 /// subprocesses are not.
 fn partLanded(r: weft.ExecDone, who: PartOf) void {
-    const s = model.sessionById(who.session) orelse return;
-    model.routed = s;
+    const owner = model.Repos.byId(who.session) orelse return;
+    model.Repos.routed = owner;
+    const s = &owner.value;
     // Stash this part's bytes; the assembly happens once every part is in.
     const idx = @intFromEnum(who.part);
     if (s.part_bytes[idx]) |stale| weft.allocator.free(stale);
@@ -130,7 +132,7 @@ pub fn afterInput(argv: []const []const u8, input: ?[]const u8) void {
     // flag covered both; split apart, the window between them is exactly when
     // the visible rows describe an index that is already moving.
     s.gathering = true;
-    _ = weft.execWith(AfterOf, .{ .session = s.id }, .{
+    _ = weft.execWith(AfterOf, .{ .session = model.curSession().id }, .{
         .argv = rootedArgv(argv),
         .input = input,
     }, mutationLanded);
@@ -143,15 +145,16 @@ pub fn afterInput(argv: []const []const u8, input: ?[]const u8) void {
 pub fn afterNoted(argv: []const []const u8, input: ?[]const u8) void {
     const s = cur();
     s.gathering = true;
-    _ = weft.execWith(AfterOf, .{ .session = s.id, .note = true }, .{
+    _ = weft.execWith(AfterOf, .{ .session = model.curSession().id, .note = true }, .{
         .argv = rootedArgv(argv),
         .input = input,
     }, mutationLanded);
 }
 
 fn mutationLanded(r: weft.ExecDone, who: AfterOf) void {
-    const s = model.sessionById(who.session) orelse return;
-    model.routed = s;
+    const owner = model.Repos.byId(who.session) orelse return;
+    model.Repos.routed = owner;
+    const s = &owner.value;
     if (who.note) {
         s.effect_ok = r.ok();
         var buf: [512]u8 = undefined;
@@ -182,7 +185,7 @@ var rooted: Argv = .{};
 /// a fact a second repository's commands can be routed by. `-C` is git's own
 /// mechanism, needs no door, and is exactly as scoped as the guard it replaces.
 fn rootedArgv(argv: []const []const u8) []const []const u8 {
-    const root = cur().root;
+    const root = model.curSession().root;
     if (root.len == 0 or argv.len == 0) return argv;
     if (!std.mem.eql(u8, argv[0], "git")) return argv; // `rm` takes absolute paths
     rooted = .{};
@@ -227,7 +230,7 @@ pub const Argv = struct {
 /// and are never parsed into the model.
 pub fn show(argv: []const []const u8, name: []const u8, style: model.ViewStyle) void {
     if (!model.focusBuffer(name)) weft.runStr("buffer-create", name);
-    var who: ShowOf = .{ .session = cur().id, .style = style };
+    var who: ShowOf = .{ .session = model.curSession().id, .style = style };
     who.name_len = @min(name.len, who.name_buf.len);
     @memcpy(who.name_buf[0..who.name_len], name[0..who.name_len]);
     _ = weft.execWith(ShowOf, who, .{ .argv = rootedArgv(argv) }, showLanded);
@@ -250,8 +253,8 @@ const ShowOf = struct {
 };
 
 fn showLanded(r: weft.ExecDone, who: ShowOf) void {
-    const s = model.sessionById(who.session) orelse return;
-    model.routed = s;
+    const s = model.Repos.byId(who.session) orelse return;
+    model.Repos.routed = s;
     var scratch: [1 << 16]u8 = undefined;
     const text = r.read(.out, 0, &scratch);
     // A projected view IS its tree: publishing it writes the buffer, so there

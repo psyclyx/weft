@@ -50,6 +50,7 @@ const Library = enum {
     ex,
     jsonrpc,
     output,
+    sessions,
     files,
     annotate,
 
@@ -62,6 +63,7 @@ const Library = enum {
             .ex => "weft_ex",
             .jsonrpc => "weft_jsonrpc",
             .output => "weft_output",
+            .sessions => "weft_sessions",
             .files => "weft_files",
             .annotate => "weft_annotate",
         };
@@ -391,7 +393,7 @@ const guests = [_]Guest{
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
     .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
     .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
-    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{.prompt} },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions } },
     .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },

@@ -191,7 +191,7 @@ pub fn statusLabel(f: *const File) []const u8 {
 /// and everything downstream (folding, hit-testing, where the cursor lands)
 /// follows from the keys rather than from where the bytes ended up.
 pub fn repaint() void {
-    const b = weft.project(cur().name()) orelse return;
+    const b = weft.project(model.curSession().name()) orelse return;
 
     if (!cur().in_repo) {
         _ = b.add(.{

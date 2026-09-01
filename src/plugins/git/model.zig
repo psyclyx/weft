@@ -10,6 +10,7 @@
 
 const std = @import("std");
 pub const weft = @import("weft");
+const sessions_lib = @import("weft_sessions");
 
 // ── Caps on ONE repository's working state (bounded, degrade loud) ──
 // These bound what a single gather can show — files, hunks, bytes of git
@@ -123,24 +124,16 @@ pub const Hunk = struct {
     len: usize,
 };
 
-/// One repository's whole world: its model, its projection, its buffer, its
-/// in-flight interaction. Nothing here is shared, so two repositories open at
-/// once cannot read or stage each other's files (§18: "two repositories …
-/// remain isolated").
-pub const RepoSession = struct {
-    /// This session's identity, minted once and never reused. What a fill
-    /// token, a pick id and a draft carry — none of them may name a row of a
-    /// table, because the table moves.
-    id: u32,
-    /// Absolute repository root — the session's key AND the directory every one
-    /// of its commands runs in. OWNED: a root that did not fit used to be
-    /// truncated silently, which keys the session on a directory that is not
-    /// the repository and then `cd`s into it.
-    root: []u8,
-    /// The instanced buffer this session projects into (`*git*`, `*git:2*`).
-    name_buf: [64]u8 = undefined,
-    name_len: usize = 0,
-
+/// One repository.s whole world: its model, its projection, its in-flight
+/// interaction. Nothing here is shared, so two repositories open at once cannot
+/// read or stage each other.s files (§18: "two repositories … remain
+/// isolated").
+///
+/// IDENTITY IS NOT HERE. The id, the absolute root and the instanced buffer
+/// name belong to `weft_sessions`, which owns find-or-mint and routing for
+/// every plugin that projects a per-place authority — so this struct is the
+/// part that is actually about git.
+pub const RepoState = struct {
     files: [MAX_FILES]File = undefined,
     file_count: usize = 0,
     hunks: [MAX_HUNKS]Hunk = undefined,
@@ -203,91 +196,50 @@ pub const RepoSession = struct {
     committing: ?*Drafts.Slot = null,
     sequencing: ?*Todos.Slot = null,
 
-    // ── Interaction state (per repository: two sessions can each have their
-    // own half-finished commit, confirm or prompt) ──
-    /// What a DEFERRED verb acts on — the destructive confirmations and the
-    /// reset transient, which fire after the question. Captured when the verb
-    /// is armed, re-resolved when it fires.
-    /// The commit `x` armed the reset transient with. Not a confirmation stash:
-    /// a menu is a mode, and the leaf that reads this runs while it is still
+    // ── Interaction state ──
+    //
+    // ONE field, where there were nine. The rest were each half of a demux,
+    // and each went when its other half did: the push/pull/fetch flags belong
+    // to the transient that arms them, `commit_flags` and `rebase_base` to the
+    // draft that carries them, and `input_action` to the prompt that asks.
+    // What is left is the one case where a value really is parked between two
+    // keystrokes rather than travelling with a question.
+    /// The commit `x` armed the reset menu with. Not a confirmation stash: a
+    /// menu is a mode, and the leaf that reads this runs while it is still
     /// open. What a CONFIRMED verb acts on travels with its question instead.
     pending_target: Target = .{},
-    /// A full mutation staged behind a confirmation (branch delete, stash
-    /// drop, reset --hard) — run verbatim once the answer comes back `yes`.
-    /// WHICH question the open prompt is asking. The typed TEXT is the
-    /// prompt library's, not ours — a session used to carry a copy of it
-    /// (`input_name`) because the answer had to survive a round trip through
-    /// a real buffer; it is handed straight to `onInput` now.
-    /// Extra flags the commit-finish path passes to `git commit` (amend/
-    /// reword), so the ONE editable `*git-commit*` buffer serves commit AND
-    /// amend/reword.
-    commit_flags: []const u8 = "",
-    /// The rebase base ref (`HEAD~N`), for both the todo listing and finish.
-    rebase_base: [64]u8 = undefined,
-    rebase_base_len: usize = 0,
-    // Push/pull/fetch flags accumulated in the (persistent, surface-rendered)
-    // transient modes; reset each time the transient is (re)opened.
-    push_force: bool = false,
-    push_upstream: bool = false,
-    pull_rebase: bool = false,
-    fetch_all: bool = false,
-    fetch_prune: bool = false,
 
-    pub fn name(self: *const RepoSession) []const u8 {
-        return self.name_buf[0..self.name_len];
-    }
-    /// A repository-relative path made absolute — `open` resolves against the
-    /// editor's own working directory, which is not where this repository is.
-    pub fn inRepo(self: *const RepoSession, leaf: []const u8) []const u8 {
-        return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ self.root, leaf }) catch leaf;
-    }
     /// The projection is provisional while a newer gather is in flight.
-    pub fn fresh(self: *const RepoSession) bool {
+    pub fn fresh(self: *const RepoState) bool {
         return !self.gathering;
     }
 };
 
-/// Live sessions, in open order, each individually allocated so a
-/// `*RepoSession` handed out earlier survives the table growing —
-/// `core/Buffers.zig`'s shape, and its reason: a draft names the session it
-/// commits to, a fill token names the session it parses into, and both outlive
-/// the command that made them.
-///
-/// There is no cap. How many repositories you may have open at once was never a
-/// decision anybody made; the guest heap is the real bound, and it says so when
-/// it refuses. A session is still never retired: its buffer, and therefore its
-/// instance identity, outlives any single command.
-pub var sessions: std.ArrayList(*RepoSession) = .empty;
+/// git.s sessions. Identity, find-or-mint, instance naming and routing are the
+/// library.s; what is per-repository and about GIT is `RepoState` above.
+pub const Repos = sessions_lib.Registry(RepoState, .{
+    .base = buf_base,
+    .no_place = "git: this place has no local repository",
+    .no_memory = "git: out of memory — could not open this repository",
+});
+pub const RepoSession = Repos.Session;
 
-/// The next session's identity. An ORDINAL, not an index: a fill token and a
-/// pick id carry it across an async round trip, and a draft carries it for as
-/// long as the draft lives, so it has to name a session rather than a row of a
-/// table that no longer exists in that shape.
-pub var next_session_id: u32 = 1;
-
-/// The session the running command is about — set by the command funnel (from
-/// the focused buffer or the buffer's repository) and by a landing fill (from
-/// the session its token carries). Never inferred inside a handler.
-///
-/// Optional because "no repository is open yet" is a real state. It used to be
-/// spelled as a blank row of the fixed table — a session that is not one — and
-/// the only reader that could see it was `on_activate`'s offer publication.
-pub var routed: ?*RepoSession = null;
-
-/// The session this command is about. Every entry point routes before it hands
-/// control to a handler (`on_command`'s funnel, `on_fill_token`'s and
-/// `on_pick_accept`'s token, `currentDraft`'s draft), so a handler's `cur()` is
-/// always answered — the same dominated assertion `Buffers.active()` makes.
-pub fn cur() *RepoSession {
-    return routed.?;
+/// A repository-relative path made absolute — `open` resolves against the
+/// editor.s own working directory, which is not where this repository is.
+pub fn inRepo(s: *const RepoSession, leaf: []const u8) []const u8 {
+    return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ s.root, leaf }) catch leaf;
 }
 
-/// The session `id` names, or null for an id we never issued.
-pub fn sessionById(id: u32) ?*RepoSession {
-    for (sessions.items) |s| {
-        if (s.id == id) return s;
-    }
-    return null;
+/// The session the running command is about, as a POINTER TO ITS STATE. Every
+/// entry point routes before it hands control to a handler, so a handler.s
+/// `cur()` is always answered — the same dominated assertion `Buffers.active()`
+/// makes. Two spellings because two questions: `cur()` is "the repository I am
+/// acting on", `curSession()` is "which session that is".
+pub fn cur() *RepoState {
+    return &Repos.routed.?.value;
+}
+pub fn curSession() *RepoSession {
+    return Repos.routed.?;
 }
 
 // ── Targeting: the identity a row carries (design §14.3) ────────────────────
