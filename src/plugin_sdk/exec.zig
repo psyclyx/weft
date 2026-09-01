@@ -235,3 +235,44 @@ pub fn deliver(token: u32) void {
     defer if (slot.release) |f| f(weft.allocator, slot.ctx);
     slot.thunk(.{ .status = e.wl_exec_status() }, slot.ctx);
 }
+
+/// An argv built up a piece at a time, for the caller whose command line
+/// depends on what it finds — staging a section's files, a flag menu splicing
+/// what is armed.
+///
+/// It lives beside `exec` because that is what it is FOR: `Spec.argv` is a
+/// slice, and a caller with a variable number of arguments needs somewhere to
+/// assemble one. git had this as its own type; the second plugin to run a
+/// command over a list of things should not write it again.
+///
+/// BOUNDED, and the ceiling is the useful part: a section of ten thousand
+/// files is a different interaction, not a longer command line. `push` refuses
+/// past the end and says so through `full`, rather than silently truncating an
+/// argv into a command that means something else.
+pub const Argv = struct {
+    items: [max_args][]const u8 = undefined,
+    n: usize = 0,
+    /// Whether anything was refused. A caller that ignores this runs a command
+    /// missing arguments it asked for — check it before `slice()`.
+    full: bool = false,
+
+    /// An argv's length is a syscall's business, not a plugin's to choose.
+    pub const max_args = 512;
+
+    pub fn push(self: *Argv, arg: []const u8) void {
+        if (self.n == self.items.len) {
+            self.full = true;
+            return;
+        }
+        self.items[self.n] = arg;
+        self.n += 1;
+    }
+
+    pub fn pushAll(self: *Argv, args: []const []const u8) void {
+        for (args) |a| self.push(a);
+    }
+
+    pub fn slice(self: *const Argv) []const []const u8 {
+        return self.items[0..self.n];
+    }
+};

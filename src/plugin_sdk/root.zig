@@ -153,6 +153,7 @@ pub const thunk = @import("plugin.zig").thunk;
 pub const ExecSpec = @import("exec.zig").Spec;
 pub const ExecDone = @import("exec.zig").Done;
 pub const ExecStream = @import("exec.zig").Stream;
+pub const Argv = @import("exec.zig").Argv;
 pub const exec = @import("exec.zig").exec;
 pub const execWith = @import("exec.zig").execWith;
 

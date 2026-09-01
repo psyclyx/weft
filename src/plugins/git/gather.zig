@@ -190,36 +190,9 @@ fn rootedArgv(argv: []const []const u8) []const []const u8 {
 }
 
 /// A bounded argv for the commands whose length comes from the MODEL —
-/// staging a section, discarding one. Bounded rather than allocated because
-/// the ceiling is the useful part: a section of ten thousand files is a
-/// different interaction, not a longer command line, and `push` says so by
-/// refusing rather than by silently truncating.
-pub const Argv = struct {
-    items: [max_args][]const u8 = undefined,
-    n: usize = 0,
-    full: bool = false,
-
-    /// One argument per file plus the verb.s own words. The one place a bound
-    /// survives: an argv is a syscall.s, not this plugin.s to choose.
-    pub const max_args = 512;
-
-    pub fn push(self: *Argv, arg: []const u8) void {
-        if (self.n == self.items.len) {
-            self.full = true;
-            return;
-        }
-        self.items[self.n] = arg;
-        self.n += 1;
-    }
-
-    pub fn pushAll(self: *Argv, args: []const []const u8) void {
-        for (args) |a| self.push(a);
-    }
-
-    pub fn slice(self: *const Argv) []const []const u8 {
-        return self.items[0..self.n];
-    }
-};
+/// staging a section, discarding one — `weft.Argv`, which lives beside `exec`
+/// because assembling one is what a caller with variable arguments needs.
+pub const Argv = weft.Argv;
 
 /// Focus the named tool entry and fill it with one command's stdout — the
 /// read-only views (`git log`, `git show`, a blame) that own their own buffer
