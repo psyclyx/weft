@@ -84,7 +84,6 @@ const Section = model.Section;
 const File = model.File;
 const Hunk = model.Hunk;
 const RepoSession = model.RepoSession;
-const InputAction = model.InputAction;
 const render_order = model.render_order;
 const cur = model.cur;
 const sessionById = model.sessionById;
@@ -1382,19 +1381,19 @@ fn gitResetHard() void {
 
 // ── Branch transient (names come from the `*git-input*` prompt) ─────────────
 fn gitBranchCheckout() void {
-    openInput(.branch_checkout, "checkout branch: (C-c C-c)");
+    askBranch(.{ .before = &.{ "git", "checkout" } }, "checkout branch: ");
 }
 fn gitBranchCreate() void {
-    openInput(.branch_create, "create & checkout branch: (C-c C-c)");
+    askBranch(.{ .before = &.{ "git", "checkout", "-b" } }, "create & checkout branch: ");
 }
 fn gitBranchNew() void {
-    openInput(.branch_new, "new branch: (C-c C-c)");
+    askBranch(.{ .before = &.{ "git", "branch" } }, "new branch: ");
 }
 fn gitBranchDelete() void {
-    openInput(.branch_delete, "delete branch: (C-c C-c)");
+    askBranch(.{ .before = &.{ "git", "branch", "-d" }, .confirm = true }, "delete branch: ");
 }
 fn gitBranchRename() void {
-    openInput(.branch_rename, "rename current branch to: (C-c C-c)");
+    askBranch(.{ .before = &.{ "git", "branch", "-m" } }, "rename current branch to: ");
 }
 
 // ── Stash transient ─────────────────────────────────────────────────────────
@@ -1429,40 +1428,42 @@ fn gitLogAll() void {
 // minibuffer vim's `:` and lsp's rename use, so backing out of a branch name
 // is the same key as backing out of anything else, and git no longer owns
 // four commands and two modes for text entry.
+//
+// Each opening carries WHAT IT IS FOR (`openWith`), so there is no
+// `InputAction` enum, no `input_action` parked on the session, and no `onInput`
+// switch translating one back into the other. The question and its purpose
+// travel together, which is the same fix `confirmWith` made for confirmations.
 const input = prompt.Prompt(.{
     .name = "git-input",
     .resting = "git",
     .capacity = 256,
-    .on_accept = onInput,
+    .payload_callers = true,
     .on_cancel = struct {
         fn cancelled() void {
-            cur().input_action = .none;
             weft.echo("cancelled");
         }
     }.cancelled,
 });
 
-fn openInput(action: InputAction, label: []const u8) void {
-    cur().input_action = action;
-    input.open(label);
-}
+/// A branch verb is its argv template: everything before the name, and
+/// everything after it. Five verbs, one continuation.
+const BranchOp = struct {
+    before: []const []const u8,
+    /// Ask first — `branch -d` is the one that can lose work.
+    confirm: bool = false,
+};
 
-fn onInput(name: []const u8) void {
-    const act = cur().input_action;
-    cur().input_action = .none;
-    if (name.len == 0) {
-        weft.echo("cancelled");
-        return;
-    }
-    switch (act) {
-        .branch_checkout => after(&.{ "git", "checkout", name }),
-        .branch_create => after(&.{ "git", "checkout", "-b", name }),
-        .branch_new => after(&.{ "git", "branch", name }),
-        .branch_rename => after(&.{ "git", "branch", "-m", name }),
-        .branch_delete => confirmThen(.branch_delete, name, "delete branch?"),
-        .rebase_start => startRebase(name),
-        .none => {},
-    }
+fn askBranch(comptime op: BranchOp, label: []const u8) void {
+    input.openWith(BranchOp, op, label, struct {
+        fn done(name: []const u8, held: BranchOp) void {
+            if (name.len == 0) return weft.echo("cancelled");
+            if (held.confirm) return confirmThen(.branch_delete, name, "delete branch?");
+            var argv: Argv = .{};
+            argv.pushAll(held.before);
+            argv.push(name);
+            after(argv.slice());
+        }
+    }.done);
 }
 
 // ── Interactive rebase (Phase 2c) ───────────────────────────────────────────
@@ -1491,7 +1492,12 @@ fn gitRebaseInteractive() void {
         weft.setMode("git-rebase-menu");
         return;
     }
-    openInput(.rebase_start, "interactive rebase last N commits: (C-c C-c)");
+    input.openWith(void, {}, "interactive rebase last N commits: ", struct {
+        fn done(depth: []const u8, _: void) void {
+            if (depth.len == 0) return weft.echo("cancelled");
+            startRebase(depth);
+        }
+    }.done);
 }
 /// Kick off the todo: an ordinary instanced entry listing `HEAD~N..HEAD`
 /// oldest-first; the `.rebase` fill rewrites those lines into a `pick …` todo,

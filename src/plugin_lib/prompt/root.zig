@@ -43,17 +43,28 @@ pub const Config = struct {
     /// A GRAMMAR that owns the mode (vim's `:`) names it, because for that
     /// one the answer really is a specific mode.
     resting: ?[]const u8 = null,
-    /// What to do with the accepted line. Called AFTER the resting mode is
-    /// restored and the prompt is closed, so a handler is free to open
-    /// another prompt (git's `branch -d` → confirm) without fighting itself
-    /// for the mode.
-    on_accept: *const fn (line: []const u8) void,
+    /// What to do with the accepted line, when every opening of this prompt
+    /// means the same thing. Called AFTER the resting mode is restored and the
+    /// prompt is closed, so a handler is free to open another prompt (git's
+    /// `branch -d` → confirm) without fighting itself for the mode.
+    ///
+    /// Null when the callers use `openWith` instead — see its doc. A prompt
+    /// with neither is a prompt whose answer goes nowhere, and is refused at
+    /// compile time.
+    on_accept: ?*const fn (line: []const u8) void = null,
     /// What to do when the user backs out. Default: nothing but the echo
     /// line clearing — cancelling is not an event most callers have work for.
     on_cancel: ?*const fn () void = null,
     /// Longest line accepted. Overflow is refused out loud, never truncated
     /// silently into a shorter branch name than the user typed.
     capacity: usize = 1024,
+    /// Say so when EVERY opening carries its own continuation (`openWith`), so
+    /// leaving `on_accept` null is a decision rather than an omission.
+    payload_callers: bool = false,
+    /// Room for one `openWith` payload. The default holds anything a verb
+    /// plausibly carries (a target, an id, a small enum); a caller wanting more
+    /// says so and gets a bound, not a heap.
+    payload_capacity: usize = 64,
     /// An optional trailing HINT, recomputed from the line on every keystroke
     /// and rendered dimly after it. This is where signature help lives: the
     /// `:` line hands back the parameters a typed command still wants
@@ -77,11 +88,30 @@ pub fn Prompt(comptime cfg: Config) type {
     return struct {
         const Self = @This();
 
+        comptime {
+            if (cfg.on_accept == null and !cfg.payload_callers)
+                @compileError(cfg.name ++ ": a prompt needs `on_accept`, or `payload_callers = true` if every opening uses `openWith`");
+        }
+
         var buf: [cfg.capacity]u8 = undefined;
         var len: usize = 0;
         var label_buf: [128]u8 = undefined;
         var label_len: usize = 0;
         var open_now: bool = false;
+
+        /// One opening's payload, inline. There is at most one prompt open at a
+        /// time (opening a second replaces the first), so this needs no
+        /// allocator and no slot table — unlike `ask`, where two questions
+        /// really can be in flight.
+        const payload_capacity = cfg.payload_capacity;
+        /// Over-aligned to `@alignOf(u128)` so any ordinary payload — a struct
+        /// of slices, an enum, a packed id — can be stored in place. A payload
+        /// needing more says so at compile time rather than being misaligned at
+        /// run time.
+        const payload_align = @alignOf(u128);
+        const Payload = [payload_capacity]u8;
+        var payload_store: Payload align(payload_align) = undefined;
+        var pending: ?*const fn (line: []const u8, held: *align(payload_align) const Payload) void = null;
         /// Label + line + whatever `cfg.hint` trails it with.
         var render_buf: [cfg.capacity + label_buf.len + hint_cap]u8 = undefined;
         const hint_cap = 256;
@@ -127,6 +157,49 @@ pub fn Prompt(comptime cfg: Config) type {
         /// Ask, pre-filled — for "edit this existing value", where making the
         /// user retype what is already true is just a way to lose it.
         pub fn openSeeded(label: []const u8, seed: []const u8) void {
+            pending = null;
+            begin(label, seed);
+        }
+
+        /// Ask, carrying WHAT THE ANSWER IS FOR — the same shape as
+        /// `weft.confirmWith`, and for the same reason.
+        ///
+        /// A prompt with one `on_accept` forces every caller through one
+        /// callback, so a plugin asking six different questions has to stash an
+        /// enum before opening and switch on it coming back. git had exactly
+        /// that (`InputAction`, `input_action` on the session, and an
+        /// `onInput` switch) — a demux whose only job was to undo the fact that
+        /// the question and its purpose travelled separately.
+        ///
+        /// Here they travel together. The payload is copied into the prompt's
+        /// own storage, so it does not have to outlive the call that opened it,
+        /// and it is bounded: a payload larger than `payload_capacity` is a
+        /// compile error rather than a silent truncation of the thing an answer
+        /// is about.
+        pub fn openWith(
+            comptime T: type,
+            payload: T,
+            label: []const u8,
+            comptime on_answer: fn (line: []const u8, held: T) void,
+        ) void {
+            comptime {
+                if (@sizeOf(T) > payload_capacity)
+                    @compileError(cfg.name ++ ": payload " ++ @typeName(T) ++ " exceeds payload_capacity");
+                if (@alignOf(T) > payload_align)
+                    @compileError(cfg.name ++ ": payload " ++ @typeName(T) ++ " is over-aligned");
+            }
+            const Shim = struct {
+                fn call(line: []const u8, raw: *align(payload_align) const Payload) void {
+                    on_answer(line, @as(*const T, @ptrCast(@alignCast(raw))).*);
+                }
+            };
+            payload_store = undefined;
+            @as(*T, @ptrCast(@alignCast(&payload_store))).* = payload;
+            pending = Shim.call;
+            begin(label, "");
+        }
+
+        fn begin(label: []const u8, seed: []const u8) void {
             label_len = @min(label.len, label_buf.len);
             @memcpy(label_buf[0..label_len], label[0..label_len]);
             len = @min(seed.len, buf.len);
@@ -152,6 +225,7 @@ pub fn Prompt(comptime cfg: Config) type {
             if (!open_now) return;
             open_now = false;
             len = 0;
+            pending = null;
             weft.echo("");
             leave();
         }
@@ -200,13 +274,19 @@ pub fn Prompt(comptime cfg: Config) type {
             len = 0;
             leave();
             weft.echo("");
-            cfg.on_accept(held[0..n]);
+            // The opening's own continuation wins, and is cleared BEFORE it
+            // runs: a handler that opens this prompt again must not have its
+            // new payload overwritten by this one's teardown.
+            const cont = pending;
+            pending = null;
+            if (cont) |f| f(held[0..n], &payload_store) else if (cfg.on_accept) |f| f(held[0..n]);
         }
 
         pub fn onCancel() void {
             if (!open_now) return;
             open_now = false;
             len = 0;
+            pending = null;
             weft.echo("");
             leave();
             if (cfg.on_cancel) |f| f();

@@ -29,8 +29,6 @@ pub var patch_buf: [PATCH_CAP]u8 = undefined;
 /// small wasm stack).
 pub var body_out: [PATCH_CAP]u8 = undefined;
 
-pub const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_new, branch_rename, branch_delete, rebase_start };
-
 /// Buffer for building a rebase plan's todo lines + the transient op command.
 pub var op_buf: [1 << 14]u8 = undefined;
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
@@ -217,7 +215,6 @@ pub const RepoSession = struct {
     /// prompt library's, not ours — a session used to carry a copy of it
     /// (`input_name`) because the answer had to survive a round trip through
     /// a real buffer; it is handed straight to `onInput` now.
-    input_action: InputAction = .none,
     /// Extra flags the commit-finish path passes to `git commit` (amend/
     /// reword), so the ONE editable `*git-commit*` buffer serves commit AND
     /// amend/reword.
