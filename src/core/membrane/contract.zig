@@ -322,6 +322,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_proj_span", .handler = proj.hProjSpan },
     .{ .name = "wl_proj_rows", .handler = proj.hProjRows },
     .{ .name = "wl_proj_select", .handler = proj.hProjSelect },
+    .{ .name = "wl_tool_view", .handler = proj.hToolView },
     .{ .name = "wl_proj_commit", .handler = proj.hProjCommit },
     .{ .name = "wl_proj_at_cursor", .handler = proj.hProjAtCursor },
     .{ .name = "wl_proj_toggle", .handler = proj.hProjToggle },

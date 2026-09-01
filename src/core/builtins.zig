@@ -45,19 +45,46 @@ fn invokeSemanticAction(ctx: *Context, action_name: []const u8) anyerror!Value {
     }
     // ONE ACTION NAME, EITHER PLANE.
     //
-    // `view.apply`, `fs.entry.create-file`, `selection.delete` are what a
+    // `view.apply`, `fs.entry.create-file`, `selection.paste-after` are what a
     // person means, and a config binds the NAME. Which plane answers is not
-    // their business: a scene-backed view answers through its focused node, and
-    // a producer whose view is a text PROJECTION answers by `provide`-ing the
-    // same name against what the row under point IS. Without this the two
-    // planes needed two vocabularies for one idea, which is exactly the fork
-    // doc/plugin-api.md §F2 is about.
+    // their business: a scene-backed view answers from its FOCUSED NODE, and a
+    // producer whose view is a text PROJECTION answers from the ROW UNDER
+    // POINT — whose key IS that node.
     //
-    // An action nobody claims is still a no-op, as it always was — an ordinary
-    // text buffer has no `view.apply` and says so by silence.
+    // It goes through the SAME `invokeAction`, so the system transfer, the
+    // selected register, the interaction stack and outcome absorption are all
+    // filled in here, where they live. Reimplementing them on the guest side
+    // of the membrane was never on: a plugin cannot see the register.
+    if (ctx.semantic) |services| {
+        if (rowSubjectHere(ctx)) |subject| {
+            _ = services.invokeAction(
+                &ctx.head.interactions,
+                ctx.gpa,
+                .{ .action = action_name, .view = subject.view, .subject = subject.node },
+            ) catch |err| switch (err) {
+                error.ActionUnavailable, error.StaleView => return ok,
+                else => return err,
+            };
+            return ok;
+        }
+    }
+    // Neither plane: an action nobody claims is a no-op, as it always was — an
+    // ordinary text buffer has no `view.apply` and says so by silence.
     const cmd = ctx.actions.resolveFacts(action_name, ctx.capturedCtx().mergedFacts()) orelse return ok;
     _ = try command.run(ctx.commands, ctx, cmd, &.{});
     return ok;
+}
+
+/// The producer view and scene node the ROW UNDER POINT stands for, when the
+/// active entry is a text projection whose producer named its view.
+fn rowSubjectHere(ctx: *Context) ?struct { view: semantic_model.view.Ref, node: semantic_model.scene.NodeId } {
+    const entry = ctx.buffers.active();
+    const view = entry.tool_view orelse return null;
+    const projection_view = entry.projection orelse return null;
+    const ed = entry.textEditor() orelse return null;
+    const node = projection_view.subjectAt(ed.cursorOffset()) orelse return null;
+    const raw = std.fmt.parseInt(u64, node.key, 10) catch return null;
+    return .{ .view = view, .node = @enumFromInt(raw) };
 }
 
 /// Register a command trampoline for an open semantic action name. This is

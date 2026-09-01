@@ -181,6 +181,7 @@ pub const projectionSelectedLines = @import("projection.zig").selectedLines;
 pub const ProjectionRow = @import("projection.zig").Row;
 pub const projectionRows = @import("projection.zig").rows;
 pub const projectionSelect = @import("projection.zig").select;
+pub const toolView = @import("projection.zig").toolView;
 
 // ── transient: a flag menu as a declaration ──────────────────────────
 // See `transient.zig`. Built entirely on doors that already existed

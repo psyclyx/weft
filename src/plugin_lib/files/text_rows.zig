@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const model = @import("weft_files_model");
+const projection = @import("weft_files_projection");
 
 /// Roles. What a row IS, in the one vocabulary every projection shares — so a
 /// theme styles a directory listing and a repository the same way, and a third
@@ -157,17 +158,26 @@ pub fn lineOf(rows: []const model.Row, row: model.Row, out: []u8) ?Line {
     return .{ .text = out[0..w], .name_at = head.len };
 }
 
-/// A row's key: its model id, which is the identity the draft already uses.
-/// Minted here and parsed back here, and never anything a person sees — the
-/// display name is the row's TEXT, which is free to change under a rename
-/// precisely BECAUSE it is not the identity.
+/// A row.s key IS its scene NODE ID, in decimal.
+///
+/// The key is the producer.s to choose, and choosing this one makes the bridge
+/// trivial: core can answer an action on "the row under point" by reading the
+/// key and handing it to the same `invokeAction` a scene-backed view goes
+/// through — with the system transfer, the selected register, and the
+/// interaction stack all filled in on the host side, where they live.
+///
+/// It is never anything a person sees. The display name is the row.s TEXT,
+/// which is free to change under a rename precisely BECAUSE it is not the
+/// identity.
 pub fn keyOf(id: model.NodeId, out: []u8) []const u8 {
-    return std.fmt.bufPrint(out, "{d}", .{id}) catch "";
+    const node = projection.rowNodeId(id) catch return "";
+    return std.fmt.bufPrint(out, "{d}", .{@intFromEnum(node)}) catch "";
 }
 
 pub fn idOf(key: []const u8) ?model.NodeId {
     if (key.len == 0) return null;
-    return std.fmt.parseInt(model.NodeId, key, 10) catch null;
+    const raw = std.fmt.parseInt(u64, key, 10) catch return null;
+    return projection.modelRowId(@enumFromInt(raw)) catch null;
 }
 
 /// What the user's edit says this row's name is now.
@@ -242,10 +252,14 @@ test "files rows: what the user typed is what the name becomes" {
     try t.expectEqualStrings("", nameIn("     "));
 }
 
-test "files rows: a key round-trips, and a name never parses as one" {
+test "files rows: a key round-trips through the SCENE node id, and a name never parses as one" {
+    // The key is the row.s scene node id, so core can hand it straight to the
+    // same `invokeAction` a scene-backed view goes through. What matters is
+    // that it round-trips and that nothing a person types looks like one.
     var buf: [24]u8 = undefined;
-    try t.expectEqualStrings("42", keyOf(42, &buf));
-    try t.expectEqual(@as(?model.NodeId, 42), idOf("42"));
+    const key = keyOf(42, &buf);
+    try t.expect(key.len > 0);
+    try t.expectEqual(@as(?model.NodeId, 42), idOf(key));
     try t.expectEqual(@as(?model.NodeId, null), idOf("alpha.txt"));
     try t.expectEqual(@as(?model.NodeId, null), idOf(""));
 }

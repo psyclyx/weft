@@ -230,3 +230,16 @@ pub fn rows(out: []Row) []const Row {
 pub fn select(node: Ordinal, start: usize, end: usize) void {
     e.wl_proj_select(@intCast(node), @intCast(start), @intCast(end));
 }
+
+/// Name the SEMANTIC VIEW this entry's producer publishes for it.
+///
+/// A listing renders as text and answers actions through the same view a scene
+/// would have — so a paste carrying the system transfer, a named register, an
+/// interaction dialog and `view.apply` reach it through the host plumbing that
+/// already exists. Without this, each would have to be reimplemented on the
+/// guest side of the membrane, where the transfer and the register are not
+/// even visible.
+pub fn toolView(view: weft.semantic.view.Ref) void {
+    const wire = view.toWire();
+    e.wl_tool_view(wire.authority, wire.slot, wire.generation);
+}

@@ -117,6 +117,29 @@ pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     open.view.span(@intCast(args[0]), start, end, role) catch {};
 }
 
+/// `wl_tool_view(authority, slot, generation)`: name the SEMANTIC VIEW this
+/// entry.s producer publishes for it.
+///
+/// A listing renders as text and answers actions through the same view a scene
+/// would have. That is what lets `view.apply`, a paste carrying the system
+/// transfer, a named register and an interaction dialog reach it through the
+/// host plumbing that already exists — rather than each being reimplemented on
+/// the guest side, where the transfer and the register are not even visible.
+pub fn hToolView(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().buffers.active();
+    const view = entry.projection orelse return;
+    if (!std.mem.eql(u8, view.owner, p.name)) return;
+    if (args[2] == 0) return; // generation 0 is not a handle
+    entry.tool_view = .fromWire(.{
+        .authority = @bitCast(args[0]),
+        .slot = @bitCast(args[1]),
+        .generation = @bitCast(args[2]),
+    });
+}
+
 /// `wl_proj_select(node, start, end)`: select `[start,end)` of node `node`.s OWN
 /// text.
 ///

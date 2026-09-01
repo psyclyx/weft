@@ -529,6 +529,11 @@ pub const Session = struct {
             // scene plane had, kept.
             weft.declarePosture(.structural);
         } else _ = weft.focusBuffer(self.bufferName());
+        // This entry.s producer VIEW: the listing renders as text and answers
+        // actions through the same view a scene would have, so a paste carrying
+        // the system transfer, a named register and an interaction dialog reach
+        // it through the host plumbing that already exists.
+        weft.toolView(self.view_ref);
         self.publishRows(&self.draft);
     }
 

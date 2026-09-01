@@ -91,6 +91,18 @@ pub const Buffer = struct {
     /// between operations. An editable projection (mini.files files) is simply
     /// NOT read-only and takes `edit`.
     read_only: bool = false,
+    /// The semantic VIEW this entry.s producer publishes for it, when the
+    /// entry is a text projection rather than a scene.
+    ///
+    /// A listing renders as text and answers actions through the same view the
+    /// scene plane would have — so `view.apply`, a paste carrying the system
+    /// transfer, a named register, an interaction dialog all reach it through
+    /// the host plumbing that already exists, instead of each being
+    /// reimplemented on the guest side of the membrane. What differs is only
+    /// WHICH ROW: a scene answers from its focused node, a projection from the
+    /// row under point, whose KEY is that node.
+    tool_view: ?semantic.view.Ref = null,
+
     /// The buffer-local semantic cursor, restored when the buffer is selected
     /// again.
     semantic_focus: Head.SemanticFocus = .empty,

@@ -255,6 +255,7 @@ pub extern "weft" fn wl_proj_node(key: u32, key_len: u32, role: u32, role_len: u
 pub extern "weft" fn wl_proj_span(node: i32, start: i32, end: i32, role: u32, role_len: u32) void;
 pub extern "weft" fn wl_proj_rows(out: u32, cap: u32) i32;
 pub extern "weft" fn wl_proj_select(node: i32, start: i32, end: i32) void;
+pub extern "weft" fn wl_tool_view(authority: u32, slot: u32, generation: u32) void;
 pub extern "weft" fn wl_proj_commit() i32;
 pub extern "weft" fn wl_proj_at_cursor(out: u32, out_cap: u32) i32;
 pub extern "weft" fn wl_proj_toggle(key: u32, key_len: u32) i32;
