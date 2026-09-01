@@ -50,9 +50,9 @@ pub const fetch = weft.transient("git-fetch", .{
 });
 
 /// The three commands' one shape: a base argv, whatever is armed, and a
-/// re-gather. `procToBuffer` captures only stdout, so op output is suppressed
-/// for a clean re-gather — the post-op git state IS the feedback; hard errors
-/// surface via the host log (see `report`).
+/// re-gather. The op's own output is not shown — the post-op git state IS the
+/// feedback, which is what `after` re-gathers; a hard failure surfaces through
+/// `report` off the command's stderr.
 fn run(comptime t: type, base: []const []const u8, saying: []const u8) void {
     var argv: Argv = .{};
     argv.pushAll(base);

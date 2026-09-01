@@ -1,19 +1,20 @@
-//! git — git as a MODEL rendered into a foldable buffer (design §6.6), a
+//! git — git as a MODEL published as a foldable projection (design §6.6), a
 //! `.wasm` plugin. A `*git*` buffer is READ-ONLY and owned entirely by this
-//! plugin: one combined `git status`/`git diff`/`git diff --cached`/`git log`
-//! runs via `procToBuffer`, its raw output lands in the buffer that fill
-//! captured, the host fires `on_fill_token`, and we PARSE that output into a
-//! section→file→hunk tree then RE-RENDER the tree as pretty, foldable text over
-//! the same buffer (`edit` + `styleClear`/`style` + `foldClear`/`fold`).
+//! plugin: four `git status`/`git diff`/`git diff --cached`/`git log` runs go
+//! out through `weft.exec` as argv, their output comes back to a continuation
+//! that carries what it was for, and we PARSE it into a section→file→hunk tree
+//! and PUBLISH that tree (`weft.project`). The host lays it out, styles it from
+//! each row's ROLE, folds it, and hit-tests the cursor back to a row.
 //!
-//! The parallel node table (each node's rendered `[start,end)`) is DISPLAY and
-//! only display: it hit-tests the cursor to a row. What a verb acts on is the
-//! identity that row carries — a `Target` — resolved against the live model
-//! when the verb fires (design §14.3): a commit is a durable OID, a file is a
-//! revisioned name (section + path), a hunk and any line selection inside it
-//! are scoped to the render `snapshot` they were named in. A verb whose target
-//! the model no longer names refuses; it never falls back to whatever row a
-//! stale offset now covers.
+//! What a verb acts on is the identity the row carries — a `Target`, minted
+//! and parsed in `render.zig` alone — resolved against the live model when the
+//! verb fires (design §14.3): a commit is a durable OID, a file is a revisioned
+//! name (section + path), a hunk and any line selection inside it are scoped to
+//! the render `snapshot` they were named in. A verb whose target the model no
+//! longer names refuses; it never falls back to whatever row a stale offset now
+//! covers — and since no projection door takes or returns an offset, that is
+//! now a thing this plugin cannot express rather than a thing it is careful
+//! about.
 //!
 //! REPOSITORY SESSIONS (design §14.3). The model is per REPOSITORY, not per
 //! plugin: a `RepoSession` keyed by repository root owns the files/hunks/raw/
@@ -120,7 +121,6 @@ var msg_buf: [1 << 16]u8 = undefined;
 
 /// Buffer for building a rebase plan's todo lines + the transient op command.
 var op_buf: [1 << 14]u8 = undefined;
-/// The command handed to `procToBuffer`: the session's `cd` guard + the body.
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
 var tmp_buf: [1024]u8 = undefined;
 /// Scratch for the focused buffer's path made absolute (`activePathAbs`) —
