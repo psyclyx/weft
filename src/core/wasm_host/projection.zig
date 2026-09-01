@@ -286,7 +286,7 @@ fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize)
     // Parents first, children after, so a child's own role wins over the range
     // its parent painted — the reading a nested row wants.
     for (view.nodes.items) |n| {
-        const class = theme.classOf(n.role);
+        const class = @intFromEnum(theme.classOf(n.role));
         const start = @min(n.start, classes.len);
         // A node's OWN first line, not its whole subtree: a section header is
         // emphasised, its files are not painted as the section.
@@ -297,7 +297,7 @@ fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize)
         // relative to text it wrote; the node's rendered start is added here,
         // which is the only place that knows it.
         for (n.spans.items) |s| {
-            const sc = theme.classOf(s.role);
+            const sc = @intFromEnum(theme.classOf(s.role));
             if (sc == 0) continue;
             const lo = @min(start + s.start, classes.len);
             const hi = @min(start + s.end, classes.len);
@@ -319,10 +319,10 @@ const RoleCache = struct {
     container: *const @import("../container.zig").Container,
     facts: @import("weft_facts").Facts,
     leaves: [24][]const u8 = undefined,
-    classes: [24]u8 = undefined,
+    classes: [24]projection.Class = undefined,
     n: usize = 0,
 
-    fn classOf(self: *RoleCache, role: []const u8) u8 {
+    fn classOf(self: *RoleCache, role: []const u8) projection.Class {
         const leaf = projection.leafOf(role);
         for (self.leaves[0..self.n], self.classes[0..self.n]) |seen, class| {
             if (std.mem.eql(u8, seen, leaf)) return class;

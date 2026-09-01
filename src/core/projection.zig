@@ -400,24 +400,31 @@ pub const View = struct {
 /// vocabulary themeable without core learning it.
 pub const theme_slot_prefix = "theme/";
 
+/// A bound value is a STYLE CLASS NAME, not a number. Two reasons, and the
+/// second is not cosmetic: `weft.bind("theme/hunk", "muted")` is what a person
+/// would write, and `StyleClass` is an exhaustive enum — so a number would let
+/// a config bind 42 and turn a colour lookup into illegal behaviour. A name
+/// that is not a class simply is not one, and reads as `normal`.
+pub const Class = @import("capability.zig").StyleClass;
+
 /// What core says each role looks like, ABSENT any other opinion. This is data
 /// bound into the container at `.core` tier (`declareTheme`), not a switch — so
 /// it is overridable in the same way as everything else rather than in a way
 /// peculiar to styling.
-pub const default_theme = [_]struct { leaf: []const u8, class: u8 }{
-    .{ .leaf = "added", .class = 1 },
-    .{ .leaf = "removed", .class = 2 },
-    .{ .leaf = "header", .class = 3 },
-    .{ .leaf = "section", .class = 3 },
-    .{ .leaf = "title", .class = 3 },
-    .{ .leaf = "location", .class = 4 },
-    .{ .leaf = "path", .class = 4 },
-    .{ .leaf = "file", .class = 4 },
-    .{ .leaf = "commit", .class = 4 },
-    .{ .leaf = "emphasis", .class = 5 },
-    .{ .leaf = "muted", .class = 6 },
-    .{ .leaf = "detail", .class = 6 },
-    .{ .leaf = "hunk", .class = 6 },
+pub const default_theme = [_]struct { leaf: []const u8, class: Class }{
+    .{ .leaf = "added", .class = .added },
+    .{ .leaf = "removed", .class = .removed },
+    .{ .leaf = "header", .class = .header },
+    .{ .leaf = "section", .class = .header },
+    .{ .leaf = "title", .class = .header },
+    .{ .leaf = "location", .class = .location },
+    .{ .leaf = "path", .class = .location },
+    .{ .leaf = "file", .class = .location },
+    .{ .leaf = "commit", .class = .location },
+    .{ .leaf = "emphasis", .class = .emphasis },
+    .{ .leaf = "muted", .class = .muted },
+    .{ .leaf = "detail", .class = .muted },
+    .{ .leaf = "hunk", .class = .muted },
 };
 
 /// A role's LEAF — the last dotted segment, so `git.file` and `fs.file` both
@@ -435,7 +442,7 @@ pub fn declareTheme(container: *@import("container.zig").Container) !void {
         try container.declareSlot(.{ .name = slot, .shape = .value, .composition = .first_wins });
         try container.bind(.{
             .slot = slot,
-            .provider = .{ .value = std.fmt.comptimePrint("{d}", .{row.class}) },
+            .provider = .{ .value = @tagName(row.class) },
             .predicate = .{ .all = &.{} },
             .tier = .core,
             .owner = "core.theme",
@@ -448,15 +455,21 @@ pub fn declareTheme(container: *@import("container.zig").Container) !void {
 /// An unknown role is `.normal` (0). That is the honest default: a producer
 /// naming something nobody has themed should render as plain text, not as a
 /// guess — and a theme that wants otherwise says so by binding the slot.
-pub fn styleForIn(container: *const @import("container.zig").Container, f: @import("weft_facts").Facts, role: []const u8) u8 {
+pub fn styleForIn(container: *const @import("container.zig").Container, f: @import("weft_facts").Facts, role: []const u8) Class {
     var buf: [128]u8 = undefined;
-    const slot = std.fmt.bufPrint(&buf, theme_slot_prefix ++ "{s}", .{leafOf(role)}) catch return 0;
-    const winner = container.resolveOne(slot, f) orelse return 0;
-    const text = switch (winner.provider) {
+    const slot = std.fmt.bufPrint(&buf, theme_slot_prefix ++ "{s}", .{leafOf(role)}) catch return .normal;
+    const winner = container.resolveOne(slot, f) orelse return .normal;
+    const name = switch (winner.provider) {
         .value => |v| v,
-        else => return 0,
+        else => return .normal,
     };
-    return std.fmt.parseInt(u8, text, 10) catch 0;
+    // A name that is not a class reads as `normal` rather than becoming one by
+    // arithmetic — the enum is exhaustive, so there is no such thing as class 42
+    // to fall back to.
+    inline for (@typeInfo(Class).@"enum".fields) |field| {
+        if (std.mem.eql(u8, name, field.name)) return @field(Class, field.name);
+    }
+    return .normal;
 }
 
 const t = std.testing;
@@ -540,8 +553,8 @@ test "projection: styling resolves through the role's last segment" {
     var c = try themedContainer();
     defer c.deinit();
     try t.expectEqual(styleForIn(&c, .{}, "git.file"), styleForIn(&c, .{}, "fs.file"));
-    try t.expectEqual(@as(u8, 1), styleForIn(&c, .{}, "git.diff.added"));
-    try t.expectEqual(@as(u8, 0), styleForIn(&c, .{}, "something.nobody.declared"));
+    try t.expectEqual(Class.added, styleForIn(&c, .{}, "git.diff.added"));
+    try t.expectEqual(Class.normal, styleForIn(&c, .{}, "something.nobody.declared"));
 }
 
 test "projection: a theme rebinds a role, and can style one core never heard of" {
@@ -552,43 +565,57 @@ test "projection: a theme rebinds a role, and can style one core never heard of"
     defer c.deinit();
 
     // Core's defaults, read through the container rather than the table.
-    try t.expectEqual(@as(u8, 1), styleForIn(&c, .{}, "git.diff.added"));
-    try t.expectEqual(@as(u8, 0), styleForIn(&c, .{}, "output.result"));
+    try t.expectEqual(Class.added, styleForIn(&c, .{}, "git.diff.added"));
+    try t.expectEqual(Class.normal, styleForIn(&c, .{}, "output.result"));
 
     // A theme restyles an existing role…
     try c.bind(.{
         .slot = theme_slot_prefix ++ "added",
-        .provider = .{ .value = "5" },
+        .provider = .{ .value = "emphasis" },
         .predicate = .{ .all = &.{} },
         .tier = .config,
         .owner = "my-theme",
     });
-    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{}, "git.diff.added"));
+    try t.expectEqual(Class.emphasis, styleForIn(&c, .{}, "git.diff.added"));
     // …and every producer that named that leaf follows, without knowing.
-    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{}, "dap.added"));
+    try t.expectEqual(Class.emphasis, styleForIn(&c, .{}, "dap.added"));
 
     // …and styles a role core has never heard of, which is the half a
     // hardcoded table could not do at all.
     try c.declareSlot(.{ .name = theme_slot_prefix ++ "result", .shape = .value, .composition = .first_wins });
     try c.bind(.{
         .slot = theme_slot_prefix ++ "result",
-        .provider = .{ .value = "4" },
+        .provider = .{ .value = "location" },
         .predicate = .{ .all = &.{} },
         .tier = .config,
         .owner = "my-theme",
     });
-    try t.expectEqual(@as(u8, 4), styleForIn(&c, .{}, "output.result"));
+    try t.expectEqual(Class.location, styleForIn(&c, .{}, "output.result"));
 
     // A theme may be CONTEXTUAL, because eligibility is the ordinary predicate:
     // the same role reads differently in a different mode, with nothing in the
     // styling path aware that modes exist.
     try c.bind(.{
         .slot = theme_slot_prefix ++ "added",
-        .provider = .{ .value = "2" },
+        .provider = .{ .value = "removed" },
         .predicate = .{ .mode = "review" },
         .tier = .config,
         .owner = "my-theme",
     });
-    try t.expectEqual(@as(u8, 2), styleForIn(&c, .{ .mode = "review" }, "git.diff.added"));
-    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{ .mode = "normal" }, "git.diff.added"));
+    try t.expectEqual(Class.removed, styleForIn(&c, .{ .mode = "review" }, "git.diff.added"));
+    try t.expectEqual(Class.emphasis, styleForIn(&c, .{ .mode = "normal" }, "git.diff.added"));
+
+    // A NONSENSE value is inert, and this is why the binding is a class NAME.
+    // `StyleClass` is an exhaustive enum: had the value been a number, a config
+    // that said 42 would have reached `@enumFromInt(42)` and turned a colour
+    // lookup into illegal behaviour. There is no name that is not a class, only
+    // names that are not one.
+    try c.bind(.{
+        .slot = theme_slot_prefix ++ "muted",
+        .provider = .{ .value = "chartreuse" },
+        .predicate = .{ .all = &.{} },
+        .tier = .config,
+        .owner = "my-theme",
+    });
+    try t.expectEqual(Class.normal, styleForIn(&c, .{}, "git.diff.muted"));
 }
