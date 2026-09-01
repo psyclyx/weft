@@ -2,14 +2,22 @@
 //! (doc/cwa-prior-docs-audit.md §5). `Facts` is the union of two vocabularies
 //! that used to live in separate, incompatible predicate systems:
 //!
-//!   - the buffer-resource axis (`mode.zig`'s `Resource`: ext/shebang/glob
-//!     over `path`, `tags`, `locus`) — dead code today, zero consumers, but
-//!     the right shape;
+//!   - the buffer-resource axis (`ext`/`shebang`/`glob` over `path`, `tags`,
+//!     `locus`), which arrived from a `mode.zig` that had the right shape and
+//!     no consumers;
 //!   - the interaction axis (`action.zig`'s `When`/`Ctx`: `mode`, `lang`,
 //!     `tool`) — live code, the thing actually gating action dispatch.
 //!
-//! `Predicate` is `mode.zig`'s `{ext,shebang,glob,tag,locus,all,any,not}`
-//! vocabulary plus `{mode,tool,lang}`, evaluated over `Facts` instead of the
+//! That merger is now complete in the only way that lasts: `mode.zig` is
+//! DELETED. It survived the merge as a 346-line module holding a second,
+//! structurally-similar `Predicate`, a `Resource`, and an `Engine` — none of
+//! them reachable — imported by this file alone, for an enum and a glob
+//! matcher, both of which live here now. Two predicate vocabularies is the
+//! condition this module exists to end; leaving the loser in the tree kept it
+//! one import away from coming back.
+//!
+//! `Predicate` is that `{ext,shebang,glob,tag,locus,all,any,not}` vocabulary
+//! plus `{mode,tool,lang}`, evaluated over `Facts` instead of the
 //! narrower `Resource` — so a cross-axis conjunction (`mode=normal AND
 //! ext=.nix`) is an ORDINARY predicate, not something a single-scope matcher
 //! has no home for. This is the repair review finding A1/C-F5 asked for
@@ -25,15 +33,17 @@
 //! computation callers relied on before (action.zig does; `.lang` predicates
 //! never re-run `langOfName` themselves).
 //!
-//! Host-evaluated, pure data, O(predicate size), no callback — the same
-//! footgun-list discipline `mode.zig` documents.
+//! Host-evaluated, pure data, O(predicate size), no callback — predicates stay
+//! DATA, never a callback the engine has to trust.
+//!
+//! `std` is the only import, deliberately: this vocabulary is the one every
+//! plane must agree on, so it must be able to compile anywhere one of them
+//! runs — including `wasm32-freestanding`.
 
 const std = @import("std");
-const mode = @import("mode.zig");
 
-/// Reused from `mode.zig` rather than redeclared: one enum, not two
-/// structurally-identical-but-nominally-distinct types drifting apart.
-pub const Locality = mode.Locality;
+/// Where a buffer's bytes live.
+pub const Locality = enum { local, remote, tool, none };
 
 /// The merged fact set a `Predicate` matches against. Buffer-resource facts
 /// default to "no information" (`.none`/null/empty); interaction facts
@@ -68,7 +78,7 @@ pub const Facts = struct {
     }
 };
 
-/// A host-evaluated predicate over `Facts`. `mode.zig`'s vocabulary
+/// A host-evaluated predicate over `Facts`. The buffer-resource vocabulary
 /// (`ext,shebang,glob,tag,locus,all,any,not`) plus the interaction axis
 /// (`mode,tool,lang`) — the generalization W1 was pulled forward to build
 /// (doc/configuration.md §7, review C-F5).
@@ -107,7 +117,7 @@ pub const Predicate = union(enum) {
             .ext => |e| if (f.path) |p| std.mem.endsWith(u8, p, e) else false,
             .shebang => |s| std.mem.startsWith(u8, f.first_line, "#!") and
                 std.mem.indexOf(u8, f.first_line, s) != null,
-            .glob => |g| if (f.path) |p| mode.globMatch(g, p) else false,
+            .glob => |g| if (f.path) |p| globMatch(g, p) else false,
             .tag => |tg| f.hasTag(tg),
             .locus => |l| f.locality == l,
             .mode => |m| std.mem.eql(u8, m, f.mode),
@@ -214,6 +224,33 @@ fn sameAxisDisjoint(a: Predicate, b: Predicate) bool {
     };
 }
 
+/// Iterative `*`/`?` glob with backtracking over a path. Lives here rather
+/// than in a sibling because `Predicate.glob` is its only caller.
+pub fn globMatch(pattern: []const u8, text: []const u8) bool {
+    // Iterative `*`/`?` glob with backtracking — O(len·len) worst case,
+    // fine for paths; no regex engine (footgun rule: predicates stay data).
+    var p: usize = 0;
+    var s: usize = 0;
+    var star: ?usize = null;
+    var star_s: usize = 0;
+    while (s < text.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == text[s])) {
+            p += 1;
+            s += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            star_s = s;
+            p += 1;
+        } else if (star) |sp| {
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else return false;
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -244,6 +281,22 @@ test "facts: predicates match merged buffer + interaction facts" {
     // eligibility (review A1/A3); an ordinary predicate here.
     try t.expect((Predicate{ .all = &.{ .{ .mode = "normal" }, .{ .ext = ".rs" } } }).matches(f));
     try t.expect(!(Predicate{ .all = &.{ .{ .mode = "insert" }, .{ .ext = ".rs" } } }).matches(f));
+}
+
+test "facts: glob backtracks, and arrived here with its coverage" {
+    // `mode.zig` held this algorithm and the only tests of it; both moved
+    // rather than one of them being dropped on the way.
+    try t.expect(globMatch("src/*.rs", "src/main.rs"));
+    try t.expect(!globMatch("test/*.rs", "src/main.rs"));
+    try t.expect(globMatch("*", "anything"));
+    try t.expect(globMatch("?ain.zig", "main.zig"));
+    try t.expect(!globMatch("?ain.zig", "ain.zig"));
+    // The backtracking case: a `*` that must give ground for a later literal.
+    try t.expect(globMatch("*.test.zig", "a/b/c.test.zig"));
+    try t.expect(!globMatch("*.test.zig", "a/b/c.zig"));
+    // Trailing stars collapse; an exhausted pattern with input left fails.
+    try t.expect(globMatch("src/**", "src/a/b"));
+    try t.expect(!globMatch("src", "src/a"));
 }
 
 test "facts: specificity generalizes conjunct-count to any predicate tree" {
