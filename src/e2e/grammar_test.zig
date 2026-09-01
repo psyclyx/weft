@@ -96,41 +96,39 @@ fn fieldText(ed: *h.Editor, gpa: std.mem.Allocator, ref: semantic.scene.FieldRef
     return gpa.dupe(u8, snap.value.bytes);
 }
 
-/// The name column of every row the focused view currently shows, in scene
-/// order. `column` is where the projection placed it, which is how nesting
-/// reaches the surface.
+/// The name of every row the focused LISTING shows, in order.
+///
+/// A listing is a text projection: a row is a node, its NAME is the stretch its
+/// producer marked editable, and nesting reaches the surface as indent. This
+/// used to walk a scene's columns and snapshot a field — which is what the
+/// scene plane was chosen for, and what the text plane now gives without
+/// costing search, yank or selection.
 fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         for (out.items) |s| gpa.free(s);
         out.deinit(gpa);
     }
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        try out.append(gpa, try fieldText(ed, gpa, name.content.field.ref));
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
+    for (view.nodes.items) |node| {
+        const edit = node.editable orelse continue;
+        try out.append(gpa, try gpa.dupe(u8, node.text[edit.start..@min(edit.end, node.text.len)]));
     }
     return out;
 }
 
-/// A files row's editable name column, the one focus traversal stops on.
-fn nameNode(row: semantic.scene.Node) ?semantic.scene.Node {
-    const columns = switch (row.content) {
-        .container => |c| c.children,
-        else => return null,
-    };
-    for (columns) |column| if (column.focusable and column.content == .field) return column;
-    return null;
-}
-
-/// Where the projection placed a named row's name column.
+/// A row's INDENT, which is where nesting reaches the surface — the scene
+/// carried the same fact as a layout column.
 fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        const text = try fieldText(ed, gpa, name.content.field.ref);
-        defer gpa.free(text);
-        if (std.mem.eql(u8, text, want)) return name.layout.column;
+    _ = gpa;
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
+    for (view.nodes.items) |node| {
+        const edit = node.editable orelse continue;
+        const name = node.text[edit.start..@min(edit.end, node.text.len)];
+        if (!std.mem.eql(u8, name, want)) continue;
+        var i: usize = 0;
+        while (i < node.text.len and node.text[i] == ' ') i += 1;
+        return @intCast(i);
     }
     return null;
 }
@@ -479,14 +477,18 @@ fn countName(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !usize {
 }
 
 fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: ?u16) !usize {
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
+    _ = gpa;
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
     var n: usize = 0;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        const text = try fieldText(ed, gpa, name.content.field.ref);
-        defer gpa.free(text);
-        if (!std.mem.eql(u8, text, want)) continue;
-        if (column) |want_column| if (name.layout.column != want_column) continue;
+    for (view.nodes.items) |node| {
+        const edit = node.editable orelse continue;
+        const name = node.text[edit.start..@min(edit.end, node.text.len)];
+        if (!std.mem.eql(u8, name, want)) continue;
+        if (column) |want_column| {
+            var i: usize = 0;
+            while (i < node.text.len and node.text[i] == ' ') i += 1;
+            if (i != want_column) continue;
+        }
         n += 1;
     }
     return n;
