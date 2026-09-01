@@ -12,16 +12,17 @@ const std = @import("std");
 pub const weft = @import("weft");
 const sessions_lib = @import("weft_sessions");
 
-// ── Caps on ONE repository's working state (bounded, degrade loud) ──
-// These bound what a single gather can show — files, hunks, bytes of git
-// output — and every one of them says so when it is reached. What is NOT here
-// any more is a cap on how many repositories may be open: that was never about
-// a gather's size, only about the height of a static array, and a wasm guest
-// has a growable heap (`weft.allocator`) to hold sessions on instead.
-pub const MAX_FILES = 128;
-pub const MAX_HUNKS = 512;
-pub const RAW_CAP = 1 << 18; // 256 KiB of raw git output (paged in via `slice`)
-pub const PATCH_CAP = 1 << 16; // a synthesized one-hunk patch
+// ── What a gather holds ──
+//
+// NOTHING is capped any more. Files, hunks and the raw git output were fixed
+// arrays that degraded loudly — ">128 files — some omitted" is a sentence this
+// plugin used to say to anyone with a large working tree, and "output > 256 KiB
+// — diff truncated" to anyone with a large diff. Neither was a decision about
+// git; both were the height of a static array, in a guest that has a growable
+// heap (`weft.allocator`).
+//
+// The one bound left is a SYNTHESIZED PATCH, which is one hunk by construction.
+pub const PATCH_CAP = 1 << 16;
 
 pub var cmd_buf: [1 << 13]u8 = undefined;
 pub var msg_buf: [1 << 16]u8 = undefined;
@@ -134,13 +135,9 @@ pub const Hunk = struct {
 /// every plugin that projects a per-place authority — so this struct is the
 /// part that is actually about git.
 pub const RepoState = struct {
-    files: [MAX_FILES]File = undefined,
-    file_count: usize = 0,
-    hunks: [MAX_HUNKS]Hunk = undefined,
-    hunk_count: usize = 0,
-
-    raw: [RAW_CAP]u8 = undefined,
-    raw_len: usize = 0,
+    files: std.ArrayList(File) = .empty,
+    hunks: std.ArrayList(Hunk) = .empty,
+    raw: std.ArrayList(u8) = .empty,
     /// Where each gathered part ENDS in `raw`, in `Part` order. Recorded by
     /// the assembler as it appends, which is what replaced scanning the bytes
     /// for a sentinel: the boundary is known at the moment it is created, so
@@ -179,10 +176,6 @@ pub const RepoState = struct {
     /// on a fresh `*git*` without a TAB first; TAB still toggles it.
     sec_present: [4]bool = @splat(false),
     sec_count: [4]usize = @splat(0),
-
-    dropped_files: bool = false,
-    dropped_hunks: bool = false,
-    truncated_raw: bool = false,
 
     /// Snapshot identity (§14.3). `snapshot` names the gathered status the
     /// render (and every path/hunk reference in it) belongs to — a `Target`

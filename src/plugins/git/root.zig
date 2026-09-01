@@ -91,7 +91,6 @@ const sessionById = model.Repos.byId;
 const focusBuffer = model.focusBuffer;
 const Target = model.Target;
 const Lines = model.Lines;
-const RAW_CAP = model.RAW_CAP;
 const findFile = render_mod.findFile;
 const buildPatch = patch_mod.buildPatch;
 const transient = @import("transient.zig");
@@ -281,9 +280,6 @@ const base_cmds = [_]Cmd{
     .{ .name = "git-diff", .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } } },
     .{ .name = "git-diff-staged", .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } } },
     .{ .name = "git-blame", .do = .{ .call = gitBlame } },
-    // Internal: the deferred half of `noteDrops` (task #19 item 4) — not a
-    // user-facing verb, invoked only via `weft.run` from `on_fill_token`.
-    .{ .name = "git-note-drops-deliver", .do = .{ .call = gitNoteDropsDeliver }, .route = .carried },
 };
 
 /// The shared prompt's five editing commands (`input`, below), mapped into
@@ -575,27 +571,6 @@ fn renderStatus() void {
     repaint();
     // A new model is a new offer table: the previous one described rows that
     // no longer exist, and its ordinal is now stale at the door.
-    noteDrops();
-}
-
-/// `noteDrops` is only ever reached from `on_fill_token` (BACKGROUND — see the
-/// on_fill_token body above: it's the tail of `parseAndRender`, called nowhere
-/// else). `weft.echo` is head-gated (task #19 item 4), so the actual
-/// echoes defer through a self-registered command: a nested `weft.run` from
-/// a background entry IS a dispatching entry for its duration (the same
-/// door an async LSP response uses — see `src/plugins/lsp/root.zig`'s identical
-/// pattern), so `gitNoteDropsDeliver` below runs with a real dispatching
-/// head. The session travels WITH the deferral (`.carried` routing) — a
-/// background note never asks what is focused.
-fn noteDrops() void {
-    if (!(cur().dropped_files or cur().dropped_hunks or cur().truncated_raw)) return;
-    weft.run("git-note-drops-deliver");
-}
-
-fn gitNoteDropsDeliver() void {
-    if (cur().dropped_files) weft.echo("git: >128 files — some omitted");
-    if (cur().dropped_hunks) weft.echo("git: >512 hunks — some omitted");
-    if (cur().truncated_raw) weft.echo("git: output > 256 KiB — diff truncated");
 }
 
 // Every verb targets through `nodeAtCursor` and resolves through `resolve`.
@@ -621,7 +596,7 @@ fn resolve(t: Target) ?Node {
             // Snapshot-scoped: an ordinal from a superseded model names nothing.
             if (t.snap != cur().snapshot) return null;
             const fi = findFile(t.section, t.path_()) orelse return null;
-            const f = &cur().files[fi];
+            const f = &cur().files.items[fi];
             if (t.ord >= f.n_hunks) return null;
             return .{ .kind = .hunk, .idx = f.first_hunk + t.ord };
         },
@@ -752,7 +727,7 @@ fn gitToggleFold() void {
     // recomputing an offset to jump back to.
     const fold_key = switch (n.kind) {
         .section, .file => render_mod.keyOf(t),
-        .hunk => render_mod.keyOf(fileTarget(cur().hunks[n.idx].file)),
+        .hunk => render_mod.keyOf(fileTarget(cur().hunks.items[n.idx].file)),
         else => return,
     };
     render_mod.toggleFold(fold_key);
@@ -770,7 +745,7 @@ fn gitVisit() void {
     const n = resolve(t) orelse return;
     const fi: usize = switch (n.kind) {
         .file => n.idx,
-        .hunk => cur().hunks[n.idx].file,
+        .hunk => cur().hunks.items[n.idx].file,
         // RET on a recent commit → show it (a diff-colored read-only buffer).
         .commit => {
             showCommit(t);
@@ -778,7 +753,7 @@ fn gitVisit() void {
         },
         else => return,
     };
-    weft.runStr("open", model.inRepo(model.curSession(), cur().files[fi].path_()));
+    weft.runStr("open", model.inRepo(model.curSession(), cur().files.items[fi].path_()));
 }
 
 // ── Staging: file / hunk / region, resolved from the node under point ───────
@@ -787,14 +762,14 @@ fn gitStage() void {
     const n = liveNode(t, "stage") orelse return;
     switch (n.kind) {
         .hunk => {
-            if (cur().files[cur().hunks[n.idx].file].section != .unstaged) {
+            if (cur().files.items[cur().hunks.items[n.idx].file].section != .unstaged) {
                 weft.echo("stage: not an unstaged hunk");
                 return;
             }
             applyHunk(n.idx, t.sel, false);
         },
         .file => {
-            const f = &cur().files[n.idx];
+            const f = &cur().files.items[n.idx];
             if (f.section == .staged) {
                 weft.echo("stage: already staged");
                 return;
@@ -814,14 +789,14 @@ fn gitUnstage() void {
     const n = liveNode(t, "unstage") orelse return;
     switch (n.kind) {
         .hunk => {
-            if (cur().files[cur().hunks[n.idx].file].section != .staged) {
+            if (cur().files.items[cur().hunks.items[n.idx].file].section != .staged) {
                 weft.echo("unstage: not a staged hunk");
                 return;
             }
             applyHunk(n.idx, t.sel, true);
         },
         .file => {
-            const f = &cur().files[n.idx];
+            const f = &cur().files.items[n.idx];
             if (f.section != .staged) {
                 weft.echo("unstage: not staged");
                 return;
@@ -847,9 +822,9 @@ fn stageSection(sec: Section, stage: bool) void {
     if (stage) argv.pushAll(&.{ "git", "add", "--" }) else argv.pushAll(&.{ "git", "reset", "-q", "HEAD", "--" });
     const before = argv.n;
     var fi: usize = 0;
-    while (fi < cur().file_count) : (fi += 1) {
-        if (cur().files[fi].section != sec) continue;
-        argv.push(cur().files[fi].path_());
+    while (fi < cur().files.items.len) : (fi += 1) {
+        if (cur().files.items[fi].section != sec) continue;
+        argv.push(cur().files.items[fi].path_());
     }
     if (argv.n == before) return;
     after(argv.slice());
@@ -896,11 +871,11 @@ fn gitDiscardDo(yes: bool, armed: Armed) void {
         .hunk => {
             // Reverse the worktree change; for a staged hunk, drop it from the
             // index too (git's discard reverts both sides).
-            const staged = cur().files[cur().hunks[n.idx].file].section == .staged;
+            const staged = cur().files.items[cur().hunks.items[n.idx].file].section == .staged;
             discardHunk(n.idx, t.sel, staged);
         },
         .file => {
-            const f = &cur().files[n.idx];
+            const f = &cur().files.items[n.idx];
             switch (f.section) {
                 // `rm` has no `-C`, so it gets the path made absolute against the
                 // session's root — the same join `open` already uses for a row.
@@ -936,11 +911,11 @@ fn discardSection(sec: Section) void {
     }
     const before = argv.n;
     var fi: usize = 0;
-    while (fi < cur().file_count) : (fi += 1) {
-        if (cur().files[fi].section != sec) continue;
+    while (fi < cur().files.items.len) : (fi += 1) {
+        if (cur().files.items[fi].section != sec) continue;
         // `rm` runs with no `-C`, so its paths are absolute; git's are
         // repository-relative, which is what git wants.
-        argv.push(if (sec == .untracked) model.inRepo(model.curSession(), cur().files[fi].path_()) else cur().files[fi].path_());
+        argv.push(if (sec == .untracked) model.inRepo(model.curSession(), cur().files.items[fi].path_()) else cur().files.items[fi].path_());
     }
     if (argv.n == before) {
         weft.setMode("git");

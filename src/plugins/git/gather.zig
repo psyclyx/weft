@@ -64,7 +64,7 @@ pub fn gather() void {
     weft.focusOrCreateBuffer(sess.name());
     weft.toolBacking(tool);
     s.gathering = true;
-    s.raw_len = 0;
+    s.raw.clearRetainingCapacity();
     s.pending_parts = model.part_count;
     for (0..model.part_count) |i| {
         const part: Part = @enumFromInt(i);
@@ -92,16 +92,11 @@ fn partLanded(r: weft.ExecDone, who: PartOf) void {
     // Every part is in. Concatenate in Part order, recording each region's END
     // as we go — the boundary is known when it is created, so nothing has to
     // be recovered by searching the bytes.
-    s.raw_len = 0;
-    s.truncated_raw = false;
+    s.raw.clearRetainingCapacity();
     for (0..model.part_count) |i| {
         const bytes = s.part_bytes[i] orelse &[_]u8{};
-        const room = model.RAW_CAP - s.raw_len;
-        const n = @min(bytes.len, room);
-        if (n < bytes.len) s.truncated_raw = true;
-        @memcpy(s.raw[s.raw_len..][0..n], bytes[0..n]);
-        s.raw_len += n;
-        s.bounds[i] = s.raw_len;
+        s.raw.appendSlice(weft.allocator, bytes) catch {};
+        s.bounds[i] = s.raw.items.len;
     }
     for (&s.part_bytes) |*held| {
         if (held.*) |bytes| weft.allocator.free(bytes);
@@ -204,8 +199,9 @@ pub const Argv = struct {
     n: usize = 0,
     full: bool = false,
 
-    /// One argument per file plus the verb's own words.
-    pub const max_args = model.MAX_FILES + 8;
+    /// One argument per file plus the verb.s own words. The one place a bound
+    /// survives: an argv is a syscall.s, not this plugin.s to choose.
+    pub const max_args = 512;
 
     pub fn push(self: *Argv, arg: []const u8) void {
         if (self.n == self.items.len) {

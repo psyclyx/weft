@@ -144,8 +144,8 @@ fn setPath(t: *Target, p: []const u8) void {
 pub fn findFile(sec: Section, pth: []const u8) ?usize {
     if (pth.len == 0) return null;
     var i: usize = 0;
-    while (i < cur().file_count) : (i += 1) {
-        if (cur().files[i].section == sec and std.mem.eql(u8, cur().files[i].path_(), pth)) return i;
+    while (i < cur().files.items.len) : (i += 1) {
+        if (cur().files.items[i].section == sec and std.mem.eql(u8, cur().files.items[i].path_(), pth)) return i;
     }
     return null;
 }
@@ -155,7 +155,7 @@ pub fn countLines(s: usize, e: usize) usize {
     var i = s;
     while (i < e) {
         var le = i;
-        while (le < e and cur().raw[le] != '\n') le += 1;
+        while (le < e and cur().raw.items[le] != '\n') le += 1;
         if (le > i) n += 1;
         i = le + 1;
     }
@@ -222,8 +222,8 @@ pub fn repaint() void {
             addRecent(b, head);
         } else {
             var fi: usize = 0;
-            while (fi < cur().file_count) : (fi += 1) {
-                if (cur().files[fi].section != sec) continue;
+            while (fi < cur().files.items.len) : (fi += 1) {
+                if (cur().files.items[fi].section != sec) continue;
                 addFile(b, head, fi);
             }
         }
@@ -232,7 +232,7 @@ pub fn repaint() void {
 }
 
 fn addFile(b: weft.ProjectionBuilder, parent: u32, fi: usize) void {
-    const f = &cur().files[fi];
+    const f = &cur().files.items[fi];
     const file_node = b.addFmt(.{
         .key = keyOf(.{ .kind = .file, .section = f.section, .path = f.path, .plen = f.plen }),
         .role = roleFile(f.section),
@@ -255,14 +255,14 @@ fn addFile(b: weft.ProjectionBuilder, parent: u32, fi: usize) void {
 /// for the whole hunk, which is the thing the old per-line `styleHunk` scan
 /// existed to avoid. The rows are also what a partial-hunk selection is about.
 fn addHunk(b: weft.ProjectionBuilder, parent: u32, fi: usize, ord: usize, hi: usize) void {
-    const f = &cur().files[fi];
+    const f = &cur().files.items[fi];
     const key = keyOf(.{ .kind = .hunk, .section = f.section, .path = f.path, .plen = f.plen, .ord = ord });
     var key_owned: [512]u8 = undefined;
     const owned = key_owned[0..@min(key.len, key_owned.len)];
     @memcpy(owned, key[0..owned.len]);
 
-    const h = &cur().hunks[hi];
-    const body = cur().raw[h.at .. h.at + h.len];
+    const h = &cur().hunks.items[hi];
+    const body = cur().raw.items[h.at .. h.at + h.len];
     var it = std.mem.splitScalar(u8, body, '\n');
     const header = it.first();
     const hunk_node = b.add(.{
@@ -295,9 +295,9 @@ fn addRecent(b: weft.ProjectionBuilder, parent: u32) void {
     var i = cur().recent_start;
     while (i < cur().recent_end) {
         var le = i;
-        while (le < cur().recent_end and cur().raw[le] != '\n') le += 1;
+        while (le < cur().recent_end and cur().raw.items[le] != '\n') le += 1;
         if (le > i) {
-            const line = cur().raw[i..le];
+            const line = cur().raw.items[i..le];
             // The hash is the first token; it IS the row's durable identity,
             // which is why a commit row survives a re-gather where a working
             // path may not.
@@ -338,7 +338,7 @@ pub fn selectedLines(hunk_key: []const u8) ?Lines {
 
 /// A file target for `fi` in the CURRENT snapshot.
 pub fn fileTarget(fi: usize) Target {
-    const f = &cur().files[fi];
+    const f = &cur().files.items[fi];
     return .{
         .kind = .file,
         .snap = cur().snapshot,
@@ -349,7 +349,7 @@ pub fn fileTarget(fi: usize) Target {
 }
 
 pub fn nameFile(t: *Target, fi: usize) void {
-    const f = &cur().files[fi];
+    const f = &cur().files.items[fi];
     t.section = f.section;
     t.plen = @min(f.plen, t.path.len);
     @memcpy(t.path[0..t.plen], f.path[0..t.plen]);

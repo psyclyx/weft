@@ -22,16 +22,16 @@ pub var body_out: [model.PATCH_CAP]u8 = undefined;
 /// (git's algorithm: unselected `+` dropped, unselected `-` demoted to context)
 /// and recompute the `@@` counts. Returns null if it won't fit.
 pub fn buildPatch(hi: usize, sel: ?Lines) ?[]const u8 {
-    const h = &cur().hunks[hi];
-    const f = &cur().files[h.file];
+    const h = &cur().hunks.items[hi];
+    const f = &cur().files.items[h.file];
     if (f.header_len == 0) return null;
     var w: usize = 0;
-    const hdr = cur().raw[f.header_off .. f.header_off + f.header_len];
+    const hdr = cur().raw.items[f.header_off .. f.header_off + f.header_len];
     if (hdr.len > patch_buf.len) return null;
     @memcpy(patch_buf[0..hdr.len], hdr);
     w = hdr.len;
 
-    const hunk = cur().raw[h.at .. h.at + h.len];
+    const hunk = cur().raw.items[h.at .. h.at + h.len];
     if (sel) |s| return buildPartial(hunk, s, &w);
     if (w + hunk.len > patch_buf.len) return null;
     @memcpy(patch_buf[w .. w + hunk.len], hunk);

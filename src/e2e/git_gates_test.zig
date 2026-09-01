@@ -427,3 +427,45 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
     ed.settle(2);
     try t.expect(ed.buffers.findByName("*git-commit*") == null);
 }
+
+// ── GATE G8: nothing about a working tree is capped ──
+//
+// git used to hold a gather in fixed arrays — 128 files, 512 hunks, 256 KiB of
+// output — and say so out loud when it hit one: ">128 files — some omitted".
+// That sentence was never a fact about git. It was the height of a static
+// array, in a guest that has a growable heap, and the cost was that a large
+// repository silently showed you part of itself.
+test "e2e/git-gates: G8 a working tree past the old caps renders whole" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // 300 untracked files — well past the old 128 — with names that sort so the
+    // last one is unambiguous.
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "for i in $(seq -w 1 300); do printf 'x\\n' > f$i.txt; done",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "f300.txt"));
+
+    // The first and the last are both there — not a prefix of the tree.
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "f001.txt") != null);
+    try t.expect(std.mem.indexOf(u8, text, "f300.txt") != null);
+    // And no apology, because there is nothing left to apologise for.
+    try t.expect(std.mem.indexOf(u8, text, "omitted") == null);
+}

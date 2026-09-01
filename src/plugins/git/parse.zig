@@ -7,12 +7,11 @@
 //! without holding the rest of the plugin in your head.
 
 const std = @import("std");
+const weft = @import("weft");
 const model = @import("model.zig");
 const Section = model.Section;
 const RepoSession = model.RepoSession;
 const cur = model.cur;
-const MAX_FILES = model.MAX_FILES;
-const MAX_HUNKS = model.MAX_HUNKS;
 const render_order = model.render_order;
 const countLines = @import("render.zig").countLines;
 /// The parser needs to find an already-recorded file to attach a hunk to.
@@ -21,14 +20,12 @@ const findFile = @import("render.zig").findFile;
 
 // ── Parse ──────────────────────────────────────────────────────────────────
 pub fn parse() void {
-    cur().file_count = 0;
-    cur().hunk_count = 0;
+    cur().files.clearRetainingCapacity();
+    cur().hunks.clearRetainingCapacity();
     cur().branch_len = 0;
     cur().in_repo = false;
     cur().recent_start = 0;
     cur().recent_end = 0;
-    cur().dropped_files = false;
-    cur().dropped_hunks = false;
     for (0..4) |i| {
         cur().sec_present[i] = false;
         cur().sec_count[i] = 0;
@@ -54,7 +51,7 @@ pub fn parse() void {
             cur().sec_count[idx] = countLines(cur().recent_start, cur().recent_end);
         } else {
             var c: usize = 0;
-            for (cur().files[0..cur().file_count]) |f| if (f.section == sec) {
+            for (cur().files.items[0..cur().files.items.len]) |f| if (f.section == sec) {
                 c += 1;
             };
             cur().sec_count[idx] = c;
@@ -68,9 +65,9 @@ pub fn parsePorcelain(s: usize, e: usize) void {
     while (i < e) {
         const ls = i;
         var le = i;
-        while (le < e and cur().raw[le] != '\n') le += 1;
+        while (le < e and cur().raw.items[le] != '\n') le += 1;
         i = le + 1;
-        const line = cur().raw[ls..le];
+        const line = cur().raw.items[ls..le];
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "## ")) {
             cur().in_repo = true;
@@ -104,15 +101,10 @@ pub fn dequote(pth: []const u8) []const u8 {
 }
 
 pub fn addFile(section: Section, pth: []const u8, x: u8, y: u8) void {
-    if (cur().file_count >= MAX_FILES) {
-        cur().dropped_files = true;
-        return;
-    }
-    var f = &cur().files[cur().file_count];
-    f.* = .{ .section = section, .idx_ch = x, .wt_ch = y };
+    var f: model.File = .{ .section = section, .idx_ch = x, .wt_ch = y };
     f.plen = @min(pth.len, f.path.len);
     @memcpy(f.path[0..f.plen], pth[0..f.plen]);
-    cur().file_count += 1;
+    cur().files.append(weft.allocator, f) catch return;
 }
 
 pub fn parseDiff(ds: usize, de: usize, sec: Section) void {
@@ -122,21 +114,21 @@ pub fn parseDiff(ds: usize, de: usize, sec: Section) void {
     while (i < de) {
         const ls = i;
         var le = i;
-        while (le < de and cur().raw[le] != '\n') le += 1;
+        while (le < de and cur().raw.items[le] != '\n') le += 1;
         i = le + 1;
-        const line = cur().raw[ls..le];
+        const line = cur().raw.items[ls..le];
         if (std.mem.startsWith(u8, line, "diff --git ")) {
             closeHunk(&hstart, cur_file, ls);
             cur_file = findFile(sec, pathFromDiffGit(line));
             if (cur_file) |fi| {
-                cur().files[fi].header_off = ls;
-                cur().files[fi].header_len = 0; // set at the first @@
-                cur().files[fi].first_hunk = cur().hunk_count;
-                cur().files[fi].n_hunks = 0;
+                cur().files.items[fi].header_off = ls;
+                cur().files.items[fi].header_len = 0; // set at the first @@
+                cur().files.items[fi].first_hunk = cur().hunks.items.len;
+                cur().files.items[fi].n_hunks = 0;
             }
         } else if (std.mem.startsWith(u8, line, "@@")) {
             if (cur_file) |fi| {
-                if (cur().files[fi].header_len == 0) cur().files[fi].header_len = ls - cur().files[fi].header_off;
+                if (cur().files.items[fi].header_len == 0) cur().files.items[fi].header_len = ls - cur().files.items[fi].header_off;
             }
             closeHunk(&hstart, cur_file, ls);
             hstart = ls;
@@ -149,13 +141,8 @@ pub fn closeHunk(hstart: *?usize, file: ?usize, end: usize) void {
     const s = hstart.* orelse return;
     hstart.* = null;
     const fi = file orelse return;
-    if (cur().hunk_count >= MAX_HUNKS) {
-        cur().dropped_hunks = true;
-        return;
-    }
-    cur().hunks[cur().hunk_count] = .{ .file = fi, .at = s, .len = end - s };
-    cur().hunk_count += 1;
-    cur().files[fi].n_hunks += 1;
+    cur().hunks.append(weft.allocator, .{ .file = fi, .at = s, .len = end - s }) catch return;
+    cur().files.items[fi].n_hunks += 1;
 }
 
 pub fn pathFromDiffGit(line: []const u8) []const u8 {
