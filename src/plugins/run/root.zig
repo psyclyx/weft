@@ -28,25 +28,20 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "run-command", .handler = runCommand, .params = "command", .summary = "Run a shell command, streaming it into *output*." },
-    .{ .name = "run-line", .handler = runLine, .summary = "Run the current line as a shell command." },
-    .{ .name = "output-visit", .handler = output.visit, .summary = "Open the location the focused output row names." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "run-command", .call = runCommand, .params = "command", .summary = "Run a shell command, streaming it into *output*." },
+    .{ .name = "run-line", .call = runLine, .summary = "Run the current line as a shell command." },
+    .{ .name = "output-visit", .call = output.visit, .summary = "Open the location the focused output row names." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn initExtra() void {
     // `*output*` is navigable: Return jumps to the stack frame or compile error
     // the focused row points at, j/k walk, q goes back.
     output.installMode("output", "output-visit");
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// The fill landed: capture each row's location before the text is anyone's
@@ -68,4 +63,8 @@ fn runLine() void {
     // Copy out of the read scratch — `procToBuffer`/`runStr` need it stable.
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s}", .{line}) catch return;
     output.show(cmd, out_name, "output");
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

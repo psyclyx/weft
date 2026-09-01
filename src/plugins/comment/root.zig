@@ -12,22 +12,16 @@ const weft = @import("weft");
 /// present, else the bare `//`.
 const token = "// ";
 
-/// Registration order == the id the host hands `on_command`.
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "comment-line", .handler = commentLine },
-    .{ .name = "comment-selection", .handler = commentSelection },
-    .{ .name = "op.comment", .handler = opComment },
+/// The command table. `describe`, `init`, and `on_command` are generated from
+/// it (`plugin_sdk/plugin.zig`), including the id→command mapping this file
+/// used to assume was registration order.
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "comment-line", .call = commentLine },
+    .{ .name = "comment-selection", .call = commentSelection },
+    .{ .name = "op.comment", .call = opComment },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }
 
 // ── Line inspection (over a read-only `slice` snapshot) ───────────────

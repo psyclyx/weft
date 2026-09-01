@@ -283,96 +283,95 @@ fn chooseRegister(comptime index: u8) fn () void {
 }
 
 // ── The static command table (registration order == on_command id) ────
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const static_cmds = [_]Cmd{
-    .{ .name = "vim-insert", .handler = insert },
-    .{ .name = "vim-append", .handler = append },
-    .{ .name = "vim-open-below", .handler = openBelow },
-    .{ .name = "vim-open-above", .handler = openAbove },
-    .{ .name = "vim-visual", .handler = visual },
-    .{ .name = "vim-visual-delete", .handler = visualDelete },
-    .{ .name = "vim-visual-yank", .handler = visualYank },
-    .{ .name = "vim-visual-change", .handler = visualChange },
-    .{ .name = "vim-visual-comment", .handler = visualOp("op.comment") },
-    .{ .name = "vim-visual-upcase", .handler = visualOp("op.upcase") },
-    .{ .name = "vim-visual-lowercase", .handler = visualOp("op.lowercase") },
-    .{ .name = "vim-visual-indent", .handler = visualOp("op.indent") },
-    .{ .name = "vim-visual-dedent", .handler = visualOp("op.dedent") },
-    .{ .name = "enter-op-upcase", .handler = enterOpUpcase },
-    .{ .name = "enter-op-lowercase", .handler = enterOpLowercase },
-    .{ .name = "enter-op-indent", .handler = enterOpIndent },
-    .{ .name = "enter-op-dedent", .handler = enterOpDedent },
-    .{ .name = "vim-visual-line", .handler = visualLine },
-    .{ .name = "vim-normal", .handler = normal },
-    .{ .name = "vim-append-line", .handler = appendLine },
-    .{ .name = "vim-insert-line", .handler = insertLine },
-    .{ .name = "vim-delete-eol", .handler = deleteEol },
-    .{ .name = "vim-change-eol", .handler = changeEol },
-    .{ .name = "vim-change-line", .handler = changeLine },
-    .{ .name = "yank-line", .handler = yankLine },
-    .{ .name = "paste", .handler = paste },
-    .{ .name = "paste-before", .handler = pasteBefore },
-    .{ .name = "vim-open-focused", .handler = openFocused },
-    .{ .name = "vim-open-container", .handler = openContainer },
-    .{ .name = "join-lines", .handler = joinLines },
-    .{ .name = "enter-op-delete", .handler = enterOpDelete },
-    .{ .name = "enter-op-change", .handler = enterOpChange },
-    .{ .name = "enter-op-yank", .handler = enterOpYank },
-    .{ .name = "enter-op-comment", .handler = enterOpComment },
-    .{ .name = "op-cancel", .handler = opCancel },
-    .{ .name = "op-line", .handler = opLine },
-    .{ .name = "enter-op-inner", .handler = enterOpInner },
-    .{ .name = "enter-op-around", .handler = enterOpAround },
-    .{ .name = "enter-register", .handler = enterRegister },
-    .{ .name = "find-file", .handler = findFile },
+const static_cmds = [_]weft.CommandEntry{
+    .{ .name = "vim-insert", .call = insert },
+    .{ .name = "vim-append", .call = append },
+    .{ .name = "vim-open-below", .call = openBelow },
+    .{ .name = "vim-open-above", .call = openAbove },
+    .{ .name = "vim-visual", .call = visual },
+    .{ .name = "vim-visual-delete", .call = visualDelete },
+    .{ .name = "vim-visual-yank", .call = visualYank },
+    .{ .name = "vim-visual-change", .call = visualChange },
+    .{ .name = "vim-visual-comment", .call = visualOp("op.comment") },
+    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase") },
+    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase") },
+    .{ .name = "vim-visual-indent", .call = visualOp("op.indent") },
+    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent") },
+    .{ .name = "enter-op-upcase", .call = enterOpUpcase },
+    .{ .name = "enter-op-lowercase", .call = enterOpLowercase },
+    .{ .name = "enter-op-indent", .call = enterOpIndent },
+    .{ .name = "enter-op-dedent", .call = enterOpDedent },
+    .{ .name = "vim-visual-line", .call = visualLine },
+    .{ .name = "vim-normal", .call = normal },
+    .{ .name = "vim-append-line", .call = appendLine },
+    .{ .name = "vim-insert-line", .call = insertLine },
+    .{ .name = "vim-delete-eol", .call = deleteEol },
+    .{ .name = "vim-change-eol", .call = changeEol },
+    .{ .name = "vim-change-line", .call = changeLine },
+    .{ .name = "yank-line", .call = yankLine },
+    .{ .name = "paste", .call = paste },
+    .{ .name = "paste-before", .call = pasteBefore },
+    .{ .name = "vim-open-focused", .call = openFocused },
+    .{ .name = "vim-open-container", .call = openContainer },
+    .{ .name = "join-lines", .call = joinLines },
+    .{ .name = "enter-op-delete", .call = enterOpDelete },
+    .{ .name = "enter-op-change", .call = enterOpChange },
+    .{ .name = "enter-op-yank", .call = enterOpYank },
+    .{ .name = "enter-op-comment", .call = enterOpComment },
+    .{ .name = "op-cancel", .call = opCancel },
+    .{ .name = "op-line", .call = opLine },
+    .{ .name = "enter-op-inner", .call = enterOpInner },
+    .{ .name = "enter-op-around", .call = enterOpAround },
+    .{ .name = "enter-register", .call = enterRegister },
+    .{ .name = "find-file", .call = findFile },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
     // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
-    .{ .name = "leader-cancel", .handler = leaderCancel },
-    .{ .name = "vim-find-file", .handler = vimFindFile },
-    .{ .name = "vim-share", .handler = vimShare },
-    .{ .name = "vim-palette", .handler = vimPalette },
-    .{ .name = "vim-split", .handler = vimSplit },
-    .{ .name = "vim-vsplit", .handler = vimVsplit },
-    .{ .name = "vim-focus-other", .handler = vimFocusOther },
-    .{ .name = "vim-unsplit", .handler = vimUnsplit },
-    .{ .name = "vim-win-left", .handler = vimWinLeft },
-    .{ .name = "vim-win-right", .handler = vimWinRight },
-    .{ .name = "vim-win-up", .handler = vimWinUp },
-    .{ .name = "vim-win-down", .handler = vimWinDown },
-    .{ .name = "vim-win-move-left", .handler = vimWinMoveLeft },
-    .{ .name = "vim-win-move-right", .handler = vimWinMoveRight },
-    .{ .name = "vim-win-move-up", .handler = vimWinMoveUp },
-    .{ .name = "vim-win-move-down", .handler = vimWinMoveDown },
-    .{ .name = "vim-goto-top", .handler = vimGotoTop },
-    .{ .name = "vim-center", .handler = vimCenter },
-    .{ .name = "find-f", .handler = enterFindF },
-    .{ .name = "find-F", .handler = enterFindBigF },
-    .{ .name = "find-t", .handler = enterFindT },
-    .{ .name = "find-T", .handler = enterFindBigT },
-    .{ .name = "vim-repeat-find", .handler = repeatFind },
-    .{ .name = "vim-repeat-find-rev", .handler = repeatFindRev },
-    .{ .name = "vim-replace-char", .handler = enterReplaceChar },
-    .{ .name = "do-replace-char", .handler = doReplaceChar },
-    .{ .name = "vim-tilde", .handler = tildeCase },
-    .{ .name = "do-find-f", .handler = doFindF },
-    .{ .name = "do-find-F", .handler = doFindBigF },
-    .{ .name = "do-find-t", .handler = doFindT },
-    .{ .name = "do-find-T", .handler = doFindBigT },
+    .{ .name = "leader-cancel", .call = leaderCancel },
+    .{ .name = "vim-find-file", .call = vimFindFile },
+    .{ .name = "vim-share", .call = vimShare },
+    .{ .name = "vim-palette", .call = vimPalette },
+    .{ .name = "vim-split", .call = vimSplit },
+    .{ .name = "vim-vsplit", .call = vimVsplit },
+    .{ .name = "vim-focus-other", .call = vimFocusOther },
+    .{ .name = "vim-unsplit", .call = vimUnsplit },
+    .{ .name = "vim-win-left", .call = vimWinLeft },
+    .{ .name = "vim-win-right", .call = vimWinRight },
+    .{ .name = "vim-win-up", .call = vimWinUp },
+    .{ .name = "vim-win-down", .call = vimWinDown },
+    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft },
+    .{ .name = "vim-win-move-right", .call = vimWinMoveRight },
+    .{ .name = "vim-win-move-up", .call = vimWinMoveUp },
+    .{ .name = "vim-win-move-down", .call = vimWinMoveDown },
+    .{ .name = "vim-goto-top", .call = vimGotoTop },
+    .{ .name = "vim-center", .call = vimCenter },
+    .{ .name = "find-f", .call = enterFindF },
+    .{ .name = "find-F", .call = enterFindBigF },
+    .{ .name = "find-t", .call = enterFindT },
+    .{ .name = "find-T", .call = enterFindBigT },
+    .{ .name = "vim-repeat-find", .call = repeatFind },
+    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev },
+    .{ .name = "vim-replace-char", .call = enterReplaceChar },
+    .{ .name = "do-replace-char", .call = doReplaceChar },
+    .{ .name = "vim-tilde", .call = tildeCase },
+    .{ .name = "do-find-f", .call = doFindF },
+    .{ .name = "do-find-F", .call = doFindBigF },
+    .{ .name = "do-find-t", .call = doFindT },
+    .{ .name = "do-find-T", .call = doFindBigT },
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
-    .{ .name = "vim-zero", .handler = zeroKey },
-    .{ .name = "vim-delete-char", .handler = deleteCharFwd },
+    .{ .name = "vim-zero", .call = zeroKey },
+    .{ .name = "vim-delete-char", .call = deleteCharFwd },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
-    .{ .name = "vim-ex", .handler = ex.enter },
+    .{ .name = "vim-ex", .call = ex.enter },
 };
 
 /// The `:` line's own editing commands, from the shared `prompt` library —
 /// the same five every other prompt in the editor registers, mapped into
 /// vim's `Cmd` so `on_command`'s id indexing stays one flat table.
-const ex_cmds: [ex.commands.len]Cmd = blk: {
-    var arr: [ex.commands.len]Cmd = undefined;
-    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
+    var arr: [ex.commands.len]weft.CommandEntry = undefined;
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
     break :blk arr;
 };
 
@@ -386,37 +385,37 @@ const n_gen = blk: {
     }
     break :blk n;
 };
-const gen_cmds: [n_gen]Cmd = blk: {
-    var arr: [n_gen]Cmd = undefined;
+const gen_cmds: [n_gen]weft.CommandEntry = blk: {
+    var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .handler = moveByMotion(m.motion) };
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion) };
         i += 1;
         if (m.in_op) {
-            arr[i] = .{ .name = "vim/o/" ++ m.motion, .handler = opByMotion(m.motion) };
+            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion) };
             i += 1;
         }
     }
     for (to_objs) |obj| {
-        arr[i] = .{ .name = "vim/to/" ++ obj, .handler = objWrap(obj) };
+        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj) };
         i += 1;
     }
     break :blk arr;
 };
-const register_cmds: [26]Cmd = blk: {
-    var arr: [26]Cmd = undefined;
+const register_cmds: [26]weft.CommandEntry = blk: {
+    var arr: [26]weft.CommandEntry = undefined;
     for (0..26) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
-        .handler = chooseRegister(@intCast(i + 1)),
+        .call = chooseRegister(@intCast(i + 1)),
     };
     break :blk arr;
 };
 /// One command per count digit 1–9 (`vim-count-N`), bound to the digit keys.
-const count_cmds: [9]Cmd = blk: {
-    var arr: [9]Cmd = undefined;
+const count_cmds: [9]weft.CommandEntry = blk: {
+    var arr: [9]weft.CommandEntry = undefined;
     for (0..9) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-count-{d}", .{i + 1}),
-        .handler = countDigit(@intCast(i + 1)),
+        .call = countDigit(@intCast(i + 1)),
     };
     break :blk arr;
 };
@@ -449,14 +448,17 @@ const preserve_register = blk: {
     break :blk arr;
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+comptime {
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle }).exportAll();
 }
-export fn on_command(id: u32) void {
-    if (id >= cmds.len) return;
-    cmds[id].handler();
-    if (!preserve_count[id]) pending_count = 0;
-    if (!preserve_register[id]) selected_register = 0;
+
+/// The dispatch epilogue: a stray count or a named slot must not leak into an
+/// unrelated later command. It is the manifest's `after` hook rather than a tail
+/// pasted onto `on_command`, so the index it indexes is the TABLE's — not
+/// whatever id the host happened to assign.
+fn settle(index: usize) void {
+    if (!preserve_count[index]) pending_count = 0;
+    if (!preserve_register[index]) selected_register = 0;
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != file_pick) return;
@@ -470,7 +472,7 @@ export fn on_pick_accept(pick_id: u32) void {
     openChosen(path);
 }
 
-export fn init() void {
+fn initExtra() void {
     weft.setFallback("normal", "default");
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
@@ -491,8 +493,6 @@ export fn init() void {
     // both the state vim rests in and the one it types in.
     for ([_][]const u8{ "normal", "insert" }) |m|
         weft.bindKeys(m, "C-backslash", &.{"std.input.break-out"});
-
-    for (cmds) |c| _ = weft.register(c.name);
 
     // Normal-mode motion keys → the generated wrappers (drive `motions`). A
     // motion with a standard intention binds the LIST: the intention first,

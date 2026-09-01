@@ -27,7 +27,23 @@ const PAGE: usize = 12;
 /// when a menu opens; advanced by the page commands.
 var scroll_off: usize = 0;
 
-const cmds = [_][]const u8{ "which-key-page-down", "which-key-page-up" };
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "which-key-page-down", .call = pageDown },
+    .{ .name = "which-key-page-up", .call = pageUp },
+};
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
+}
+
+/// Page down; `render` clamps to the last page.
+fn pageDown() void {
+    scroll_off += PAGE;
+    render();
+}
+fn pageUp() void {
+    scroll_off = if (scroll_off >= PAGE) scroll_off - PAGE else 0;
+    render();
+}
 
 /// The baseline editing floor — self-insert + basic cursor/delete/newline. These
 /// are the "regular keys" everyone knows; listing them in a which-key hint (an
@@ -55,13 +71,6 @@ fn isNoise(key: []const u8, cmd: []const u8) bool {
         std.mem.eql(u8, cmd, "op-cancel") or
         std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up") or
         isBaselineEdit(cmd);
-}
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c);
 }
 
 /// Drop the vocabulary prefix a hint row doesn't need: `std.hierarchy.toggle
@@ -155,16 +164,5 @@ export fn on_menu(open: u32) void {
         return;
     }
     scroll_off = 0; // a fresh menu starts at the top
-    render();
-}
-
-/// The paging commands re-render in place (the menu stays open; the command
-/// doesn't change the mode). Ids match `cmds` registration order.
-export fn on_command(id: u32) void {
-    switch (id) {
-        0 => scroll_off += PAGE, // page down (render clamps to the last page)
-        1 => scroll_off = if (scroll_off >= PAGE) scroll_off - PAGE else 0, // page up
-        else => return,
-    }
     render();
 }

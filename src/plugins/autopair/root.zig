@@ -109,6 +109,15 @@ const closers = [_]Closer{
     .{ .name = "pair-close-bracket", .ch = ']' },
 };
 
+// This is the ONE plugin in the tree whose command table is not known at
+// compile time — the pairs come from config — so it keeps the three exports by
+// hand rather than using `weft.plugin`. What it does NOT keep is the assumption
+// that made the old dispatch fragile: `register` RETURNS the id the host chose,
+// and this records it instead of trusting that the ids arrive in the order the
+// names were offered.
+var pair_ids: [pairs.len]u32 = @splat(std.math.maxInt(u32));
+var closer_ids: [closers.len]u32 = @splat(std.math.maxInt(u32));
+
 export fn describe() void {
     loadPairs();
     loadQuoteLangs();
@@ -118,14 +127,15 @@ export fn describe() void {
 export fn init() void {
     loadPairs();
     loadQuoteLangs();
-    for (pairs[0..pairs_len]) |pr| _ = weft.register(pr.name);
-    for (closers) |c| _ = weft.register(c.name);
+    for (pairs[0..pairs_len], 0..) |pr, i| pair_ids[i] = weft.register(pr.name);
+    for (closers, 0..) |c, i| closer_ids[i] = weft.register(c.name);
 }
 export fn on_command(id: u32) void {
-    if (id < pairs_len) {
-        insertPair(pairs[id]);
-    } else if (id - pairs_len < closers.len) {
-        skipClose(closers[id - pairs_len].ch);
+    for (pair_ids[0..pairs_len], 0..) |registered, i| {
+        if (registered == id) return insertPair(pairs[i]);
+    }
+    for (closer_ids, 0..) |registered, i| {
+        if (registered == id) return skipClose(closers[i].ch);
     }
 }
 

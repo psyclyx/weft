@@ -12,20 +12,21 @@
 
 const weft = @import("weft");
 
-var id_insert: u32 = 0;
-
-export fn describe() void {
-    weft.describeCommand("insert-shell", "command", "Run a shell command and insert its output at the cursor.");
-    weft.requestPerm(.proc);
-    weft.requestPerm(.timer);
+const cmds = [_]weft.CommandEntry{
+    .{
+        .name = "insert-shell",
+        .call = weft.thunk(insertShell),
+        .params = "command",
+        .summary = "Run a shell command and insert its output at the cursor.",
+    },
+};
+comptime {
+    weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();
 }
 
-export fn init() void {
-    id_insert = weft.register("insert-shell");
-}
-
-export fn on_command(id: u32) void {
-    _ = id;
-    const cmd = weft.argStr(0) orelse return;
+/// The command's argument arrives as a parameter, owned for this call — where
+/// it used to be a slice into the shim's shared arg scratch that any other read
+/// door would have overwritten underneath us.
+fn insertShell(cmd: []const u8) void {
     weft.shellInsert(cmd);
 }

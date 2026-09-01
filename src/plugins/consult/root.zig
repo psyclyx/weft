@@ -56,21 +56,11 @@ fn beginTargets() void {
     releaseTargets();
 }
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "consult-line", .handler = consultLine },
-    .{ .name = "consult-imenu", .handler = consultImenu },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "consult-line", .call = consultLine },
+    .{ .name = "consult-imenu", .call = consultImenu },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != line_pick and pick_id != sym_pick) return;
     defer releaseTargets();
@@ -193,4 +183,8 @@ fn consultImenu() void {
     }
     weft.pickEnd();
     if (truncated) weft.echo(std.fmt.comptimePrint("consult: >{d} symbols — some omitted", .{targets.len}));
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

@@ -53,41 +53,31 @@ const pick_buffers = 1;
 /// emacs user in someone else's `normal` (see `weft_prompt`'s `resting`).
 const asker = invoke.Invoker(.{ .name = "palette-arg" });
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const own_cmds = [_]Cmd{
-    .{ .name = "pick-commands", .handler = palette },
-    .{ .name = "help", .handler = palette },
-    .{ .name = "buffers", .handler = buffers },
-    .{ .name = "status", .handler = status },
+const own_cmds = [_]weft.CommandEntry{
+    .{ .name = "pick-commands", .call = palette },
+    .{ .name = "help", .call = palette },
+    .{ .name = "buffers", .call = buffers },
+    .{ .name = "status", .call = status },
 };
 /// The argument prompt's five editing commands, spliced into this plugin's
 /// one flat table so `on_command`'s id indexing stays a single array.
-const arg_cmds: [asker.commands.len]Cmd = blk: {
-    var arr: [asker.commands.len]Cmd = undefined;
-    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+const arg_cmds: [asker.commands.len]weft.CommandEntry = blk: {
+    var arr: [asker.commands.len]weft.CommandEntry = undefined;
+    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
     break :blk arr;
 };
 const cmds = own_cmds ++ arg_cmds;
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-
-export fn init() void {
-    for (cmds, 0..) |c, i| {
-        const id = weft.register(c.name);
-        if (i == 0) id_palette = id;
-        if (i == 1) id_help = id;
-        if (i == 2) id_buffers = id;
-        if (i == 3) id_status = id;
-    }
+fn initExtra() void {
+    // The manifest registered these; ask it what the host called them, rather
+    // than registering a second time and keeping a parallel index by position.
+    id_palette = manifest.idOf("pick-commands");
+    id_help = manifest.idOf("help");
+    id_buffers = manifest.idOf("buffers");
+    id_status = manifest.idOf("status");
     asker.install();
     asker.setAsk(!std.mem.eql(u8, weft.config("arguments"), "off"));
     show_signature = !std.mem.eql(u8, weft.config("signature"), "off");
-}
-
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// A fuzzy pick over what this context OFFERS and over the whole command
@@ -205,4 +195,9 @@ export fn on_pick_accept(pick_id: u32) void {
         };
         weft.runInt("buffer-switch", @intCast(id));
     }
+}
+
+const manifest = weft.plugin(&cmds, .{ .init = initExtra });
+comptime {
+    manifest.exportAll();
 }

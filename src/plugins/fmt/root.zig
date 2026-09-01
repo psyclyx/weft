@@ -17,21 +17,14 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "format-buffer", .handler = formatBuffer, .summary = "Format the buffer with the formatter configured for its language." },
-    .{ .name = "filter", .handler = filter, .params = "command", .summary = "Pipe the selection (or buffer) through a shell command." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "format-buffer", .call = formatBuffer, .summary = "Format the buffer with the formatter configured for its language." },
+    .{ .name = "filter", .call = filter, .params = "command", .summary = "Pipe the selection (or buffer) through a shell command." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// (extension, in-place formatter with a `{}` for the file). First match wins.
@@ -65,4 +58,8 @@ fn filter() void {
     const cmd = weft.argStr(0) orelse return;
     const r = weft.selection() orelse weft.Range{ .start = 0, .end = weft.byteLen() };
     weft.procFilter(cmd, r);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

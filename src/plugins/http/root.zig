@@ -39,19 +39,12 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "http-get", .handler = get, .params = "url", .summary = "Fetch a URL into its own buffer (http:// or https://)." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "http-get", .call = get, .params = "url", .summary = "Fetch a URL into its own buffer (http:// or https://)." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.net);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 const Url = struct { tls: bool, host: []const u8, hostport: []const u8, path: []const u8 };
@@ -102,4 +95,8 @@ fn retire() void {
     const old = conns.oldest() orelse return;
     weft.netClose(old.value);
     conns.close(old);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

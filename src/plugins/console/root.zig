@@ -26,21 +26,14 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "console-open", .handler = open, .summary = "Open a command console of its own." },
-    .{ .name = "console-send", .handler = send, .summary = "Run the current line in this console." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "console-open", .call = open, .summary = "Open a command console of its own." },
+    .{ .name = "console-send", .call = send, .summary = "Run the current line in this console." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// Open a console of its own.
@@ -57,4 +50,8 @@ fn send() void {
     const n = @min(line.len, cmd_buf.len);
     @memcpy(cmd_buf[0..n], line[0..n]); // copy — the read scratch is reused below
     weft.procAppendBuffer(cmd_buf[0..n], slot.name(), 0);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

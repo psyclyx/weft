@@ -11,35 +11,24 @@ const std = @import("std");
 const weft = @import("weft");
 
 /// Registration order == the id the host hands `on_command`.
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "motion.left", .handler = left },
-    .{ .name = "motion.right", .handler = right },
-    .{ .name = "motion.up", .handler = up },
-    .{ .name = "motion.down", .handler = down },
-    .{ .name = "motion.word-fwd", .handler = wordFwd },
-    .{ .name = "motion.word-back", .handler = wordBack },
-    .{ .name = "motion.word-end", .handler = wordEnd },
-    .{ .name = "motion.WORD-fwd", .handler = wordFwdBig },
-    .{ .name = "motion.WORD-back", .handler = wordBackBig },
-    .{ .name = "motion.WORD-end", .handler = wordEndBig },
-    .{ .name = "motion.line-start", .handler = lineStart },
-    .{ .name = "motion.line-end", .handler = lineEnd },
-    .{ .name = "motion.first-non-blank", .handler = firstNonBlank },
-    .{ .name = "motion.doc-start", .handler = docStart },
-    .{ .name = "motion.doc-end", .handler = docEnd },
-    .{ .name = "motion.match-pair", .handler = matchPair },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "motion.left", .call = left },
+    .{ .name = "motion.right", .call = right },
+    .{ .name = "motion.up", .call = up },
+    .{ .name = "motion.down", .call = down },
+    .{ .name = "motion.word-fwd", .call = wordFwd },
+    .{ .name = "motion.word-back", .call = wordBack },
+    .{ .name = "motion.word-end", .call = wordEnd },
+    .{ .name = "motion.WORD-fwd", .call = wordFwdBig },
+    .{ .name = "motion.WORD-back", .call = wordBackBig },
+    .{ .name = "motion.WORD-end", .call = wordEndBig },
+    .{ .name = "motion.line-start", .call = lineStart },
+    .{ .name = "motion.line-end", .call = lineEnd },
+    .{ .name = "motion.first-non-blank", .call = firstNonBlank },
+    .{ .name = "motion.doc-start", .call = docStart },
+    .{ .name = "motion.doc-end", .call = docEnd },
+    .{ .name = "motion.match-pair", .call = matchPair },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 /// Return the range `[cursor, target]` as this motion's result. The cursor is
 /// always one endpoint, so the caller recovers the direction (target = the end
@@ -198,4 +187,8 @@ fn matchPair() void {
         }
     }
     ret(cur);
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

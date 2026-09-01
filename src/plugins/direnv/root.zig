@@ -16,32 +16,24 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "direnv-status", .handler = status },
-    .{ .name = "direnv-allow", .handler = allow },
-    .{ .name = "direnv-reload", .handler = reload },
-    .{ .name = "direnv-apply", .handler = apply },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "direnv-status", .call = status },
+    .{ .name = "direnv-allow", .call = allow },
+    .{ .name = "direnv-reload", .call = reload },
+    .{ .name = "direnv-apply", .call = apply },
 };
 
 /// The fill token `direnv-apply` waits on. Any other fill in this buffer (a
 /// `status`, an `allow`) must not be read as an environment.
 const apply_token: u32 = 1;
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
     // Publishing an environment for a place governs every subprocess ANY
     // plugin runs there, which is why this is its own capability and not
     // implied by `proc` — the same weight `direnv allow` already carries.
     weft.requestPerm(.env);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 fn show(cmd: []const u8) void {
@@ -104,4 +96,8 @@ export fn on_fill_token(token: u32) void {
     if (w == 0) return weft.echo("direnv: nothing to apply here");
     if (weft.envPublish(vars[0..w]) < 0) return weft.echo("direnv: could not apply");
     weft.echo("direnv: applied to this project");
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

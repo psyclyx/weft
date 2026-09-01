@@ -22,19 +22,12 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "snippets-expand", .handler = expand, .params = "trigger [file]", .summary = "Insert the named snippet's body at the cursor." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "snippets-expand", .call = expand, .params = "trigger [file]", .summary = "Insert the named snippet's body at the cursor." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.fs_read);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// Insert the body of the snippet named arg0 at the cursor.
@@ -68,4 +61,8 @@ fn expand() void {
         weft.edit(.{ .start = off, .end = off }, body_buf[0..w]);
         return;
     }
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

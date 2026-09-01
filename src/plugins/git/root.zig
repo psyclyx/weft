@@ -169,6 +169,9 @@ const Route = enum { repo, focus, carried };
 ///                 answer may then do is the target it captured (see `resolve`).
 const Scope = enum { durable, snapshot, arm };
 
+/// git's own metadata, one entry per command, PARALLEL to the manifest table:
+/// the SDK's `Entry` holds the name and the call, this holds what the funnel
+/// (`dispatch`, below) needs before it runs.
 const Cmd = struct {
     name: []const u8,
     handler: *const fn () void,
@@ -274,19 +277,29 @@ const input_cmds: [input.commands.len]Cmd = blk: {
 
 const cmds = base_cmds ++ input_cmds;
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+/// The manifest's table, derived from `cmds` — same order, so `dispatch`'s
+/// index reaches the same entry's route and scope.
+const entries: [cmds.len]weft.CommandEntry = blk: {
+    var arr: [cmds.len]weft.CommandEntry = undefined;
+    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    break :blk arr;
+};
+
+comptime {
     // `{proc, timer}` and nothing else — the set `direnv` and `spool` have.
     // Every file git hands a subprocess is spooled by the host
     // (`weft.procSpool`), and every path it used to PROBE is inside the place
     // it already dispatches in (`weft.placeHas`), so there is no filesystem
     // question left for a grant to answer. `wasm_abi/tests.zig` asserts the
     // absence of both fs capabilities, so a regrant is loud.
-    weft.requestPerm(.proc);
-    weft.requestPerm(.timer);
+    weft.plugin(&entries, .{
+        .perms = &.{ .proc, .timer },
+        .init = initExtra,
+        .before = dispatch,
+    }).exportAll();
 }
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+
+fn initExtra() void {
     // git mode: navigation plus the interactive verbs. It declares no text
     // commit, and the `*git*` entry holds no editor at all, so typing refuses
     // STRUCTURALLY — there is nothing for a mode lock to protect. It is the
@@ -461,20 +474,26 @@ export fn init() void {
     weft.bindKey("git-view", "g", "git-status");
     weft.bindKey("git-view", "q", "git-status");
 }
-/// THE funnel. Two decisions live here and nowhere else: which repository
-/// session the command is about, and whether the snapshot its arguments were
-/// designated against is still the one the model holds.
-export fn on_command(id: u32) void {
-    if (id >= cmds.len) return;
-    const c = cmds[id];
-    const s = route(c.route) orelse return;
+/// THE funnel — the manifest's dispatch prologue. Two decisions live here and
+/// nowhere else: which repository session the command is about, and whether the
+/// snapshot its arguments were designated against is still the one the model
+/// holds. Returning false refuses the dispatch; the handler never runs.
+fn dispatch(index: usize) bool {
+    const c = cmds[index];
+    const s = route(c.route) orelse return false;
     model.routed = s;
     switch (c.scope) {
         .durable => {},
-        .snapshot => if (!s.fresh()) return refuseStale(),
-        .arm => if (!s.fresh()) return refuseStale(),
+        .snapshot => if (!s.fresh()) {
+            refuseStale();
+            return false;
+        },
+        .arm => if (!s.fresh()) {
+            refuseStale();
+            return false;
+        },
     }
-    c.handler();
+    return true;
 }
 
 /// A path/hunk action whose snapshot the model has moved past does NOT act on

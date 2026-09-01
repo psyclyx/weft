@@ -12,21 +12,10 @@ const weft = @import("weft");
 /// use. Dedent peels leading spaces up to this width, or a single leading tab.
 const unit = "  ";
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "op.indent", .handler = opIndent },
-    .{ .name = "op.dedent", .handler = opDedent },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "op.indent", .call = opIndent },
+    .{ .name = "op.dedent", .call = opDedent },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 /// Whether the line has no non-whitespace content (indent skips blank lines, as
 /// vim's `>` does — no trailing indent left dangling on empty rows).
@@ -88,4 +77,8 @@ fn opDedent() void {
     const h = weft.argRange(0) orelse return;
     const r = weft.rangeEnds(h) orelse return;
     indentSpan(r.start, r.end, true);
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

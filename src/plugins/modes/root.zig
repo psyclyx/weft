@@ -37,21 +37,13 @@ fn langFor(path: []const u8) ?Lang {
     return null;
 }
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "lang-run", .handler = langRun },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "lang-run", .call = langRun },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// The host calls this when a buffer takes focus (design §3). BACKGROUND
@@ -99,4 +91,8 @@ fn runSubst(template: []const u8, path: []const u8) void {
     }
     weft.runStr("buffer-create", "*run*");
     weft.procToBuffer(cmd_buf[0..w], "*run*", 0);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

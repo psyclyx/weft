@@ -96,28 +96,19 @@ fn openChosen(choice: []const u8) void {
 }
 
 // ── Command table (registration order == on_command id) ──
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "find-file", .handler = findFile },
-    .{ .name = "beginning-of-line", .handler = beginningOfLine },
-    .{ .name = "end-of-line", .handler = endOfLine },
-    .{ .name = "beginning-of-buffer", .handler = beginningOfBuffer },
-    .{ .name = "end-of-buffer", .handler = endOfBuffer },
-    .{ .name = "forward-word", .handler = moveByMotion("motion.word-fwd") },
-    .{ .name = "backward-word", .handler = moveByMotion("motion.word-back") },
-    .{ .name = "kill-line", .handler = killLine },
-    .{ .name = "kill-region", .handler = killRegion },
-    .{ .name = "copy-region", .handler = copyRegion },
-    .{ .name = "yank", .handler = yank },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "find-file", .call = findFile },
+    .{ .name = "beginning-of-line", .call = beginningOfLine },
+    .{ .name = "end-of-line", .call = endOfLine },
+    .{ .name = "beginning-of-buffer", .call = beginningOfBuffer },
+    .{ .name = "end-of-buffer", .call = endOfBuffer },
+    .{ .name = "forward-word", .call = moveByMotion("motion.word-fwd") },
+    .{ .name = "backward-word", .call = moveByMotion("motion.word-back") },
+    .{ .name = "kill-line", .call = killLine },
+    .{ .name = "kill-region", .call = killRegion },
+    .{ .name = "copy-region", .call = copyRegion },
+    .{ .name = "yank", .call = yank },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != file_pick) return;
@@ -131,7 +122,7 @@ export fn on_pick_accept(pick_id: u32) void {
     openChosen(path);
 }
 
-export fn init() void {
+fn initExtra() void {
     // The one resting mode: `emacs` inherits the `default` editing floor's
     // BINDINGS (arrows/Backspace/C-s) and layers the emacs chords over it, and
     // declares that it commits typed text — a declaration, never inherited.
@@ -152,8 +143,6 @@ export fn init() void {
     // states (§10.4).
     for ([_][]const u8{ "emacs", "emacs-structural" }) |m|
         weft.bindKeys(m, "C-c C-backslash", &.{"std.input.break-out"});
-
-    for (cmds) |c| _ = weft.register(c.name);
 
     // Intra-buffer keys. Movement, kill/yank — the everyday editing chords. The
     // C-x/C-c prefix TREE (find-file, save, buffers, windows, git, files) is
@@ -197,4 +186,8 @@ export fn init() void {
     weft.runStr2("cursor-blink", "emacs", "on");
 
     weft.setMode("emacs");
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .init = initExtra }).exportAll();
 }

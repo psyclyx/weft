@@ -71,25 +71,18 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "notes-capture", .handler = capture, .params = "text [file]", .summary = "Append a line to the notes file." },
-    .{ .name = "notes-open", .handler = open, .params = "[file]", .summary = "Open the notes file itself." },
-    .{ .name = "notes-capture-here", .handler = captureHere, .params = "[file]", .summary = "Append an embed naming where you are now." },
-    .{ .name = "notes-embeds", .handler = embedsRefresh, .summary = "Render this note's embeds live beside their own bytes." },
-    .{ .name = "notes-embeds-off", .handler = embedsOff, .summary = "Stop rendering this note's embeds." },
-    .{ .name = "notes-embed-activate", .handler = embedActivate, .summary = "Open what the embed on this line designates." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "notes-capture", .call = capture, .params = "text [file]", .summary = "Append a line to the notes file." },
+    .{ .name = "notes-open", .call = open, .params = "[file]", .summary = "Open the notes file itself." },
+    .{ .name = "notes-capture-here", .call = captureHere, .params = "[file]", .summary = "Append an embed naming where you are now." },
+    .{ .name = "notes-embeds", .call = embedsRefresh, .summary = "Render this note's embeds live beside their own bytes." },
+    .{ .name = "notes-embeds-off", .call = embedsOff, .summary = "Stop rendering this note's embeds." },
+    .{ .name = "notes-embed-activate", .call = embedActivate, .summary = "Open what the embed on this line designates." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.fs_read);
     weft.requestPerm(.fs_write);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// A note takes focus: publish its embeds, and offer activation exactly while
@@ -357,4 +350,8 @@ fn freeSlot() ?*?Note {
 fn release(held: *?Note) void {
     if (held.*) |n| n.anno.close();
     held.* = null;
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

@@ -30,22 +30,15 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "net-open", .handler = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer." },
-    .{ .name = "net-open-tls", .handler = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name." },
-    .{ .name = "net-send", .handler = send, .params = "bytes", .summary = "Write bytes to this buffer's connection." },
-    .{ .name = "net-close", .handler = close, .summary = "Hang up this buffer's connection; others stay live." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "net-open", .call = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer." },
+    .{ .name = "net-open-tls", .call = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name." },
+    .{ .name = "net-send", .call = send, .params = "bytes", .summary = "Write bytes to this buffer's connection." },
+    .{ .name = "net-close", .call = close, .summary = "Hang up this buffer's connection; others stay live." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.net);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// arg0 = host:port.
@@ -76,4 +69,8 @@ fn close() void {
     const slot = conns.current("net") orelse return;
     weft.netClose(slot.value);
     conns.close(slot);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

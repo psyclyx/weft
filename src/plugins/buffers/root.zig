@@ -15,21 +15,11 @@ const buf_pick = 0;
 var candidates: [1024]ordering.Candidate = undefined;
 var order: [1024]usize = undefined;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "buf-pick", .handler = bufPick },
-    .{ .name = "buf-scratch", .handler = bufScratch },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "buf-pick", .call = bufPick },
+    .{ .name = "buf-scratch", .call = bufScratch },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != buf_pick) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
@@ -86,4 +76,8 @@ fn bufScratch() void {
         }
     }
     weft.runStr("buffer-create", "*scratch*");
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

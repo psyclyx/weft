@@ -136,6 +136,17 @@ pub fn requestPerm(perm: Perm) void {
     e.wl_request_perm(@intFromEnum(perm));
 }
 
+// ── The manifest: one command table, three generated exports ──────────
+// `plugin.zig`'s doc says why. Three re-export lines is the whole cost of
+// the split (Zig 0.16 has no `usingnamespace`), and this one is worth it:
+// the generated dispatch is the only correct reading of `register`'s
+// return value, and `thunk` is the only place a command argument is
+// copied off the shared shim scratch before a handler can be handed it.
+pub const CommandEntry = @import("plugin.zig").Entry;
+pub const PluginHooks = @import("plugin.zig").Hooks;
+pub const plugin = @import("plugin.zig").plugin;
+pub const thunk = @import("plugin.zig").thunk;
+
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
     return e.wl_cursor();

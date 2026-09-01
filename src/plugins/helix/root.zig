@@ -59,37 +59,35 @@ fn deleteByMotion(comptime motion: []const u8) fn () void {
     }.h;
 }
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-
-const base_cmds = [_]Cmd{
-    .{ .name = "helix-mode", .handler = enterHelix },
-    .{ .name = "hx-insert", .handler = hxInsert },
-    .{ .name = "hx-append", .handler = hxAppend },
-    .{ .name = "hx-open-below", .handler = hxOpenBelow },
-    .{ .name = "hx-normal", .handler = hxNormal },
-    .{ .name = "hx-delete-op", .handler = enterDeleteOp },
+const base_cmds = [_]weft.CommandEntry{
+    .{ .name = "helix-mode", .call = enterHelix },
+    .{ .name = "hx-insert", .call = hxInsert },
+    .{ .name = "hx-append", .call = hxAppend },
+    .{ .name = "hx-open-below", .call = hxOpenBelow },
+    .{ .name = "hx-normal", .call = hxNormal },
+    .{ .name = "hx-delete-op", .call = enterDeleteOp },
     // The `:` ex command line — the key that OPENS it (shared engine; helix
     // mode namespace). Its five editing commands come from the shared
     // prompt, spliced in as `ex_cmds` below.
-    .{ .name = "helix-ex", .handler = ex.enter },
+    .{ .name = "helix-ex", .call = ex.enter },
 };
 
 /// The `:` line's editing commands, from the shared `prompt` library, mapped
-/// into helix's `Cmd` so `on_command`'s id indexing stays one flat table.
-const ex_cmds: [ex.commands.len]Cmd = blk: {
-    var arr: [ex.commands.len]Cmd = undefined;
-    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+/// into helix's `weft.CommandEntry` so `on_command`'s id indexing stays one flat table.
+const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
+    var arr: [ex.commands.len]weft.CommandEntry = undefined;
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
     break :blk arr;
 };
 
 /// Generated: `hx/n/<motion>` (move) for every motion, `hx/d/<motion>` (delete)
 /// for the word motions. Names exist only for key binding.
 const gen_cmds = blk: {
-    var arr: [mtable.len * 2]Cmd = undefined;
+    var arr: [mtable.len * 2]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "hx/n/" ++ m.motion, .handler = moveByMotion(m.motion) };
-        arr[i + 1] = .{ .name = "hx/d/" ++ m.motion, .handler = deleteByMotion(m.motion) };
+        arr[i] = .{ .name = "hx/n/" ++ m.motion, .call = moveByMotion(m.motion) };
+        arr[i + 1] = .{ .name = "hx/d/" ++ m.motion, .call = deleteByMotion(m.motion) };
         i += 2;
     }
     break :blk arr;
@@ -97,11 +95,7 @@ const gen_cmds = blk: {
 
 const cmds = base_cmds ++ ex_cmds ++ gen_cmds;
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn initExtra() void {
 
     // Only insert commits typed text; helix-normal is modal and declares
     // nothing, so nothing can leak into it. `helix-insert` falls back to the
@@ -190,10 +184,6 @@ export fn init() void {
     weft.setMode("helix-normal");
 }
 
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
-
 fn enterHelix() void {
     weft.setMode("helix-normal");
 }
@@ -230,4 +220,8 @@ fn hxOpenBelow() void {
 }
 fn enterDeleteOp() void {
     weft.setMode("helix-op");
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .init = initExtra }).exportAll();
 }

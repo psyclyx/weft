@@ -28,30 +28,19 @@ const max_recent = 50;
 /// long a recents list is, rather than sharing that decision with a byte count.
 var list_buf: std.ArrayList(u8) = .empty;
 
-var id_remember: u32 = 0;
-var id_recent: u32 = 0;
-var id_root: u32 = 0;
-
-export fn describe() void {
-    weft.declareCommand("project-remember");
-    weft.declareCommand("project-recent");
-    weft.declareCommand("project-root");
-    // NO capabilities. The VCS-marker climb this plugin used to run — its only
-    // reason for `fs_read` — is gone: the host detects a project root when a
-    // file is opened, over exactly the same markers (`app/session.zig`'s
-    // `project_markers`), and `weft.placeRoot()` reads that answer
-    // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and
-    // the second cost a grant over the whole filesystem.
-}
-
-export fn init() void {
-    id_remember = weft.register("project-remember");
-    id_recent = weft.register("project-recent");
-    id_root = weft.register("project-root");
-}
-
-export fn on_command(id: u32) void {
-    if (id == id_remember) remember() else if (id == id_recent) recent() else if (id == id_root) projectRoot();
+// NO capabilities. The VCS-marker climb this plugin used to run — its only
+// reason for `fs_read` — is gone: the host detects a project root when a file
+// is opened, over exactly the same markers (`app/session.zig`'s
+// `project_markers`), and `weft.placeRoot()` reads that answer
+// (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
+// second cost a grant over the whole filesystem.
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "project-remember", .call = remember },
+    .{ .name = "project-recent", .call = recent },
+    .{ .name = "project-root", .call = projectRoot },
+};
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }
 
 /// Every buffer focus records the file. The root no longer needs recording:

@@ -6,21 +6,12 @@
 
 const weft = @import("weft");
 
-var id_kind: u32 = 0;
-var id_del: u32 = 0;
-
-export fn describe() void {
-    weft.declareCommand("node-kind");
-    weft.declareCommand("delete-node");
-}
-
-export fn init() void {
-    id_kind = weft.register("node-kind");
-    id_del = weft.register("delete-node");
-}
-
-export fn on_command(id: u32) void {
-    if (id == id_kind) nodeKind() else if (id == id_del) deleteNode();
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "node-kind", .call = nodeKind },
+    .{ .name = "delete-node", .call = deleteNode },
+};
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }
 
 /// The grammar kind of the node under the cursor, or nil (no grammar / node).

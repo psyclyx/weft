@@ -27,21 +27,14 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "llm-ask", .handler = ask, .params = "prompt", .summary = "Ask the configured LLM CLI; the reply lands in its own buffer." },
-    .{ .name = "llm-ask-line", .handler = askLine, .summary = "Ask using the current line as the prompt." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "llm-ask", .call = ask, .params = "prompt", .summary = "Ask the configured LLM CLI; the reply lands in its own buffer." },
+    .{ .name = "llm-ask-line", .call = askLine, .summary = "Ask using the current line as the prompt." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// The prompt, copied out of whichever shim scratch it arrived in — `argStr`'s
@@ -77,4 +70,8 @@ fn ask() void {
 fn askLine() void {
     const l = weft.lineAt(weft.cursor());
     run(weft.slice(l.start, l.end)); // `run` copies out of the read scratch
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

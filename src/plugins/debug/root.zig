@@ -16,22 +16,11 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "debug-toggle-breakpoint", .handler = toggle },
-    .{ .name = "debug-clear-breakpoints", .handler = clearAll },
-    .{ .name = "debug-list-breakpoints", .handler = list },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "debug-toggle-breakpoint", .call = toggle },
+    .{ .name = "debug-clear-breakpoints", .call = clearAll },
+    .{ .name = "debug-list-breakpoints", .call = list },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 /// The focused buffer changed: paint ITS breakpoints (the decorations layer is
 /// per-buffer, so a switch would otherwise show nothing).
@@ -92,3 +81,7 @@ const Offsets = struct {
         return null;
     }
 };
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
+}

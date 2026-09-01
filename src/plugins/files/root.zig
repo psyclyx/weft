@@ -9,25 +9,26 @@
 const weft = @import("weft");
 const files_guest = @import("weft_files_adapter");
 
-const command_name = "files";
 var plugin: files_guest.Plugin = undefined;
 
-export fn describe() void {
-    weft.requestPerm(.fs_read);
-    weft.requestPerm(.fs_write);
-    weft.declareCommand(command_name);
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "files", .call = browse },
+};
+comptime {
+    weft.plugin(&cmds, .{
+        .perms = &.{ .fs_read, .fs_write },
+        .init = start,
+    }).exportAll();
 }
 
-export fn init() void {
+fn start() void {
     plugin = .init(weft.allocator);
     // The launcher remains usable in a command-only host. Target callbacks
     // decline until the generic semantic services become available.
     plugin.start() catch {};
-    _ = weft.register(command_name);
 }
 
-export fn on_command(id: u32) void {
-    if (id != 0) return;
+fn browse() void {
     // The browser opens WHERE the dispatch is (`doc/place.md`): the project the
     // focused file belongs to, not the directory the editor was launched in.
     const directory = weft.placeRoot();

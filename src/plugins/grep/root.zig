@@ -28,25 +28,20 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "grep", .handler = grep, .params = "pattern", .summary = "Search the project for a pattern, into *grep*." },
-    .{ .name = "grep-word", .handler = grepWord, .summary = "Search the project for the word under the cursor." },
-    .{ .name = "grep-visit", .handler = output.visit, .summary = "Open the location the focused result row names." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "grep", .call = grep, .params = "pattern", .summary = "Search the project for a pattern, into *grep*." },
+    .{ .name = "grep-word", .call = grepWord, .summary = "Search the project for the word under the cursor." },
+    .{ .name = "grep-visit", .call = output.visit, .summary = "Open the location the focused result row names." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn initExtra() void {
     // `*grep*` is a results list you navigate: Return visits the location the
     // focused row carries, j/k walk the matches, q goes back.
     output.installMode("grep", "grep-visit");
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// An identifier byte — the run `grep-word` grows around the cursor.
@@ -113,4 +108,8 @@ fn grepWord() void {
     var hi = i + 1;
     while (hi < text.len and isWord(text[hi])) hi += 1;
     runGrep(text[lo..hi]);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

@@ -9,34 +9,23 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "ts-node-kind", .handler = nodeKind },
-    .{ .name = "ts-select-node", .handler = selectNode },
-    .{ .name = "ts-expand-selection", .handler = expandSelection },
-    .{ .name = "ts-goto-parent", .handler = gotoParent },
-    .{ .name = "ts-select-function", .handler = selectFunction },
-    .{ .name = "ts-select-class", .handler = selectClass },
-    .{ .name = "ts-select-call", .handler = selectCall },
-    .{ .name = "ts-select-block", .handler = selectBlock },
-    .{ .name = "ts-select-comment", .handler = selectComment },
-    .{ .name = "ts-goto-first-child", .handler = gotoFirstChild },
-    .{ .name = "ts-select-child", .handler = selectChild },
-    .{ .name = "ts-raise", .handler = raise },
-    .{ .name = "ts-query", .handler = queryCount },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "ts-node-kind", .call = nodeKind },
+    .{ .name = "ts-select-node", .call = selectNode },
+    .{ .name = "ts-expand-selection", .call = expandSelection },
+    .{ .name = "ts-goto-parent", .call = gotoParent },
+    .{ .name = "ts-select-function", .call = selectFunction },
+    .{ .name = "ts-select-class", .call = selectClass },
+    .{ .name = "ts-select-call", .call = selectCall },
+    .{ .name = "ts-select-block", .call = selectBlock },
+    .{ .name = "ts-select-comment", .call = selectComment },
+    .{ .name = "ts-goto-first-child", .call = gotoFirstChild },
+    .{ .name = "ts-select-child", .call = selectChild },
+    .{ .name = "ts-raise", .call = raise },
+    .{ .name = "ts-query", .call = queryCount },
 };
 
 var raise_buf: [1 << 15]u8 = undefined;
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 /// The current selection, or an empty range at the cursor.
 fn sel() weft.Range {
@@ -127,4 +116,8 @@ fn queryCount() void {
     const scm = weft.argStr(0) orelse return weft.setResultInt(0);
     const n = weft.query(scm, .{ .start = 0, .end = weft.byteLen() });
     weft.setResultInt(@intCast(n));
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

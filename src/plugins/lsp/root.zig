@@ -72,43 +72,40 @@ const requestOf = request.requestOf;
 const posRequest = request.posRequest;
 
 // ── Plugin surface ───────────────────────────────────────────────────
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const base_cmds = [_]Cmd{
-    .{ .name = "hover", .handler = cmdHover },
-    .{ .name = "goto-definition", .handler = cmdDefinition },
-    .{ .name = "references", .handler = cmdReferences },
-    .{ .name = "symbols", .handler = cmdSymbols },
-    .{ .name = "next-diagnostic", .handler = cmdNextDiag },
-    .{ .name = "prev-diagnostic", .handler = cmdPrevDiag },
-    .{ .name = "lsp-format", .handler = cmdFormat },
-    .{ .name = "rename", .handler = cmdRename },
-    .{ .name = "signature-help", .handler = cmdSignature },
-    .{ .name = "inlay-hints", .handler = cmdInlay },
-    .{ .name = "code-actions", .handler = cmdCodeActions },
+const base_cmds = [_]weft.CommandEntry{
+    .{ .name = "hover", .call = cmdHover },
+    .{ .name = "goto-definition", .call = cmdDefinition },
+    .{ .name = "references", .call = cmdReferences },
+    .{ .name = "symbols", .call = cmdSymbols },
+    .{ .name = "next-diagnostic", .call = cmdNextDiag },
+    .{ .name = "prev-diagnostic", .call = cmdPrevDiag },
+    .{ .name = "lsp-format", .call = cmdFormat },
+    .{ .name = "rename", .call = cmdRename },
+    .{ .name = "signature-help", .call = cmdSignature },
+    .{ .name = "inlay-hints", .call = cmdInlay },
+    .{ .name = "code-actions", .call = cmdCodeActions },
     // Internal: the deferred half of `on_poll`'s message dispatch (task #19
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.
-    .{ .name = "lsp-deliver-internal", .handler = lspDeliverInternal },
+    .{ .name = "lsp-deliver-internal", .call = lspDeliverInternal },
 };
 
 /// The rename prompt's five editing commands (`rename_prompt`, below),
-/// mapped into lsp's `Cmd` so `on_command`'s id indexing stays one table.
-const prompt_cmds: [rename_prompt.commands.len]Cmd = blk: {
-    var arr: [rename_prompt.commands.len]Cmd = undefined;
-    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.handler };
+/// mapped into lsp's `weft.CommandEntry` so `on_command`'s id indexing stays one table.
+const prompt_cmds: [rename_prompt.commands.len]weft.CommandEntry = blk: {
+    var arr: [rename_prompt.commands.len]weft.CommandEntry = undefined;
+    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
     break :blk arr;
 };
 
 const cmds = base_cmds ++ prompt_cmds;
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+fn describeExtra() void {
     weft.declareCapability("edit/completion");
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn initExtra() void {
     weft.provideCompletion();
     rename_prompt.install();
     // …and annotate the completion rows this plugin's own answers produce.
@@ -185,10 +182,6 @@ export fn on_complete(session: u32) void {
     };
     p.caps = session;
     _ = send(s, p, .completion); // a refusal declines through `retire`
-}
-
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// Drain every complete server message and dispatch it. BACKGROUND (task #19
@@ -920,4 +913,8 @@ fn asInt(v: rpc.Value) ?i64 {
         .integer => |i| i,
         else => null,
     };
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

@@ -10,21 +10,10 @@ const std = @import("std");
 const weft = @import("weft");
 
 /// Registration order == the id the host hands `on_command`.
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "increment-number", .handler = increment },
-    .{ .name = "decrement-number", .handler = decrement },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "increment-number", .call = increment },
+    .{ .name = "decrement-number", .call = decrement },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 fn increment() void {
     bump(1);
@@ -97,4 +86,8 @@ fn format(v: i64) []const u8 {
         numbuf[i] = '-';
     }
     return numbuf[i..];
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

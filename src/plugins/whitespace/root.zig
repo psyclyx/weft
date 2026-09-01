@@ -15,21 +15,10 @@ const weft = @import("weft");
 var out: [1 << 16]u8 = undefined;
 
 /// Registration order == the id the host hands `on_command`.
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "trim-trailing-line", .handler = trimLine },
-    .{ .name = "trim-trailing-buffer", .handler = trimBuffer },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "trim-trailing-line", .call = trimLine },
+    .{ .name = "trim-trailing-buffer", .call = trimBuffer },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 fn isBlank(b: u8) bool {
     return b == ' ' or b == '\t';
@@ -76,4 +65,8 @@ fn trimBuffer() void {
 
     if (j == n) return; // nothing to trim in the read portion
     weft.edit(.{ .start = 0, .end = n }, out[0..j]);
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

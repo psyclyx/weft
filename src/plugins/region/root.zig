@@ -6,20 +6,23 @@
 
 const weft = @import("weft");
 
-var id_mark: u32 = 0;
-
-export fn describe() void {
-    weft.describeCommand("mark-region", "[language]", "Mark this line as a region of another language (default text).");
+const cmds = [_]weft.CommandEntry{
+    .{
+        .name = "mark-region",
+        .call = weft.thunk(markRegion),
+        .params = "[language]",
+        .summary = "Mark this line as a region of another language (default text).",
+    },
+};
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }
 
-export fn init() void {
-    id_mark = weft.register("mark-region");
-}
-
-export fn on_command(id: u32) void {
-    _ = id;
-    // The language fact (first arg, defaulting to "text").
-    const lang = weft.argStr(0) orelse "text";
+/// The language fact is the optional first argument, and it is OURS for the
+/// duration of the call — it used to be a slice into the shim's arg scratch,
+/// still live across two more host calls before `subbufferPutFact` read it.
+fn markRegion(language: ?[]const u8) void {
+    const lang = language orelse "text";
     const line = weft.lineAt(weft.cursor());
     const handle = weft.claimSubbuffer(line.start, line.end) orelse return;
     weft.subbufferPutFact(handle, "language", lang);

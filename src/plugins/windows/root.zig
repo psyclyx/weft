@@ -7,24 +7,13 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "win-split", .handler = split },
-    .{ .name = "win-vsplit", .handler = vsplit },
-    .{ .name = "win-focus", .handler = focus },
-    .{ .name = "win-close", .handler = close },
-    .{ .name = "win-center", .handler = center },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "win-split", .call = split },
+    .{ .name = "win-vsplit", .call = vsplit },
+    .{ .name = "win-focus", .call = focus },
+    .{ .name = "win-close", .call = close },
+    .{ .name = "win-center", .call = center },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 fn split() void {
     weft.run("split");
@@ -40,4 +29,8 @@ fn close() void {
 }
 fn center() void {
     weft.run("center-line");
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

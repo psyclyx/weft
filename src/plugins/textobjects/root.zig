@@ -22,28 +22,17 @@ const object_names = [_][]const u8{
     "quote-back", "paren",    "bracket",      "brace",
     "paragraph",  "function", "class",        "call",
 };
-const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = blk: {
-    var arr: [object_names.len * 2]Cmd = undefined;
+    var arr: [object_names.len * 2]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (object_names) |obj| {
-        arr[i] = .{ .name = "textobj.inner-" ++ obj, .handler = objHandler(obj, false) };
+        arr[i] = .{ .name = "textobj.inner-" ++ obj, .call = objHandler(obj, false) };
         i += 1;
-        arr[i] = .{ .name = "textobj.a-" ++ obj, .handler = objHandler(obj, true) };
+        arr[i] = .{ .name = "textobj.a-" ++ obj, .call = objHandler(obj, true) };
         i += 1;
     }
     break :blk arr;
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 fn objHandler(comptime obj: []const u8, comptime around: bool) fn () void {
     return struct {
@@ -219,4 +208,8 @@ fn paraObj(around: bool) ?Obj {
         e += 1;
     };
     return .{ .s = lo + s, .e = lo + e };
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

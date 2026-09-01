@@ -11,22 +11,11 @@ const weft = @import("weft");
 
 var xform: [1 << 16]u8 = undefined;
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "op.delete", .handler = delete },
-    .{ .name = "op.upcase", .handler = upcase },
-    .{ .name = "op.lowercase", .handler = lowercase },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "op.delete", .call = delete },
+    .{ .name = "op.upcase", .call = upcase },
+    .{ .name = "op.lowercase", .call = lowercase },
 };
-
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
-}
 
 /// Delete the awaited range (the edit door, grade-gated + CRDT-anchored).
 fn delete() void {
@@ -48,4 +37,8 @@ fn upcase() void {
 }
 fn lowercase() void {
     mapCase(std.ascii.toLower);
+}
+
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }

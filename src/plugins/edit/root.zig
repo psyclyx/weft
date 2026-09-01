@@ -16,21 +16,12 @@ const weft = @import("weft");
 /// Scratch for building an edit's bytes (no allocator in a freestanding guest).
 var buf: [1 << 16]u8 = undefined;
 
-var id_dup: u32 = 0;
-var id_up: u32 = 0;
-
-export fn describe() void {
-    weft.declareCommand("duplicate-line");
-    weft.declareCommand("upcase-line");
-}
-
-export fn init() void {
-    id_dup = weft.register("duplicate-line");
-    id_up = weft.register("upcase-line");
-}
-
-export fn on_command(id: u32) void {
-    if (id == id_dup) duplicateLine() else if (id == id_up) upcaseLine();
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "duplicate-line", .call = duplicateLine },
+    .{ .name = "upcase-line", .call = upcaseLine },
+};
+comptime {
+    weft.plugin(&cmds, .{}).exportAll();
 }
 
 /// Copy the current line and insert the copy right below it.

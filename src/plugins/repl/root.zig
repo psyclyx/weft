@@ -26,23 +26,16 @@ const Cmd = struct {
     params: []const u8 = "",
     summary: []const u8 = "",
 };
-const cmds = [_]Cmd{
-    .{ .name = "repl-start", .handler = start, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer (default sh)." },
-    .{ .name = "repl-send", .handler = send, .params = "text", .summary = "Send a line to this buffer's REPL." },
-    .{ .name = "repl-send-line", .handler = sendLine, .summary = "Send the current line to this buffer's REPL." },
-    .{ .name = "repl-quit", .handler = quit, .summary = "Stop this buffer's REPL; others stay live." },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "repl-start", .call = start, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer (default sh)." },
+    .{ .name = "repl-send", .call = send, .params = "text", .summary = "Send a line to this buffer's REPL." },
+    .{ .name = "repl-send-line", .call = sendLine, .summary = "Send the current line to this buffer's REPL." },
+    .{ .name = "repl-quit", .call = quit, .summary = "Stop this buffer's REPL; others stay live." },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.describeCommand(c.name, c.params, c.summary);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-}
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 /// Start a REPL running arg0 (default `sh` — a shell REPL; pass e.g.
 /// "python3 -u", "node", "nix repl") in a buffer of its own. Note:
@@ -69,4 +62,8 @@ fn quit() void {
     const slot = sessions.current("repl") orelse return;
     weft.replQuit(slot.value);
     sessions.close(slot);
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }

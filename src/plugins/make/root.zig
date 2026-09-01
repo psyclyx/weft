@@ -12,26 +12,20 @@ const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "make-build", .handler = makeBuild },
-    .{ .name = "make-test", .handler = makeTest },
-    .{ .name = "make-run", .handler = makeRun },
-    .{ .name = "make-visit", .handler = output.visit },
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "make-build", .call = makeBuild },
+    .{ .name = "make-test", .call = makeTest },
+    .{ .name = "make-run", .call = makeRun },
+    .{ .name = "make-visit", .call = output.visit },
 };
 
-export fn describe() void {
-    for (cmds) |c| weft.declareCommand(c.name);
+fn describeExtra() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }
-export fn init() void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn initExtra() void {
     // Return jumps to the compiler error the focused row points at.
     output.installMode("build", "make-visit");
-}
-export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
 }
 
 /// The fill landed: capture each row's location before the text is anyone's
@@ -49,4 +43,8 @@ fn makeTest() void {
 }
 fn makeRun() void {
     output.show("make", "*build*", "build");
+}
+
+comptime {
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }
