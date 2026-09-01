@@ -280,6 +280,10 @@ fn drainLoopIdleOrDiff(proj: *Project, ed: *Editor) bool {
 // in for.
 test "e2e/git-gates: G3 no git mode is locked" {
     const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
     defer ed.deinit();
@@ -288,11 +292,37 @@ test "e2e/git-gates: G3 no git mode is locked" {
     try t.expect(ed.keymap.isRestingMode("git"));
     try t.expect(ed.keymap.isRestingMode("git-view"));
 
+    // A REAL status projection, because that is what makes `git` the resting
+    // mode. Escape out of a menu asks the ENTRY where to land — no menu names
+    // a mode to return to any more — so this gate only means anything with an
+    // entry that has an answer.
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > f.txt && git add f.txt && git commit -q -m base",
+        "printf 'one\\ntwo\\n' > f.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
+    try t.expectEqualStrings("git", ed.mode());
+
     // Escape must never strand the projection in a dead mode: out of one of
-    // git's own transients it comes back to git's keys.
-    ed.setMode("git");
-    ed.press("b", ""); // the branch transient
+    // git's plain action menus it comes back to git's keys…
+    ed.press("b", ""); // the branch menu
     try t.expectEqualStrings("git-branch-menu", ed.mode());
+    ed.press("Escape", "");
+    try t.expectEqualStrings("git", ed.mode());
+
+    // …and out of a flag TRANSIENT, whose mode, bindings and leave are all
+    // generated, exactly the same way.
+    ed.press("P", ""); // the push transient
+    try t.expectEqualStrings("git-push-menu", ed.mode());
+    ed.press("f", ""); // a toggle: sticky, so the menu stays open
+    try t.expectEqualStrings("git-push-menu", ed.mode());
     ed.press("Escape", "");
     try t.expectEqualStrings("git", ed.mode());
 }

@@ -236,13 +236,34 @@ test "e2e/project: git push/pull/fetch transients are sticky menus" {
 
     // The flag transients must be sticky (stay open while flags accumulate) —
     // sticky implies menu-mode, so which-key also lists their keys. The reset
-    // transient (a plain one-shot menu) must NOT be sticky.
+    // menu (a plain one-shot, not a transient) must NOT be sticky.
+    //
+    // Both are DERIVED from one declaration: `weft.transient("git-push", …)`
+    // names the open command, and the mode is that name plus `-menu`. Nothing
+    // declares stickiness either — a menu is sticky exactly when it has flags
+    // to accumulate, which is why reset (a list of verbs) is not.
     try t.expect(ed.keymap.isStickyMenu("git-push-menu"));
     try t.expect(ed.keymap.isStickyMenu("git-pull-menu"));
     try t.expect(ed.keymap.isStickyMenu("git-fetch-menu"));
     try t.expect(ed.keymap.isMenuMode("git-push-menu"));
     try t.expect(!ed.keymap.isStickyMenu("git-reset-menu"));
     try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
+
+    // The five flagless menus are the same declaration with `switches` left
+    // out — one-shot, and their keys bind straight to git's own verbs, so no
+    // wrapper command exists to route around.
+    try t.expect(ed.keymap.isMenuMode("git-branch-menu"));
+    try t.expect(ed.keymap.isMenuMode("git-stash-menu"));
+    try t.expect(ed.keymap.isMenuMode("git-log-choose-menu"));
+    try t.expect(ed.keymap.isMenuMode("git-commit-dispatch-menu"));
+    try t.expect(!ed.keymap.isStickyMenu("git-branch-menu"));
+    try t.expect(ed.commands.find("git-branch-stash") == null);
+
+    // And the generated verbs are real, findable commands — the toggle named
+    // for its FLAG, the action named for what it does.
+    try t.expect(ed.commands.find("git-push-toggle-force-with-lease") != null);
+    try t.expect(ed.commands.find("git-push-do") != null);
+    try t.expect(ed.commands.find("git-push-cancel") != null);
 }
 
 // Task #21: `git-rebase-interactive` re-sets `git-rebase-menu` when a rebase

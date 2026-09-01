@@ -213,18 +213,9 @@ const base_cmds = [_]Cmd{
     .{ .name = "git-stash-drop", .handler = gitStashDrop },
     // Log transient.
     .{ .name = "git-log-all", .handler = gitLogAll },
-    // Push/pull/fetch flag transients (toggle flags, then execute).
-    .{ .name = "git-push", .handler = transient.gitPush },
-    .{ .name = "git-pull", .handler = transient.gitPull },
-    .{ .name = "git-fetch", .handler = transient.gitFetch },
-    .{ .name = "git-push-toggle-force", .handler = transient.gitPushToggleForce },
-    .{ .name = "git-push-toggle-upstream", .handler = transient.gitPushToggleUpstream },
-    .{ .name = "git-push-do", .handler = transient.gitPushDo },
-    .{ .name = "git-pull-toggle-rebase", .handler = transient.gitPullToggleRebase },
-    .{ .name = "git-pull-do", .handler = transient.gitPullDo },
-    .{ .name = "git-fetch-toggle-all", .handler = transient.gitFetchToggleAll },
-    .{ .name = "git-fetch-toggle-prune", .handler = transient.gitFetchTogglePrune },
-    .{ .name = "git-fetch-do", .handler = transient.gitFetchDo },
+    // Push/pull/fetch are TRANSIENTS: their open/toggle/run/cancel commands are
+    // generated from the declarations in `transient.zig` and spliced in below
+    // (`transient_cmds`), so there is nothing to list here.
     // Interactive rebase: the plan is an entry; saving it runs the rebase.
     .{ .name = "git-rebase-interactive", .handler = gitRebaseInteractive },
     .{ .name = "git-rebase-continue", .handler = gitRebaseContinue },
@@ -233,7 +224,6 @@ const base_cmds = [_]Cmd{
     .{ .name = "git-rebase-save", .handler = gitRebaseSave, .route = .carried },
     .{ .name = "git-rebase-settle", .handler = gitRebaseSettle, .route = .carried },
     .{ .name = "git-menu-cancel", .handler = transient.gitMenuCancel },
-    .{ .name = "git-menu-cancel-surface", .handler = transient.gitMenuCancelSurface },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
     .{ .name = "git-log", .handler = gitLog },
     .{ .name = "git-diff", .handler = gitDiff },
@@ -255,7 +245,18 @@ const input_cmds: [input.commands.len]Cmd = blk: {
     break :blk arr;
 };
 
-const cmds = base_cmds ++ input_cmds;
+/// The push/pull/fetch transients' generated commands, adapted to git's own
+/// `Cmd`. They take the table's defaults — `.focus` route, `.durable` scope —
+/// which is what push/pull/fetch always had: a flag menu is about the
+/// repository the focused entry names, and nothing it holds is a row from the
+/// current render.
+const transient_cmds: [transient.commands.len]Cmd = blk: {
+    var arr: [transient.commands.len]Cmd = undefined;
+    for (transient.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .handler = c.call };
+    break :blk arr;
+};
+
+const cmds = base_cmds ++ input_cmds ++ transient_cmds;
 
 /// The manifest's table, derived from `cmds` — same order, so `dispatch`'s
 /// index reaches the same entry's route and scope.
@@ -310,9 +311,9 @@ fn initExtra() void {
     weft.bindKey("git", "x", "git-discard");
     // `c` opens the commit dispatch transient (which-key renders it).
     weft.bindKey("git", "c", "git-commit-dispatch");
-    weft.bindKey("git", "b", "git-branch-menu");
-    weft.bindKey("git", "z", "git-stash-menu");
-    weft.bindKey("git", "l", "git-log-menu");
+    weft.bindKey("git", "b", "git-branch");
+    weft.bindKey("git", "z", "git-stash");
+    weft.bindKey("git", "l", "git-log-choose");
     weft.bindKey("git", "r", "git-rebase-menu");
     // Cherry-pick / revert the commit under point (resolve the hash live).
     weft.bindKey("git", "A", "git-cherry-pick");
@@ -341,52 +342,10 @@ fn initExtra() void {
     // What else a draft affords is PUBLISHED, like every other `plugin.git.*`
     // intention (see publishOffers) — one namespace, one plane.
 
-    // Commit dispatch (`c`): a which-key transient. Each key is terminal, so the
-    // core's one-shot menu auto-return lands back in git for free.
-    weft.menuMode("git-commit-dispatch");
-    weft.bindKeys("git-commit-dispatch", "c", &.{"plugin.git.commit"});
-    weft.bindKey("git-commit-dispatch", "a", "git-amend");
-    weft.bindKey("git-commit-dispatch", "e", "git-extend");
-    weft.bindKey("git-commit-dispatch", "w", "git-reword");
-    weft.bindKey("git-commit-dispatch", "f", "git-fixup");
-    weft.bindKey("git-commit-dispatch", "s", "git-squash");
-    weft.bindKey("git-commit-dispatch", "Escape", "git-menu-cancel");
-    weft.bindKey("git-commit-dispatch", "C-g", "git-menu-cancel");
-
-    // Reset transient (entered by `x` on a commit): soft/mixed, hard→confirm.
-    weft.menuMode("git-reset-menu");
-    weft.bindKey("git-reset-menu", "s", "git-reset-soft");
-    weft.bindKey("git-reset-menu", "m", "git-reset-mixed");
-    weft.bindKey("git-reset-menu", "h", "git-reset-hard");
-    weft.bindKey("git-reset-menu", "Escape", "git-menu-cancel");
-    weft.bindKey("git-reset-menu", "C-g", "git-menu-cancel");
-
-    // Branch transient (`b`).
-    weft.menuMode("git-branch-menu");
-    weft.bindKey("git-branch-menu", "b", "git-branch-checkout");
-    weft.bindKey("git-branch-menu", "c", "git-branch-create");
-    weft.bindKey("git-branch-menu", "n", "git-branch-new");
-    weft.bindKey("git-branch-menu", "d", "git-branch-delete");
-    weft.bindKey("git-branch-menu", "r", "git-branch-rename");
-    weft.bindKey("git-branch-menu", "Escape", "git-menu-cancel");
-    weft.bindKey("git-branch-menu", "C-g", "git-menu-cancel");
-
-    // Stash transient (`z`).
-    weft.menuMode("git-stash-menu");
-    weft.bindKey("git-stash-menu", "z", "git-stash-save");
-    weft.bindKey("git-stash-menu", "p", "git-stash-pop");
-    weft.bindKey("git-stash-menu", "a", "git-stash-apply");
-    weft.bindKey("git-stash-menu", "l", "git-stash-list");
-    weft.bindKey("git-stash-menu", "k", "git-stash-drop");
-    weft.bindKey("git-stash-menu", "Escape", "git-menu-cancel");
-    weft.bindKey("git-stash-menu", "C-g", "git-menu-cancel");
-
-    // Log transient (`l`) — the inline Recent section covers most needs.
-    weft.menuMode("git-log-menu");
-    weft.bindKey("git-log-menu", "l", "git-log");
-    weft.bindKey("git-log-menu", "a", "git-log-all");
-    weft.bindKey("git-log-menu", "Escape", "git-menu-cancel");
-    weft.bindKey("git-log-menu", "C-g", "git-menu-cancel");
+    // Commit dispatch, reset, branch, stash and log are TRANSIENTS with no
+    // flags — five `menuMode` blocks and their bindings are now five
+    // declarations in `transient.zig`, installed with the three flag menus
+    // below.
 
     // Rebase transient (`r`): interactive + in-progress continue/abort/skip. The
     // right verb is chosen per state; the wrong one just no-ops with a git error.
@@ -397,7 +356,7 @@ fn initExtra() void {
     // c/a/s/`i`-when-clean all still close normally: each explicitly leaves via
     // `weft.setMode` to a DIFFERENT mode (git or git-input), which dispatch's
     // "leaf moved us elsewhere" branch honors regardless of stickiness — same
-    // as git-push-menu's sticky toggles vs. its mode-changing `-do` leaf.
+    // as the git-push transient's sticky toggles vs. its leaving `-do` action.
     weft.stickyMenu("git-rebase-menu");
     weft.bindKey("git-rebase-menu", "i", "git-rebase-interactive");
     weft.bindKey("git-rebase-menu", "c", "git-rebase-continue");
@@ -413,34 +372,10 @@ fn initExtra() void {
     // Push/pull/fetch flag transients: STICKY menu modes. Sticky means a leaf key
     // does NOT one-shot auto-pop — the transient stays open while flags
     // accumulate (a toggle re-renders and we're still in the mode); only the
-    // execute key (p/RET, which re-gathers into git) or Escape/q leaves. Being
-    // menu modes, which-key lists the keys, AND our own surface paints the live
-    // flag state (see renderPushSurface & co.).
-    weft.stickyMenu("git-push-menu");
-    weft.bindKey("git-push-menu", "f", "git-push-toggle-force");
-    weft.bindKey("git-push-menu", "u", "git-push-toggle-upstream");
-    weft.bindKey("git-push-menu", "p", "git-push-do");
-    weft.bindKey("git-push-menu", "Return", "git-push-do");
-    weft.bindKey("git-push-menu", "Escape", "git-menu-cancel-surface");
-    weft.bindKey("git-push-menu", "C-g", "git-menu-cancel-surface");
-    weft.bindKey("git-push-menu", "q", "git-menu-cancel-surface");
-
-    weft.stickyMenu("git-pull-menu");
-    weft.bindKey("git-pull-menu", "r", "git-pull-toggle-rebase");
-    weft.bindKey("git-pull-menu", "p", "git-pull-do");
-    weft.bindKey("git-pull-menu", "Return", "git-pull-do");
-    weft.bindKey("git-pull-menu", "Escape", "git-menu-cancel-surface");
-    weft.bindKey("git-pull-menu", "C-g", "git-menu-cancel-surface");
-    weft.bindKey("git-pull-menu", "q", "git-menu-cancel-surface");
-
-    weft.stickyMenu("git-fetch-menu");
-    weft.bindKey("git-fetch-menu", "a", "git-fetch-toggle-all");
-    weft.bindKey("git-fetch-menu", "p", "git-fetch-toggle-prune");
-    weft.bindKey("git-fetch-menu", "f", "git-fetch-do");
-    weft.bindKey("git-fetch-menu", "Return", "git-fetch-do");
-    weft.bindKey("git-fetch-menu", "Escape", "git-menu-cancel-surface");
-    weft.bindKey("git-fetch-menu", "C-g", "git-menu-cancel-surface");
-    weft.bindKey("git-fetch-menu", "q", "git-menu-cancel-surface");
+    // execute key (p/RET, which re-gathers into git) or Escape/q leaves. All
+    // of that — the sticky mode, every binding, the live flag surface, and the
+    // leave — is generated from the three declarations in `transient.zig`.
+    transient.install();
 
     // A rebase plan is a list of verbs in an ordinary text entry: it is edited
     // by typing, like the todo `git rebase -i` would have opened, and saving it
@@ -1029,10 +964,11 @@ fn gitDiscard() void {
         .file => _ = weft.confirmWith(Armed, armed, "discard changes to this file?", gitDiscardDo),
         .hunk => _ = weft.confirmWith(Armed, armed, "discard this hunk?", gitDiscardDo),
         // `x` on a recent commit → the reset transient, scoped to that OID.
+        // Opened through its own command so the menu paints itself; the echo
+        // line no longer has to be a hand-typed copy of its key list.
         .commit => {
             cur().pending_target = t;
-            weft.echo("reset: s soft  m mixed  h hard");
-            weft.setMode("git-reset-menu");
+            weft.run(transient.reset.open_command);
         },
         .section => _ = weft.confirmWith(Armed, armed, "discard the whole section?", gitDiscardDo),
         .none => {},

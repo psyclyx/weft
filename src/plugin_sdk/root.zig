@@ -178,6 +178,15 @@ pub const projectionAtCursor = @import("projection.zig").atCursor;
 pub const projectionToggleFold = @import("projection.zig").toggleFold;
 pub const projectionSelectedLines = @import("projection.zig").selectedLines;
 
+// ── transient: a flag menu as a declaration ──────────────────────────
+// See `transient.zig`. Built entirely on doors that already existed
+// (`stickyMenu`, `bindKey`, `surface*`, `exitToResting`) — what was
+// missing was anything that made writing them once enough.
+pub const transient = @import("transient.zig").transient;
+pub const TransientSpec = @import("transient.zig").Spec;
+pub const TransientSwitch = @import("transient.zig").Switch;
+pub const TransientAction = @import("transient.zig").Action;
+
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
     return e.wl_cursor();

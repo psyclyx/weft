@@ -839,10 +839,10 @@ test "keymap: sticky menus stay open (implies menu-mode)" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try t.expect(!km.isStickyMenu("git-push-menu"));
-    try km.markStickyMenu(gpa, "git-push-menu");
-    try t.expect(km.isStickyMenu("git-push-menu"));
-    try t.expect(km.isMenuMode("git-push-menu")); // sticky implies menu-mode
+    try t.expect(!km.isStickyMenu("git-flag-menu"));
+    try km.markStickyMenu(gpa, "git-flag-menu");
+    try t.expect(km.isStickyMenu("git-flag-menu"));
+    try t.expect(km.isMenuMode("git-flag-menu")); // sticky implies menu-mode
     // A plain menu isn't sticky — it still one-shot auto-pops.
     try km.markMenuMode(gpa, "leader");
     try t.expect(!km.isStickyMenu("leader"));

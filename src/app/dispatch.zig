@@ -13,7 +13,7 @@
 //! the actual production shape of a menu open — real examples:
 //! `src/plugins/git/root.zig`'s `weft.bindKey("git", "c", "git-commit-dispatch")`,
 //! `git-branch-menu`, `git-stash-menu`, `git-log-menu`, `git-rebase-menu`,
-//! `git-commit-menu`, `git-push-menu`. Entering one now PUSHES a paired
+//! `git-commit-menu`. Entering one now PUSHES a paired
 //! transient (`core/ctx.zig`'s `Ctx.pushTransient`, backed by
 //! `core.Head.transient_stack`) instead of a bare `Head.enterMode`; the
 //! matching leaf auto-pop and `menu-escape` are the POP, reconstructed from
@@ -22,8 +22,9 @@
 //! the durable record spanning however many keypresses the menu stays open.
 //! NOT migrated to PAIRED TRANSIENTS this pass (deliberately — see
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
-//! OWN direct menu entry — `git-push-menu`/`git-pull-menu`/`git-fetch-menu`
-//! (sticky), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
+//! OWN direct menu entry — the `weft.transient` flag menus `git-push`/
+//! `git-pull`/`git-fetch` (sticky, and now generated rather than
+//! hand-written), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
 //! `helix-op`, files's `files-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for
