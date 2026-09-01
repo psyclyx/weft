@@ -10,6 +10,7 @@ const scene_codec = @import("weft_scene_codec");
 const wire_util = @import("semantic_wire.zig");
 
 const shared = @import("plugin.zig");
+const action_here = @import("../action_here.zig");
 const WasmPlugin = shared.WasmPlugin;
 const requireDispatch = shared.requireDispatch;
 
@@ -249,7 +250,11 @@ pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     };
     if (args[2] < 0 or args[2] > 26) return;
     const slot: u8 = @intCast(args[2]);
-    const effect = services.invokeFocusedActionInRegister(&ctx.head.interactions, ctx.head, plugin.gpa, action, slot) catch return;
+    // BOTH PLANES, the same rule commands get: a listing is a text projection
+    // and has no semantic focus at all, so asking only the focused scene made
+    // this door inert against one — `:e!` reverted nothing, silently.
+    _ = services;
+    const effect = action_here.invokeHere(ctx, action, slot) catch return;
     results[0] = if (effect) |value| switch (value) {
         .declined => 0,
         .handled => 1,

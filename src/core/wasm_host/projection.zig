@@ -93,8 +93,9 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(ordinal);
 }
 
-/// `wl_proj_span(node, start, end, role, role_len)`: style a stretch of node
-/// `node`'s OWN text.
+/// `wl_proj_span(node, start, end, role, role_len, key, key_len)`: name a
+/// stretch of node `node`'s OWN text — how it is STYLED, and optionally WHAT IT
+/// IS.
 ///
 /// The offsets are into the text this plugin passed to `wl_proj_node`, not into
 /// the document — which is why this door exists at all rather than a tool view
@@ -104,6 +105,12 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// naming something the next render moves. Nothing here can be turned into a
 /// document offset by the guest: the node's rendered start is added on this
 /// side, and never handed back.
+///
+/// A non-empty `key` makes the span a SUBJECT: point inside it names this PART
+/// rather than the whole row, so a listing's mode column and its name are two
+/// things a verb can be about without the row stopping being one line of text.
+/// That was §F2's fork — per-column identity used to mean leaving the text
+/// plane, and with it search, yank and selection.
 pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -112,9 +119,14 @@ pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     if (args[0] < 0) return;
     const role = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
     defer gpa.free(role);
+    const key: []const u8 = if (args[6] > 0)
+        caller.readMemory(gpa, @intCast(args[5]), @intCast(args[6])) catch return
+    else
+        "";
+    defer if (key.len != 0) gpa.free(@constCast(key));
     const start: usize = if (args[1] < 0) 0 else @intCast(args[1]);
     const end: usize = if (args[2] < 0) 0 else @intCast(args[2]);
-    open.view.span(@intCast(args[0]), start, end, role) catch {};
+    open.view.span(@intCast(args[0]), start, end, role, key) catch {};
 }
 
 /// `wl_tool_view(authority, slot, generation)`: name the SEMANTIC VIEW this

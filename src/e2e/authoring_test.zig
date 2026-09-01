@@ -1462,10 +1462,10 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     // surface, not a legacy `*files*` text buffer.
     authorFile(ed, "old.txt", "keep me\n");
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view_ref = ed.toolView().?;
     const view = ed.session.system.semantic.views.get(view_ref).?;
     try t.expectEqualStrings("files", view.scene.role);
-    const name_node = view.node(ed.head.semantic_focus.path().?.leaf().?).?;
+    const name_node = view.node(ed.subjectHere().?).?;
     const file_link = name_node.target orelse return error.TestExpectedEqual;
     const file_descriptor = ed.session.system.semantic.targets.get(file_link.target) orelse return error.TestExpectedEqual;
     try t.expect(file_descriptor.kind == .file);
@@ -1474,22 +1474,24 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     try t.expect(attached.root.eql(authorized.root));
     try t.expect(attached.ref.eql(authorized.ref));
     try t.expectEqualStrings(attached.revision.token, authorized.revision.token);
-    const field_ref = name_node.content.field.ref;
+    const field_ref = ed.fieldHere().?;
     var initial = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
     defer initial.deinit();
     try t.expectEqualStrings("old.txt", initial.value.bytes);
 
-    // Replace the raw name through generic semantic field editing. The field
-    // starts at byte offset zero; Delete is the core field operation inherited
-    // by Vim's insert mode, so this path is valid for unusual raw names too.
+    // Replace the name by TYPING IT — point already rests on the name part,
+    // which is where a vertical step and a fresh render both land. Delete is
+    // ordinary text editing here, so this path is valid for unusual raw names
+    // too (a row whose name is not text refuses the rename out loud instead).
     ed.press("i", "");
     for (0..7) |_| ed.press("Delete", ""); // `old.txt`
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    var renamed = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-    defer renamed.deinit();
-    try t.expectEqualStrings("new.txt", renamed.value.bytes);
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    // THE DRAFT IS THE TEXT: what the row says now IS the pending rename,
+    // which is the whole of editing in place. Nothing has to be committed into
+    // a field for the change to exist.
+    try t.expect(try rowDraftEnds(ed, gpa, "new.txt"));
+    try t.expectEqual(view_ref, ed.toolView().?);
 
     // Vim's force-edit spelling is generic for structured views: Ex invokes
     // `view.revert`, and the owning provider rebuilds its draft from external
@@ -1498,19 +1500,17 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     ed.typeText("e!");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.head.currentMode());
-    var reverted = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-    defer reverted.deinit();
-    try t.expectEqualStrings("old.txt", reverted.value.bytes);
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expect(try rowDraftEnds(ed, gpa, "old.txt"));
+    try t.expectEqual(view_ref, ed.toolView().?);
 
-    // Stage the rename again so the rest of the test still proves that the
+    // Type the rename again so the rest of the test still proves that the
     // exact draft shown by the view is the plan applied after confirmation.
-    try ed.session.system.semantic.fields.get(field_ref).?.edit(reverted.value.revision, .{
-        .start = 0,
-        .end = reverted.value.bytes.len,
-        .replacement = "new.txt",
-        .selection_after = .{ .anchor = 7, .caret = 7 },
-    });
+    try focusFilesRow(ed, gpa, "old.txt");
+    ed.press("i", "");
+    for (0..7) |_| ed.press("Delete", "");
+    ed.typeText("new.txt");
+    ed.press("Escape", "");
+    try t.expect(try rowDraftEnds(ed, gpa, "new.txt"));
 
     // Apply is an advertised semantic action. Its provider opens a head-local
     // interaction; the dialog owns `y`, rather than introducing a files mode or
@@ -1546,7 +1546,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     _ = try app.proj.oracle("mkdir clean-dir");
     ed.runStr("open", ".");
 
-    var view_ref = ed.head.semantic_focus.path().?.view;
+    var view_ref = ed.toolView().?;
     var view = ed.session.system.semantic.views.get(view_ref).?;
     var dirty_field: ?semantic.scene.FieldRef = null;
     var clean_field: ?semantic.scene.FieldRef = null;
@@ -1586,7 +1586,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     core.file.deleteFile(gpa, "removed.txt");
 
     ed.chord("SPC v r");
-    view_ref = ed.head.semantic_focus.path().?.view;
+    view_ref = ed.toolView().?;
     view = ed.session.system.semantic.views.get(view_ref).?;
 
     var saw_created = false;
@@ -1641,7 +1641,7 @@ test "authoring/files: refresh rollback restores retained fields after an interl
     for (fixture_names) |name| authorFile(ed, name, name);
     ed.runStr("open", ".");
 
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view_ref = ed.toolView().?;
     const view = ed.session.system.semantic.views.get(view_ref).?;
     var retained_mode_field: ?semantic.scene.FieldRef = null;
     var tail_field: ?semantic.scene.FieldRef = null;
@@ -1720,7 +1720,7 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     core.file.deleteFile(gpa, "destination/.seed");
 
     ed.runStr("open", "source");
-    const source_view_ref = ed.head.semantic_focus.path().?.view;
+    const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
     const source_row = source_view.scene.content.container.children[0];
     const source_field_ref = source_row.content.container.children[2].content.field.ref;
@@ -1750,7 +1750,7 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     core.file.deleteFile(gpa, source_path);
 
     ed.runStr("open", "destination");
-    const destination_view_ref = ed.head.semantic_focus.path().?.view;
+    const destination_view_ref = ed.toolView().?;
     try t.expect(!destination_view_ref.eql(source_view_ref));
     const empty_view = ed.session.system.semantic.views.get(destination_view_ref).?;
     try t.expectEqual(@as(usize, 0), empty_view.scene.content.container.children.len);
@@ -1785,7 +1785,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     try core.file.writeBytesMakingDirs(gpa, "z-referents", "z-referents/target.txt", "referent survives\n");
     _ = try app.proj.oracle("mkdir destination && ln -s -- z-referents/target.txt a-link");
     ed.runStr("open", ".");
-    const source_view_ref = ed.head.semantic_focus.path().?.view;
+    const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
     const source_rows = source_view.scene.content.container.children;
     try t.expectEqual(@as(usize, 3), source_rows.len);
@@ -1821,7 +1821,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     // loop is deliberately independent of files row ids or a files mode.
     var focused_link = false;
     for (0..source_rows.len) |_| {
-        const leaf = ed.head.semantic_focus.path().?.leaf().?;
+        const leaf = ed.subjectHere().?;
         if (leaf == link_leaf_id) {
             focused_link = true;
             break;
@@ -1857,7 +1857,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     // removed. The retained transfer must recreate a symlink with identical
     // raw link text; the referent remains an ordinary untouched file.
     ed.runStr("open", "destination");
-    const destination_view_ref = ed.head.semantic_focus.path().?.view;
+    const destination_view_ref = ed.toolView().?;
     const empty = ed.session.system.semantic.views.get(destination_view_ref).?;
     try t.expectEqual(@as(usize, 0), empty.scene.content.container.children.len);
     ed.chord("SPC v p");
@@ -1915,7 +1915,7 @@ test "authoring/files: Vim named semantic register crosses delete and another vi
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
-    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene.content.container.children.len);
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
     ed.chord("SPC v a");
     ed.press("y", "y");
     const disk = try core.file.readAlloc(gpa, "destination/kept.txt");
@@ -1933,14 +1933,14 @@ test "authoring/files: generic create and permissions actions apply from an empt
     try core.file.writeBytesMakingDirs(gpa, "workspace", "workspace/.seed", "");
     core.file.deleteFile(gpa, "workspace/.seed");
     ed.runStr("open", "workspace");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view_ref = ed.toolView().?;
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
 
     // Creation is an open semantic action declared by config. The provider
     // returns an ordinary field focus; Vim supplies only its normal insert
     // posture, and the default placeholder selection makes typing replace it.
     ed.chord("SPC v n");
-    var created_file = try ed.session.system.semantic.fields.get(ed.head.semantic_focus.path().?.field.?).?.snapshot(gpa);
+    var created_file = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
     defer created_file.deinit();
     try t.expectEqualStrings("new-file", created_file.value.bytes);
     try t.expectEqual(@as(u32, 0), created_file.value.selection.anchor);
@@ -1953,14 +1953,14 @@ test "authoring/files: generic create and permissions actions apply from an empt
     // provider reports POSIX-mode capability. No config or editing plugin
     // knows which structured tool supplied it.
     ed.chord("SPC v m");
-    const mode_leaf = ed.head.semantic_focus.path().?.leaf().?;
+    const mode_leaf = ed.subjectHere().?;
     try t.expectEqualStrings("files.mode", ed.session.system.semantic.views.get(view_ref).?.node(mode_leaf).?.role);
     ed.press("i", "");
     ed.typeText("0600");
     ed.press("Escape", "");
 
     ed.chord("SPC v N");
-    var created_directory = try ed.session.system.semantic.fields.get(ed.head.semantic_focus.path().?.field.?).?.snapshot(gpa);
+    var created_directory = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
     defer created_directory.deinit();
     try t.expectEqualStrings("new-directory", created_directory.value.bytes);
     ed.press("i", "");
@@ -2216,43 +2216,31 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
 
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    const view = ed.session.system.semantic.views.get(view_ref).?;
-    const leaf = ed.head.semantic_focus.path().?.leaf().?;
-    const field_ref = view.node(leaf).?.content.field.ref;
-    const draft = struct {
-        fn bytes(e: *h.Editor, ref: semantic.scene.FieldRef, a: std.mem.Allocator) ![]u8 {
-            var snap = try e.session.system.semantic.fields.get(ref).?.snapshot(a);
-            defer snap.deinit();
-            return a.dupe(u8, snap.value.bytes);
-        }
-    }.bytes;
+    const view_ref = ed.toolView().?;
+    // THE DRAFT IS THE TEXT. A listing row is edited in place, so what the
+    // rename currently says is what the row currently says — read from the
+    // part its producer published as the name, not from a field snapshot the
+    // typing no longer goes through.
 
     // Structural posture: the file browser's mode never commits, so an unbound
     // printable key reaches neither the draft nor a hidden backing document.
     ed.press("ampersand", "&");
     {
-        const name = try draft(ed, field_ref, gpa);
-        defer gpa.free(name);
-        try t.expectEqualStrings("note.txt", name);
+        try t.expect(try rowDraftEnds(ed, gpa, "note.txt"));
     }
 
     // Insert posture commits typed text into the field...
     ed.press("i", "");
     ed.typeText("x");
     {
-        const name = try draft(ed, field_ref, gpa);
-        defer gpa.free(name);
-        try t.expectEqualStrings("xnote.txt", name);
+        try t.expect(try rowDraftEnds(ed, gpa, "xnote.txt"));
     }
 
     // ...but Tab is a physical key, not a commit: the field consumes it and the
     // rename draft never gains a literal tab byte (doc/cwa-review.md §2.2).
     ed.press("Tab", "\t");
-    const name = try draft(ed, field_ref, gpa);
-    defer gpa.free(name);
-    try t.expectEqualStrings("xnote.txt", name);
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expect(try rowDraftEnds(ed, gpa, "xnote.txt"));
+    try t.expectEqual(view_ref, ed.toolView().?);
 }
 
 /// The name column of the focused files view's row whose draft reads `want`.
@@ -2263,11 +2251,11 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
 /// see. This used to walk the scene's third column and snapshot a field —
 /// which is what choosing the scene plane bought, and what the text plane now
 /// gives without giving up search, yank or selection.
-fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?core.projection.Node {
+fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?*const core.projection.Node {
     _ = gpa;
     const view = ed.buffers.active().projection orelse return null;
-    for (view.nodes.items) |node| {
-        if (std.mem.eql(u8, filesName(node.text), want)) return node;
+    for (view.nodes.items) |*node| {
+        if (std.mem.eql(u8, filesName(node), want)) return node;
     }
     return null;
 }
@@ -2280,23 +2268,35 @@ fn indentOf(row_text: []const u8) usize {
     return i;
 }
 
-/// A row.s name: past the indent and the glyph, which are structure.
-fn filesName(row_text: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < row_text.len and row_text[i] == ' ') i += 1;
-    if (i >= row_text.len) return "";
-    const glyph_len = std.unicode.utf8ByteSequenceLength(row_text[i]) catch 1;
-    i = @min(i + glyph_len, row_text.len);
-    while (i < row_text.len and row_text[i] == ' ') i += 1;
-    return std.mem.trimEnd(u8, row_text[i..], " \t\r");
+/// Does the row under point now END with `want`?
+///
+/// The live draft, read out of the DOCUMENT — a listing is edited in place, so
+/// what the row says is what you typed, and no field holds it until something
+/// applies. `endsWith` because the name is written last by construction, which
+/// is the same property that makes the row parseable at all.
+fn rowDraftEnds(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !bool {
+    const draft = try ed.draftHere(gpa);
+    defer gpa.free(draft);
+    return std.mem.endsWith(u8, draft, want);
 }
+
+/// A row.s name — the stretch its producer PUBLISHED as the name, not a
+/// second reading of the row.s format. A listing has more than one column and
+/// re-deriving "everything past the glyph" quietly swallowed the first of them.
+fn filesName(node: *const core.projection.Node) []const u8 {
+    return h.Editor.partText(node, files_name_role);
+}
+
+const files_name_role = "fs.name";
+const files_mode_role = "fs.mode";
 
 /// Put POINT on the NAME of the row named `want` — an ordinary cursor
 /// placement, because the row is ordinary text, and on the name because that is
 /// the part of it a person edits (the row.s EDITABLE span).
 fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
     const node = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
-    const at = if (node.editable) |e2| node.start + e2.start else node.start;
+    const part = h.Editor.partOf(node, files_name_role);
+    const at = if (part) |s| node.start + s.start else node.start;
     ed.buffers.active().textEditor().?.placeCursor(at);
 }
 
@@ -2310,7 +2310,7 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     try core.file.writeBytesMakingDirs(gpa, "nest", "nest/inner.txt", "inner\n");
     authorFile(ed, "beside.txt", "beside\n");
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view_ref = ed.toolView().?;
 
     // A rename staged beside the directory about to be folded. Vim supplies
     // only its ordinary insert posture; the draft lives in the browser.
@@ -2324,7 +2324,7 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     // byte reaches the rename draft under the cursor.
     try focusFilesRow(ed, gpa, "nest");
     ed.press("Tab", "\t");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(view_ref, ed.toolView().?);
     try t.expectEqualStrings("normal", ed.mode());
     {
         const nest = (try filesRowNamed(ed, gpa, "nest")) orelse return error.TestExpectedEqual;
@@ -2336,7 +2336,9 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
         const at = ed.buffers.active().projection.?.subjectAt(
             ed.buffers.active().textEditor().?.cursorOffset(),
         ) orelse return error.NoRowUnderPoint;
-        try t.expectEqualStrings(nest.key, at.key);
+        // The same ROW under point: `at` may name a PART of it (the column
+        // the caret is in), and the row is what encloses that.
+        try t.expectEqualStrings(nest.key, at.node.key);
     }
 
     // A draft made INSIDE the folded-open directory, so the round trip below
@@ -2356,7 +2358,7 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     ed.press("Tab", "\t");
     try t.expect((try filesRowNamed(ed, gpa, "kept-inner.txt")) != null);
     try t.expect((try filesRowNamed(ed, gpa, "draft-beside.txt")) != null);
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(view_ref, ed.toolView().?);
 }
 
 test "authoring/files: Vim Return on a file row opens it as an ordinary buffer" {
@@ -2368,7 +2370,7 @@ test "authoring/files: Vim Return on a file row opens it as an ordinary buffer" 
 
     try core.file.writeBytes(gpa, "note.txt", "hello\n");
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view_ref = ed.toolView().?;
     const browser = ed.buffers.active().id;
 
     // Vim supplies only its ordinary Return interaction. No plugin renders a

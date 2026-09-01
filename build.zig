@@ -286,6 +286,7 @@ fn createFilesPortableModules(
     facade.addImport("weft_files_actions", actions);
     facade.addImport("weft_files_text_rows", text_rows);
     text_rows.addImport("weft_files_model", model);
+    text_rows.addImport("weft_files_projection", projection);
     return .{
         .model = model,
         .workspace = workspace,

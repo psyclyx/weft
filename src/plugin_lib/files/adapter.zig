@@ -203,161 +203,122 @@ pub const Plugin = struct {
         }
     }
 
-/// WHAT A ROW AFFORDS, as predicates against what it IS.
-///
-/// The listing owns no keymap — the property the scene plane had, kept and made
-/// cheaper. A grammar binds `Return` to `std.target.activate` and `minus` to
-/// `std.hierarchy.step-out`; these `provide`s say those intentions reach here
-/// when point is on a row of a listing. Neither side names the other, and a
-/// third party can put its own verb on `fs.file` the same way.
-pub fn provideRowVerbs() void {
-    const on_row: weft.Predicate = .{ .any = &.{
-        .{ .role = files.text_rows.role_file },
-        .{ .role = files.text_rows.role_directory },
-        .{ .role = files.text_rows.role_symlink },
-        .{ .role = files.text_rows.role_other },
-        .{ .role = files.text_rows.role_dirty },
-    } };
-    weft.provide("std.target.activate", on_row, "files-enter", 0);
-    const in_files: weft.Predicate = .{ .tool = "files" };
-    weft.provide("std.hierarchy.step-out", in_files, "files-up", 0);
-    // The INTENTION spellings a grammar binds directly (`std.*`, doc §5.1)
-    // alongside the bare ACTION names a config binds through
-    // `bindActionGroup`. Two spellings of one verb is the vocabulary.s doing,
-    // not this plugin.s — it claims both so a grammar reaches the listing
-    // whichever way it asks.
-    // Folding is offered on a DIRECTORY row and nowhere else. Offered for the
-    // whole tool it would be "available" on a file row and then fail, which
-    // turns "nothing offers this here" into an error message — absence is
-    // nonapplicable (§9.3), and a row that cannot be opened simply does not
-    // offer opening.
-    weft.provide(
-        "std.hierarchy.toggle-expanded",
-        .{ .role = files.text_rows.role_directory },
-        actionCommandName(semantic.action.standard.toggle_expanded),
-        0,
-    );
-    inline for (.{
-        .{ "std.transfer.yank", semantic.action.standard.copy },
-        .{ "std.transfer.delete-to-register", semantic.action.standard.cut },
-        .{ "std.transfer.paste", semantic.action.standard.paste_after },
-    }) |pair| weft.provide(pair[0], on_row, actionCommandName(pair[1]), 0);
-    // Saving a listing is applying what was typed into it — the same
-    // `std.persistence.save` a text buffer resolves, scoped to this tool.
-    weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
-    // The workspace vocabulary, claimed for a listing whose view is a text
-    // projection. A config binds the NAME (`view.apply`, `fs.entry.create-file`);
-    // which plane answers is core.s question, not the user.s — see
-    // `builtins.invokeSemanticAction`.
-    const in_listing: weft.Predicate = .{ .tool = "files" };
-    inline for (action_verbs) |verb| {
-        // The row-scoped verbs only where a row can answer them; the rest are
-        // about the LISTING and apply wherever it is focused.
-        const when: weft.Predicate = if (std.mem.eql(u8, verb, semantic.action.standard.toggle_expanded))
-            .{ .role = files.text_rows.role_directory }
-        else
-            in_listing;
-        weft.provide(verb, when, actionCommandName(verb), 0);
+    /// WHAT A ROW AFFORDS, as predicates against what it IS.
+    ///
+    /// The listing owns no keymap — the property the scene plane had, kept and made
+    /// cheaper. A grammar binds `Return` to `std.target.activate` and `minus` to
+    /// `std.hierarchy.step-out`; these `provide`s say those intentions reach here
+    /// when point is on a row of a listing. Neither side names the other, and a
+    /// third party can put its own verb on `fs.file` the same way.
+    pub fn provideRowVerbs() void {
+        // ONE provide. Everything else a listing affords — activate, step out,
+        // fold, yank, paste, apply, create, permissions — is the STD VOCABULARY,
+        // answered for a tool entry by core against this entry.s producer view
+        // (`builtins.rowSubjectHere`). The listing publishes rows; it does not
+        // re-declare the workspace.
+        //
+        // `save` is the exception because it is not a semantic action: `:w` and
+        // `C-s` resolve `save` on the ACTION plane, and in a listing saving means
+        // applying what was typed into it.
+        weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
     }
-}
 
-/// One command per standard verb, each running it against the row under point.
-///
-/// Generated rather than listed: the table below IS the set the plugin
-/// `provide`s, so a verb cannot be offered without a command behind it or the
-/// reverse.
-pub const action_verbs = [_][]const u8{
-    semantic.action.standard.copy,
-    semantic.action.standard.cut,
-    semantic.action.standard.delete,
-    semantic.action.standard.paste_before,
-    semantic.action.standard.paste_after,
-    semantic.action.standard.toggle_expanded,
-    semantic.action.standard.set_working_target,
-    semantic.action.standard.refresh,
-    semantic.action.standard.revert,
-    semantic.action.standard.apply,
-    files.permissions_edit_action,
-    files.create_file_action,
-    files.create_directory_action,
-};
-
-pub fn actionCommandName(comptime verb: []const u8) []const u8 {
-    return "files-act-" ++ verb;
-}
-
-/// The row under point, as the action plane.s subject.
-///
-/// A scene-backed view answers an action from its FOCUSED NODE; a listing that
-/// is a text projection answers from the row point is on. Same action, same
-/// name, same controller — only "which row" is asked differently, which is the
-/// one thing that genuinely differs between a scene and a buffer.
-fn subjectRow(session: *Session) ?semantic.scene.NodeId {
-    _ = session;
-    const key = weft.projectionAtCursor() orelse return null;
-    const id = files.text_rows.idOf(key) orelse return null;
-    return files.rowNodeId(id) catch null;
-}
-
-/// Run a standard action on the focused listing. `subject` is the row under
-/// point when there is one — an action like `view.apply` or
-/// `fs.entry.create-file` is about the VIEW and needs none.
-pub fn actOnListing(self: *Plugin, name: []const u8) void {
-    const session = self.focusedSession() orelse return;
-    _ = session.invoke(.{
-        .action = name,
-        .view = session.view_ref,
-        // A view-scoped verb (`view.apply`, a create) has no row; the view.s
-        // own root node stands for "this listing", the same node the scene
-        // handed such an action.
-        .subject = subjectRow(session) orelse files.rootNodeId(),
-    }) catch {};
-}
-
-/// The session whose listing is focused, if any.
-fn focusedSession(self: *Plugin) ?*Session {
-    var buf: [64]u8 = undefined;
-    const active = weft.activeBufferName(&buf) orelse return null;
-    for (self.sessions.items) |session| {
-        if (std.mem.eql(u8, session.bufferName(), active)) return session;
-    }
-    return null;
-}
-
-/// Return on a row: open what it names, through the ordinary provider-aware
-/// `open`. A directory comes back as another listing (this same handler); a
-/// file comes back as an editor entry. Neither outcome is decided here.
-pub fn enterRow(self: *Plugin) void {
-    const session = self.focusedSession() orelse return;
-    const key = weft.projectionAtCursor() orelse return;
-    const id = files.text_rows.idOf(key) orelse return;
-    const name = for (session.draft.rows.items) |row| {
-        if (row.id == id) break row.draft.name;
-    } else return;
-    var joined: [1024]u8 = undefined;
-    const path = std.fmt.bufPrint(&joined, "{s}/{s}", .{ session.path(), name }) catch return;
-    setOpeningPath(path);
-    weft.runStr("open", path);
-}
-
-/// `-`: the directory containing this one, opened the same way.
-pub fn stepOut(self: *Plugin) void {
-    const session = self.focusedSession() orelse return;
-    const here = session.path();
-    const cut = std.mem.lastIndexOfScalar(u8, here, '/') orelse return;
-    const up = if (cut == 0) "/" else here[0..cut];
-    setOpeningPath(up);
-    weft.runStr("open", up);
-}
-
-
-/// `save` in a listing: apply what was typed.
-pub fn applyFocused(self: *Plugin) void {
-    const session = self.focusedSession() orelse return;
-    _ = session.applyEdits() catch {
-        weft.echo("files: could not apply");
+    /// One command per standard verb, each running it against the row under point.
+    ///
+    /// Generated rather than listed: the table below IS the set the plugin
+    /// `provide`s, so a verb cannot be offered without a command behind it or the
+    /// reverse.
+    pub const action_verbs = [_][]const u8{
+        semantic.action.standard.copy,
+        semantic.action.standard.cut,
+        semantic.action.standard.delete,
+        semantic.action.standard.paste_before,
+        semantic.action.standard.paste_after,
+        semantic.action.standard.toggle_expanded,
+        semantic.action.standard.set_working_target,
+        semantic.action.standard.refresh,
+        semantic.action.standard.revert,
+        semantic.action.standard.apply,
+        files.permissions_edit_action,
+        files.create_file_action,
+        files.create_directory_action,
     };
-}
+
+    pub fn actionCommandName(comptime verb: []const u8) []const u8 {
+        return "files-act-" ++ verb;
+    }
+
+    /// The row under point, as the action plane.s subject.
+    ///
+    /// A scene-backed view answers an action from its FOCUSED NODE; a listing that
+    /// is a text projection answers from the row point is on. Same action, same
+    /// name, same controller — only "which row" is asked differently, which is the
+    /// one thing that genuinely differs between a scene and a buffer.
+    fn subjectRow(session: *Session) ?semantic.scene.NodeId {
+        _ = session;
+        const key = weft.projectionAtCursor() orelse return null;
+        const id = files.text_rows.idOf(key) orelse return null;
+        return files.rowNodeId(id) catch null;
+    }
+
+    /// Run a standard action on the focused listing. `subject` is the row under
+    /// point when there is one — an action like `view.apply` or
+    /// `fs.entry.create-file` is about the VIEW and needs none.
+    pub fn actOnListing(self: *Plugin, name: []const u8) void {
+        const session = self.focusedSession() orelse return;
+        _ = session.invoke(.{
+            .action = name,
+            .view = session.view_ref,
+            // A view-scoped verb (`view.apply`, a create) has no row; the view.s
+            // own root node stands for "this listing", the same node the scene
+            // handed such an action.
+            .subject = subjectRow(session) orelse files.rootNodeId(),
+        }) catch {};
+    }
+
+    /// The session whose listing is focused, if any.
+    fn focusedSession(self: *Plugin) ?*Session {
+        var buf: [64]u8 = undefined;
+        const active = weft.activeBufferName(&buf) orelse return null;
+        for (self.sessions.items) |session| {
+            if (std.mem.eql(u8, session.bufferName(), active)) return session;
+        }
+        return null;
+    }
+
+    /// Return on a row: open what it names, through the ordinary provider-aware
+    /// `open`. A directory comes back as another listing (this same handler); a
+    /// file comes back as an editor entry. Neither outcome is decided here.
+    pub fn enterRow(self: *Plugin) void {
+        const session = self.focusedSession() orelse return;
+        const key = weft.projectionAtCursor() orelse return;
+        const id = files.text_rows.idOf(key) orelse return;
+        const name = for (session.draft.rows.items) |row| {
+            if (row.id == id) break row.draft.name;
+        } else return;
+        var joined: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&joined, "{s}/{s}", .{ session.path(), name }) catch return;
+        setOpeningPath(path);
+        weft.runStr("open", path);
+    }
+
+    /// `-`: the directory containing this one, opened the same way.
+    pub fn stepOut(self: *Plugin) void {
+        const session = self.focusedSession() orelse return;
+        const here = session.path();
+        const cut = std.mem.lastIndexOfScalar(u8, here, '/') orelse return;
+        const up = if (cut == 0) "/" else here[0..cut];
+        setOpeningPath(up);
+        weft.runStr("open", up);
+    }
+
+    /// `save` in a listing: apply what was typed.
+    pub fn applyFocused(self: *Plugin) void {
+        const session = self.focusedSession() orelse return;
+        _ = session.applyEdits() catch {
+            weft.echo("files: could not apply");
+        };
+    }
 
     fn sessionForView(self: *Plugin, ref: semantic.view.Ref) ?*Session {
         for (self.sessions.items) |session| if (session.view_ref.eql(ref)) return session;
@@ -529,12 +490,15 @@ pub const Session = struct {
             // scene plane had, kept.
             weft.declarePosture(.structural);
         } else _ = weft.focusBuffer(self.bufferName());
+        self.publishRows(&self.draft);
+        // AFTER the projection exists — the door records the view on an entry
+        // that has one, so naming it first records nothing.
+        //
         // This entry.s producer VIEW: the listing renders as text and answers
         // actions through the same view a scene would have, so a paste carrying
         // the system transfer, a named register and an interaction dialog reach
         // it through the host plumbing that already exists.
         weft.toolView(self.view_ref);
-        self.publishRows(&self.draft);
     }
 
     /// The draft as a TEXT PROJECTION — the same rows the scene shows, in the
@@ -557,11 +521,29 @@ pub const Session = struct {
                 .text = line.text,
                 .foldable = row.draft.kind == .directory,
                 .focusable = true,
-                // Only the NAME is the user.s to change: the indent and the
+                // The COLUMNS are the user.s to change; the indent and the
                 // glyph are structure, and a keystroke on them is not a rename.
-                .editable = .{ .start = line.name_at, .end = line.nameEnd() },
+                .editable = .{ .start = line.mode_at, .end = line.nameEnd() },
             }) orelse continue;
-            b.span(node, line.name_at, line.nameEnd(), files.text_rows.role_name);
+            // Each column is a SUBJECT, keyed by the scene node it always was.
+            // A row is still one line of text — searchable, yankable, one
+            // selection — and point in the mode column is still on the mode.
+            var part_buf: [24]u8 = undefined;
+            b.part(
+                node,
+                line.mode_at,
+                line.modeEnd(),
+                files.text_rows.role_mode,
+                files.text_rows.modeKeyOf(row.id, &part_buf),
+            );
+            var name_buf: [24]u8 = undefined;
+            b.part(
+                node,
+                line.name_at,
+                line.nameEnd(),
+                files.text_rows.role_name,
+                files.text_rows.nameKeyOf(row.id, &name_buf),
+            );
         }
         _ = b.commit();
     }
@@ -575,29 +557,67 @@ pub const Session = struct {
     /// rename typed here and one made through an action are the same operation
     /// reaching the filesystem by the same route.
     pub fn applyEdits(self: *Session) !bool {
+        const ferried = try self.ferryEdits();
+        if (ferried.refused > 0)
+            weft.echo("files: that name is not text — rename it another way");
+        if (!ferried.changed) return false;
+        return self.applyConfirmed();
+    }
+
+    /// FOLD THE BUFFER INTO THE DRAFT. What the user typed lives in the text
+    /// until something asks — `:w`, `view.apply`, an explicit save — because
+    /// the buffer IS the draft while you are editing it. That is the whole of
+    /// what an in-place listing means, and it is why nothing here syncs a
+    /// field per keystroke.
+    /// What folding the buffer into the draft found.
+    pub const Ferried = struct {
+        changed: bool,
+        /// Rows whose displayed name is not their real one (raw bytes shown as
+        /// U+FFFD) and so cannot be renamed by typing.
+        refused: usize,
+    };
+
+    pub fn ferryEdits(self: *Session) !Ferried {
         var rows: [512]weft.ProjectionRow = undefined;
         const live = weft.projectionRows(&rows);
         var changed = false;
+        var refused: usize = 0;
         for (live) |r| {
             const id = files.text_rows.idOf(r.key) orelse continue;
-            const now = files.text_rows.nameIn(r.text);
-            if (now.len == 0) continue; // a blanked row is not a rename
             const found = for (self.draft.rows.items) |row| {
                 if (row.id == id) break row;
             } else continue;
+            // WHAT CAME BACK IS THE EDITABLE REGION — `<mode> <name>` — because
+            // that is the stretch the host anchored. Both columns are read from
+            // it at once.
+            //
+            // THE COLUMN IS THE FIELD: a mode typed into the permissions column
+            // is the same draft change `SPC v m` makes, one plan whichever way
+            // you spelled it. A column that stopped looking like a mode says
+            // nothing rather than chmod-ing to zero.
+            const fields = files.text_rows.fieldsIn(r.text);
+            if (fields.mode) |mode| {
+                if (found.draft.mode == null or found.draft.mode.? != mode) {
+                    try self.draft.setMode(id, mode);
+                    changed = true;
+                }
+            }
+            const now = fields.name;
+            if (now.len == 0) continue; // a blanked row is not a rename
             if (std.mem.eql(u8, now, found.draft.name)) continue;
             // Its DISPLAYED name is not its real one (raw bytes shown as
             // U+FFFD), so what was typed cannot be turned back into a name.
-            // Refused out loud rather than renamed to the replacement.
+            // COUNTED, not announced: this runs from a semantic action too, and
+            // that is not a dispatching entry — saying so is the caller.s job,
+            // where the head is reachable.
             if (!files.text_rows.renamable(found)) {
-                weft.echo("files: this name is not text — rename it another way");
+                refused += 1;
                 continue;
             }
             try self.draft.rename(id, now);
             changed = true;
         }
-        if (!changed) return false;
-        return self.applyConfirmed();
+        return .{ .changed = changed, .refused = refused };
     }
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
@@ -658,6 +678,11 @@ pub const Session = struct {
     fn invoke(self: *Session, request: semantic.action.Request) !semantic.action.Outcome {
         try self.validateTarget();
         if (std.mem.eql(u8, request.action, semantic.action.standard.apply)) {
+            // WHAT YOU SEE IS WHAT IS APPLIED. The buffer is the draft while
+            // you type, so the plan has to be read out of it before there is
+            // anything to confirm — otherwise `SPC v a` proposes the changes
+            // made through actions and silently drops the ones you typed.
+            _ = try self.ferryEdits();
             if (self.apply_committed or !self.draft.hasPendingChanges()) return .declined;
             return .{ .interaction = self.applyConfirmation() };
         }
@@ -699,7 +724,7 @@ pub const Session = struct {
             return .handled;
         }
 
-        var staged = try self.draft.duplicate();
+        var staged = try self.stage();
         defer staged.deinit();
         var staged_controller = files.ActionController.init(self.plugin.gpa, &staged, self.view_ref);
         defer staged_controller.deinit();
@@ -734,6 +759,11 @@ pub const Session = struct {
     }
 
     fn refresh(self: *Session, discard: bool) !void {
+        // A REFRESH RECONCILES EXTERNAL CHANGE AGAINST YOUR DRAFT, and your
+        // draft is what the buffer says — so read it back first. A discard is
+        // the opposite request and deliberately skips this: `:e!` means throw
+        // away what I typed.
+        if (!discard) _ = try self.ferryEdits();
         var listing = try weft.semanticFsList(self.plugin.gpa, self.target, self.target_revision);
         defer listing.deinit();
         var staged = try files.reconcileListing(
@@ -769,11 +799,21 @@ pub const Session = struct {
         }
     }
 
+    /// START A STAGED CHANGE FROM WHAT IS CURRENTLY TRUE — which includes what
+    /// the user has TYPED, because the buffer is the draft while you are editing
+    /// it. Staging from `self.draft` alone republished the listing from the last
+    /// applied state, so folding a row (or any other action that re-renders)
+    /// silently threw away a rename in progress.
+    fn stage(self: *Session) !files.Model {
+        _ = try self.ferryEdits();
+        return self.draft.duplicate();
+    }
+
     /// Fold a directory row open or closed. Collapsing keeps its rows in the
     /// draft; opening re-reads the provider, so a fold is never a stale
     /// replay of what the directory held last time.
     fn toggleExpanded(self: *Session, row: files.NodeId) !void {
-        var staged = try self.draft.duplicate();
+        var staged = try self.stage();
         defer staged.deinit();
         const current = staged.row(row) orelse return error.UnknownSubject;
         if (current.expanded)
@@ -798,7 +838,7 @@ pub const Session = struct {
     }
 
     fn addPending(self: *Session, kind: contract.Kind) !semantic.scene.NodeId {
-        var staged = try self.draft.duplicate();
+        var staged = try self.stage();
         defer staged.deinit();
         const name = switch (kind) {
             .regular => "new-file",
@@ -944,7 +984,7 @@ pub const Session = struct {
         @memcpy(next[0..start], current[0..start]);
         @memcpy(next[start..][0..edit.replacement.len], edit.replacement);
         @memcpy(next[start + edit.replacement.len ..], current[end..]);
-        var staged = try self.draft.duplicate();
+        var staged = try self.stage();
         defer staged.deinit();
         switch (field.kind) {
             .name => try staged.rename(field.row, next),

@@ -93,24 +93,24 @@ fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
 /// scenario uses this only to make directory enumeration order irrelevant;
 /// all edits and actions after the focus change still travel through the
 /// shipped Vim/config bindings.
+/// Does the row under point now END with `want`? The live draft, read out of
+/// the DOCUMENT — a listing is edited in place, and the name is written last.
+fn spineDraftEnds(ed: *Editor, gpa: std.mem.Allocator, want: []const u8) !bool {
+    const draft = try ed.draftHere(gpa);
+    defer gpa.free(draft);
+    return std.mem.endsWith(u8, draft, want);
+}
+
 fn spineFocusFilesName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
-    const path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return error.NoFilesView;
-    const rows = switch (view.scene.content) {
-        .container => |container| container.children,
-        else => return error.FilesSceneNotContainer,
-    };
-    for (rows) |row| {
-        if (row.content != .container) continue;
-        const columns = row.content.container.children;
-        if (columns.len < 3 or columns[2].content != .field) continue;
-        const field_ref = columns[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, name)) {
-            _ = try ed.session.system.semantic.focusView(ed.head, gpa, path.view, columns[2].id);
-            return;
-        }
+    _ = gpa;
+    // POINT ON THE NAME, in the text — a listing is a buffer, so "focus this
+    // row" is an ordinary cursor placement rather than a scene focus walk.
+    const view = ed.buffers.active().projection orelse return error.NoFilesView;
+    for (view.nodes.items) |*node| {
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), name)) continue;
+        const part = h.Editor.partOf(node, "fs.name") orelse continue;
+        ed.buffers.active().textEditor().?.placeCursor(node.start + part.start);
+        return;
     }
     return error.FilesNameNotFound;
 }
@@ -800,7 +800,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // retained structured view (not a files text buffer), and ordinary j/k
     // navigation is supplied by the Vim plugin over the generic focus path.
     ed.runStr("open", ".");
-    const directory_view = ed.head.semantic_focus.path().?.view;
+    const directory_view = ed.toolView().?;
     const directory_scene = ed.session.system.semantic.views.get(directory_view).?.scene;
     try t.expectEqualStrings("files", directory_scene.role);
     const rows = switch (directory_scene.content) {
@@ -833,27 +833,18 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    var rename_field = ed.head.semantic_focus.path().?.field.?;
-    var renamed = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
-    defer renamed.deinit();
-    try t.expectEqualStrings("new.txt", renamed.value.bytes);
-    // :e! is the generic view.revert action. It restores the provider draft,
-    // including its original field identity, without applying anything.
+    // THE DRAFT IS THE TEXT: what the row says now IS the pending rename.
+    try t.expect(try spineDraftEnds(&ed, gpa, "new.txt"));
+    // :e! is the generic view.revert action. It restores the provider draft
+    // from external authority, without applying anything.
     ed.press("colon", "");
     ed.typeText("e!");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
-    rename_field = ed.head.semantic_focus.path().?.field.?;
-    var reverted_name = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
-    defer reverted_name.deinit();
-    try t.expectEqualStrings("old.txt", reverted_name.value.bytes);
-    try ed.session.system.semantic.fields.get(rename_field).?.edit(reverted_name.value.revision, .{
-        .start = 0,
-        .end = reverted_name.value.bytes.len,
-        .replacement = "",
-        .selection_after = .{ .anchor = 0, .caret = 0 },
-    });
+    try t.expect(try spineDraftEnds(&ed, gpa, "old.txt"));
+    try spineFocusFilesName(&ed, gpa, "old.txt");
     ed.press("i", "");
+    for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-files-rename-plan");
@@ -873,7 +864,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "create-dir/.seed", "");
     core.file.deleteFile(gpa, "create-dir/.seed");
     ed.runStr("open", "create-dir");
-    const create_view = ed.head.semantic_focus.path().?.view;
+    const create_view = ed.toolView().?;
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
     ed.press("i", "");
@@ -910,7 +901,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("y", "");
     ed.press("d", "");
     ed.press("d", "");
-    const deleted_view = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    const deleted_view = ed.session.system.semantic.views.get(ed.toolView().?).?.scene;
     var saw_retained_delete = false;
     for (deleted_view.content.container.children) |row| for (row.facts) |fact| {
         saw_retained_delete = saw_retained_delete or
@@ -922,7 +913,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
-    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene.content.container.children.len);
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
     ed.chord("SPC v a");
     ed.press("y", "y");
     const copied = try core.file.readAlloc(gpa, "copy-destination/source.txt");
@@ -940,23 +931,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/z-clean.txt", "clean\n");
     ed.runStr("open", "refresh-dir");
     try spineFocusFilesName(&ed, gpa, "a-dirty.txt");
-    const dirty_ref = ed.head.semantic_focus.path().?.field.?;
-    var dirty_name = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
-    defer dirty_name.deinit();
-    try ed.session.system.semantic.fields.get(dirty_ref).?.edit(dirty_name.value.revision, .{
-        .start = 0,
-        .end = dirty_name.value.bytes.len,
-        .replacement = "",
-        .selection_after = .{ .anchor = 0, .caret = 0 },
-    });
     ed.press("i", "");
+    for (0.."a-dirty.txt".len) |_| ed.press("Delete", "");
     ed.typeText("draft.txt");
     ed.press("Escape", "");
     _ = try proj.oracle("mv -- refresh-dir/a-dirty.txt refresh-dir/external.txt");
     core.file.deleteFile(gpa, "refresh-dir/z-clean.txt");
     ed.chord("SPC v r");
     var saw_stale_draft = false;
-    const refreshed = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    const refreshed = ed.session.system.semantic.views.get(ed.toolView().?).?.scene;
     for (refreshed.content.container.children) |row| {
         if (row.content != .container) continue;
         const columns = row.content.container.children;

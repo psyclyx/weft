@@ -758,15 +758,18 @@ fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref)
     // viewport hold it — core attaching a scene-backed buffer on top would be
     // the second display path all over again. A handler that only published a
     // scene still gets core.s default presentation, below.
-    const before = ctx.buffers.active_id;
     switch (try core.target_open.openAndFocus(services, ctx.head, ctx.gpa, target)) {
         .opened => {
-            if (ctx.buffers.active_id != before) {
-                // The handler showed its own BUFFER, so the scene it published
-                // for the open protocol is not what your keys are about. Left
-                // focused, `std.navigation.down` would resolve to a semantic
-                // move and `j` would do nothing to the cursor — two
-                // presentations of one listing, fighting.
+            // WHAT IS SHOWING, not what CHANGED. This asked whether the active
+            // entry moved, which is false in the one case that matters most:
+            // opening the directory you are already looking at. Core then
+            // attached a second, scene-backed presentation on top of the
+            // listing buffer — a `files: .` entry with no projection, so every
+            // key that reads rows found none.
+            if (ctx.buffers.active().projection != null and ctx.buffers.active().tool_view != null) {
+                // The handler showed its own BUFFER — see
+                // `builtins.dropFocusIfShownAsBuffer` for why the scene it
+                // published for the open protocol must not keep the input.
                 ctx.head.semantic_focus.clear();
                 return;
             }

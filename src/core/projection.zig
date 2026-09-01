@@ -51,11 +51,45 @@ pub const Span = struct {
     /// Owned. Resolved through `theme/<leaf>` exactly as a node's role is, so the
     /// theme sees one vocabulary and a producer still chooses no colours.
     role: []u8,
+    /// The producer's identity for THIS PART of the row, or empty. Owned.
+    ///
+    /// A row is one line of text, but it is not one subject: `-rw-r--r-- src`
+    /// is a mode and a name, and a verb pressed on the mode is about the mode.
+    /// The scene plane could say that (each column was a node); the text plane
+    /// could not, so a producer that wanted a per-column subject had to leave
+    /// text behind and give up search, yank and selection to get it.
+    ///
+    /// This is that fork closed. A span with a key is a SUBJECT inside a row:
+    /// `subjectAt` returns it, so an action, a role read, and a focus request
+    /// all land on the column point is in rather than on the whole line.
+    key: []u8,
 };
 
 /// The stretch of a row the user may type into. No role: it is not a styling
 /// decision, it is which bytes are a FIELD.
 pub const Edit = struct { start: u32, end: u32 };
+
+/// WHAT POINT IS ON — a row, or a part of one.
+///
+/// `key` is the producer's identity for it either way, which is the whole
+/// reason a caller need not know which of the two it got: an action, a role
+/// lookup and a focus request all name a subject by key.
+pub const Subject = struct {
+    key: []const u8,
+    role: []const u8,
+    /// The row this subject is in — itself, when the subject IS the row.
+    node: *const Node,
+    /// Document byte range.
+    start: usize,
+    end: usize,
+
+    pub fn text(self: Subject) []const u8 {
+        if (self.node.start == self.start and self.node.end == self.end) return self.node.text;
+        const lo = self.start - self.node.start;
+        const hi = @min(self.end - self.node.start, self.node.text.len);
+        return if (lo >= hi) "" else self.node.text[lo..hi];
+    }
+};
 
 /// What a node contributes to the projection.
 pub const Node = struct {
@@ -113,11 +147,40 @@ pub const Node = struct {
     /// stays visible and the body collapses under it.
     body: usize = 0,
 
+    /// WHERE POINT RESTS on this row — a document offset.
+    ///
+    /// The part matching `prior_role`, so a vertical step keeps its column:
+    /// `j` from a name goes to the next name, `j` from a permissions column to
+    /// the next one. Keeping the column is what every editor does with a
+    /// vertical move, and the producer already named the columns, so nothing
+    /// here needs a notion of which one is special.
+    ///
+    /// Failing that, the LAST keyed part — a row is written with its subject
+    /// last precisely so nothing after it can be mistaken for structure — then
+    /// the editable region, then the row itself.
+    pub fn restingOffset(self: *const Node, prior_role: ?[]const u8) usize {
+        if (prior_role) |role| {
+            for (self.spans.items) |s| {
+                if (s.key.len != 0 and std.mem.eql(u8, s.role, role)) return self.start + s.start;
+            }
+        }
+        var last: ?u32 = null;
+        for (self.spans.items) |s| {
+            if (s.key.len == 0) continue;
+            if (last == null or s.start > last.?) last = s.start;
+        }
+        if (last) |start| return self.start + start;
+        return self.start + if (self.editable) |e| e.start else 0;
+    }
+
     fn deinit(self: *Node, gpa: Allocator) void {
         gpa.free(self.key);
         gpa.free(self.role);
         gpa.free(self.text);
-        for (self.spans.items) |s| gpa.free(s.role);
+        for (self.spans.items) |s| {
+            gpa.free(s.role);
+            gpa.free(s.key);
+        }
         self.spans.deinit(gpa);
     }
 };
@@ -215,7 +278,14 @@ pub const View = struct {
     /// be off by a byte at the end of a truncated row, and losing the whole
     /// row's emphasis over that is worse than shortening the span. An
     /// inverted or empty range says nothing and is dropped.
-    pub fn span(self: *View, ordinal: u32, start: usize, end: usize, role: []const u8) !void {
+    pub fn span(
+        self: *View,
+        ordinal: u32,
+        start: usize,
+        end: usize,
+        role: []const u8,
+        key: []const u8,
+    ) !void {
         if (!self.open) return error.NoBuild;
         if (ordinal >= self.building.items.len) return error.BadNode;
         const n = &self.building.items[ordinal];
@@ -224,7 +294,14 @@ pub const View = struct {
         if (lo >= hi) return;
         const owned = try self.gpa.dupe(u8, role);
         errdefer self.gpa.free(owned);
-        try n.spans.append(self.gpa, .{ .start = @intCast(lo), .end = @intCast(hi), .role = owned });
+        const owned_key = try self.gpa.dupe(u8, key);
+        errdefer self.gpa.free(owned_key);
+        try n.spans.append(self.gpa, .{
+            .start = @intCast(lo),
+            .end = @intCast(hi),
+            .role = owned,
+            .key = owned_key,
+        });
     }
 
     /// Swap the built tree in and render it. Returns the text; the caller
@@ -310,7 +387,7 @@ pub const View = struct {
     /// Null when no ancestor is focusable: point is on pure structure (a
     /// section header), which affords nothing rather than affording whatever
     /// its container happens to.
-    pub fn subjectAt(self: *const View, offset: usize) ?*const Node {
+    pub fn subjectAt(self: *const View, offset: usize) ?Subject {
         var n = self.nodeAt(offset) orelse return null;
         // Bounded by the node count: a parent ordinal always refers to an
         // EARLIER node (the builder appends parents first), so this terminates,
@@ -322,7 +399,65 @@ pub const View = struct {
             if (p >= self.nodes.items.len) return null;
             n = &self.nodes.items[p];
         }
-        return n;
+        // A KEYED SPAN OF THE SUBJECT WINS. Point inside the mode column of a
+        // listing row is pointing at the mode, and the row is what encloses it
+        // — the same containment `nodeAt` walks between nodes, one level finer.
+        // Asked of the SUBJECT, not of the leaf: a non-focusable line is not a
+        // thing to be on, so neither are its parts.
+        if (self.partIn(n, offset)) |part| return part;
+        return .{ .key = n.key, .role = n.role, .node = n, .start = n.start, .end = n.end };
+    }
+
+    /// The innermost keyed span of `n` covering `offset`, if any. Innermost so
+    /// a producer may nest parts without the outer one swallowing them.
+    fn partIn(self: *const View, n: *const Node, offset: usize) ?Subject {
+        _ = self;
+        if (offset < n.start or offset > n.start + n.text.len) return null;
+        const local = offset - n.start;
+        var best: ?Subject = null;
+        for (n.spans.items) |s| {
+            if (s.key.len == 0) continue;
+            if (local < s.start or local > s.end) continue;
+            const width = s.end - s.start;
+            if (best) |b| if (width >= b.end - b.start) continue;
+            best = .{
+                .key = s.key,
+                .role = s.role,
+                .node = n,
+                .start = n.start + s.start,
+                .end = n.start + s.end,
+            };
+        }
+        return best;
+    }
+
+    /// Where the subject named by `key` is in the document, or null. The
+    /// inverse of `subjectAt`, and what makes a producer's focus request
+    /// meaningful in a text projection: "focus the mode field" is "put point
+    /// in these bytes".
+    pub fn subjectSpan(self: *const View, key: []const u8) ?Span {
+        for (self.nodes.items) |*n| {
+            for (n.spans.items) |s| {
+                if (s.key.len != 0 and std.mem.eql(u8, s.key, key))
+                    return .{
+                        .start = @intCast(n.start + s.start),
+                        .end = @intCast(n.start + s.end),
+                        .role = s.role,
+                        .key = s.key,
+                    };
+            }
+            if (std.mem.eql(u8, n.key, key)) {
+                const edit = n.editable orelse
+                    return .{ .start = @intCast(n.start), .end = @intCast(n.end), .role = n.role, .key = n.key };
+                return .{
+                    .start = @intCast(n.start + edit.start),
+                    .end = @intCast(n.start + edit.end),
+                    .role = n.role,
+                    .key = n.key,
+                };
+            }
+        }
+        return null;
     }
 
     pub fn byKey(self: *const View, key: []const u8) ?*const Node {
@@ -362,13 +497,13 @@ pub const View = struct {
     /// stale offset lands on whatever row now covers it.
     pub fn focusOffset(self: *const View) usize {
         if (self.focus.len > 0) {
-            if (self.byKey(self.focus)) |n| return n.start;
+            if (self.byKey(self.focus)) |n| return n.restingOffset(null);
         }
         // No remembered row: the first row a verb could act on, not merely the
         // first row. Landing on a header would leave every verb with nothing
         // under point, which reads as the projection being inert.
-        for (self.nodes.items) |n| {
-            if (n.focusable) return n.start;
+        for (self.nodes.items) |*n| {
+            if (n.focusable) return n.restingOffset(null);
         }
         return if (self.nodes.items.len == 0) 0 else self.nodes.items[0].start;
     }

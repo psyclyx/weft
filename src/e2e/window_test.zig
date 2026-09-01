@@ -133,21 +133,17 @@ test "app/window: a further split tiles three panes and still composites" {
 /// The name of the listing row point is on, or null when it is not on one.
 ///
 /// A listing is a text projection: the row under point is `subjectAt`'s node,
-/// and its name is its text past the indent and glyph. This used to walk the
+/// and its name is the part it published under `fs.name`. This used to walk the
 /// scene's third column and snapshot a field — the identity the text plane
 /// used to lack, and now has.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
     const b = ed.buffers.active();
     const view = b.projection orelse return null;
     const editor = b.textEditor() orelse return null;
-    const node = view.subjectAt(editor.cursorOffset()) orelse return null;
-    var i: usize = 0;
-    while (i < node.text.len and node.text[i] == ' ') i += 1;
-    if (i >= node.text.len) return null;
-    const glyph = std.unicode.utf8ByteSequenceLength(node.text[i]) catch 1;
-    i = @min(i + glyph, node.text.len);
-    while (i < node.text.len and node.text[i] == ' ') i += 1;
-    return try gpa.dupe(u8, std.mem.trimEnd(u8, node.text[i..], " \t\r"));
+    const subject = view.subjectAt(editor.cursorOffset()) orelse return null;
+    // The name is the stretch the PRODUCER published as one. Re-deriving it
+    // from the row.s format is a second copy of that format.
+    return try gpa.dupe(u8, Editor.partText(subject.node, "fs.name"));
 }
 
 /// Press `j` until the row under point is `want`. Navigation is the std
@@ -402,7 +398,7 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
         // Matched on the row.s TEXT: the key is the model.s own id, which is
         // the point — identity is not the name, so a rename does not change
         // which row a verb is about.
-        if (at) |node| if (std.mem.indexOf(u8, node.text, "nested") != null) break;
+        if (at) |subject| if (std.mem.indexOf(u8, subject.node.text, "nested") != null) break;
         ed.press("j", "");
     } else return error.NestedRowNeverFocused;
     ed.press("Return", "");
@@ -413,7 +409,8 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
         try t.expect(std.mem.startsWith(u8, ed.bufferName(), "*files"));
     }
 
-    // And back up, through the grammar.s own `minus` → `std.hierarchy.step-out`.
+    // And back up, through the grammar.s own `minus` → `std.hierarchy.step-out`,
+    // which follows the CONTAINER relation the listing.s producer publishes.
     ed.press("minus", "");
     {
         const text = try ed.textAlloc();

@@ -97,15 +97,89 @@ pub fn hidden(rows: []const model.Row, row: model.Row) bool {
     return false;
 }
 
-/// One row as a line, and where its NAME starts within it.
+/// One row as a line, and where each of its PARTS is within it.
 pub const Line = struct {
     text: []const u8,
+    mode_at: usize,
     name_at: usize,
+
+    pub fn modeEnd(self: Line) usize {
+        return self.mode_at + mode_width;
+    }
 
     pub fn nameEnd(self: Line) usize {
         return self.text.len;
     }
 };
+
+/// The permissions column, fixed-width so the names line up. Octal, as the
+/// scene's `files.mode` field was — this is the same field, in the same
+/// vocabulary, reached by putting point on it instead of by focusing a node.
+pub const mode_width = 4;
+const mode_absent = "-" ** mode_width;
+
+/// The stretch of a row that is its MODE.
+pub const role_mode = "fs.mode";
+
+fn writeMode(mode: ?u32, out: *[mode_width]u8) []const u8 {
+    const value = mode orelse {
+        @memcpy(out, mode_absent);
+        return out;
+    };
+    return std.fmt.bufPrint(out, "{o:0>4}", .{value & 0o7777}) catch blk: {
+        @memcpy(out, mode_absent);
+        break :blk out;
+    };
+}
+
+/// WHAT THE USER TYPED, read back. One parser, because there is one thing to
+/// read: the row's EDITABLE REGION, `<mode> <name>`, which is exactly the
+/// stretch the host's row ferry hands back (it brackets that span and nothing
+/// else). `nameIn`/`modeIn` are this same read, offered a whole row.
+pub const Fields = struct {
+    mode: ?u32,
+    name: []const u8,
+};
+
+pub fn fieldsIn(edited: []const u8) Fields {
+    var i: usize = 0;
+    while (i < edited.len and edited[i] == ' ') i += 1;
+    var mode: ?u32 = null;
+    // The MODE COLUMN is consumed only while it still looks like one. A user
+    // who blanked it has not renamed the file to its own first word — the
+    // token stops parsing as a mode and the name reads from where it always
+    // did. A lone token is a NAME: there is no name left for it to be the
+    // column of.
+    var j = i;
+    while (j < edited.len and edited[j] != ' ') j += 1;
+    if (j > i and j < edited.len) {
+        const token = edited[i..j];
+        if (std.mem.eql(u8, token, mode_absent)) {
+            i = j;
+        } else if (std.fmt.parseInt(u32, token, 8)) |value| {
+            mode = value;
+            i = j;
+        } else |_| {}
+    }
+    while (i < edited.len and edited[i] == ' ') i += 1;
+    return .{ .mode = mode, .name = std.mem.trimEnd(u8, edited[i..], " \t\r") };
+}
+
+/// The mode a whole ROW now says. Null is not a refusal: it is how a row whose
+/// column the user blanked (or one that never had a mode) stays a rename
+/// rather than becoming a chmod to zero.
+pub fn modeIn(row_text: []const u8) ?u32 {
+    return fieldsIn(row_text[afterGlyph(row_text)..]).mode;
+}
+
+/// Past the indent and the glyph — where a row's columns begin.
+fn afterGlyph(row_text: []const u8) usize {
+    var i: usize = 0;
+    while (i < row_text.len and row_text[i] == ' ') i += 1;
+    if (i >= row_text.len) return row_text.len;
+    const glyph_len = std.unicode.utf8ByteSequenceLength(row_text[i]) catch 1;
+    return @min(i + glyph_len, row_text.len);
+}
 
 /// A FILENAME IS BYTES; a text buffer is UTF-8. The scene plane could hold a
 /// raw-byte name in a field, and a document cannot — so a listing that simply
@@ -147,15 +221,24 @@ fn writeName(name: []const u8, out: []u8) usize {
     return w;
 }
 
-/// Render `row` into `out`. The shape is `<indent><glyph> <name>` — the name
-/// LAST, so everything before it is fixed-width per row and a name containing
-/// anything at all cannot be confused for structure.
+/// Render `row` into `out`. The shape is `<indent><glyph> <mode> <name>` — the
+/// name LAST, so everything before it is fixed-width per row and a name
+/// containing anything at all cannot be confused for structure.
 pub fn lineOf(rows: []const model.Row, row: model.Row, out: []u8) ?Line {
     const depth = @min(depthOf(rows, row) * indent_cells, indent_spaces.len);
     const glyph = glyphOf(row);
-    const head = std.fmt.bufPrint(out, "{s}{s} ", .{ indent_spaces[0..depth], glyph }) catch return null;
+    var mode_buf: [mode_width]u8 = undefined;
+    const head = std.fmt.bufPrint(out, "{s}{s} {s} ", .{
+        indent_spaces[0..depth],
+        glyph,
+        writeMode(row.draft.mode, &mode_buf),
+    }) catch return null;
     const w = head.len + writeName(row.draft.name, out[head.len..]);
-    return .{ .text = out[0..w], .name_at = head.len };
+    return .{
+        .text = out[0..w],
+        .mode_at = head.len - (mode_width + 1),
+        .name_at = head.len,
+    };
 }
 
 /// A row.s key IS its scene NODE ID, in decimal.
@@ -171,6 +254,20 @@ pub fn lineOf(rows: []const model.Row, row: model.Row, out: []u8) ?Line {
 /// identity.
 pub fn keyOf(id: model.NodeId, out: []u8) []const u8 {
     const node = projection.rowNodeId(id) catch return "";
+    return std.fmt.bufPrint(out, "{d}", .{@intFromEnum(node)}) catch "";
+}
+
+/// The key of a row's NAME part, and of its MODE part — the scene nodes the
+/// columns already were. A part key IS a subject core can hand to
+/// `invokeAction`, so `SPC v m`'s field focus lands point in the mode column
+/// with no second vocabulary for "which part of a row".
+pub fn nameKeyOf(id: model.NodeId, out: []u8) []const u8 {
+    const node = projection.nameNodeId(id) catch return "";
+    return std.fmt.bufPrint(out, "{d}", .{@intFromEnum(node)}) catch "";
+}
+
+pub fn modeKeyOf(id: model.NodeId, out: []u8) []const u8 {
+    const node = projection.modeNodeId(id) catch return "";
     return std.fmt.bufPrint(out, "{d}", .{@intFromEnum(node)}) catch "";
 }
 
@@ -191,14 +288,7 @@ pub fn idOf(key: []const u8) ?model.NodeId {
 /// deletion rather than as a rename to "", which is why this returns the empty
 /// string rather than refusing.
 pub fn nameIn(row_text: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < row_text.len and row_text[i] == ' ') i += 1;
-    if (i >= row_text.len) return "";
-    // The glyph is one codepoint, however many bytes that is.
-    const glyph_len = std.unicode.utf8ByteSequenceLength(row_text[i]) catch 1;
-    i = @min(i + glyph_len, row_text.len);
-    while (i < row_text.len and row_text[i] == ' ') i += 1;
-    return std.mem.trimEnd(u8, row_text[i..], " \t\r");
+    return fieldsIn(row_text[afterGlyph(row_text)..]).name;
 }
 
 const t = std.testing;
@@ -214,27 +304,33 @@ fn mkRow(id: model.NodeId, parent: ?model.NodeId, name: []u8, kind: @TypeOf(@as(
     };
 }
 
-test "files rows: a line is indent, glyph, name — and the name reads back whole" {
+test "files rows: a line is indent, glyph, mode, name — and each part reads back whole" {
     var alpha = "alpha.txt".*;
     var src = "src".*;
     var deep = "a name with spaces.txt".*;
-    const rows = [_]model.Row{
+    var rows = [_]model.Row{
         mkRow(1, null, &src, .directory),
         mkRow(2, 1, &alpha, .regular),
         mkRow(3, 1, &deep, .regular),
     };
+    rows[1].draft.mode = 0o644;
 
     var buf: [256]u8 = undefined;
+    // No mode reported: the column is still there, so the names line up and
+    // the parse never has to guess which token it is looking at.
     const top = lineOf(&rows, rows[0], &buf).?;
-    try t.expectEqualStrings("▸ src", top.text);
+    try t.expectEqualStrings("▸ ---- src", top.text);
     try t.expectEqualStrings("src", nameIn(top.text));
+    try t.expectEqual(@as(?u32, null), modeIn(top.text));
 
     const child = lineOf(&rows, rows[1], &buf).?;
-    try t.expectEqualStrings("  · alpha.txt", child.text);
-    // The indent is structure, not part of the name — the bug a naive
-    // "everything after the first space" reading has.
+    try t.expectEqualStrings("  · 0644 alpha.txt", child.text);
+    // The indent and the mode are structure, not part of the name — the bug a
+    // naive "everything after the first space" reading has.
     try t.expectEqualStrings("alpha.txt", nameIn(child.text));
     try t.expectEqualStrings("alpha.txt", child.text[child.name_at..]);
+    try t.expectEqualStrings("0644", child.text[child.mode_at..child.modeEnd()]);
+    try t.expectEqual(@as(?u32, 0o644), modeIn(child.text));
 
     // A name with spaces survives whole; a rename that stopped at the first
     // space would be a rename to something else.
@@ -244,12 +340,29 @@ test "files rows: a line is indent, glyph, name — and the name reads back whol
 
 test "files rows: what the user typed is what the name becomes" {
     // The edits a person actually makes to a listing.
-    try t.expectEqualStrings("renamed.txt", nameIn("  · renamed.txt"));
-    try t.expectEqualStrings("renamed.txt", nameIn("  · renamed.txt   ")); // trailing space
-    try t.expectEqualStrings("nested", nameIn("    ▾ nested"));
+    try t.expectEqualStrings("renamed.txt", nameIn("  · 0644 renamed.txt"));
+    try t.expectEqualStrings("renamed.txt", nameIn("  · 0644 renamed.txt   ")); // trailing space
+    try t.expectEqualStrings("nested", nameIn("    ▾ ---- nested"));
     // Blanked outright: a deletion, not a rename to nothing.
     try t.expectEqualStrings("", nameIn(""));
     try t.expectEqualStrings("", nameIn("     "));
+}
+
+test "files rows: a mangled mode column costs the mode, never the name" {
+    // BLANKING THE COLUMN MUST NOT EAT A WORD. Positional parsing would read
+    // `renamed.txt` as the mode and `here` as the whole name; token parsing
+    // sees something that is not a mode and stops treating it as a column.
+    try t.expectEqualStrings("renamed.txt here", nameIn("  · renamed.txt here"));
+    try t.expectEqual(@as(?u32, null), modeIn("  · renamed.txt here"));
+    // A row whose NAME is itself octal still reads as a name, because the
+    // column before it is what is being skipped.
+    try t.expectEqualStrings("0644", nameIn("  · 0755 0644"));
+    try t.expectEqual(@as(?u32, 0o755), modeIn("  · 0755 0644"));
+    // A lone octal token with nothing after it is a NAME: there is no name
+    // left for it to be the column of.
+    try t.expectEqualStrings("0644", nameIn("  · 0644"));
+    // What the user typed in the column is what the mode becomes.
+    try t.expectEqual(@as(?u32, 0o600), modeIn("  · 0600 alpha.txt"));
 }
 
 test "files rows: a key round-trips through the SCENE node id, and a name never parses as one" {

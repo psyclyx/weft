@@ -110,6 +110,16 @@ pub const Builder = struct {
     /// Clamped to the node, so a producer that miscounts shortens its own
     /// emphasis rather than painting its neighbours.
     pub fn span(self: Builder, node: Ordinal, start: usize, end: usize, role: []const u8) void {
+        self.part(node, start, end, role, "");
+    }
+
+    /// `span`, and this stretch is ALSO A SUBJECT under `key`.
+    ///
+    /// A row is one line, but it need not be one thing: a listing.s mode column
+    /// and its name are two, and point in either names that one. Without this a
+    /// producer wanting per-column identity had to publish a scene instead and
+    /// give up being text — search, yank and selection with it.
+    pub fn part(self: Builder, node: Ordinal, start: usize, end: usize, role: []const u8, key: []const u8) void {
         _ = self;
         e.wl_proj_span(
             @intCast(node),
@@ -117,6 +127,8 @@ pub const Builder = struct {
             @intCast(end),
             p(role.ptr),
             @intCast(role.len),
+            p(key.ptr),
+            @intCast(key.len),
         );
     }
 

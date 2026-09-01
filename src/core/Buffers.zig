@@ -164,8 +164,14 @@ pub const Buffer = struct {
         const ed = self.textEditor() orelse return "";
         // `subjectAt`, not `nodeAt`: a role is what a verb ACTS ON, so point
         // inside a hunk's body names the hunk. See that method's doc.
-        const node = view.subjectAt(ed.cursorOffset()) orelse return "";
-        return node.role;
+        //
+        // The ROW's role, not the part's: `role` is the fact a third party
+        // binds against (`.{ .role = "fs.file" }`), and a file does not stop
+        // being one because point is in its permissions column. What the part
+        // is remains the projection's own business — styling, and which bytes
+        // are a field.
+        const subject = view.subjectAt(ed.cursorOffset()) orelse return "";
+        return subject.node.role;
     }
 
     pub fn ref(self: *const Buffer) Ref {

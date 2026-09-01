@@ -110,9 +110,9 @@ fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
         out.deinit(gpa);
     }
     const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
-    for (view.nodes.items) |node| {
-        const edit = node.editable orelse continue;
-        try out.append(gpa, try gpa.dupe(u8, node.text[edit.start..@min(edit.end, node.text.len)]));
+    for (view.nodes.items) |*node| {
+        if (node.editable == null) continue;
+        try out.append(gpa, try gpa.dupe(u8, h.Editor.partText(node, "fs.name")));
     }
     return out;
 }
@@ -122,10 +122,8 @@ fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
 fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
     _ = gpa;
     const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
-    for (view.nodes.items) |node| {
-        const edit = node.editable orelse continue;
-        const name = node.text[edit.start..@min(edit.end, node.text.len)];
-        if (!std.mem.eql(u8, name, want)) continue;
+    for (view.nodes.items) |*node| {
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), want)) continue;
         var i: usize = 0;
         while (i < node.text.len and node.text[i] == ' ') i += 1;
         return @intCast(i);
@@ -150,9 +148,8 @@ fn focusedName(ed: *h.Editor, gpa: std.mem.Allocator) ![]u8 {
     const b = ed.buffers.active();
     const view = b.projection orelse return error.TestExpectedEqual;
     const editor = b.textEditor() orelse return error.TestExpectedEqual;
-    const node = view.subjectAt(editor.cursorOffset()) orelse return error.TestExpectedEqual;
-    const edit = node.editable orelse return error.TestExpectedEqual;
-    return gpa.dupe(u8, node.text[edit.start..@min(edit.end, node.text.len)]);
+    const subject = view.subjectAt(editor.cursorOffset()) orelse return error.TestExpectedEqual;
+    return gpa.dupe(u8, h.Editor.partText(subject.node, "fs.name"));
 }
 
 /// Walk the rows with the grammar's own `j` until `want` has the focus,
@@ -262,10 +259,13 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
         try t.expect(indexOfName(names.items, "inner.txt") != null);
     }
 
-    // `q` — std.navigation.back — leaves the browser: the workspace moves to
-    // another entry and no view holds the focus.
+    // `q` — std.navigation.back — is buffer history, and a listing is a
+    // buffer: from the child listing it lands back on the one you descended
+    // FROM. The scene plane had a view per directory but one entry, so back
+    // left the browser entirely; a directory per BUFFER is what makes any of
+    // them dockable, and it makes back mean the same thing here as anywhere.
     ed.press("q", "q");
-    try t.expect(ed.buffers.active().id != browser_entry);
+    try t.expectEqual(browser_entry, ed.buffers.active().id);
 
     // Return on a FILE row is the same key, the same intention, and the same
     // route: no tool claims a file, so the shell's placement policy opens it
@@ -430,9 +430,10 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.navigation.down"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.navigation.down", r.intention);
-            // Moving in a tool entry is core.s answer now, from the ACTION
-            // plane, where the scene used to offer it from a focused node.
-            try t.expectEqualStrings("core", r.provider);
+            // The VIEW ADAPTER offers it, derived from the listing.s own scene
+            // — for the row under point, exactly as it derives a scene-backed
+            // view.s from the focused node.
+            try t.expectEqualStrings("core.view", r.provider);
         },
         else => return error.TestExpectedReady,
     }
@@ -444,9 +445,12 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.hierarchy.toggle-expanded", r.intention);
-            // The LISTING offers folding, attributed to the plugin that binds
-            // it — a derived offer names its author (`catalog.Offer.attribution`).
-            try t.expectEqualStrings("plugin.files", r.provider);
+            // The VIEW ADAPTER offers it, derived from what the listing.s own
+            // scene advertises for the row under point — so folding is offered
+            // on a directory and nowhere else, without the producer declaring
+            // an offer table. The adapter is who BINDS it; the producer is
+            // named by the view it answers through.
+            try t.expectEqualStrings("core.view", r.provider);
         },
         else => return error.TestExpectedReady,
     }
@@ -493,10 +497,9 @@ fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: 
     _ = gpa;
     const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
     var n: usize = 0;
-    for (view.nodes.items) |node| {
-        const edit = node.editable orelse continue;
-        const name = node.text[edit.start..@min(edit.end, node.text.len)];
-        if (!std.mem.eql(u8, name, want)) continue;
+    for (view.nodes.items) |*node| {
+        if (node.editable == null) continue;
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), want)) continue;
         if (column) |want_column| {
             var i: usize = 0;
             while (i < node.text.len and node.text[i] == ' ') i += 1;

@@ -3444,11 +3444,11 @@ test "projection: a span is clamped to its own node, however wrong the producer 
     const a = try v.add(.{ .key = "a", .role = "output.text", .text = "hello", .parent = null, .foldable = false });
     const b = try v.add(.{ .key = "b", .role = "output.text", .text = "world", .parent = null, .foldable = false });
 
-    try v.span(a, 1, 3, "output.match"); // ordinary
-    try v.span(a, 3, 99, "output.match"); // past the end: clamped to the node
-    try v.span(a, 4, 2, "output.match"); // inverted: says nothing
-    try v.span(b, 0, 5, "output.match");
-    try t.expectError(error.BadNode, v.span(7, 0, 1, "output.match"));
+    try v.span(a, 1, 3, "output.match", ""); // ordinary
+    try v.span(a, 3, 99, "output.match", ""); // past the end: clamped to the node
+    try v.span(a, 4, 2, "output.match", ""); // inverted: says nothing
+    try v.span(b, 0, 5, "output.match", "");
+    try t.expectError(error.BadNode, v.span(7, 0, 1, "output.match", ""));
 
     const node_a = &v.building.items[a];
     try t.expectEqual(@as(usize, 2), node_a.spans.items.len);
