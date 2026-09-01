@@ -130,26 +130,30 @@ test "app/window: a further split tiles three panes and still composites" {
 // focus feed marks this viewport's focus as companion focus, so nothing
 // follows it (D2).
 
-/// The name column of the focused files row, or null when the focus is not on
-/// one. The rename field IS the row's name (editable projection), so reading
-/// its draft is reading what the user sees.
+/// The name of the listing row point is on, or null when it is not on one.
+///
+/// A listing is a text projection: the row under point is `subjectAt`'s node,
+/// and its name is its text past the indent and glyph. This used to walk the
+/// scene's third column and snapshot a field — the identity the text plane
+/// used to lack, and now has.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
-    const path = ed.head.semantic_focus.path() orelse return null;
-    const leaf = path.leaf() orelse return null;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return null;
-    for (view.scene.content.container.children) |row| {
-        const column = row.content.container.children[2];
-        if (column.id != leaf and row.id != leaf) continue;
-        var snapshot = try ed.session.system.semantic.fields.get(column.content.field.ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        return try gpa.dupe(u8, snapshot.value.bytes);
-    }
-    return null;
+    const b = ed.buffers.active();
+    const view = b.projection orelse return null;
+    const editor = b.textEditor() orelse return null;
+    const node = view.subjectAt(editor.cursorOffset()) orelse return null;
+    var i: usize = 0;
+    while (i < node.text.len and node.text[i] == ' ') i += 1;
+    if (i >= node.text.len) return null;
+    const glyph = std.unicode.utf8ByteSequenceLength(node.text[i]) catch 1;
+    i = @min(i + glyph, node.text.len);
+    while (i < node.text.len and node.text[i] == ' ') i += 1;
+    return try gpa.dupe(u8, std.mem.trimEnd(u8, node.text[i..], " \t\r"));
 }
 
-/// Press `j` until the focused row is `want`. Navigation is the std intention
-/// `std.navigation.down` (vim binds `j` to it, with a text motion as the
-/// fallback arm) — no files-specific key anywhere.
+/// Press `j` until the row under point is `want`. Navigation is the std
+/// intention `std.navigation.down` (vim binds `j` to it, with a text motion as
+/// the fallback arm) — no files-specific key anywhere, which is the property
+/// the listing keeps by declaring a POSTURE rather than a mode.
 fn navigateToRow(ed: *Editor, gpa: std.mem.Allocator, want: []const u8) !void {
     for (0..64) |_| {
         if (try focusedRowName(ed, gpa)) |name| {

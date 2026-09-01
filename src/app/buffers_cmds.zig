@@ -40,6 +40,19 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const deps = command_context.attachments;
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const spec = args[0].string;
+    // AN OPEN FROM A TOOL ENTRY IS AN ACTIVATION (§9.4).
+    //
+    // A listing, a grep result, a build log: opening something FROM one means
+    // "show me that", and where it goes is the placement policy.s answer — from
+    // an ordinary pane "here", from a docked companion "the editing pane". That
+    // is the whole of "Return in the sidebar opens in the editor", and it
+    // belongs here rather than in every tool: each of them opening by hand and
+    // guessing at placement is how a sidebar becomes special-cased.
+    //
+    // Only when nothing has already asked: a caller that stated its own
+    // placement means it.
+    if (ctx.head.placement == null and ctx.buffers.active().tool.len > 0)
+        ctx.head.placement = .{ .hint = .primary, .kind = .unknown };
     if (ctx.buffers.findByPath(spec)) |id| {
         try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
