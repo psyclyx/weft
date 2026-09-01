@@ -16,6 +16,7 @@ const command = @import("command.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
+const action_offers = @import("action_offers.zig");
 const Head = @import("Head.zig");
 
 pub const Catalog = catalog_mod.Catalog;
@@ -183,6 +184,24 @@ pub const Plane = struct {
     /// here for the same reason as the editing table — a plane without its
     /// host providers is a half-wired state nothing should be able to build.
     views: view_offers.Publisher = undefined,
+    /// The DERIVED table: every declared action with an eligible provider
+    /// here. `view_offers` derives from a scene.s shape; this derives from the
+    /// providers bound against the focused context, which is what connects
+    /// `provide` to the plane a keystroke actually reads.
+    derived: *action_offers.Publisher = undefined,
+    derived_attached: bool = false,
+
+    /// Wire the DERIVED publisher, once `Actions` exists. Separate from `init`
+    /// because the two are constructed in the other order and neither can be
+    /// moved: `Actions` needs the container, the plane needs the catalog, and
+    /// the derived table needs both.
+    pub fn attachActions(self: *Plane, gpa: Allocator, actions: *Actions) !void {
+        const pub_ptr = try gpa.create(action_offers.Publisher);
+        errdefer gpa.destroy(pub_ptr);
+        pub_ptr.* = try action_offers.Publisher.init(gpa, self, actions);
+        self.derived = pub_ptr;
+        self.derived_attached = true;
+    }
 
     pub fn init(self: *Plane, gpa: Allocator) !void {
         self.* = .{ .catalog = .init(gpa) };
@@ -201,6 +220,11 @@ pub const Plane = struct {
     }
 
     pub fn deinit(self: *Plane, gpa: Allocator) void {
+        if (self.derived_attached) {
+            self.derived.deinit(gpa);
+            gpa.destroy(self.derived);
+            self.derived_attached = false;
+        }
         self.invokers.deinit(gpa);
         self.catalog.deinit();
         self.* = undefined;
@@ -214,6 +238,15 @@ pub const Plane = struct {
         head: *const Head,
     ) Allocator.Error!void {
         _ = try self.views.refresh(&self.catalog, services, head);
+    }
+
+    /// Republish the DERIVED table when the context or the provider set moved.
+    /// A signature comparison when nothing moved — the same pushed-offer
+    /// discipline every other table here follows, so nothing recomputes
+    /// eligibility on the keystroke path.
+    pub fn syncDerived(self: *Plane, gpa: Allocator, f: @import("weft_facts").Facts) !void {
+        if (!self.derived_attached) return;
+        _ = try self.derived.refresh(gpa, &self.catalog, f);
     }
 
     /// Republish core's table when the focused entry's shape changes — the
@@ -258,6 +291,12 @@ pub const Plane = struct {
     pub fn snapshotFor(self: *Plane, ctx: *command.Context) ?*const catalog_mod.Snapshot {
         self.syncEntryShape(ctx.buffers.active().textEditor() != null) catch {};
         if (ctx.semantic) |services| self.syncFocus(services, ctx.head) catch {};
+        // The third built-in provider, synced HERE rather than on the dispatch
+        // path, because "what would this key do" and "what does this key do"
+        // must read the same table. Hung off `dispatchSpec` first, and the
+        // difference was visible immediately: `s` staged the row while
+        // which-key, one call earlier, said nothing was offered.
+        self.syncDerived(ctx.gpa, factsFor(ctx)) catch {};
         return self.catalog.snapshot(catalogContext(ctx)) catch |err| {
             std.log.warn("intent: catalog snapshot failed: {t}", .{err});
             return null;
@@ -445,18 +484,18 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
         switch (snap.resolveOne(id)) {
             .decision => |d| return .{ .ready = .{
                 .intention = cat.intentionName(d.intention),
-                .provider = cat.providerName(d.provider),
+                .provider = d.owner,
             } },
             .unavailable => |u| switch (u) {
                 .no_offer => {}, // nonapplicable — the next arm gets its turn
                 .disabled => |d| return .{ .blocked = .{
                     .intention = cat.intentionName(d.intention),
-                    .provider = cat.providerName(d.provider),
+                    .provider = d.owner,
                     .reason = d.reason.reason,
                 } },
                 .checking => |ch| return .{ .blocked = .{
                     .intention = cat.intentionName(ch.intention),
-                    .provider = cat.providerName(ch.provider),
+                    .provider = ch.owner,
                     .reason = "checking",
                 } },
             },

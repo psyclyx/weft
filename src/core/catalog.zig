@@ -203,6 +203,19 @@ pub const Offer = struct {
     /// Restrict to a focused endpoint class; `null` applies to any.
     class: ?ClassId = null,
     priority: i32 = 0,
+    /// Who this offer is FROM, when that is not the publishing provider.
+    /// Borrowed; must outlive the publication (an owner name held by the
+    /// thing that authored the binding).
+    ///
+    /// A DERIVED table is one publisher standing in for many authors
+    /// (`core/action_offers.zig` publishes what every plugin's `provide`
+    /// affords here). Leaving those rows attributed to the deriver is not a
+    /// display wart: `Candidate.owner` is a term of §7.2's total order, and
+    /// the cross-owner tie is REFUSED rather than silently ranked. Collapsing
+    /// two plugins' verbs onto one owner name would turn a genuine ambiguity
+    /// into a decl_index coin-flip — so a stand-in publisher says who each row
+    /// is really from, and the order stays true.
+    attribution: ?[]const u8 = null,
 
     /// DERIVED, never pushed: conjunct count of the eligibility predicate,
     /// plus one for an endpoint-class constraint. A provider raises its rank
@@ -292,6 +305,10 @@ pub fn sameStrength(a: Candidate, b: Candidate) bool {
 pub const Decision = struct {
     intention: IntentionId,
     provider: ProviderId,
+    /// Who the winning offer is FROM (`Offer.attribution`, else the publishing
+    /// provider) — the same string `Candidate.owner` ranked by, so what a hint
+    /// NAMES and what the order DECIDED can never disagree. Borrowed.
+    owner: []const u8,
     endpoint: EndpointToken,
     /// Index of the winning arm in the authored fallback list.
     arm: u32,
@@ -307,12 +324,14 @@ pub const Unavailable = union(enum) {
     disabled: struct {
         intention: IntentionId,
         provider: ProviderId,
+        owner: []const u8,
         reason: Disabled,
     },
     /// The strongest offer's provider is still recomputing eligibility.
     checking: struct {
         intention: IntentionId,
         provider: ProviderId,
+        owner: []const u8,
         task: u64,
     },
 };
@@ -473,6 +492,7 @@ fn selectArm(run: []const Candidate, arm: u32, epoch: u64) ArmOutcome {
         .enabled => .{ .decision = .{
             .intention = best.intention,
             .provider = best.provider,
+            .owner = best.owner,
             .endpoint = best.endpoint,
             .arm = arm,
             .revision = best.revision,
@@ -481,11 +501,13 @@ fn selectArm(run: []const Candidate, arm: u32, epoch: u64) ArmOutcome {
         .disabled => |d| .{ .unavailable = .{ .disabled = .{
             .intention = best.intention,
             .provider = best.provider,
+            .owner = best.owner,
             .reason = d,
         } } },
         .checking => |c| .{ .unavailable = .{ .checking = .{
             .intention = best.intention,
             .provider = best.provider,
+            .owner = best.owner,
             .task = c.task,
         } } },
     } };
@@ -704,13 +726,13 @@ pub const Catalog = struct {
         var list: std.ArrayList(Candidate) = .empty;
         errdefer list.deinit(self.gpa);
         for (self.tables.values()) |table| {
-            const owner = self.providerName(table.provider);
+            const publisher = self.providerName(table.provider);
             for (table.offers, 0..) |offer, i| {
                 if (fit(offer, ctx) != .ok) continue;
                 try list.append(self.gpa, .{
                     .intention = offer.intention,
                     .provider = table.provider,
-                    .owner = owner,
+                    .owner = offer.attribution orelse publisher,
                     .endpoint = offer.endpoint,
                     .availability = offer.availability,
                     .tier = table.tier,
@@ -797,7 +819,7 @@ pub const Catalog = struct {
                 try out.append(gpa, .{ .verdict = verdict, .candidate = .{
                     .intention = want,
                     .provider = table.provider,
-                    .owner = self.providerName(table.provider),
+                    .owner = offer.attribution orelse self.providerName(table.provider),
                     .endpoint = offer.endpoint,
                     .availability = offer.availability,
                     .tier = table.tier,

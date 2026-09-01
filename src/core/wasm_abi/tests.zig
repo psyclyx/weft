@@ -3337,13 +3337,30 @@ test "wasm plugin: a third party puts a verb on rows it did not produce" {
         try t.expectEqualStrings("on-a-hunk", env.actions.resolveFacts("row-verb", facts).?);
     }
 
-    // On the SECTION header, neither: a row a provider did not bind is a row
-    // the verb does not apply to, which is what "no offer" should mean.
+    // On the SECTION header, neither. It is not even a role: a header is
+    // structure, not a subject, so there is nothing for a verb to be about —
+    // which is what "no offer" should mean, and is stronger than binding a
+    // role no provider happened to name.
     editor.placeCursor(0);
     {
         const facts = intent_mod.factsFor(&env.ctx);
-        try t.expectEqualStrings("git.section", facts.role);
+        try t.expectEqualStrings("", facts.role);
         try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("row-verb", facts));
+    }
+
+    // Point INSIDE a hunk's body — a line the producer did not make focusable —
+    // still names the hunk. This is the case a leaf-role reading gets wrong,
+    // and the one a person hits constantly: you point at the changed line, not
+    // at the `@@` header above it.
+    editor.placeCursor(std.mem.indexOf(u8, text, " context").?);
+    {
+        const view = buf.projection.?;
+        // The node at point really is the body line — the walk is doing the
+        // work, not a coincidence of the tree's shape.
+        try t.expectEqualStrings("git.diff.context", view.nodeAt(editor.cursorOffset()).?.role);
+        const facts = intent_mod.factsFor(&env.ctx);
+        try t.expectEqualStrings("git.hunk", facts.role);
+        try t.expectEqualStrings("on-a-hunk", env.actions.resolveFacts("row-verb", facts).?);
     }
 }
 

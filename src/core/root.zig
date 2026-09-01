@@ -60,6 +60,7 @@ pub const layers = @import("layers.zig");
 /// A node tree rendered into a text buffer, with the host owning every
 /// offset — the primitive every tool projection was hand-rolling.
 pub const projection = @import("projection.zig");
+pub const action_offers = @import("action_offers.zig");
 /// The one context vocabulary and its predicate — shared with every guest as
 /// the `weft_facts` module, re-exported here so host-side consumers name it
 /// through core like every other core type.

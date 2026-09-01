@@ -132,7 +132,9 @@ pub const Buffer = struct {
     pub fn focusedRole(self: *Buffer) []const u8 {
         const view = self.projection orelse return "";
         const ed = self.textEditor() orelse return "";
-        const node = view.nodeAt(ed.cursorOffset()) orelse return "";
+        // `subjectAt`, not `nodeAt`: a role is what a verb ACTS ON, so point
+        // inside a hunk's body names the hunk. See that method's doc.
+        const node = view.subjectAt(ed.cursorOffset()) orelse return "";
         return node.role;
     }
 

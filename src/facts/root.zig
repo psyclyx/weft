@@ -85,6 +85,45 @@ pub const Facts = struct {
         for (self.tags) |tg| if (std.mem.eql(u8, tg, tag)) return true;
         return false;
     }
+
+    /// Overlay `over` onto `base`: an inner scope's fact wins where it says
+    /// something, and a `Facts` "says something" exactly when the field is not
+    /// its declared default — the convention this struct's doc comment states,
+    /// applied by READING the struct rather than by restating it once per
+    /// field.
+    ///
+    /// Reflection here is not cleverness, it is the fix for a real defect. The
+    /// hand-written predecessor (`ctx.zig`'s `mergeOne`) was ten
+    /// `if (over.x.len != 0)` lines, and a field added to `Facts` without its
+    /// matching line was silently dropped at every merge. `role` was added
+    /// without one: the derived offer table saw the row's role and published
+    /// `plugin.git.stage`, then the door re-resolved against a merge that had
+    /// erased it and refused its own offer as stale. A merge that enumerates
+    /// fields is a merge that can forget one; this one cannot.
+    pub fn merge(base: Facts, over: Facts) Facts {
+        var out = base;
+        inline for (@typeInfo(Facts).@"struct".fields) |f| {
+            if (present(f, @field(over, f.name))) @field(out, f.name) = @field(over, f.name);
+        }
+        return out;
+    }
+
+    /// Is this field carrying information? Slices and optionals answer
+    /// structurally (an empty slice is absent however it was spelled, and two
+    /// empty slices with different pointers are the same absence — which is
+    /// why this is not `std.meta.eql` against the default). Everything else
+    /// compares against the field's own default, so a new scalar or enum axis
+    /// needs no rule here, and a type with no sensible answer fails the build
+    /// instead of guessing.
+    fn present(comptime f: std.builtin.Type.StructField, v: f.type) bool {
+        return switch (@typeInfo(f.type)) {
+            .optional => v != null,
+            .pointer => |p| if (p.size == .slice) v.len != 0 else true,
+            .int, .float, .bool, .@"enum" => v != comptime f.defaultValue().?,
+            else => @compileError("facts: no presence rule for field '" ++ f.name ++
+                "' of type " ++ @typeName(f.type)),
+        };
+    }
 };
 
 /// A host-evaluated predicate over `Facts`. The buffer-resource vocabulary
@@ -671,4 +710,49 @@ test "facts: disjoint proves same-axis literal mismatches, stays conservative el
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "facts: merge carries EVERY field — the class, not one field" {
+    // The point of the reflection in `merge` is that this test does not have
+    // to be updated when a fact axis is added: it builds an overlay in which
+    // every field is non-default, merges it over an empty base, and asserts
+    // nothing was dropped. `role` was dropped for exactly as long as the merge
+    // was a hand-written list, and no test noticed because the tests were
+    // written per-field too.
+    const over: Facts = .{
+        .locality = .local,
+        .path = "/p",
+        .name = "n",
+        .first_line = "#!x",
+        .tags = &.{"tg"},
+        .size = 7,
+        .mode = "normal",
+        .lang = "zig",
+        .tool = "git",
+        .role = "git.file.unstaged",
+        .pane = 3,
+    };
+    inline for (@typeInfo(Facts).@"struct".fields) |f| {
+        // Every field of the overlay above must actually BE an overlay,
+        // otherwise this test would pass by asserting a default equals itself.
+        try t.expect(Facts.present(f, @field(over, f.name)));
+    }
+
+    const merged = Facts.merge(.{}, over);
+    inline for (@typeInfo(Facts).@"struct".fields) |f| {
+        switch (@typeInfo(f.type)) {
+            .pointer => |p| if (p.size == .slice and p.child == u8)
+                try t.expectEqualStrings(@field(over, f.name), @field(merged, f.name))
+            else
+                try t.expectEqual(@field(over, f.name).len, @field(merged, f.name).len),
+            .optional => try t.expectEqualStrings(@field(over, f.name).?, @field(merged, f.name).?),
+            else => try t.expectEqual(@field(over, f.name), @field(merged, f.name)),
+        }
+    }
+
+    // …and an ABSENT overlay field never erases what an outer scope said.
+    const kept = Facts.merge(over, .{});
+    try t.expectEqualStrings("git.file.unstaged", kept.role);
+    try t.expectEqualStrings("git", kept.tool);
+    try t.expectEqual(@as(u32, 3), kept.pane);
 }

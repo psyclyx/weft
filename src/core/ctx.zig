@@ -383,7 +383,7 @@ pub const Ctx = struct {
     /// `Context.actionCtx`'s doc.
     pub fn mergedFacts(self: *const Ctx) Facts {
         var out: Facts = .{};
-        for (self.scopes.constSlice()) |s| out = mergeOne(out, s.facts);
+        for (self.scopes.constSlice()) |s| out = Facts.merge(out, s.facts);
         return out;
     }
 
@@ -458,21 +458,6 @@ pub const TransientHandle = struct {
         };
     }
 };
-
-fn mergeOne(base: Facts, over: Facts) Facts {
-    var out = base;
-    if (over.locality != .none) out.locality = over.locality;
-    if (over.path != null) out.path = over.path;
-    if (over.name.len != 0) out.name = over.name;
-    if (over.first_line.len != 0) out.first_line = over.first_line;
-    if (over.tags.len != 0) out.tags = over.tags;
-    if (over.size != 0) out.size = over.size;
-    if (over.mode.len != 0) out.mode = over.mode;
-    if (over.lang.len != 0) out.lang = over.lang;
-    if (over.tool.len != 0) out.tool = over.tool;
-    if (over.pane != 0) out.pane = over.pane;
-    return out;
-}
 
 // ── BACKGROUND CODE CANNOT — a worked, honest example (§6 W2b gate (e)) ──
 //

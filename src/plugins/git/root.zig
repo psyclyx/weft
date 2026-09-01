@@ -280,6 +280,7 @@ comptime {
 }
 
 fn initExtra() void {
+    provideRowVerbs();
     // What a settled gather owes the rest of the plugin, and how a view is
     // coloured. Installed rather than called directly so `gather.zig` stays
     // readable without the rest of this file in your head.
@@ -535,7 +536,7 @@ fn paintOwnEntry() void {
 
 fn onViewFilled(style: model.ViewStyle) void {
     // Colouring a read-only view is `render.zig`.s, beside the projection it
-    // is deliberately NOT: a view is one command.s output shown verbatim, with
+    // is deliberately NOT: a view is one command's output shown verbatim, with
     // no model behind it and no rows to name, which is why it still paints
     // spans by offset and the projection never does.
     render_mod.styleView(style);
@@ -547,7 +548,6 @@ fn onViewFilled(style: model.ViewStyle) void {
 /// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
 export fn on_activate() void {
     if (focusedSession()) |s| model.routed = s;
-    publishOffers();
 }
 
 // ── Repository sessions: root detection, minting, routing ──────────────────
@@ -724,7 +724,6 @@ fn renderStatus() void {
     repaint();
     // A new model is a new offer table: the previous one described rows that
     // no longer exist, and its ordinal is now stale at the door.
-    publishOffers();
     noteDrops();
 }
 
@@ -803,88 +802,59 @@ fn sectionOf(t: Target) ?Section {
     };
 }
 
-fn stageReason(t: Target) []const u8 {
-    if (t.kind == .commit) return "not-a-change";
-    return switch (sectionOf(t) orelse return "no-row") {
-        .untracked, .unstaged => "",
-        .staged => "already-staged",
-        .recent => "not-a-change",
-    };
-}
+// ── What a row affords is a PREDICATE, not a table this file pushes ────────
+//
+// git used to compute, on every model change and every cursor move, a table of
+// eight offers each with a sentence saying why it did or did not apply
+// (`stageReason`, `unstageReason`, `openReason`), and push it through
+// `offersBegin`/`offer`/`offersCommit` stamped with the snapshot.
+//
+// Each is a `provide` now, bound ONCE at init against the ROLE a row carries.
+// Core derives the offer table from whichever providers are eligible here
+// (`core/action_offers.zig`), so the engine that already decides every other
+// action decides these — and a third party can bind a verb to git's rows
+// without git enumerating it or knowing it exists.
+//
+// What is lost, said plainly: the REASON. "already-staged" was better than
+// silence. A row no provider bound now affords nothing rather than affording
+// something disabled-with-an-explanation, and the two verbs that are
+// state-dependent rather than row-dependent — fixing up onto a commit the
+// draft never chose — refuse out loud when invoked instead of in advance.
+fn provideRowVerbs() void {
+    const file_unstaged: weft.Predicate = .{ .role = "git.file.unstaged" };
+    const file_untracked: weft.Predicate = .{ .role = "git.file.untracked" };
+    const file_staged: weft.Predicate = .{ .role = "git.file.staged" };
+    const hunk_unstaged: weft.Predicate = .{ .role = "git.hunk.unstaged" };
+    const hunk_staged: weft.Predicate = .{ .role = "git.hunk.staged" };
+    const sec_unstaged: weft.Predicate = .{ .role = "git.section.unstaged" };
+    const sec_untracked: weft.Predicate = .{ .role = "git.section.untracked" };
+    const sec_staged: weft.Predicate = .{ .role = "git.section.staged" };
+    const commit_row: weft.Predicate = .{ .role = "git.commit" };
 
-fn unstageReason(t: Target) []const u8 {
-    if (t.kind == .commit) return "not-staged";
-    return if ((sectionOf(t) orelse return "no-row") == .staged) "" else "not-staged";
-}
+    // The disjunction the old four-tag wire could not encode, doing the work a
+    // reason string used to do.
+    weft.provide("plugin.git.stage", .{ .any = &.{ file_unstaged, file_untracked, hunk_unstaged, sec_unstaged, sec_untracked } }, "git-stage", 0);
+    weft.provide("plugin.git.unstage", .{ .any = &.{ file_staged, hunk_staged, sec_staged } }, "git-unstage", 0);
+    weft.provide("plugin.git.open-diff", .{ .any = &.{
+        file_unstaged, file_untracked, file_staged,
+        hunk_unstaged, hunk_staged,    commit_row,
+    } }, "git-visit", 0);
 
-fn openReason(t: Target) []const u8 {
-    return switch (t.kind) {
-        .file, .hunk, .commit => "",
-        .section => "no-target",
-        .none => "no-row",
-    };
-}
+    // Entry-level verbs: about the repository this entry projects, not about
+    // the row under point.
+    const in_git: weft.Predicate = .{ .tool = tool };
+    weft.provide("plugin.git.commit", in_git, "git-commit", 0);
+    weft.provide("plugin.git.refresh", in_git, "git-refresh", 0);
+    weft.provide("plugin.git.push", in_git, "git-push", 0);
+    weft.provide("plugin.git.pull", in_git, "git-pull", 0);
+    weft.provide("plugin.git.fetch", in_git, "git-fetch", 0);
 
-/// Publish what git affords RIGHT HERE: the row verbs, from the target under
-/// point, and the repository-level verbs, from being in a repo at all. Pushed
-/// on every event that can change either — a new model, a fold, a row move —
-/// so nothing has to probe git mid-resolution.
-///
-/// The table is scoped to git's own tool identity and stamped with the
-/// session's snapshot ordinal: it applies in a status entry, and only while the
-/// model it was computed from is the current one.
-///
-/// ONE table is live, and it must describe the entry the user is looking at: a
-/// commit draft offers what it can be re-seated as, a status projection offers
-/// its row verbs, and a gather landing in an unfocused session says nothing.
-/// `on_activate` republishes when focus moves.
-fn publishOffers() void {
-    if (focusedDraft()) |slot| return publishDraftOffers(slot);
-    // Before the first repository is opened there is nothing to describe. This
-    // is the one reader that can run unrouted, which is why `model.routed` is the
-    // thing it tests rather than a blank session standing in for one.
-    if (model.routed == null) return weft.offersRetract();
-    if (focusedSession() != model.routed) return;
-    if (!cur().in_repo) {
-        weft.offersRetract();
-        return;
-    }
-    const t = nodeAtCursor();
-    weft.offersBegin(tool, cur().snapshot);
-    weft.offer("plugin.git.stage", "git-stage", stageReason(t));
-    weft.offer("plugin.git.unstage", "git-unstage", unstageReason(t));
-    weft.offer("plugin.git.open-diff", "git-visit", openReason(t));
-    weft.offer("plugin.git.commit", "git-commit", "");
-    weft.offer("plugin.git.refresh", "git-refresh", "");
-    weft.offer("plugin.git.push", "git-push", "");
-    weft.offer("plugin.git.pull", "git-pull", "");
-    weft.offer("plugin.git.fetch", "git-fetch", "");
-    weft.offersCommit();
-}
-
-/// The draft entry that is FOCUSED, if any. Unlike `Drafts.current` this never
-/// falls back to the most recent: an offer table is about the buffer under the
-/// user's eyes, not the one a command last touched.
-fn focusedDraft() ?*Drafts.Slot {
-    var buf: [64]u8 = undefined;
-    const active = weft.activeBufferName(&buf) orelse return null;
-    for (drafts.slots.items) |slot| {
-        if (std.mem.eql(u8, slot.name(), active)) return slot;
-    }
-    return null;
-}
-
-/// What a draft affords: the same `plugin.git.*` namespace, published through
-/// the same door — a re-seat onto a commit needs the commit the draft was
-/// opened for, and says so when there is none.
-fn publishDraftOffers(slot: *Drafts.Slot) void {
-    const onto: []const u8 = if (slot.value.onto.kind == .commit) "" else "no-commit-chosen";
-    weft.offersBegin(draft_tool, draft_ordinal);
-    weft.offer("plugin.git.amend", "git-draft-amend", "");
-    weft.offer("plugin.git.reword", "git-draft-reword", "");
-    weft.offer("plugin.git.fixup", "git-draft-fixup", onto);
-    weft.offer("plugin.git.squash", "git-draft-squash", onto);
-    weft.offersCommit();
+    // A draft's own verbs, scoped to the draft's tool identity.
+    const in_draft: weft.Predicate = .{ .tool = draft_tool };
+    weft.provide("plugin.git.amend", in_draft, "git-draft-amend", 0);
+    weft.provide("plugin.git.reword", in_draft, "git-draft-reword", 0);
+    weft.provide("plugin.git.fixup", in_draft, "git-draft-fixup", 0);
+    weft.provide("plugin.git.squash", in_draft, "git-draft-squash", 0);
 }
 
 // ── Navigation / folding ────────────────────────────────────────────────────
@@ -894,11 +864,9 @@ fn publishDraftOffers(slot: *Drafts.Slot) void {
 /// re-resolves the node, exactly as it always has.
 fn gitNextRow() void {
     weft.run("cursor-down");
-    publishOffers();
 }
 fn gitPrevRow() void {
     weft.run("cursor-up");
-    publishOffers();
 }
 
 fn gitStatus() void {
@@ -940,7 +908,6 @@ fn gitToggleFold() void {
         else => return,
     };
     render_mod.toggleFold(fold_key);
-    publishOffers();
 }
 
 /// Repaint from the model in hand — no re-gather, the model is intact (a
@@ -1094,7 +1061,7 @@ fn gitDiscardDo(yes: bool, armed: Armed) void {
             const f = &cur().files[n.idx];
             switch (f.section) {
                 // `rm` has no `-C`, so it gets the path made absolute against the
-                // session.s root — the same join `open` already uses for a row.
+                // session's root — the same join `open` already uses for a row.
                 .untracked => after(&.{ "rm", "--", cur().inRepo(f.path_()) }),
                 .unstaged => after(&.{ "git", "checkout", "--", f.path_() }),
                 // `checkout HEAD --` restores index AND worktree in one
@@ -1129,7 +1096,7 @@ fn discardSection(sec: Section) void {
     var fi: usize = 0;
     while (fi < cur().file_count) : (fi += 1) {
         if (cur().files[fi].section != sec) continue;
-        // `rm` runs with no `-C`, so its paths are absolute; git.s are
+        // `rm` runs with no `-C`, so its paths are absolute; git's are
         // repository-relative, which is what git wants.
         argv.push(if (sec == .untracked) cur().inRepo(cur().files[fi].path_()) else cur().files[fi].path_());
     }
@@ -1193,14 +1160,6 @@ var todos: Todos = .{};
 const draft_tool = model.draft_tool;
 const todo_tool = model.todo_tool;
 
-/// The ordinal of what the drafts' published offers describe — bumped whenever
-/// a draft opens or is re-seated, i.e. whenever its meaning changes. It is that
-/// table's `revision`, so a decision resolved against the old meaning dies at
-/// the effect door.
-var draft_ordinal: u32 = 0;
-
-/// What the effect said and whether it succeeded. Scratch, not state: the
-/// settle that reads it is nested inside the very delivery that wrote it.
 /// Open a commit draft. `prefill` (or "") is a shell command whose stdout seeds
 /// the message — `git log -1 --format=%B` for amend/reword.
 fn openDraft(flags: []const u8, prefill: []const []const u8) ?*Drafts.Slot {
@@ -1221,8 +1180,6 @@ fn openDraft(flags: []const u8, prefill: []const []const u8) ?*Drafts.Slot {
 fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
     slot.value.flags_len = @min(flags.len, slot.value.flags.len);
     @memcpy(slot.value.flags[0..slot.value.flags_len], flags[0..slot.value.flags_len]);
-    draft_ordinal +%= 1;
-    publishOffers();
 }
 
 /// Seed a draft's message from `prefill`'s stdout (`git log -1 --format=%B` for
@@ -1230,7 +1187,7 @@ fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
 /// entry stays exactly as it is, so nothing can land on top of what was typed.
 fn seedDraft(slot: *Drafts.Slot, prefill: []const []const u8) void {
     if (prefill.len == 0) return;
-    show(prefill, slot.name(), .none); // read from the draft.s own repository
+    show(prefill, slot.name(), .none); // read from the draft's own repository
 }
 
 /// The draft this command is about — the entry it was invoked in — and, with
@@ -1676,7 +1633,7 @@ fn gitRebaseSave() void {
 }
 
 /// A plan git ran is spent, and closes like any other entry; one it refused
-/// stays, with the refusal shown — git.s own words, off its own stderr.
+/// stays, with the refusal shown — git's own words, off its own stderr.
 fn gitRebaseSettle() void {
     const slot = cur().sequencing orelse return;
     cur().sequencing = null;

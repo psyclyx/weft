@@ -270,6 +270,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     try pick.declareAnnotation(&self.container);
     try self.intent.init(gpa);
     errdefer self.intent.deinit(gpa);
+    try self.intent.attachActions(gpa, &self.actions);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
     return self;
 }

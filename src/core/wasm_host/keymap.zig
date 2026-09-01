@@ -90,12 +90,20 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // this tree is ours to release either way.
     const predicate = facts.decode(gpa, pred_bytes) catch facts.Predicate{ .all = &.{} };
     defer facts.free(gpa, predicate);
+    // ONE identity for a plugin across both planes. `plugin.<name>` is already
+    // what this plugin's offers are published under (`wasm_host/intent.zig`'s
+    // `publisher`), and a derived offer is attributed to the binding's owner —
+    // so a verb reaching a key by `provide` and a verb reaching it by a pushed
+    // table now name the same author, instead of `git` and `plugin.git` being
+    // two owners that the §7.2 order would treat as strangers to each other.
+    var owner_buf: [128]u8 = undefined;
+    const owner = std.fmt.bufPrint(&owner_buf, "plugin.{s}", .{p.name}) catch p.name;
     p.activeCtx().actions.provide(.{
         .action = action,
         .predicate = predicate,
         .command = cmd,
         .priority = args[6],
-        .owner = p.name,
+        .owner = owner,
     }) catch |e| if (e == error.RaceRejectsProvider) {
         // Surface the mistake to the plugin author via the echo line when the
         // call is on a dispatching path or the load handshake (the common,

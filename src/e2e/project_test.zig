@@ -1646,10 +1646,23 @@ fn confirmDiscard(ed: *Editor) !void {
 }
 
 // git's row verbs are OFFERS now: `s`/`u`/`RET` in *git* name an intention,
-// git publishes what the row under point affords (with the reason when it
-// affords nothing), and the effect door invokes the winner. The locked mode
-// that used to make those keys work is gone — the buffer holds no editor, so
-// typing refuses structurally, and `git` is simply its resting mode.
+// what the row under point affords is DERIVED from the providers bound against
+// it (`core/action_offers.zig`), and the effect door invokes the winner. The
+// locked mode that used to make those keys work is gone — the buffer holds no
+// editor, so typing refuses structurally, and `git` is simply its resting mode.
+//
+// git no longer publishes a table of its own. It says `provide("plugin.git.stage",
+// .{.role = "git.file.unstaged"} | …, "git-stage")` and core derives the rest —
+// which is what lets a THIRD party put a verb on git's rows without git
+// knowing. The rows are attributed to `plugin.git` all the same
+// (`catalog.Offer.attribution`), so the order still treats two plugins' verbs
+// as coming from two owners.
+//
+// WHAT THAT COST, asserted below rather than glossed: the per-verb REASON.
+// The hand-written table said "not-staged" when `u` did not apply; a derived
+// one can only say that nobody bound `unstage` to this row, which reads as
+// "not offered here". A sentence explaining a specific refusal is a thing only
+// the plugin could write, and it went out with the table it was written on.
 test "e2e/project: git's row verbs resolve through published offers, and the locked modes are gone" {
     const gpa = t.allocator;
     var proj: Project = undefined;
@@ -1684,8 +1697,9 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
     try t.expectEqualStrings("git", ed.mode());
 
     // What the key WOULD do, asked through the same explain path which-key
-    // renders (core.intent.explain, exactly what wasm_host/menu.zig calls):
-    // staging is offered by git itself, unstaging is refused with its reason.
+    // renders (core.intent.explain, exactly what wasm_host/menu.zig calls).
+    // Nobody pushed this: it is derived from git's `provide`s against the role
+    // of the row point is on, and attributed back to git.
     switch (core.intent.explain(ed.ctx, &.{"plugin.git.stage"})) {
         .ready => |r| {
             try t.expectEqualStrings("plugin.git.stage", r.intention);
@@ -1693,29 +1707,36 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
         },
         else => return error.StageNotOffered,
     }
+    // On an UNSTAGED row, unstaging is not offered — and that is the whole
+    // answer now. See the header: the reason went out with the hand-written
+    // table. What survives is that the key refuses rather than doing
+    // something, and says so in the same breath every unbound intention does.
     switch (core.intent.explain(ed.ctx, &.{"plugin.git.unstage"})) {
-        .blocked => |b| try t.expectEqualStrings("not-staged", b.reason),
+        .blocked => |b| try t.expectEqualStrings("not offered here", b.reason),
         else => return error.UnstageNotRefused,
     }
     // And the same answer a user SEES: which-key peeks the git mode and
     // paints the offer rows through that existing path — no new UI.
-    // The rendered row reads `s  plugin.git.stage -> plugin.git`, and the
-    // refused one is dimmed with its reason — painted from the same explain
-    // answer, by the hint plugin that already existed.
+    // The rendered row reads `s  plugin.git.stage -> plugin.git`.
     try t.expect(whichKeyShows(&ed, "plugin.git.stage"));
-    try t.expect(whichKeyShows(&ed, "not-staged"));
+    // The refused verb is not painted as a dimmed row with a sentence any
+    // more; it is simply absent, which is what "no provider bound this row"
+    // looks like. Asserted so the change is a decision, not a drift.
+    try t.expect(!whichKeyShows(&ed, "not-staged"));
 
     // And what it actually does: `s` resolves the offer and invokes it
     // through the effect door — the file is staged on disk.
     ed.press("s", "");
     try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "f.txt"));
 
-    // The re-gathered model publishes a NEW table: the same row is staged
-    // now, so staging it again is the refused one.
+    // The re-gathered model gives the row a NEW role, and the table follows
+    // it: the same row is staged now, so unstaging is what it affords. Nothing
+    // republished a list — the row changed what it IS, and the derivation is a
+    // function of that.
     try t.expect(drainToolContains(&ed, "*git*", "Staged changes"));
     switch (core.intent.explain(ed.ctx, &.{"plugin.git.unstage"})) {
         .ready => |r| try t.expectEqualStrings("plugin.git", r.provider),
-        .blocked => |b| try t.expectEqualStrings("not-staged", b.reason),
+        .blocked => |b| try t.expectEqualStrings("not offered here", b.reason),
         .none => return error.UnstageNotOffered,
     }
 
@@ -2011,7 +2032,7 @@ test "e2e/git: no verb reads a rendered byte range to choose its target" {
     }
 
     // Targeting still has exactly ONE door, DEFINED once, and it now answers
-    // from the host.s hit-test rather than from a table this plugin
+    // from the host's hit-test rather than from a table this plugin
     // maintained. The verbs file calls it freely — that is the point of it
     // being the only way to ask.
     try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "fn nodeAtCursor("));

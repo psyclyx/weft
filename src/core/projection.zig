@@ -226,6 +226,34 @@ pub const View = struct {
         return best;
     }
 
+    /// What a verb pressed at `offset` ACTS ON: the innermost node covering it,
+    /// walked up to the nearest `focusable` ancestor.
+    ///
+    /// "The node at point" and "the subject at point" are different questions,
+    /// and answering the second with the first is a real defect rather than an
+    /// approximation. A diff line inside a hunk is not focusable — its producer
+    /// said so — so point resting on it names the HUNK, which is exactly what a
+    /// person means by pointing at a line of a change. Reading the leaf's own
+    /// role instead made `s` on a context line afford nothing at all.
+    ///
+    /// Null when no ancestor is focusable: point is on pure structure (a
+    /// section header), which affords nothing rather than affording whatever
+    /// its container happens to.
+    pub fn subjectAt(self: *const View, offset: usize) ?*const Node {
+        var n = self.nodeAt(offset) orelse return null;
+        // Bounded by the node count: a parent ordinal always refers to an
+        // EARLIER node (the builder appends parents first), so this terminates,
+        // and the bound holds even if a malformed tree says otherwise.
+        var hops: usize = 0;
+        while (!n.focusable) : (hops += 1) {
+            if (hops > self.nodes.items.len) return null;
+            const p = n.parent orelse return null;
+            if (p >= self.nodes.items.len) return null;
+            n = &self.nodes.items[p];
+        }
+        return n;
+    }
+
     pub fn byKey(self: *const View, key: []const u8) ?*const Node {
         for (self.nodes.items) |*n| {
             if (std.mem.eql(u8, n.key, key)) return n;
