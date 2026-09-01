@@ -151,6 +151,38 @@ pub fn begin(buffer: []const u8) ?Builder {
     return .{};
 }
 
+/// Publish `text` as the named buffer's projection, ONE NODE PER LINE.
+///
+/// The commonest shape there is: a command wrote some output and it is a row
+/// each. `emit` says what a row IS — its key, its role, its spans — and gets
+/// the line, its ordinal, and whatever context it needs; the scan, the final
+/// line without a trailing newline, and the commit are here.
+///
+/// It is here rather than in one of the plugins because two already had it, in
+/// two shapes that differed only in an off-by-one no test would have caught the
+/// day it drifted: `output` for run/make/grep, git for `show` and `log`.
+///
+/// False when there is no such buffer to project into.
+pub fn projectLines(
+    buffer: []const u8,
+    text: []const u8,
+    comptime Ctx: type,
+    ctx: Ctx,
+    comptime emit: fn (Builder, Ctx, usize, []const u8) void,
+) bool {
+    const b = begin(buffer) orelse return false;
+    var ordinal: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (ordinal += 1) {
+        var end = i;
+        while (end < text.len and text[end] != '\n') end += 1;
+        emit(b, ctx, ordinal, text[i..end]);
+        i = end + 1;
+    }
+    _ = b.commit();
+    return true;
+}
+
 var key_scratch: [1024]u8 = undefined;
 
 /// The key of the innermost row the cursor is on, or null for no row. This is

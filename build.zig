@@ -43,7 +43,8 @@ const Guest = struct {
 /// arguments you left out", `ex` is vim's and helix's command line, `output`
 /// is the tool-buffer surface `run`/`make`/`grep` share, `jsonrpc` is the
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
-/// adapter.
+/// adapter, `rowkey` is the round trip between a projection row's key and the
+/// structured identity it names.
 const Library = enum {
     prompt,
     invoke,
@@ -53,6 +54,7 @@ const Library = enum {
     sessions,
     files,
     annotate,
+    rowkey,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -66,6 +68,7 @@ const Library = enum {
             .sessions => "weft_sessions",
             .files => "weft_files",
             .annotate => "weft_annotate",
+            .rowkey => "weft_rowkey",
         };
     }
 
@@ -403,7 +406,7 @@ const guests = [_]Guest{
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
     .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
     .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
-    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions } },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions, .rowkey } },
     .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },

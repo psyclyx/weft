@@ -487,35 +487,20 @@ fn refuseStale() void {
 // `gather.zig` calls when the bytes are in: the sequencing that a settled
 // gather owes the rest of the plugin, and how a read-only view is coloured.
 
+/// A gather settled: publish the new model, then let whatever was waiting on it
+/// finish.
+///
+/// There used to be a `paintOwnEntry` here — save the focused buffer, land on
+/// this session's entry, repaint, land back — because the repaint authored
+/// whatever was ACTIVE and a delivery could arrive while you were somewhere
+/// else. `wl_proj_begin` captures the entry by name, once, and nothing between
+/// then and the commit can redirect it, so a session repaints its own entry
+/// from wherever you happen to be standing. The dance is gone, and with it the
+/// window where a gather landing mid-keystroke moved your focus.
 fn onGathered() void {
-    paintOwnEntry();
-    // The settles run OUTSIDE the focus scope above, because each does its own
-    // focus work — landing on a draft to close it, then landing back — and a
-    // restore wrapped around that would put focus on an entry the settle had
-    // just retired.
+    renderStatus();
     if (cur().committing != null) gitCommitSettle();
     if (cur().sequencing != null) gitRebaseSettle();
-}
-
-/// Repaint the session's OWN entry, whatever happens to be focused.
-///
-/// The fill door used to guarantee this by binding the target entry at spawn:
-/// a delivery could not be misdirected because it never asked what was active.
-/// `exec` carries a PLACE, not an entry, and `repaint` authors the active
-/// buffer — so the guarantee is re-made here, by landing on the entry and
-/// landing back.
-///
-/// This is the seam the projection closes for good: `wl_proj_begin` captures
-/// the entry once, and nothing between then and the commit can redirect it.
-/// Deleting this function is the first thing git's port to it buys.
-fn paintOwnEntry() void {
-    var prev_buf: [64]u8 = undefined;
-    const prev = weft.activeBufferName(&prev_buf);
-    if (!model.focusBuffer(model.curSession().name())) return; // the entry went away mid-flight
-    defer if (prev) |name| {
-        if (!std.mem.eql(u8, name, model.curSession().name())) _ = model.focusBuffer(name);
-    };
-    renderStatus();
 }
 
 fn onViewFilled(style: model.ViewStyle) void {
@@ -1047,15 +1032,26 @@ fn gitCommitSave() void {
 fn gitCommitSettle() void {
     const slot = cur().committing orelse return;
     cur().committing = null;
+    settleDraft(Drafts, &drafts, slot, "committed");
+}
+
+/// AN EDITABLE ENTRY THAT STOOD FOR AN OPERATION, after git answered.
+///
+/// Accepted, the entry is spent and closes like any other; refused, it STAYS,
+/// with git's own first line of stderr, so what you wrote is still there to fix.
+/// Two callers, one rule: the commit draft and the rebase plan differ in their
+/// slot table and in one word, and having written it twice is how the two would
+/// eventually differ in something that mattered.
+fn settleDraft(comptime Table: type, table: *Table, slot: *Table.Slot, done: []const u8) void {
     if (!cur().effect_ok) {
         weft.echo(cur().effect_note[0..cur().effect_note_len]);
         return;
     }
     // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
-    drafts.close(slot);
+    table.close(slot);
     _ = focusBuffer(model.curSession().name());
-    weft.echo("committed");
+    weft.echo(done);
 }
 
 // ── The draft's own offers (amend/reword/fixup/squash) ─────────────────────
@@ -1416,15 +1412,7 @@ fn gitRebaseSave() void {
 fn gitRebaseSettle() void {
     const slot = cur().sequencing orelse return;
     cur().sequencing = null;
-    if (!cur().effect_ok) {
-        weft.echo(cur().effect_note[0..cur().effect_note_len]);
-        return;
-    }
-    // Retiring the entry is focus-scoped: land on it, then close it.
-    if (focusBuffer(slot.name())) weft.run("buffer-close");
-    todos.close(slot);
-    _ = focusBuffer(model.curSession().name());
-    weft.echo("rebased");
+    settleDraft(Todos, &todos, slot, "rebased");
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────

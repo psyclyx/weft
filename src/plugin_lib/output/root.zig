@@ -132,23 +132,21 @@ const role_location = "output.location";
 /// display, and the projection is what makes that literally true — nothing
 /// downstream reads a byte of it.
 fn fill(req: Request, text: []const u8) void {
-    const slot = &slots[req.slot];
-    slot.table.clear(weft.allocator);
-    const b = weft.project(slot.name) orelse return;
-    var i: usize = 0;
-    while (i < text.len) {
-        var e = i;
-        while (e < text.len and text[e] != '\n') e += 1;
-        emitRow(slot, b, text[i..e], req.row_style);
-        i = e + 1;
-    }
-    _ = b.commit();
+    slots[req.slot].table.clear(weft.allocator);
+    _ = weft.projectLines(slots[req.slot].name, text, Request, req, emitRow);
 }
 
 /// One row: its location into the table, its text into the tree, and the key
 /// that ties them. The key is the table INDEX — a handle into a table this
 /// library owns, minted here and never parsed out of anything rendered.
-fn emitRow(slot: *Slot, b: weft.ProjectionBuilder, line: []const u8, row_style: ?RowStyle) void {
+///
+/// The ordinal the line arrived at is deliberately unused: a row's identity is
+/// its place in the TABLE, which is the same number here and would stop being
+/// so the moment a fill skipped a line.
+fn emitRow(b: weft.ProjectionBuilder, req: Request, ordinal: usize, line: []const u8) void {
+    _ = ordinal;
+    const slot = &slots[req.slot];
+    const row_style = req.row_style;
     const index = slot.table.len();
     slot.table.push(weft.allocator, line) catch return;
     const at = slot.table.get(index);

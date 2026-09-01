@@ -24,6 +24,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const model = @import("model.zig");
+const rowkey = @import("weft_rowkey");
 const Section = model.Section;
 const render_order = model.render_order;
 const File = model.File;
@@ -72,66 +73,62 @@ const role_context = "git.diff.context";
 const role_commit = "git.commit";
 const role_header = "git.header";
 
-// ── Keys: a row's identity, minted here and parsed back here ──────────
-// One grammar, one place. `s:<section>` / `f:<section>:<path>` /
-// `h:<section>:<path>:<ord>` / `c:<hash>`. The path goes LAST in the file and
-// hunk forms so a path containing a colon cannot be confused for a separator —
-// everything before it is fixed-arity.
+// ── Keys: a row's identity, DECLARED ──────────────────────────────────
+//
+// What a row IS, as a record. The encoding, the parse, and the rule that keeps
+// them unambiguous are `weft_rowkey`'s: a path may legally contain the
+// separator, so the field that holds one must come last, and that is checked
+// from this declaration rather than remembered while writing a parser.
+
+const Key = union(enum) {
+    section: struct { section: Section },
+    file: struct { section: Section, path: []const u8 },
+    hunk: struct { section: Section, ord: usize, path: []const u8 },
+    commit: struct { hash: []const u8 },
+};
+
+const keys = rowkey.Codec(Key);
 
 var key_buf: [512]u8 = undefined;
 
 pub fn keyOf(t: Target) []const u8 {
-    return switch (t.kind) {
-        .none => "",
-        .section => std.fmt.bufPrint(&key_buf, "s:{s}", .{@tagName(t.section)}) catch "",
-        .file => std.fmt.bufPrint(&key_buf, "f:{s}:{s}", .{ @tagName(t.section), t.path_() }) catch "",
-        .hunk => std.fmt.bufPrint(&key_buf, "h:{s}:{d}:{s}", .{ @tagName(t.section), t.ord, t.path_() }) catch "",
-        .commit => std.fmt.bufPrint(&key_buf, "c:{s}", .{t.hash_()}) catch "",
-    };
+    return keys.encode(switch (t.kind) {
+        .none => return "",
+        .section => .{ .section = .{ .section = t.section } },
+        .file => .{ .file = .{ .section = t.section, .path = t.path_() } },
+        .hunk => .{ .hunk = .{ .section = t.section, .ord = t.ord, .path = t.path_() } },
+        .commit => .{ .commit = .{ .hash = t.hash_() } },
+    }, &key_buf);
 }
 
-/// A key back into the identity it names. Returns `.none` for a key this
-/// plugin did not mint, or one whose section no longer parses — a row it
-/// cannot name is a row it must not act on.
+/// A key back into the identity it names. `.none` for a key this plugin did
+/// not mint, or one that no longer parses — a row it cannot name is a row it
+/// must not act on.
 pub fn targetOf(key: []const u8) Target {
     var t: Target = .{ .snap = cur().snapshot };
-    if (key.len < 2 or key[1] != ':') return t;
-    const body = key[2..];
-    switch (key[0]) {
-        's' => {
-            t.section = sectionNamed(body) orelse return .{ .snap = t.snap };
+    switch (keys.decode(key) orelse return t) {
+        .section => |k| {
+            t.section = k.section;
             t.kind = .section;
         },
-        'f' => {
-            const sep = std.mem.indexOfScalar(u8, body, ':') orelse return t;
-            t.section = sectionNamed(body[0..sep]) orelse return .{ .snap = t.snap };
-            setPath(&t, body[sep + 1 ..]);
+        .file => |k| {
+            t.section = k.section;
+            setPath(&t, k.path);
             t.kind = .file;
         },
-        'h' => {
-            const sep = std.mem.indexOfScalar(u8, body, ':') orelse return t;
-            t.section = sectionNamed(body[0..sep]) orelse return .{ .snap = t.snap };
-            const rest = body[sep + 1 ..];
-            const sep2 = std.mem.indexOfScalar(u8, rest, ':') orelse return t;
-            t.ord = std.fmt.parseInt(usize, rest[0..sep2], 10) catch return t;
-            setPath(&t, rest[sep2 + 1 ..]);
+        .hunk => |k| {
+            t.section = k.section;
+            t.ord = k.ord;
+            setPath(&t, k.path);
             t.kind = .hunk;
         },
-        'c' => {
-            t.hlen = @min(body.len, t.hash.len);
-            @memcpy(t.hash[0..t.hlen], body[0..t.hlen]);
+        .commit => |k| {
+            t.hlen = @min(k.hash.len, t.hash.len);
+            @memcpy(t.hash[0..t.hlen], k.hash[0..t.hlen]);
             t.kind = .commit;
         },
-        else => {},
     }
     return t;
-}
-
-fn sectionNamed(name: []const u8) ?Section {
-    inline for (@typeInfo(Section).@"enum".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
-    }
-    return null;
 }
 
 fn setPath(t: *Target, p: []const u8) void {
@@ -383,17 +380,7 @@ pub fn projectView(name: []const u8, style: model.ViewStyle, text: []const u8) b
         .none, .rebase_todo => return false,
         .diff, .log => {},
     }
-    const b = weft.project(name) orelse return false;
-    var ordinal: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) : (ordinal += 1) {
-        var e = i;
-        while (e < text.len and text[e] != '\n') e += 1;
-        emitViewRow(b, style, ordinal, text[i..e]);
-        i = e + 1;
-    }
-    _ = b.commit();
-    return true;
+    return weft.projectLines(name, text, model.ViewStyle, style, emitViewRow);
 }
 
 fn emitViewRow(b: weft.ProjectionBuilder, style: model.ViewStyle, ordinal: usize, line: []const u8) void {

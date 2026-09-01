@@ -175,6 +175,7 @@ pub const confirmWith = @import("ask.zig").confirmWith;
 pub const ProjectionNode = @import("projection.zig").Node;
 pub const ProjectionBuilder = @import("projection.zig").Builder;
 pub const project = @import("projection.zig").begin;
+pub const projectLines = @import("projection.zig").projectLines;
 pub const projectionAtCursor = @import("projection.zig").atCursor;
 pub const projectionToggleFold = @import("projection.zig").toggleFold;
 pub const projectionSelectedLines = @import("projection.zig").selectedLines;
