@@ -399,6 +399,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
     .{ .name = "wl_proc_spool", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer`, but write `<input>` to a HOST-NAMED temp file, substitute it for `{}` in `<cmd>`, and delete it afterwards — a subprocess gets a real path without the guest holding fs_write" },
     .{ .name = "wl_proc_filter", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "filter `[start,end)` through `<cmd>` in place (formatters)" },
+    .{ .name = "wl_exec", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .proc_timer, .doc = "run an ARGV (NUL-separated, no shell) off-thread and deliver (status, stdout, stderr) to `on_exec`; `<input>` is spooled to a host-named temp substituted for a bare `{}` argument; `<at>` names a buffer whose place the child runs in (empty = the dispatching entry's)" },
+    .{ .name = "wl_exec_status", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "the delivered command's exit code, or -1 outside a delivery or for a child that died by signal" },
+    .{ .name = "wl_exec_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "a window on the delivered command's stdout (`which` 0) or stderr (1) from `offset`; -1 outside a delivery" },
 
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
     .{ .name = "wl_repl_start", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .proc_timer, .doc = "start a persistent REPL streaming into a named comint buffer" },
@@ -464,7 +467,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 231;
+const expected_import_count = 234;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -512,6 +515,7 @@ pub const exports = [_]Export{
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
+    .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
     // the schema-directed sibling of `on_complete` — a schema-provider
     // guest answers `session` by calling `wl_payload_push` (during this
@@ -529,7 +533,7 @@ pub const exports = [_]Export{
     .{ .name = "on_semantic_relation_query", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized named-relation query synchronously" },
 };
 
-const expected_export_count = 17;
+const expected_export_count = 18;
 
 comptime {
     @setEvalBranchQuota(120_000); // the O(n²) duplicate-name scans below, n≈215

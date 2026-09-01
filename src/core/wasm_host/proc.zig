@@ -717,6 +717,273 @@ fn procFree(ctx: ?*anyopaque) void {
     gpa.destroy(job);
 }
 
+// ── wl_exec — argv in, (status, stdout, stderr) out ───────────────────
+//
+// The fill doors above hand a guest a SHELL STRING and a buffer to put stdout
+// in, and nothing else. Everything a plugin actually wanted from a subprocess
+// had to be recovered from that: the exit status by making the command print
+// its own (`printf '\036\036C%d' "$s"`) and scanning it back out of the output;
+// stderr by folding it into stdout with `2>&1`; safety by hand-quoting every
+// interpolated path with `'{s}'` and hoping none of them contains an
+// apostrophe; and the output itself by reading a DOCUMENT the bytes were
+// briefly rendered into, in 64 KiB windows, into a fixed guest array.
+//
+// `wl_exec` is the door that was missing. The guest hands an ARGV — a
+// NUL-separated block, so there is no quoting layer to get wrong and no shell
+// to interpret anything — and gets back the three facts a command produces.
+// It grants nothing the fill doors did not: the same `.proc + .timer` gate,
+// the same place, the same host-named spool for the one thing a child needs on
+// disk.
+//
+// WHERE it runs is the dispatching entry's place, exactly as the fill doors
+// choose it — with one addition: a guest may name a BUFFER it already owns and
+// the child runs in THAT entry's place instead. This is not a cwd door. A
+// buffer's place is the host's to assign (`spawnFill` sets it, `open` sets it);
+// naming one can only reach somewhere the host already put this plugin, which
+// is what lets a second repository's projection act on its own repository
+// without the `cd '{s}'` prologue every git command carries today.
+
+/// A deferred exec: run an argv off-thread, keep what it said, and hand the
+/// three facts to the issuing plugin's `on_exec`. Like `ProcJob` it holds no
+/// borrowed context — the plugin pointer is resident for the app's life, and
+/// nothing else survives the hop.
+const ExecJob = struct {
+    gpa: Allocator,
+    styler: *WasmPlugin,
+    /// The child's argv. Owned: the block and the slice of slices into it.
+    argv_block: []u8,
+    argv: [][]const u8,
+    token: u32,
+    cwd: ?[]u8 = null,
+    environ: ?std.process.Environ = null,
+    /// Bytes the child needs as a FILE. The host writes them to a temp it
+    /// names, substitutes that path for a bare `{}` ARGUMENT, and deletes it —
+    /// the spool contract, argv-shaped. Null when the guest sent none.
+    input: ?[]u8 = null,
+    tmp: ?[]u8 = null,
+};
+
+var exec_counter: usize = 0;
+
+/// `wl_exec(argv, argv_len, argc, input, input_len, at, at_len, token) -> i32`.
+/// 0 accepted, -1 refused. `argv` is `argc` NUL-separated arguments.
+pub fn hExec(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
+    const loop = p.loop orelse return;
+    const gpa = p.gpa;
+
+    const block = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    var block_owned = true;
+    defer if (block_owned) gpa.free(block);
+    const argc: usize = @intCast(@max(args[2], 0));
+    if (argc == 0 or argc > 4096) return;
+    const argv = splitArgv(gpa, block, argc) orelse return;
+    var argv_owned = true;
+    defer if (argv_owned) gpa.free(argv);
+    if (argv[0].len == 0) return; // a nameless program is not a command
+
+    const input: ?[]u8 = if (args[4] > 0)
+        (caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return)
+    else
+        null;
+    var input_owned = true;
+    defer if (input_owned) if (input) |b| gpa.free(b);
+    // The guest names the COMMAND; the host names the FILE (`doc/place.md`
+    // §4.2). Composed here, on the frame thread, so it exists nowhere the
+    // guest can reach it and nothing it sends can influence the path.
+    const tmp: ?[]u8 = if (input != null) blk: {
+        exec_counter += 1;
+        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-exec-{d}-{d}", .{ std.os.linux.getpid(), exec_counter }) catch return;
+    } else null;
+    var tmp_owned = true;
+    defer if (tmp_owned) if (tmp) |b| gpa.free(b);
+
+    // WHERE. A named buffer's place, else the dispatching entry's own.
+    const at_name = caller.readMemory(gpa, @intCast(args[5]), @intCast(args[6])) catch return;
+    defer gpa.free(at_name);
+    const at = execSpawnAt(p, gpa, at_name);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |env| env.block.deinit(gpa);
+
+    const job = gpa.create(ExecJob) catch return;
+    job.* = .{
+        .gpa = gpa,
+        .styler = p,
+        .argv_block = block,
+        .argv = argv,
+        .token = @bitCast(args[7]),
+        .cwd = cwd,
+        .environ = spawn_env,
+        .input = input,
+        .tmp = tmp,
+    };
+    block_owned = false;
+    argv_owned = false;
+    cwd_owned = false;
+    env_owned = false;
+    input_owned = false;
+    tmp_owned = false;
+    _ = loop.spawn(execWork, job, .{ .ctx = job, .call = execDeliver, .deinit = execFree }) catch {
+        execFree(job);
+        return;
+    };
+    results[0] = 0;
+}
+
+/// Slice a NUL-separated block into `argc` arguments. Null when the block does
+/// not hold that many — a truncated argv runs nothing rather than running a
+/// prefix of what was meant.
+fn splitArgv(gpa: Allocator, block: []const u8, argc: usize) ?[][]const u8 {
+    const argv = gpa.alloc([]const u8, argc) catch return null;
+    var i: usize = 0;
+    var start: usize = 0;
+    var n: usize = 0;
+    while (i < block.len and n < argc) : (i += 1) {
+        if (block[i] != 0) continue;
+        argv[n] = block[start..i];
+        n += 1;
+        start = i + 1;
+    }
+    if (n < argc and start < block.len) {
+        argv[n] = block[start..];
+        n += 1;
+    }
+    if (n != argc) {
+        gpa.free(argv);
+        return null;
+    }
+    return argv;
+}
+
+/// The place the child runs in. `name` empty means the dispatching entry's,
+/// which is what every other proc door does; a named entry means THAT entry's
+/// place, which the host assigned and the guest cannot invent.
+fn execSpawnAt(p: *WasmPlugin, gpa: Allocator, name: []const u8) shared.SpawnAt {
+    if (name.len == 0) return shared.resolveSpawnAt(p, gpa);
+    const ctx = p.activeCtx();
+    const id = ctx.buffers.findByName(name) orelse return shared.resolveSpawnAt(p, gpa);
+    const entry = ctx.buffers.get(id) orelse return shared.resolveSpawnAt(p, gpa);
+    const prev = ctx.bindEntry(entry.ref());
+    defer _ = ctx.bindEntry(prev);
+    return shared.resolveSpawnAtCtx(ctx, gpa);
+}
+
+/// The off-thread body. Encodes the three facts into the one byte slice the
+/// task pool's result contract carries: status, then the stdout length, then
+/// the two streams back to back.
+fn execWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
+    const job: *ExecJob = @ptrCast(@alignCast(ctx.?));
+    // The spool half: land the bytes, point the `{}` argument at them, and
+    // DELETE THE FILE ON EVERY WAY OUT — the same discipline `spoolWork` holds,
+    // for the same reason (a failed effect must not litter).
+    var argv = job.argv;
+    var substituted: ?[][]const u8 = null;
+    defer if (substituted) |owned| gpa.free(owned);
+    if (job.tmp) |tmp| {
+        file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return encodeExec(gpa, -1, "", "");
+        const owned = gpa.alloc([]const u8, job.argv.len) catch return encodeExec(gpa, -1, "", "");
+        for (job.argv, 0..) |a, i| owned[i] = if (std.mem.eql(u8, a, "{}")) tmp else a;
+        substituted = owned;
+        argv = owned;
+    }
+    defer if (job.tmp) |tmp| file.deleteFile(gpa, tmp);
+
+    var res = proc.run(gpa, argv, .{
+        .environ = job.environ orelse shared.g_environ,
+        .cwd = job.cwd,
+    }) catch return encodeExec(gpa, -1, "", "");
+    defer res.deinit(gpa);
+    const status: i32 = if (res.exitCode()) |code| @intCast(code) else -1;
+    return encodeExec(gpa, status, res.stdout, res.stderr);
+}
+
+fn encodeExec(gpa: Allocator, status: i32, out: []const u8, err: []const u8) anyerror![]u8 {
+    const buf = try gpa.alloc(u8, 8 + out.len + err.len);
+    std.mem.writeInt(i32, buf[0..4], status, .little);
+    std.mem.writeInt(u32, buf[4..8], @intCast(out.len), .little);
+    @memcpy(buf[8..][0..out.len], out);
+    @memcpy(buf[8 + out.len ..][0..err.len], err);
+    return buf;
+}
+
+/// Frame-thread delivery: publish the result where the read doors can see it,
+/// call the guest, and take it away again. The guest's window on this command's
+/// output is exactly its own `on_exec` call.
+fn execDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
+    const job: *ExecJob = @ptrCast(@alignCast(ctx.?));
+    const raw = result orelse return;
+    if (raw.len < 8) return;
+    const gpa = job.gpa;
+    const status = std.mem.readInt(i32, raw[0..4], .little);
+    const out_len = @min(std.mem.readInt(u32, raw[4..8], .little), raw.len - 8);
+    const out = gpa.dupe(u8, raw[8..][0..out_len]) catch return;
+    const err = gpa.dupe(u8, raw[8 + out_len ..]) catch {
+        gpa.free(out);
+        return;
+    };
+    const resources = &job.styler.resources;
+    if (resources.exec) |*stale| stale.deinit(gpa); // a guest that re-entered
+    resources.exec = .{ .status = status, .stdout = out, .stderr = err };
+    defer {
+        if (resources.exec) |*done| done.deinit(gpa);
+        resources.exec = null;
+    }
+    contract.callOptionalExport("on_exec", &job.styler.instance, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
+}
+
+fn execFree(ctx: ?*anyopaque) void {
+    const job: *ExecJob = @ptrCast(@alignCast(ctx.?));
+    const gpa = job.gpa;
+    gpa.free(job.argv);
+    gpa.free(job.argv_block);
+    if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |env| env.block.deinit(gpa);
+    if (job.input) |b| gpa.free(b);
+    // The FILE is `execWork`'s to remove; this frees only the path string.
+    if (job.tmp) |b| gpa.free(b);
+    gpa.destroy(job);
+}
+
+/// `wl_exec_status() -> i32`: how the delivered command ended, or -1 outside a
+/// delivery (and for a child that died by signal — both mean "not a clean exit
+/// code", which is the only distinction a caller acts on).
+pub fn hExecStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = if (p.resources.exec) |e| e.status else -1;
+}
+
+/// `wl_exec_read(which, offset, out, cap) -> i32`: a window on the delivered
+/// command's stdout (`which` 0) or stderr (1), from `offset`. Returns the byte
+/// count written, or -1 outside a delivery. Paged, so a chatty command is
+/// clamped by the guest's buffer rather than by a fixed host limit.
+pub fn hExecRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const e = p.resources.exec orelse {
+        results[0] = -1;
+        return;
+    };
+    const stream = if (args[0] == 0) e.stdout else e.stderr;
+    const offset: usize = @intCast(@max(args[1], 0));
+    const from = if (offset >= stream.len) stream[0..0] else stream[offset..];
+    shared.writeExact(caller, args[2..], results, from);
+}
+
 /// A deferred proc FILTER: run `[start,end)` through a command (which rewrites
 /// a temp file in place, `{}` = its path) and replace the range with the
 /// result. The range is captured as CRDT identities and lands as the plugin

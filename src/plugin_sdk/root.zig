@@ -147,6 +147,15 @@ pub const PluginHooks = @import("plugin.zig").Hooks;
 pub const plugin = @import("plugin.zig").plugin;
 pub const thunk = @import("plugin.zig").thunk;
 
+// ── exec: an argv in, (status, stdout, stderr) out ────────────────────
+// See `exec.zig` for what this replaces. `weft.plugin` exports `on_exec`,
+// so a plugin supplies a continuation and never an async demux.
+pub const ExecSpec = @import("exec.zig").Spec;
+pub const ExecDone = @import("exec.zig").Done;
+pub const ExecStream = @import("exec.zig").Stream;
+pub const exec = @import("exec.zig").exec;
+pub const execWith = @import("exec.zig").execWith;
+
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
     return e.wl_cursor();

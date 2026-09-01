@@ -342,6 +342,10 @@ const guests = [_]Guest{
     // ("a subprocess gets a real file, the guest gets no fs perm") is proven by
     // a guest that genuinely holds none.
     .{ .name = "spool", .import = "guest_spool_wasm", .install = false },
+    // `wl_exec`'s gate guest: the same `{proc, timer}` set, proving the three
+    // facts the fill doors could not carry (status, stderr, an argument that
+    // is one argument) and that the spool contract survives the move to argv.
+    .{ .name = "exec_gate", .import = "guest_exec_wasm", .install = false },
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end.
     .{ .name = "badge", .import = "guest_badge_wasm", .install = false },

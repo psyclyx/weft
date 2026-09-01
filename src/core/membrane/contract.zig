@@ -324,6 +324,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_proc_append_buffer", .handler = proc.hProcAppendBuffer },
     .{ .name = "wl_proc_spool", .handler = proc.hProcSpool },
     .{ .name = "wl_proc_filter", .handler = proc.hProcFilter },
+    .{ .name = "wl_exec", .handler = proc.hExec },
+    .{ .name = "wl_exec_status", .handler = proc.hExecStatus },
+    .{ .name = "wl_exec_read", .handler = proc.hExecRead },
 
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
     .{ .name = "wl_repl_start", .handler = sessions.hReplStart },
@@ -502,6 +505,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_proc_append_buffer", .perm = .proc_timer }, // proc.zig hProcAppendBuffer: .proc + .timer
     .{ .name = "wl_proc_spool", .perm = .proc_timer }, // proc.zig hProcSpool → spawnFill: .proc + .timer
     .{ .name = "wl_proc_filter", .perm = .proc_timer }, // proc.zig hProcFilter: .proc + .timer
+    .{ .name = "wl_exec", .perm = .proc_timer }, // proc.zig hExec: .proc + .timer
     .{ .name = "wl_repl_start", .perm = .proc_timer }, // sessions.zig hReplStart: .proc + .timer
     .{ .name = "wl_net_connect", .perm = .net }, // sessions.zig hNetConnect: .net
     .{ .name = "wl_fs_read", .perm = .fs_read }, // fs.zig hFsRead: .fs_read

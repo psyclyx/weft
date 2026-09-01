@@ -85,6 +85,33 @@ pub const Resources = struct {
     /// Network connections (design §6.5) — the socket mirror of `sessions`.
     net_sessions: handles.Slots(net_session.Session) = .empty,
 
+    /// The finished `wl_exec` a delivery is currently handing back. Set just
+    /// before the guest's `on_exec` runs and torn down the moment it returns,
+    /// so the read doors answer only inside the callback that owns them and a
+    /// guest cannot hold one command's output into the next one's.
+    ///
+    /// It lives here rather than as a job field because the READ DOORS need it
+    /// and a door is only ever given the plugin's resources — which is exactly
+    /// the shape that stops "the result of whose exec?" from being a question.
+    exec: ?Exec = null,
+
+    /// A completed child: what it said on both streams, and how it ended.
+    pub const Exec = struct {
+        /// The exit code, or -1 for a child that died by signal or never ran.
+        /// A guest gets ONE number for "did this work", where the old sentinel
+        /// protocol had it print its own status into stdout for the plugin to
+        /// scan back out.
+        status: i32,
+        stdout: []u8,
+        stderr: []u8,
+
+        pub fn deinit(self: *Exec, gpa: Allocator) void {
+            gpa.free(self.stdout);
+            gpa.free(self.stderr);
+            self.* = undefined;
+        }
+    };
+
     pub fn init(gpa: Allocator, name: []const u8, pool: ?*Pool, environ: std.process.Environ) Resources {
         return .{ .gpa = gpa, .name = name, .pool = pool, .environ = environ };
     }
@@ -96,6 +123,7 @@ pub const Resources = struct {
         self.streams.deinit(self.gpa); // kill + join each
         self.sessions.deinit(self.gpa); // kill + join each
         self.net_sessions.deinit(self.gpa); // shut + join each
+        if (self.exec) |*e| e.deinit(self.gpa); // an unload mid-callback
     }
 
     /// Whether anything here still has buffered output or a live reader — the

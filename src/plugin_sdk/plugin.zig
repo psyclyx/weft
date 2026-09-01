@@ -130,10 +130,18 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             return null;
         }
 
+        /// The host's `exec` delivery, routed to the continuation that asked
+        /// for it. Exported unconditionally: a plugin that never calls `exec`
+        /// pays one unused export, and one that does never writes a demux.
+        fn onExec(token: u32) callconv(.c) void {
+            @import("exec.zig").deliver(token);
+        }
+
         pub fn exportAll() void {
             @export(&describeFn, .{ .name = "describe" });
             @export(&initFn, .{ .name = "init" });
             @export(&onCommand, .{ .name = "on_command" });
+            @export(&onExec, .{ .name = "on_exec" });
         }
 
         /// The host id for a command this plugin declared, by name — for the

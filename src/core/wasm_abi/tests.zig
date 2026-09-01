@@ -17,6 +17,7 @@ const semantic_mod = @import("../semantic.zig");
 const async_loop = @import("../async.zig");
 const net_session = @import("../net_session.zig");
 const wasm_host = @import("../wasm_host.zig");
+const plugin_resources = @import("../plugin_resources.zig");
 const contract = @import("../membrane/contract.zig");
 const semantic_model = @import("weft_semantic");
 const fs_contract = @import("weft_fs").contract;
@@ -3165,6 +3166,130 @@ test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs p
     // Two spools never share a path, so one in flight cannot eat another's
     // input — the property git's per-draft message files used to hand-roll.
     try t.expect(!std.mem.eql(u8, ok_at, fail_at));
+}
+
+// ── wl_exec: argv in, (status, stdout, stderr) out ─────────────────────────
+// The fill doors carry ONE of the three facts a command produces, so a plugin
+// recovered the other two by convention: git makes each command print its own
+// exit status (`printf '\036\036C%d'`) and scans the sentinel back out of the
+// output, and folds stderr into stdout with `2>&1`. These gates are the
+// difference between that and a door.
+
+/// The `*exec*` line the fixture wrote, which is a guest's only channel back.
+fn execReport(env: *Env, gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+    const buf = namedBuffer(&env.buffers, name) orelse return error.TestExpectedEqual;
+    return buf.textEditor().?.text().toOwnedSlice(gpa);
+}
+
+test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is one argument" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "exec_gate", @embedFile("guest_exec_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // `exec` grants nothing the fill doors did not: the same set, and no fs.
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+
+    // The two streams arrive APART. Under the fill doors this needed `2>&1`,
+    // after which nothing could tell them back apart.
+    _ = try command.run(&env.commands, &env.ctx, "exec-ok", &.{});
+    drainJobs(&loop);
+    {
+        const line = try execReport(&env, gpa, "*exec-ok*");
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "status=0") != null);
+        try t.expect(std.mem.indexOf(u8, line, "out=out-said") != null);
+        try t.expect(std.mem.indexOf(u8, line, "err=err-said") != null);
+    }
+
+    // A non-zero exit crosses as a NUMBER. Nothing in the output says 7.
+    _ = try command.run(&env.commands, &env.ctx, "exec-fail", &.{});
+    drainJobs(&loop);
+    {
+        const line = try execReport(&env, gpa, "*exec-fail*");
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "status=7") != null);
+        try t.expect(std.mem.indexOf(u8, line, "ok=false") != null);
+        try t.expect(std.mem.indexOf(u8, line, "err=nope") != null);
+    }
+
+    // The quoting class, deleted. One argument holding spaces, a semicolon, a
+    // `$`, backticks, a pipe, and both kinds of quote reaches the child WHOLE —
+    // there is no shell between the guest and the argv, so there is nothing for
+    // a hand-written `'{s}'` to fail to escape.
+    _ = try command.run(&env.commands, &env.ctx, "exec-argv", &.{});
+    drainJobs(&loop);
+    {
+        const line = try execReport(&env, gpa, "*exec-argv*");
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "whole=true") != null);
+    }
+
+    // A continuation carries its own value. The token stays the SDK's.
+    _ = try command.run(&env.commands, &env.ctx, "exec-ctx", &.{});
+    drainJobs(&loop);
+    {
+        const line = try execReport(&env, gpa, "*exec-ctx*");
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "carried=4242") != null);
+        try t.expect(std.mem.indexOf(u8, line, "out=ran") != null);
+    }
+}
+
+test "wasm plugin: wl_exec keeps the spool contract — a real file, no fs perm, gone after" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "exec_gate", @embedFile("guest_exec_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+
+    _ = try command.run(&env.commands, &env.ctx, "exec-spool", &.{});
+    drainJobs(&loop);
+    const line = try execReport(&env, gpa, "*exec-spool*");
+    defer gpa.free(line);
+
+    // The child read the guest's bytes off a real file…
+    try t.expect(std.mem.indexOf(u8, line, "in=hello exec") != null);
+    // …at a path the HOST chose. The guest passed an argv and bytes, never a
+    // path and never a directory to put one in.
+    const at = spooledPath(line) orelse return error.TestExpectedEqual;
+    try t.expect(std.mem.startsWith(u8, at, "/tmp/weft-exec-"));
+    // …and it is gone, though the guest leaked the name through its own stdout.
+    try t.expectEqual(file.Kind.none, file.statKind(gpa, at));
+}
+
+test "membrane: wl_exec_status and wl_exec_read answer only inside a delivery" {
+    // The window on a command's output is exactly the `on_exec` call that owns
+    // it. Outside one there is no result to read, so a guest cannot hold one
+    // command's output into the next command's — asserted at the door rather
+    // than trusted to the SDK, because the SDK is guest code.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "exec_gate", @embedFile("guest_exec_wasm"), .{});
+    defer plugin.deinit();
+    try t.expectEqual(@as(?plugin_resources.Resources.Exec, null), plugin.resources.exec);
 }
 
 test "membrane: wl_proc_spool returns nothing to the guest" {
