@@ -67,6 +67,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const pick = @import("pick.zig");
+const projection_mod = @import("projection.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
@@ -268,6 +269,10 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // core holding bytes it cannot interpret. Nothing else about annotation
     // is core's — no category, no note, no policy about who may write one.
     try pick.declareAnnotation(&self.container);
+    // How a projection ROLE reads, as bindings rather than a switch — so a
+    // theme restyles a diff, or styles a role core never heard of, the same
+    // way anything else overrides anything else.
+    try projection_mod.declareTheme(&self.container);
     try self.intent.init(gpa);
     errdefer self.intent.deinit(gpa);
     try self.intent.attachActions(gpa, &self.actions);

@@ -48,7 +48,7 @@ const Allocator = std.mem.Allocator;
 pub const Span = struct {
     start: u32,
     end: u32,
-    /// Owned. Resolved through `styleFor` exactly as a node's role is, so the
+    /// Owned. Resolved through `theme/<leaf>` exactly as a node's role is, so the
     /// theme sees one vocabulary and a producer still chooses no colours.
     role: []u8,
 };
@@ -60,7 +60,7 @@ pub const Node = struct {
     /// it, so a row that keeps its key keeps both.
     key: []u8,
     /// A name for what this row IS — `git.file`, `fs.directory`, `dap.frame`.
-    /// Owned. Styling resolves through it (`styleFor`), and it is the hook a
+    /// Owned. Styling resolves through it (`theme/<leaf>`), and it is the hook a
     /// third party attaches to without knowing the producer.
     role: []u8,
     /// The row text, verbatim, including any indentation the producer wants.
@@ -374,38 +374,81 @@ pub const View = struct {
     }
 };
 
-/// The role → style mapping. A producer names WHAT a row is; how that looks is
-/// resolved here, so a theme has something to theme and a plugin stops choosing
-/// colours. Matching is on the last dotted segment, so `git.file` and
-/// `fs.file` both read as `file` without either producer coordinating.
-///
-/// An unknown role is `.normal`. That is the honest default: a producer naming
-/// something this table has never heard of should render as plain text, not as
-/// a guess.
-pub fn styleFor(role: []const u8) u8 {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, role, '.')) |dot| role[dot + 1 ..] else role;
-    const table = .{
-        .{ "added", 1 },
-        .{ "removed", 2 },
-        .{ "header", 3 },
-        .{ "section", 3 },
-        .{ "title", 3 },
-        .{ "location", 4 },
-        .{ "path", 4 },
-        .{ "file", 4 },
-        .{ "commit", 4 },
-        .{ "emphasis", 5 },
-        .{ "muted", 6 },
-        .{ "detail", 6 },
-        .{ "hunk", 6 },
-    };
-    inline for (table) |row| {
-        if (std.mem.eql(u8, leaf, row[0])) return row[1];
+/// The slot a role's appearance resolves through: `theme/<leaf>`, value-shaped,
+/// first-wins. Core binds the defaults below at `.core` tier, so a config or a
+/// theme plugin restyles any role by binding the same slot at a higher tier —
+/// and can bind roles core never heard of, which is what makes a new producer's
+/// vocabulary themeable without core learning it.
+pub const theme_slot_prefix = "theme/";
+
+/// What core says each role looks like, ABSENT any other opinion. This is data
+/// bound into the container at `.core` tier (`declareTheme`), not a switch — so
+/// it is overridable in the same way as everything else rather than in a way
+/// peculiar to styling.
+pub const default_theme = [_]struct { leaf: []const u8, class: u8 }{
+    .{ .leaf = "added", .class = 1 },
+    .{ .leaf = "removed", .class = 2 },
+    .{ .leaf = "header", .class = 3 },
+    .{ .leaf = "section", .class = 3 },
+    .{ .leaf = "title", .class = 3 },
+    .{ .leaf = "location", .class = 4 },
+    .{ .leaf = "path", .class = 4 },
+    .{ .leaf = "file", .class = 4 },
+    .{ .leaf = "commit", .class = 4 },
+    .{ .leaf = "emphasis", .class = 5 },
+    .{ .leaf = "muted", .class = 6 },
+    .{ .leaf = "detail", .class = 6 },
+    .{ .leaf = "hunk", .class = 6 },
+};
+
+/// A role's LEAF — the last dotted segment, so `git.file` and `fs.file` both
+/// read as `file` without either producer coordinating with the other.
+pub fn leafOf(role: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, role, '.')) |dot| role[dot + 1 ..] else role;
+}
+
+/// Declare `theme/<leaf>` and bind core's defaults. Called once from
+/// `System.init`, beside `pick.declareAnnotation` and for the same reason: core
+/// has to READ these answers, so it declares the shape it can interpret.
+pub fn declareTheme(container: *@import("container.zig").Container) !void {
+    inline for (default_theme) |row| {
+        const slot = theme_slot_prefix ++ row.leaf;
+        try container.declareSlot(.{ .name = slot, .shape = .value, .composition = .first_wins });
+        try container.bind(.{
+            .slot = slot,
+            .provider = .{ .value = std.fmt.comptimePrint("{d}", .{row.class}) },
+            .predicate = .{ .all = &.{} },
+            .tier = .core,
+            .owner = "core.theme",
+        });
     }
-    return 0;
+}
+
+/// The role → style class for one role, resolved through the container.
+///
+/// An unknown role is `.normal` (0). That is the honest default: a producer
+/// naming something nobody has themed should render as plain text, not as a
+/// guess — and a theme that wants otherwise says so by binding the slot.
+pub fn styleForIn(container: *const @import("container.zig").Container, f: @import("weft_facts").Facts, role: []const u8) u8 {
+    var buf: [128]u8 = undefined;
+    const slot = std.fmt.bufPrint(&buf, theme_slot_prefix ++ "{s}", .{leafOf(role)}) catch return 0;
+    const winner = container.resolveOne(slot, f) orelse return 0;
+    const text = switch (winner.provider) {
+        .value => |v| v,
+        else => return 0,
+    };
+    return std.fmt.parseInt(u8, text, 10) catch 0;
 }
 
 const t = std.testing;
+
+/// A container holding only core's theme, for the tests below.
+fn themedContainer() !@import("container.zig").Container {
+    var c = @import("container.zig").Container.init(t.allocator);
+    errdefer c.deinit();
+    try declareTheme(&c);
+    return c;
+}
 
 test "projection: a parent encloses its children, and the innermost wins" {
     var v: View = .init(t.allocator);
@@ -475,7 +518,58 @@ test "projection: a selection inside a node is line ordinals, never offsets" {
 test "projection: styling resolves through the role's last segment" {
     // Two producers, no coordination, same reading — and an unknown role is
     // plain rather than a guess.
-    try t.expectEqual(styleFor("git.file"), styleFor("fs.file"));
-    try t.expectEqual(@as(u8, 1), styleFor("git.diff.added"));
-    try t.expectEqual(@as(u8, 0), styleFor("something.nobody.declared"));
+    var c = try themedContainer();
+    defer c.deinit();
+    try t.expectEqual(styleForIn(&c, .{}, "git.file"), styleForIn(&c, .{}, "fs.file"));
+    try t.expectEqual(@as(u8, 1), styleForIn(&c, .{}, "git.diff.added"));
+    try t.expectEqual(@as(u8, 0), styleForIn(&c, .{}, "something.nobody.declared"));
+}
+
+test "projection: a theme rebinds a role, and can style one core never heard of" {
+    // The point of `theme/<leaf>` being a slot rather than a switch: core's
+    // answers are bindings at `.core` tier, so anything above outranks them by
+    // the ordinary rule — no styling-specific override mechanism.
+    var c = try themedContainer();
+    defer c.deinit();
+
+    // Core's defaults, read through the container rather than the table.
+    try t.expectEqual(@as(u8, 1), styleForIn(&c, .{}, "git.diff.added"));
+    try t.expectEqual(@as(u8, 0), styleForIn(&c, .{}, "output.result"));
+
+    // A theme restyles an existing role…
+    try c.bind(.{
+        .slot = theme_slot_prefix ++ "added",
+        .provider = .{ .value = "5" },
+        .predicate = .{ .all = &.{} },
+        .tier = .config,
+        .owner = "my-theme",
+    });
+    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{}, "git.diff.added"));
+    // …and every producer that named that leaf follows, without knowing.
+    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{}, "dap.added"));
+
+    // …and styles a role core has never heard of, which is the half a
+    // hardcoded table could not do at all.
+    try c.declareSlot(.{ .name = theme_slot_prefix ++ "result", .shape = .value, .composition = .first_wins });
+    try c.bind(.{
+        .slot = theme_slot_prefix ++ "result",
+        .provider = .{ .value = "4" },
+        .predicate = .{ .all = &.{} },
+        .tier = .config,
+        .owner = "my-theme",
+    });
+    try t.expectEqual(@as(u8, 4), styleForIn(&c, .{}, "output.result"));
+
+    // A theme may be CONTEXTUAL, because eligibility is the ordinary predicate:
+    // the same role reads differently in a different mode, with nothing in the
+    // styling path aware that modes exist.
+    try c.bind(.{
+        .slot = theme_slot_prefix ++ "added",
+        .provider = .{ .value = "2" },
+        .predicate = .{ .mode = "review" },
+        .tier = .config,
+        .owner = "my-theme",
+    });
+    try t.expectEqual(@as(u8, 2), styleForIn(&c, .{ .mode = "review" }, "git.diff.added"));
+    try t.expectEqual(@as(u8, 5), styleForIn(&c, .{ .mode = "normal" }, "git.diff.added"));
 }

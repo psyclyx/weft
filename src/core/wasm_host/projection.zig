@@ -164,18 +164,24 @@ fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind:
 }
 
 /// Roles → classes, in one bulk pass over the rendered bytes. The producer
-/// named WHAT each row is; `projection.styleFor` decides how that reads, which
-/// is what gives a theme something to bind and stops a plugin choosing colours.
+/// named WHAT each row is; the CONTAINER decides how that reads — `theme/<leaf>`
+/// resolved like any other slot — which is what gives a theme something to bind
+/// and stops a plugin choosing colours.
 fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize) void {
     const gpa = p.gpa;
     const layer = p.activeCtx().caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
     const classes = gpa.alloc(u8, len) catch return;
     defer gpa.free(classes);
     @memset(classes, 0);
+    // A tree has many nodes and few distinct roles, and the resolution for a
+    // role cannot change mid-render — so resolve each role ONCE. Without this
+    // a thousand-row grep result would scan the whole binding list a thousand
+    // times to be told the same thing.
+    var theme: RoleCache = .{ .container = p.activeCtx().actions.container, .facts = .{} };
     // Parents first, children after, so a child's own role wins over the range
     // its parent painted — the reading a nested row wants.
     for (view.nodes.items) |n| {
-        const class = projection.styleFor(n.role);
+        const class = theme.classOf(n.role);
         const start = @min(n.start, classes.len);
         // A node's OWN first line, not its whole subtree: a section header is
         // emphasised, its files are not painted as the section.
@@ -186,7 +192,7 @@ fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize)
         // relative to text it wrote; the node's rendered start is added here,
         // which is the only place that knows it.
         for (n.spans.items) |s| {
-            const sc = projection.styleFor(s.role);
+            const sc = theme.classOf(s.role);
             if (sc == 0) continue;
             const lo = @min(start + s.start, classes.len);
             const hi = @min(start + s.end, classes.len);
@@ -197,6 +203,34 @@ fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize)
     defer gpa.free(version);
     layer.publishBulk(gpa, version, 0, classes) catch {};
 }
+
+/// One render's answers, so the container is asked once per distinct role.
+///
+/// Fixed and small on purpose: a tree with more than this many distinct roles
+/// is not a styling problem, and past the cap the extra roles simply resolve
+/// every time rather than being wrong. Lives for one `paintStyles` call, which
+/// is the whole window in which the answer is guaranteed not to move.
+const RoleCache = struct {
+    container: *const @import("../container.zig").Container,
+    facts: @import("weft_facts").Facts,
+    leaves: [24][]const u8 = undefined,
+    classes: [24]u8 = undefined,
+    n: usize = 0,
+
+    fn classOf(self: *RoleCache, role: []const u8) u8 {
+        const leaf = projection.leafOf(role);
+        for (self.leaves[0..self.n], self.classes[0..self.n]) |seen, class| {
+            if (std.mem.eql(u8, seen, leaf)) return class;
+        }
+        const class = projection.styleForIn(self.container, self.facts, role);
+        if (self.n < self.leaves.len) {
+            self.leaves[self.n] = leaf;
+            self.classes[self.n] = class;
+            self.n += 1;
+        }
+        return class;
+    }
+};
 
 /// One invisible span per collapsed node, from just past its own line to the
 /// end of its subtree — the header stays, the body goes.
