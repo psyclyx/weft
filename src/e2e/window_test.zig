@@ -354,3 +354,67 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
     try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expectEqual(before_companion, outline.retargets);
 }
+
+// A LISTING IS A BUFFER, which is the whole of what makes a sidebar trivial.
+//
+// A sidebar is a VIEWPORT and presenting a resource in one is an ordinary
+// operation whose implementation (`window_cmds.presentIn`) runs `open` and puts
+// the resulting BUFFER in the pane. So a listing that is a buffer docks with no
+// second path, no sidebar-specific producer, and no plugin that knows what a
+// sidebar is — while the same buffer, undocked, is a listing you can search and
+// yank in like any other text.
+test "e2e/files: the listing is an ordinary buffer, navigable by key" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytes(gpa, "alpha.txt", "ALPHA\n");
+    try core.file.writeBytes(gpa, "bravo.txt", "BRAVO\n");
+    try core.file.writeBytesMakingDirs(gpa, "nested", "nested/inner.txt", "INNER\n");
+
+    // The listing reads the place, so it needs the same grant a config gives
+    // it — `fs_read` rooted where the test runs.
+    try ed.grantRooted("files", "fs_read", "/");
+    ed.run("files-list");
+    try t.expectEqualStrings("*files-list*", ed.bufferName());
+
+    // The entries are TEXT — which is the half the scene plane could not give.
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "alpha.txt") != null);
+        try t.expect(std.mem.indexOf(u8, text, "bravo.txt") != null);
+        try t.expect(std.mem.indexOf(u8, text, "nested") != null);
+    }
+
+    // Descending is by the row's KEY, never by reading the rendered line back:
+    // point lands on the first focusable row, and `nested` is reachable from it
+    // with ordinary cursor motion.
+    var hops: usize = 0;
+    while (hops < 32) : (hops += 1) {
+        const at = ed.buffers.active().projection.?.subjectAt(
+            ed.buffers.active().textEditor().?.cursorOffset(),
+        );
+        if (at) |node| if (std.mem.eql(u8, node.key, "d:nested")) break;
+        ed.press("j", "");
+    } else return error.NestedRowNeverFocused;
+    ed.press("Return", "");
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "inner.txt") != null);
+        // ONE buffer for the listing — descending is a new tree in the same
+        // entry, not a buffer per directory to clean up after.
+        try t.expectEqualStrings("*files-list*", ed.bufferName());
+    }
+
+    // And back up.
+    ed.press("^", "");
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "alpha.txt") != null);
+    }
+}
