@@ -203,28 +203,28 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "semantic.txt", "field draft\n");
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "plain.txt", "");
     ed.runStr("open", ".");
-    const files_path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
-    const files_view = ed.session.system.semantic.views.get(files_path.view) orelse return error.NoFilesView;
-    var old_field: ?semantic.scene.FieldRef = null;
-    for (files_view.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
-        const columns = row.content.container.children;
-        if (columns.len < 3 or columns[2].content != .field) continue;
-        const ref = columns[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, "semantic.txt")) old_field = ref;
-    }
-    const retained = old_field orelse return error.FilesNameNotFound;
+    const listing_id = ed.buffers.active_id;
+    const listing = ed.buffers.get(listing_id) orelse return error.NoListing;
+    try t.expect(listing.projection != null);
+    const before = try ed.textAlloc();
+    defer gpa.free(before);
+    try t.expect(std.mem.indexOf(u8, before, "semantic.txt") != null);
+
+    // Leave the listing for an ordinary text buffer and type. The regression:
+    // typing must reach THIS buffer, not the row the listing left focused —
+    // the listing's rows are editable, so "which thing is my typing about" is
+    // answered by which ENTRY is active, and by nothing else.
     ed.runStr("open", "plain.txt");
     ed.press("i", "");
     ed.typeText("typed through text buffer");
     const text = try ed.textAlloc();
     defer gpa.free(text);
     try t.expectEqualStrings("typed through text buffer", text);
-    var old_snapshot = try ed.session.system.semantic.fields.get(retained).?.snapshot(gpa);
-    defer old_snapshot.deinit();
-    try t.expectEqualStrings("semantic.txt", old_snapshot.value.bytes);
+
+    // And the listing is exactly as it was.
+    const after = try ed.buffers.get(listing_id).?.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(after);
+    try t.expectEqualStrings(before, after);
 }
 
 test "e2e/project: git push/pull/fetch transients are sticky menus" {

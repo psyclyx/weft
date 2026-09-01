@@ -18,7 +18,23 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "files-enter", .call = enterRow, .summary = "Open what the focused listing row names." },
     .{ .name = "files-up", .call = stepOut, .summary = "Open the directory containing this listing." },
     .{ .name = "files-apply", .call = applyFocused, .summary = "Apply the renames typed into this listing." },
-};
+} ++ actionCommands();
+
+/// One command per standard verb the listing claims, generated from the same
+/// table it `provide`s — so a verb cannot be offered without a command behind
+/// it, or the reverse.
+fn actionCommands() [files_guest.Plugin.action_verbs.len]weft.CommandEntry {
+    var out: [files_guest.Plugin.action_verbs.len]weft.CommandEntry = undefined;
+    inline for (files_guest.Plugin.action_verbs, 0..) |verb, i| out[i] = .{
+        .name = files_guest.Plugin.actionCommandName(verb),
+        .call = struct {
+            fn call() void {
+                plugin.actOnListing(verb);
+            }
+        }.call,
+    };
+    return out;
+}
 comptime {
     weft.plugin(&cmds, .{
         .perms = &.{ .fs_read, .fs_write },

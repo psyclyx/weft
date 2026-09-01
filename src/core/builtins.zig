@@ -35,11 +35,28 @@ fn semanticMove(ctx: *Context, movement: @import("weft_semantic").focus.Movement
 /// simply has no semantic action to consume, so the command is a harmless
 /// no-op there.
 fn invokeSemanticAction(ctx: *Context, action_name: []const u8) anyerror!Value {
-    const services = ctx.semantic orelse return ok;
-    _ = services.invokeFocusedAction(&ctx.head.interactions, ctx.head, ctx.gpa, action_name) catch |err| switch (err) {
-        error.ActionUnavailable, error.StaleView => return ok,
-        else => return err,
-    };
+    if (ctx.semantic) |services| {
+        if (services.invokeFocusedAction(&ctx.head.interactions, ctx.head, ctx.gpa, action_name)) |_| {
+            return ok;
+        } else |err| switch (err) {
+            error.ActionUnavailable, error.StaleView => {},
+            else => return err,
+        }
+    }
+    // ONE ACTION NAME, EITHER PLANE.
+    //
+    // `view.apply`, `fs.entry.create-file`, `selection.delete` are what a
+    // person means, and a config binds the NAME. Which plane answers is not
+    // their business: a scene-backed view answers through its focused node, and
+    // a producer whose view is a text PROJECTION answers by `provide`-ing the
+    // same name against what the row under point IS. Without this the two
+    // planes needed two vocabularies for one idea, which is exactly the fork
+    // doc/plugin-api.md §F2 is about.
+    //
+    // An action nobody claims is still a no-op, as it always was — an ordinary
+    // text buffer has no `view.apply` and says so by silence.
+    const cmd = ctx.actions.resolveFacts(action_name, ctx.capturedCtx().mergedFacts()) orelse return ok;
+    _ = try command.run(ctx.commands, ctx, cmd, &.{});
     return ok;
 }
 

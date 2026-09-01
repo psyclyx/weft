@@ -223,6 +223,67 @@ pub fn provideRowVerbs() void {
     // Saving a listing is applying what was typed into it — the same
     // `std.persistence.save` a text buffer resolves, scoped to this tool.
     weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
+    // The workspace vocabulary, claimed for a listing whose view is a text
+    // projection. A config binds the NAME (`view.apply`, `fs.entry.create-file`);
+    // which plane answers is core.s question, not the user.s — see
+    // `builtins.invokeSemanticAction`.
+    const in_listing: weft.Predicate = .{ .tool = "files" };
+    inline for (action_verbs) |verb| weft.provide(verb, in_listing, actionCommandName(verb), 0);
+}
+
+/// One command per standard verb, each running it against the row under point.
+///
+/// Generated rather than listed: the table below IS the set the plugin
+/// `provide`s, so a verb cannot be offered without a command behind it or the
+/// reverse.
+pub const action_verbs = [_][]const u8{
+    semantic.action.standard.copy,
+    semantic.action.standard.cut,
+    semantic.action.standard.delete,
+    semantic.action.standard.paste_before,
+    semantic.action.standard.paste_after,
+    semantic.action.standard.toggle_expanded,
+    semantic.action.standard.set_working_target,
+    semantic.action.standard.refresh,
+    semantic.action.standard.revert,
+    semantic.action.standard.apply,
+    files.permissions_edit_action,
+    files.create_file_action,
+    files.create_directory_action,
+};
+
+pub fn actionCommandName(comptime verb: []const u8) []const u8 {
+    return "files-act-" ++ verb;
+}
+
+/// The row under point, as the action plane.s subject.
+///
+/// A scene-backed view answers an action from its FOCUSED NODE; a listing that
+/// is a text projection answers from the row point is on. Same action, same
+/// name, same controller — only "which row" is asked differently, which is the
+/// one thing that genuinely differs between a scene and a buffer.
+fn subjectRow(session: *Session) ?semantic.scene.NodeId {
+    _ = session;
+    const key = weft.projectionAtCursor() orelse return null;
+    const id = files.text_rows.idOf(key) orelse return null;
+    return files.rowNodeId(id) catch null;
+}
+
+/// Run a standard action on the focused listing. `subject` is the row under
+/// point when there is one — an action like `view.apply` or
+/// `fs.entry.create-file` is about the VIEW and needs none.
+pub fn actOnListing(self: *Plugin, name: []const u8) void {
+    const session = self.focusedSession() orelse return;
+    _ = session.invoke(.{
+        .action = name,
+        .view = session.view_ref,
+        // A view-scoped verb (`view.apply`, a create) has no row; the view.s
+        // own root node stands for "this listing", the same node the scene
+        // handed such an action.
+        .subject = subjectRow(session) orelse files.rootNodeId(),
+    }) catch {
+        weft.echo("files: that does not apply here");
+    };
 }
 
 /// The session whose listing is focused, if any.
