@@ -599,7 +599,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
     });
     try actions.provide(.{
         .action = "save",
-        .when = .{ .tool = projection_author },
+        .predicate = .{ .tool = projection_author },
         .command = "transcript-save",
         .priority = 10,
         .owner = "transcript",

@@ -60,6 +60,10 @@ pub const layers = @import("layers.zig");
 /// A node tree rendered into a text buffer, with the host owning every
 /// offset — the primitive every tool projection was hand-rolling.
 pub const projection = @import("projection.zig");
+/// The one context vocabulary and its predicate — shared with every guest as
+/// the `weft_facts` module, re-exported here so host-side consumers name it
+/// through core like every other core type.
+pub const facts = @import("weft_facts");
 /// BUILT AHEAD, NOT YET WIRED — same as `watch` above. Render-embeds
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");

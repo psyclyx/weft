@@ -11,6 +11,7 @@
 //! JS) — powers a config wants come through weft's own gated ABI, not Node's.
 
 const std = @import("std");
+const facts = @import("weft_facts");
 const Allocator = std.mem.Allocator;
 const wasm = @import("wasm.zig");
 const command = @import("command.zig");
@@ -1628,12 +1629,13 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         m.addProvide(action, mode, lang, cmd, priority) catch {};
         return;
     }
+    var pred_buf: [2]facts.Predicate = undefined;
     br.activeCtx().actions.provide(.{
         .action = action,
-        .when = .{
-            .mode = if (mode.len > 0) mode else null,
-            .lang = if (lang.len > 0) lang else null,
-        },
+        .predicate = facts.allOf(&pred_buf, &.{
+            if (mode.len > 0) .{ .mode = mode } else null,
+            if (lang.len > 0) .{ .lang = lang } else null,
+        }),
         .command = cmd,
         .priority = priority,
         .owner = "config",

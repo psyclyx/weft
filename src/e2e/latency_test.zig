@@ -250,7 +250,7 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
         const lang = std.fmt.bufPrint(&buf, "decoy-lang-{d}", .{i}) catch unreachable;
         try ed.ctx.actions.provide(.{
             .action = "latency-action",
-            .when = .{ .lang = lang },
+            .predicate = .{ .lang = lang },
             .command = "latency-noop",
             .priority = @intCast(i % 5),
             .owner = "latency-test",
@@ -261,7 +261,7 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
         const mode = std.fmt.bufPrint(&buf, "decoy-mode-{d}", .{i}) catch unreachable;
         try ed.ctx.actions.provide(.{
             .action = "latency-action",
-            .when = .{ .mode = mode },
+            .predicate = .{ .mode = mode },
             .command = "latency-noop",
             .priority = @intCast(i % 5),
             .owner = "latency-test",
@@ -271,22 +271,26 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
     // (so the predicate does a real two-field check before failing on tool).
     for (0..7) |i| {
         const tool = std.fmt.bufPrint(&buf, "decoy-tool-{d}", .{i}) catch unreachable;
+        // A conjunction, spelled as one — where the two-field `When` struct
+        // this replaces made "and" implicit in the shape of the literal.
+        const two = [_]core.facts.Predicate{ .{ .tool = tool }, .{ .lang = "zig" } };
         try ed.ctx.actions.provide(.{
             .action = "latency-action",
-            .when = .{ .tool = tool, .lang = "zig" },
+            .predicate = .{ .all = &two },
             .command = "latency-noop",
             .priority = @intCast(i % 5),
             .owner = "latency-test",
         });
     }
     // 25 decoys total. 7 contenders, mixed priority/specificity:
+    const normal_zig = [_]core.facts.Predicate{ .{ .mode = "normal" }, .{ .lang = "zig" } };
     try ed.ctx.actions.provide(.{ .action = "latency-action", .command = "latency-noop", .owner = "latency-test" }); // specificity 0
-    try ed.ctx.actions.provide(.{ .action = "latency-action", .when = .{ .mode = "normal" }, .command = "latency-noop", .owner = "latency-test" }); // specificity 1
-    try ed.ctx.actions.provide(.{ .action = "latency-action", .when = .{ .lang = "zig" }, .command = "latency-noop", .owner = "latency-test" }); // specificity 1
-    try ed.ctx.actions.provide(.{ .action = "latency-action", .when = .{ .mode = "normal", .lang = "zig" }, .command = "latency-noop", .owner = "latency-test" }); // specificity 2
-    try ed.ctx.actions.provide(.{ .action = "latency-action", .when = .{ .mode = "normal" }, .priority = 10, .command = "latency-noop", .owner = "latency-test" }); // higher priority
+    try ed.ctx.actions.provide(.{ .action = "latency-action", .predicate = .{ .mode = "normal" }, .command = "latency-noop", .owner = "latency-test" }); // specificity 1
+    try ed.ctx.actions.provide(.{ .action = "latency-action", .predicate = .{ .lang = "zig" }, .command = "latency-noop", .owner = "latency-test" }); // specificity 1
+    try ed.ctx.actions.provide(.{ .action = "latency-action", .predicate = .{ .all = &normal_zig }, .command = "latency-noop", .owner = "latency-test" }); // specificity 2
+    try ed.ctx.actions.provide(.{ .action = "latency-action", .predicate = .{ .mode = "normal" }, .priority = 10, .command = "latency-noop", .owner = "latency-test" }); // higher priority
     try ed.ctx.actions.provide(.{ .action = "latency-action", .command = "latency-noop", .priority = -5, .owner = "latency-test" }); // lower priority
-    try ed.ctx.actions.provide(.{ .action = "latency-action", .when = .{ .mode = "normal", .lang = "zig" }, .priority = 10, .command = "latency-noop", .owner = "latency-test" }); // ties the top priority+specificity — wins overall
+    try ed.ctx.actions.provide(.{ .action = "latency-action", .predicate = .{ .all = &normal_zig }, .priority = 10, .command = "latency-noop", .owner = "latency-test" }); // ties the top priority+specificity — wins overall
 
     try ed.keymap.bind(gpa, "normal", "F2", "latency-action", core.Keymap.prio_config, "latency-test");
 }

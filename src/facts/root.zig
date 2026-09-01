@@ -374,7 +374,51 @@ fn decodeOne(gpa: std.mem.Allocator, cur: *[]const u8, depth: usize) DecodeError
     }
 }
 
-/// Release a predicate produced by `decode`.
+/// Deep-copy a predicate so a registry can outlive the caller's stack. The
+/// mirror of `free`, and the reason a caller may pass a literal: `provide`
+/// and `slotBind` both take a predicate built inline at the call site.
+pub fn dupe(gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error!Predicate {
+    switch (pred) {
+        .all, .any => |kids| {
+            const owned = try gpa.alloc(Predicate, kids.len);
+            var built: usize = 0;
+            errdefer {
+                for (owned[0..built]) |k| free(gpa, k);
+                gpa.free(owned);
+            }
+            while (built < kids.len) : (built += 1) owned[built] = try dupe(gpa, kids[built]);
+            return if (pred == .all) .{ .all = owned } else .{ .any = owned };
+        },
+        .not => |k| {
+            const owned = try gpa.create(Predicate);
+            errdefer gpa.destroy(owned);
+            owned.* = try dupe(gpa, k.*);
+            return .{ .not = owned };
+        },
+        .locus => |l| return .{ .locus = l },
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s, kind| {
+            return @unionInit(Predicate, @tagName(kind), try gpa.dupe(u8, s));
+        },
+    }
+}
+
+/// `all{…}` over the leaves that are present, skipping the absent ones —
+/// the shape every "narrow by mode and/or lang and/or tool, whichever the
+/// caller supplied" site has. `buf` must hold `parts.len`; the result
+/// borrows it, so `dupe` it if it must outlive the call.
+///
+/// Zero present leaves yields `all{}`, which matches everything: a caller
+/// that narrowed by nothing did not narrow.
+pub fn allOf(buf: []Predicate, parts: []const ?Predicate) Predicate {
+    var n: usize = 0;
+    for (parts) |maybe| if (maybe) |leaf| {
+        buf[n] = leaf;
+        n += 1;
+    };
+    return .{ .all = buf[0..n] };
+}
+
+/// Release a predicate produced by `decode` or `dupe`.
 pub fn free(gpa: std.mem.Allocator, pred: Predicate) void {
     switch (pred) {
         .all, .any => |kids| {
@@ -476,6 +520,28 @@ test "facts: a predicate survives the wire whole, combinators included" {
     }
     // Specificity must survive too — it is what orders competing bindings.
     try t.expectEqual(pred.specificity(), back.specificity());
+}
+
+test "facts: dupe survives its source, and allOf drops the absent axes" {
+    const gpa = t.allocator;
+    const owned = blk: {
+        // The source goes out of scope; the copy must not follow it.
+        var kids = [_]Predicate{ .{ .ext = ".zig" }, .{ .mode = "normal" } };
+        const src: Predicate = .{ .all = &kids };
+        break :blk try dupe(gpa, src);
+    };
+    defer free(gpa, owned);
+    try t.expect(owned.matches(.{ .path = "a.zig", .mode = "normal" }));
+    try t.expect(!owned.matches(.{ .path = "a.zig", .mode = "insert" }));
+
+    var buf: [3]Predicate = undefined;
+    const some = allOf(&buf, &.{ .{ .mode = "normal" }, null, .{ .tool = "git" } });
+    try t.expectEqual(@as(usize, 2), some.all.len);
+    // Narrowed by nothing is not narrowed — it matches everything, which is
+    // what a provider that named no axis meant.
+    const none = allOf(&buf, &.{ null, null });
+    try t.expectEqual(@as(usize, 0), none.all.len);
+    try t.expect(none.matches(.{}));
 }
 
 test "facts: a hostile blob is refused, not obeyed and not fatal" {

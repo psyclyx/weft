@@ -690,37 +690,24 @@ pub fn stickyMenu(mode: []const u8) void {
     e.wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
 }
 
-/// A provider's context predicate — the ambient facts that must hold for it to
-/// win. An absent field is "don't care". Mirrors core.action.When.
-pub const When = struct {
-    /// Keymap mode that must be active.
-    mode: ?[]const u8 = null,
-    /// Buffer language — the active buffer name's extension (`zig`, `py`).
-    lang: ?[]const u8 = null,
-    /// The active buffer's tool-backing name (a plugin projection: `files`) —
-    /// a stable per-buffer signal, unlike `mode`. A projection scopes its
-    /// `save`/etc. providers by this so they win in its buffer in any mode.
-    tool: ?[]const u8 = null,
-};
-
 /// Register `cmd` as a provider for `action` under the predicate `when`, at
 /// `prio` (higher wins; ties break toward the more specific `when`). Auto-
 /// declares the action if `declareAction` hasn't run — a language plugin can
 /// `provide("eval", .{ .lang = "zig" }, "zig-eval", 0)` and the key bound to
 /// `eval` dispatches here in a .zig buffer, for free.
-pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void {
-    const m = when.mode orelse "";
-    const l = when.lang orelse "";
-    const tl = when.tool orelse "";
+pub fn provide(action: []const u8, when: Predicate, cmd: []const u8, prio: i32) void {
+    // Same codec as `slotBind` — one predicate vocabulary, one encoding, on
+    // both doors. `.{ .tool = "git-draft" }` reads identically to the `When`
+    // literal it replaces, because the narrow struct was always a subset of
+    // this union; what is new is that `any`, `glob`, `tag`, and `locus` are
+    // now sayable at this door too.
+    const bytes = @import("weft_facts").encode(allocator, when) catch return;
+    defer allocator.free(bytes);
     e.wl_provide(
         p(action.ptr),
         @intCast(action.len),
-        p(m.ptr),
-        @intCast(m.len),
-        p(l.ptr),
-        @intCast(l.len),
-        p(tl.ptr),
-        @intCast(tl.len),
+        p(bytes.ptr),
+        @intCast(bytes.len),
         p(cmd.ptr),
         @intCast(cmd.len),
         prio,
@@ -2607,8 +2594,9 @@ pub fn slotDeclare(name: []const u8, shape: SlotShape, composition: SlotComposit
 /// subset of it.
 ///
 /// There used to be two narrower spellings on this side of the membrane: a
-/// `SlotPredicate` union of five cases for `slotBind`, and a `When` struct of
-/// three optional strings for `provide`. Neither could express a disjunction,
+/// five-case union for `slotBind`, and a three-optional-string struct for
+/// `provide` (both named in `e2e/demolition_test.zig`, which is the only file
+/// allowed to spell them). Neither could express a disjunction,
 /// a glob, a tag, or a locality, so a provider whose interest was any of those
 /// carried the test inside itself — and interest the host cannot see is
 /// interest the host cannot route, gate, or explain.

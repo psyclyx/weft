@@ -31,8 +31,8 @@
 //! **F5 Container adapter, W3 RESOLVED (doc/configuration.md §7).**
 //! `pick` resolution is a query against `container.Container`: each
 //! `provide()` call binds a Container `Binding` on a slot named for the
-//! action, using `When`/`ProvideSpec` only to TRANSLATE into a `Binding` at
-//! registration time (predicate, priority, tier, owner, `decl_index`). The
+//! action, using `ProvideSpec` only to carry a `Binding`.s parts to
+//! registration (predicate, priority, tier, owner, `decl_index`). The
 //! RESOLVE half of the adapter — the thing W3's deletion gate named — is
 //! gone from the dispatch path: `command.actionTrampoline` (the ONE call
 //! site that fires on every keystroke) queries `container.resolveOne`
@@ -52,8 +52,7 @@
 //! slots bind into — action names, `edit/*` capability names, and `ui/*`
 //! mesh names are one flat Container slot namespace. With the resolve path
 //! gone, `Actions` is a REGISTRATION FACADE over `Container.bind`, plus the
-//! domain vocabulary that facade needs: `When`/`ProvideSpec` → `Predicate`
-//! translation (`predicateFromWhen`), the `next_provide_seq` counter that
+//! domain vocabulary that facade needs: the `next_provide_seq` counter that
 //! reproduces the legacy "later registration wins" contract through the
 //! Container's "earlier `decl_index` wins" convention (see `provide`'s
 //! doc), and owner-scoped teardown (`unregisterByOwnerPrefix`/
@@ -88,29 +87,6 @@ pub const Policy = enum {
     race,
 };
 
-/// A context predicate over the ambient facts of the moment. Every PRESENT
-/// field must hold (conjunction); an absent field is "don't care", so an empty
-/// `When` matches everything (the default provider). v1 vocabulary is `mode`
-/// and `lang`; the shape is deliberately small and grow-only — disjunction and
-/// negation are a later addition, not a rewrite (a provider list already gives
-/// OR across providers, and priority gives override).
-pub const When = struct {
-    /// Keymap mode that must be active (`normal`, `insert`, `files`, …).
-    mode: ?[]const u8 = null,
-    /// Buffer language — the active buffer name's extension without the dot
-    /// (`zig`, `py`, `md`). Matched case-sensitively.
-    lang: ?[]const u8 = null,
-    /// The active buffer's tool-backing name (a plugin projection: `files`,
-    /// `git`), or null = don't care. Unlike `mode` — which changes as you
-    /// edit a projection (vim `i`/Escape → insert/normal) — the tool-backing is
-    /// a stable per-BUFFER signal, so a projection scopes its `save` (and other
-    /// context intents) to its own identity, in any mode.
-    tool: ?[]const u8 = null,
-    // Specificity (constraint count) and eligibility ("holds") used to be
-    // hand-rolled methods here; both are now `facts.Predicate`'s job (via
-    // `predicateFromWhen` + `container.Container`) — see `provide`/`resolve`.
-};
-
 /// The ambient facts a `When` tests against — snapshotted at fire time from the
 /// live editor (active mode + active buffer). `lang` is "" when the buffer has
 /// no extension (a tool buffer, `*scratch*`).
@@ -131,22 +107,17 @@ pub fn langOfName(name: []const u8) []const u8 {
 }
 
 const Provider = struct {
-    when: When, // owned strings (when.mode/.lang)
+    /// The provider.s eligibility, OWNED — a deep copy of whatever the
+    /// caller passed, so a literal built at the call site is fine.
+    predicate: facts.Predicate,
     priority: i32,
     command: []u8, // owned — the concrete command this provider runs
     owner: []u8, // owned — plugin/config name, for teardown
-    /// Owned backing array for the Container `Binding.predicate` this
-    /// provider bound (`predicateFromWhen`'s `.all` slice — empty but still
-    /// allocated when `when` is unconstrained, so `deinit` is uniform).
-    predicate_owned: []facts.Predicate = &.{},
 
     fn deinit(self: *Provider, gpa: Allocator) void {
-        if (self.when.mode) |m| gpa.free(m);
-        if (self.when.lang) |l| gpa.free(l);
-        if (self.when.tool) |tl| gpa.free(tl);
+        facts.free(gpa, self.predicate);
         gpa.free(self.command);
         gpa.free(self.owner);
-        gpa.free(self.predicate_owned);
     }
 };
 
@@ -276,7 +247,10 @@ pub fn policyOf(self: *const Actions, name: []const u8) ?Policy {
 
 pub const ProvideSpec = struct {
     action: []const u8,
-    when: When = .{},
+    /// What must hold for this provider to be eligible. `all{}` — the
+    /// default — is "always", which is what a provider that named no axis
+    /// meant. Borrowed for the call; `provide` deep-copies it.
+    predicate: facts.Predicate = .{ .all = &.{} },
     command: []const u8,
     priority: i32 = 0,
     owner: []const u8 = "plugin",
@@ -321,18 +295,13 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
     try gop.value_ptr.providers.ensureUnusedCapacity(gpa, 1);
 
     var p: Provider = .{
-        .when = .{},
+        .predicate = try facts.dupe(gpa, spec.predicate),
         .priority = spec.priority,
         .command = try gpa.dupe(u8, spec.command),
         .owner = try gpa.dupe(u8, spec.owner),
     };
     errdefer p.deinit(gpa);
-    if (spec.when.mode) |m| p.when.mode = try gpa.dupe(u8, m);
-    if (spec.when.lang) |l| p.when.lang = try gpa.dupe(u8, l);
-    if (spec.when.tool) |tl| p.when.tool = try gpa.dupe(u8, tl);
-
-    const pred = try predicateFromWhen(gpa, p.when);
-    p.predicate_owned = ownedBacking(pred);
+    const pred = p.predicate;
 
     // decl_index: the Container's canonical tie-break convention is
     // "earlier decl_index wins" (container.zig's `betterThan`); THIS
@@ -386,36 +355,6 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
 
 /// Build the Container predicate for `when`: each present field is one
 /// conjunct (`.all` of 0..3 leaves — 0 = unconstrained, matches always,
-/// specificity 0, exactly the old `When{}` default provider's standing).
-/// Always heap-allocates (even the empty case) so `Provider.deinit`'s
-/// `gpa.free` is uniform regardless of how many fields were set.
-fn predicateFromWhen(gpa: Allocator, w: When) Allocator.Error!facts.Predicate {
-    var buf: [3]facts.Predicate = undefined;
-    var n: usize = 0;
-    if (w.mode) |m| {
-        buf[n] = .{ .mode = m };
-        n += 1;
-    }
-    if (w.lang) |l| {
-        buf[n] = .{ .lang = l };
-        n += 1;
-    }
-    if (w.tool) |tl| {
-        buf[n] = .{ .tool = tl };
-        n += 1;
-    }
-    const owned = try gpa.alloc(facts.Predicate, n);
-    @memcpy(owned, buf[0..n]);
-    return .{ .all = owned };
-}
-
-fn ownedBacking(p: facts.Predicate) []facts.Predicate {
-    return switch (p) {
-        .all => |k| @constCast(k),
-        else => &.{},
-    };
-}
-
 /// The concrete command an action resolves to in `ctx`, or null when no
 /// provider's `when` holds. The winner is the highest priority among applicable
 /// providers; ties break toward the MORE SPECIFIC `when` (a `lang:zig` provider
@@ -492,8 +431,8 @@ test "action: pick resolves by context, priority, and specificity" {
     defer acts.deinit();
 
     // eval: a zig provider, a python provider, and an unconstrained default.
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval" });
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "py" }, .command = "python-repl" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "zig-eval" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "py" }, .command = "python-repl" });
     try acts.provide(.{ .action = "eval", .command = "eval-line-default", .priority = -10 });
 
     try t.expectEqualStrings("zig-eval", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
@@ -504,13 +443,13 @@ test "action: pick resolves by context, priority, and specificity" {
     // Specificity breaks an equal-priority tie: a lang-scoped provider beats an
     // unconstrained one bound at the SAME priority.
     try acts.provide(.{ .action = "fmt", .command = "fmt-generic" });
-    try acts.provide(.{ .action = "fmt", .when = .{ .lang = "zig" }, .command = "zig-fmt" });
+    try acts.provide(.{ .action = "fmt", .predicate = .{ .lang = "zig" }, .command = "zig-fmt" });
     try t.expectEqualStrings("zig-fmt", acts.resolve("fmt", .{ .mode = "normal", .lang = "zig" }).?);
     try t.expectEqualStrings("fmt-generic", acts.resolve("fmt", .{ .mode = "normal", .lang = "c" }).?);
 
     // An unknown action, and an action with no applicable provider, resolve null.
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("nope", .{ .mode = "normal" }));
-    try acts.provide(.{ .action = "run", .when = .{ .mode = "debug" }, .command = "run-target" });
+    try acts.provide(.{ .action = "run", .predicate = .{ .mode = "debug" }, .command = "run-target" });
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("run", .{ .mode = "normal", .lang = "zig" }));
 }
 
@@ -522,7 +461,7 @@ test "action: a projection scopes save by its tool identity, in any mode" {
 
     // Core's default save (file write), and a projection's save provider.
     try acts.provide(.{ .action = "save", .command = "save-file" });
-    try acts.provide(.{ .action = "save", .when = .{ .tool = "projection" }, .command = "projection-save" });
+    try acts.provide(.{ .action = "save", .predicate = .{ .tool = "projection" }, .command = "projection-save" });
 
     // In the projection, its provider wins — REGARDLESS of mode
     // (normal while you :w, insert while you type): the tool identity is stable.
@@ -541,13 +480,13 @@ test "action: declare is idempotent and provider load-order-independent" {
     defer acts.deinit();
 
     // provide-before-declare works (auto-declares).
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "zig-eval" });
     _ = try acts.declare("eval", .pick);
     try t.expect(acts.isAction("eval"));
     try t.expectEqual(Policy.pick, acts.policyOf("eval").?);
 
     // Higher priority wins regardless of registration order.
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval-lsp", .priority = 100 });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "zig-eval-lsp", .priority = 100 });
     try t.expectEqualStrings("zig-eval-lsp", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
 }
 
@@ -557,7 +496,7 @@ test "action: owner-prefix teardown drops a plugin's providers" {
     var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval", .owner = "zig-tools#3" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "zig-eval", .owner = "zig-tools#3" });
     try acts.provide(.{ .action = "eval", .command = "eval-default", .owner = "config", .priority = -10 });
     try t.expectEqualStrings("zig-eval", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
 
@@ -574,8 +513,8 @@ test "action: unregisterByOwner is exact — a false-prefix sibling survives" {
 
     // "import:def" is a literal string-prefix of "import:defaults" — the
     // exact scenario `unregisterByOwnerPrefix` would get wrong.
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "from-def", .owner = "import:def" });
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "py" }, .command = "from-defaults", .owner = "import:defaults" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "from-def", .owner = "import:def" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "py" }, .command = "from-defaults", .owner = "import:defaults" });
 
     acts.unregisterByOwner("import:def");
     // The false-prefix sibling's provider survives.
@@ -630,7 +569,7 @@ test "action: race intents are enumerable, and reject pick providers" {
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("hover", .{ .mode = "normal", .lang = "zig" }));
 
     // noteRace is idempotent and doesn't disturb a real pick action.
-    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval" });
+    try acts.provide(.{ .action = "eval", .predicate = .{ .lang = "zig" }, .command = "zig-eval" });
     acts.noteRace("hover");
     try t.expectEqualStrings("zig-eval", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
 }

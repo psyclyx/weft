@@ -87,6 +87,23 @@ const retired_dead_doors = [_][]const u8{
     "wl_semantic_transfer_release",
 };
 
+/// The narrower predicate spellings, retired into `facts.Predicate`.
+///
+/// `When` was three optional strings on `wl_provide`; `SlotPredicate` was a
+/// five-case union over a four-tag wire on `wl_slot_bind`. Both were subsets
+/// of the host type they were translated into on arrival, and neither could
+/// express a disjunction, a glob, a tag, or a locality — so a provider whose
+/// interest was any of those bound broadly and re-tested inside its own
+/// command, putting the eligibility question back on the guest side of a
+/// membrane it had been moved off.
+///
+/// One type now, encoded and decoded by one function called from both
+/// planes. A third narrowing growing back is the thing to refuse.
+const retired_predicate_dialects = [_][]const u8{
+    "SlotPredicate",
+    "predicateFromWhen",
+};
+
 const Violation = struct {
     path: []const u8,
     line: usize,
@@ -196,6 +213,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
         for (retired_dead_doors) |gone| {
             if (std.mem.indexOf(u8, line, gone) != null)
                 try scan.record(rel_path, line_no, "a door retired for having no caller — bring its consumer in the same change or leave it out");
+        }
+
+        for (retired_predicate_dialects) |gone| {
+            if (std.mem.indexOf(u8, line, gone) != null)
+                try scan.record(rel_path, line_no, "a narrower predicate dialect — there is one facts.Predicate, encoded by one codec");
         }
 
         if (std.mem.indexOf(u8, line, "fn semanticActive") != null) {

@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command_mod = @import("../command.zig");
 const input = @import("weft_input");
+const facts = @import("weft_facts");
 const Keymap = @import("../Keymap.zig");
 
 const shared = @import("plugin.zig");
@@ -60,32 +61,40 @@ pub fn hBindKeys(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     p.activeCtx().keymap.bindArms(gpa, mode, key, cmds[0..n], Keymap.prio_plugin, p.name) catch {};
 }
 
-/// wl_provide(action, mode, lang, tool, cmd, prio) — a plugin registers a
-/// provider for `action`, owned by its name (so teardown drops it and equal-
-/// tier collisions are attributable). Empty mode/lang/tool = "don't care".
+/// wl_provide(action, predicate, cmd, prio) — a plugin registers a provider
+/// for `action`, owned by its name (so teardown drops it and equal-tier
+/// collisions are attributable).
+///
+/// The predicate crosses as an encoded `facts.Predicate`, through the same
+/// codec `wl_slot_bind` uses. It used to cross as three fixed strings —
+/// mode, lang, tool, each empty for "don't care" — which is a `When`, and
+/// `When` was only ever translated into a `Predicate` on arrival. Three
+/// parameters could express a conjunction of three specific axes and
+/// nothing else: no glob, no tag, no locality, and no disjunction. A
+/// provider wanting any of those had to bind broadly and re-test inside its
+/// own command, which is the eligibility question leaking back across the
+/// membrane it was moved off.
 pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
     const action = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(action);
-    const mode = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(mode);
-    const lang = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
-    defer gpa.free(lang);
-    const tool = caller.readMemory(gpa, @intCast(args[6]), @intCast(args[7])) catch return;
-    defer gpa.free(tool);
-    const cmd = caller.readMemory(gpa, @intCast(args[8]), @intCast(args[9])) catch return;
+    const pred_bytes = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(pred_bytes);
+    const cmd = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(cmd);
+    // A malformed blob narrows to nothing rather than trapping — the same
+    // permissive degradation `wl_slot_bind` documents, for the same reason:
+    // a predicate is a narrowing, never a grant. `provide` deep-copies, so
+    // this tree is ours to release either way.
+    const predicate = facts.decode(gpa, pred_bytes) catch facts.Predicate{ .all = &.{} };
+    defer facts.free(gpa, predicate);
     p.activeCtx().actions.provide(.{
         .action = action,
-        .when = .{
-            .mode = if (mode.len > 0) mode else null,
-            .lang = if (lang.len > 0) lang else null,
-            .tool = if (tool.len > 0) tool else null,
-        },
+        .predicate = predicate,
         .command = cmd,
-        .priority = args[10],
+        .priority = args[6],
         .owner = p.name,
     }) catch |e| if (e == error.RaceRejectsProvider) {
         // Surface the mistake to the plugin author via the echo line when the

@@ -103,7 +103,7 @@ pub extern "weft" fn wl_exit_to_resting() void;
 pub extern "weft" fn wl_resting_posture(posture: u32, ptr: u32, len: u32) void;
 pub extern "weft" fn wl_posture() u32;
 pub extern "weft" fn wl_declare_posture(posture: u32) void;
-pub extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
+pub extern "weft" fn wl_provide(a: u32, al: u32, pred: u32, pred_len: u32, c: u32, cl: u32, prio: i32) void;
 pub extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
 pub extern "weft" fn wl_run(ptr: u32, len: u32) void;
 pub extern "weft" fn wl_run_int(ptr: u32, len: u32, n: i32) void;

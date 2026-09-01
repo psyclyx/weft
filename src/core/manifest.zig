@@ -65,6 +65,7 @@ const command = @import("command.zig");
 const builtins = @import("builtins.zig");
 const kv = @import("kv.zig");
 const container_mod = @import("container.zig");
+const facts = @import("weft_facts");
 const Keymap = @import("Keymap.zig");
 const surface = @import("surface.zig");
 const grants_mod = @import("grants.zig");
@@ -797,9 +798,13 @@ pub const Manifest = struct {
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
+            var pred_buf: [2]facts.Predicate = undefined;
             actx.ctx.actions.provide(.{
                 .action = d.action,
-                .when = .{ .mode = optStr(d.mode), .lang = optStr(d.lang) },
+                .predicate = facts.allOf(&pred_buf, &.{
+                    if (optStr(d.mode)) |m| .{ .mode = m } else null,
+                    if (optStr(d.lang)) |l| .{ .lang = l } else null,
+                }),
                 .command = d.command,
                 .priority = d.priority,
                 .owner = self.owner,

@@ -238,7 +238,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
     .{ .name = "wl_mode_names", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "every mode with a binding table, newline-joined; cap=0 reports the length, short destinations return -2" },
     .{ .name = "wl_binding_table", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "mode `m`'s bindings resolved through its fallback chain, one `<key>\t<command>` per line" },
-    .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, scoped by mode/lang/tool + priority" },
+    .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, narrowed by an encoded facts.Predicate (same codec as wl_slot_bind) + priority" },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
     .{ .name = "wl_register", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .commands, .doc = "register-phase: intern a name into this plugin's local command id table" },
