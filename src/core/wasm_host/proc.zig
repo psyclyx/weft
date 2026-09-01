@@ -892,11 +892,31 @@ fn execWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     // for the same reason (a failed effect must not litter).
     var argv = job.argv;
     var substituted: ?[][]const u8 = null;
-    defer if (substituted) |owned| gpa.free(owned);
+    defer if (substituted) |owned| {
+        // Free only the arguments substitution ALLOCATED; the rest still point
+        // into the job's own block.
+        for (owned, job.argv) |made, original| {
+            if (made.ptr != original.ptr) gpa.free(made);
+        }
+        gpa.free(owned);
+    };
     if (job.tmp) |tmp| {
         file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return encodeExec(gpa, -1, "", "");
+        // `{}` is replaced WITHIN an argument, not only as a whole one. A
+        // whole-argument rule covers `git apply {}` but not `-c
+        // sequence.editor=cp {}`, where the path has to land inside a value
+        // git will hand to a shell of its own — which is precisely a case
+        // where the guest must not be the one holding the path.
         const owned = gpa.alloc([]const u8, job.argv.len) catch return encodeExec(gpa, -1, "", "");
-        for (job.argv, 0..) |a, i| owned[i] = if (std.mem.eql(u8, a, "{}")) tmp else a;
+        var built: usize = 0;
+        errdefer for (owned[0..built]) |a| if (a.ptr != job.argv[0].ptr) gpa.free(a);
+        while (built < job.argv.len) : (built += 1) {
+            const a = job.argv[built];
+            owned[built] = if (std.mem.indexOf(u8, a, "{}") != null)
+                (std.mem.replaceOwned(u8, gpa, a, "{}", tmp) catch return encodeExec(gpa, -1, "", ""))
+            else
+                a;
+        }
         substituted = owned;
         argv = owned;
     }
@@ -942,6 +962,32 @@ fn execDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         if (resources.exec) |*done| done.deinit(gpa);
         resources.exec = null;
     }
+
+    // A DISPATCHING entry, unlike the fill door's `on_fill_token`.
+    //
+    // The classification in `wasm_host/commands.zig` splits host→guest entries
+    // by whether a real head is behind the call, and every background one traps
+    // on the head-gated doors. That is right for an entry nobody asked for — an
+    // activation, a poll, a provider answering someone else's query. It is
+    // wrong for THIS one: a delivery is the second half of a command the user
+    // ran, and refusing it the echo line means a plugin cannot report what its
+    // own effect did. The sanctioned escape (`wl_run` back into a registered
+    // command) is what git and lsp each hand-rolled to get around exactly this,
+    // which is evidence the gate was in the wrong place, not that the plugins
+    // were wrong.
+    //
+    // So the continuation runs as a dispatch, with the same save/restore
+    // discipline `wpCmdTrampoline` uses — reentrancy-safe, because a
+    // continuation may `wl_run` another command, and because two execs can be
+    // in flight and land nested only through the loop's own sequencing.
+    //
+    // What this does NOT do is widen the class for entries nobody asked for.
+    // `on_activate`, `on_poll`, `on_menu`, and every provider trampoline stay
+    // background, so "ambient code cannot take the head" — the mode-leak
+    // class's founding rule — is untouched.
+    const saved_dispatch = job.styler.in_dispatch;
+    job.styler.in_dispatch = true;
+    defer job.styler.in_dispatch = saved_dispatch;
     contract.callOptionalExport("on_exec", &job.styler.instance, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
 }
 

@@ -101,13 +101,11 @@ const buildPatch = patch_mod.buildPatch;
 const transient = @import("transient.zig");
 const gather_mod = @import("gather.zig");
 const show = gather_mod.show;
-const showInput = gather_mod.showInput;
 const gather = gather_mod.gather;
-const gatherAfter = gather_mod.gatherAfter;
-const gatherAfter1 = gather_mod.gatherAfter1;
-const gatherAfterSeq = gather_mod.gatherAfterSeq;
-const gatherAfterSeq1 = gather_mod.gatherAfterSeq1;
-const gatherAfterPatch = gather_mod.gatherAfterPatch;
+const after = gather_mod.after;
+const afterInput = gather_mod.afterInput;
+const afterNoted = gather_mod.afterNoted;
+const Argv = gather_mod.Argv;
 const markRestore = gather_mod.markRestore;
 const selectedLines = render_mod.selectedLines;
 const hashTokenAt = render_mod.hashTokenAt;
@@ -123,15 +121,10 @@ const toggleFileFold = render_mod.toggleFile;
 const lineEnd = render_mod.lineEnd;
 const countLines = render_mod.countLines;
 const Kind = model.Kind;
-const Fill = model.Fill;
-const fillToken = model.fillToken;
-const gathers = model.gathers;
 const Node = model.Node;
-const MARK_C = model.MARK_C;
 const MARK_U = model.MARK_U;
 const MARK_S = model.MARK_S;
 const MARK_R = model.MARK_R;
-const GATHER = model.GATHER;
 const buf_base = model.buf_base;
 const tool = model.tool;
 
@@ -141,7 +134,6 @@ var msg_buf: [1 << 16]u8 = undefined;
 /// Buffer for building a rebase plan's todo lines + the transient op command.
 var op_buf: [1 << 14]u8 = undefined;
 /// The command handed to `procToBuffer`: the session's `cd` guard + the body.
-var run_buf: [1 << 14]u8 = undefined;
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
 var tmp_buf: [1024]u8 = undefined;
 /// Scratch for the focused buffer's path made absolute (`activePathAbs`) —
@@ -300,6 +292,11 @@ comptime {
 }
 
 fn initExtra() void {
+    // What a settled gather owes the rest of the plugin, and how a view is
+    // coloured. Installed rather than called directly so `gather.zig` stays
+    // readable without the rest of this file in your head.
+    model.on_gathered = onGathered;
+    model.on_view_filled = onViewFilled;
     // git mode: navigation plus the interactive verbs. It declares no text
     // commit, and the `*git*` entry holds no editor at all, so typing refuses
     // STRUCTURALLY — there is nothing for a mode lock to protect. It is the
@@ -505,26 +502,55 @@ fn refuseStale() void {
     if (cur().fresh() and focusedSession() == model.routed) rerender();
 }
 
-// ── on_fill_token: the async output landed → parse + render + publish ──────
+// ── What runs when a gather settles, and when a view's text lands ──────────
+//
+// This was `on_fill_token`: one export receiving a `u32` the plugin had packed
+// `(session << 8) | kind` into, unpacked back into a session and an
+// eight-member `Fill` enum, and demultiplexed by a switch — one delivery door
+// for eight unrelated things, each far from the code that asked for it.
+//
+// Every one of those eight is now the continuation of the call that wanted it,
+// carrying its own session (`execWith`). What is left is the pair of hooks
+// `gather.zig` calls when the bytes are in: the sequencing that a settled
+// gather owes the rest of the plugin, and how a read-only view is coloured.
 
-export fn on_fill_token(token: u32) void {
-    // A token we never issued routes nowhere.
-    const s = sessionById(token >> 8) orelse return;
-    const fill = std.enums.fromInt(Fill, token & 0xff) orelse return;
-    model.routed = s;
-    if (gathers(fill)) {
-        cur().gathering = false;
-        cur().snapshot +%= 1;
-    }
-    switch (fill) {
+fn onGathered() void {
+    paintOwnEntry();
+    // The settles run OUTSIDE the focus scope above, because each does its own
+    // focus work — landing on a draft to close it, then landing back — and a
+    // restore wrapped around that would put focus on an entry the settle had
+    // just retired.
+    if (cur().committing != null) gitCommitSettle();
+    if (cur().sequencing != null) gitRebaseSettle();
+}
+
+/// Repaint the session's OWN entry, whatever happens to be focused.
+///
+/// The fill door used to guarantee this by binding the target entry at spawn:
+/// a delivery could not be misdirected because it never asked what was active.
+/// `exec` carries a PLACE, not an entry, and `repaint` authors the active
+/// buffer — so the guarantee is re-made here, by landing on the entry and
+/// landing back.
+///
+/// This is the seam the projection closes for good: `wl_proj_begin` captures
+/// the entry once, and nothing between then and the commit can redirect it.
+/// Deleting this function is the first thing git's port to it buys.
+fn paintOwnEntry() void {
+    var prev_buf: [64]u8 = undefined;
+    const prev = weft.activeBufferName(&prev_buf);
+    if (!model.focusBuffer(cur().name())) return; // the entry went away mid-flight
+    defer if (prev) |name| {
+        if (!std.mem.eql(u8, name, cur().name())) _ = model.focusBuffer(name);
+    };
+    renderStatus();
+}
+
+fn onViewFilled(style: model.ViewStyle) void {
+    switch (style) {
         .none => {},
-        .status => parseAndRender(),
         .diff => classify(styleDiffLine),
         .log => classify(styleLogLine),
-        .rebase => rebaseTodoFill(),
-        .draft => draftFill(),
-        .commit => commitFill(),
-        .sequence => sequenceFill(),
+        .rebase_todo => rebaseTodoFill(),
     }
 }
 
@@ -696,32 +722,10 @@ fn absolute(pth: []const u8, here: []const u8) []const u8 {
 }
 
 /// Pull the buffer's raw bytes into `raw` (paged in `slice`-sized windows, since
-/// a read clamps to the 64 KiB scratch). Cap at RAW_CAP and note truncation —
-/// no silent drop.
-fn loadRaw() void {
-    const total = weft.byteLen();
-    cur().raw_len = 0;
-    cur().truncated_raw = false;
-    while (cur().raw_len < total and cur().raw_len < RAW_CAP) {
-        const chunk = weft.slice(cur().raw_len, total); // returns ≤ 64 KiB
-        if (chunk.len == 0) break;
-        const n = @min(chunk.len, RAW_CAP - cur().raw_len);
-        @memcpy(cur().raw[cur().raw_len .. cur().raw_len + n], chunk[0..n]);
-        cur().raw_len += n;
-        if (n < chunk.len) break;
-    }
-    if (total > RAW_CAP) cur().truncated_raw = true;
-}
-
 /// Re-render the model over this session's buffer. The projection is
 /// authored FIRST; styles and folds then index the new bytes. `render.zig`
 /// owns every step, including the write — this is the name a verb calls.
 const repaint = render_mod.repaint;
-
-fn parseAndRender() void {
-    loadRaw();
-    renderStatus();
-}
 
 /// Model → projection, over whatever `raw` currently holds.
 fn renderStatus() void {
@@ -918,7 +922,7 @@ fn gitPrevRow() void {
 
 fn gitStatus() void {
     cur().restore_cursor = false;
-    gather(GATHER);
+    gather_mod.gather();
     weft.setMode("git");
 }
 
@@ -930,11 +934,11 @@ fn gitStatus() void {
 /// `git status --branch` renders the fresh `Branch: main` header.
 fn gitInit() void {
     cur().restore_cursor = false;
-    gatherAfterSeq("git init");
+    after(&.{ "git", "init" });
 }
 fn gitRefresh() void {
     markRestore();
-    gather(GATHER);
+    gather_mod.gather();
     weft.setMode("git");
 }
 
@@ -1014,7 +1018,7 @@ fn gitStage() void {
                 weft.echo("stage: already staged");
                 return;
             }
-            gatherAfter1("git add -- '{s}'", f.path_());
+            after(&.{ "git", "add", "--", f.path_() });
         },
         .section => {
             if (t.section == .staged) return;
@@ -1041,7 +1045,7 @@ fn gitUnstage() void {
                 weft.echo("unstage: not staged");
                 return;
             }
-            gatherAfter1("git reset -q HEAD -- '{s}'", f.path_());
+            after(&.{ "git", "reset", "-q", "HEAD", "--", f.path_() });
         },
         .section => {
             if (t.section != .staged) return;
@@ -1052,27 +1056,29 @@ fn gitUnstage() void {
 }
 
 fn gitStageAll() void {
-    gatherAfter("git add -A");
+    after(&.{ "git", "add", "-A" });
 }
 fn gitUnstageAll() void {
-    gatherAfter("git reset -q HEAD");
+    after(&.{ "git", "reset", "-q", "HEAD" });
 }
 
 /// Stage/unstage every file of a section (a section header operation).
+///
+/// One command with one argument per file — where this used to build a shell
+/// line by wrapping each path in `'{s}'`, which is wrong for any path
+/// containing an apostrophe and was never going to be right for one containing
+/// a newline.
 fn stageSection(sec: Section, stage: bool) void {
-    const verb = if (stage) "git add --" else "git reset -q HEAD --";
-    var w: usize = 0;
-    w += (std.fmt.bufPrint(cmd_buf[w..], "{s}", .{verb}) catch return).len;
-    var any = false;
+    var argv: Argv = .{};
+    if (stage) argv.pushAll(&.{ "git", "add", "--" }) else argv.pushAll(&.{ "git", "reset", "-q", "HEAD", "--" });
+    const before = argv.n;
     var fi: usize = 0;
     while (fi < cur().file_count) : (fi += 1) {
         if (cur().files[fi].section != sec) continue;
-        const seg = std.fmt.bufPrint(cmd_buf[w..], " '{s}'", .{cur().files[fi].path_()}) catch break;
-        w += seg.len;
-        any = true;
+        argv.push(cur().files[fi].path_());
     }
-    if (!any) return;
-    gatherAfter(cmd_buf[0..w]);
+    if (argv.n == before) return;
+    after(argv.slice());
 }
 
 // ── Discard (destructive — always confirmed) ────────────────────────────────
@@ -1121,12 +1127,16 @@ fn gitDiscardDo(yes: bool, armed: Armed) void {
         .file => {
             const f = &cur().files[n.idx];
             switch (f.section) {
-                .untracked => gatherAfter1("rm -- '{s}'", f.path_()),
-                .unstaged => gatherAfter1("git checkout -- '{s}'", f.path_()),
-                .staged => {
-                    const mut = std.fmt.bufPrint(&msg_buf, "git reset -q HEAD -- '{s}' && git checkout -- '{s}'", .{ f.path_(), f.path_() }) catch return;
-                    gatherAfter(mut);
-                },
+                // `rm` has no `-C`, so it gets the path made absolute against the
+                // session.s root — the same join `open` already uses for a row.
+                .untracked => after(&.{ "rm", "--", cur().inRepo(f.path_()) }),
+                .unstaged => after(&.{ "git", "checkout", "--", f.path_() }),
+                // `checkout HEAD --` restores index AND worktree in one
+                // command. The pair it replaces (`reset -q HEAD` then
+                // `checkout`) existed because the two were fused with `&&` into
+                // a shell line; without a shell there is no reason to spell as
+                // two what git spells as one.
+                .staged => after(&.{ "git", "checkout", "HEAD", "--", f.path_() }),
                 .recent => {},
             }
         },
@@ -1135,28 +1145,33 @@ fn gitDiscardDo(yes: bool, armed: Armed) void {
     }
 }
 
+/// Discard a whole section: ONE command, with every path as an argument.
+///
+/// It used to be a `;`-joined shell line with a per-file command in it —
+/// necessary only because the staged case was a two-command `&&` pair, which
+/// `checkout HEAD --` collapses. Once every case is a single verb, a section
+/// is that verb applied to a list, which is what git wanted to be told.
 fn discardSection(sec: Section) void {
-    // Compose a per-file discard for the whole section, then re-gather.
-    var w: usize = 0;
-    var any = false;
+    var argv: Argv = .{};
+    switch (sec) {
+        .untracked => argv.pushAll(&.{ "rm", "--" }),
+        .unstaged => argv.pushAll(&.{ "git", "checkout", "--" }),
+        .staged => argv.pushAll(&.{ "git", "checkout", "HEAD", "--" }),
+        .recent => return,
+    }
+    const before = argv.n;
     var fi: usize = 0;
     while (fi < cur().file_count) : (fi += 1) {
-        const f = &cur().files[fi];
-        if (f.section != sec) continue;
-        const seg = switch (sec) {
-            .untracked => std.fmt.bufPrint(cmd_buf[w..], "rm -- '{s}'; ", .{f.path_()}),
-            .unstaged => std.fmt.bufPrint(cmd_buf[w..], "git checkout -- '{s}'; ", .{f.path_()}),
-            .staged => std.fmt.bufPrint(cmd_buf[w..], "git reset -q HEAD -- '{s}' && git checkout -- '{s}'; ", .{ f.path_(), f.path_() }),
-            .recent => break,
-        } catch break;
-        w += seg.len;
-        any = true;
+        if (cur().files[fi].section != sec) continue;
+        // `rm` runs with no `-C`, so its paths are absolute; git.s are
+        // repository-relative, which is what git wants.
+        argv.push(if (sec == .untracked) cur().inRepo(cur().files[fi].path_()) else cur().files[fi].path_());
     }
-    if (!any) {
+    if (argv.n == before) {
         weft.setMode("git");
         return;
     }
-    gatherAfter(cmd_buf[0..w]);
+    after(argv.slice());
 }
 
 // ── Patch synthesis + git apply ─────────────────────────────────────────────
@@ -1168,21 +1183,32 @@ fn applyHunk(hi: usize, sel: ?Lines, reverse: bool) void {
         weft.echo("git: patch too large");
         return;
     };
-    gatherAfterPatch(patch, if (reverse) "--cached --reverse" else "--cached", false);
+    // `{}` is the SPOOLED patch: the host writes it to a temp it names, hands
+    // `git apply` that path, and removes it — succeeded or failed. git names
+    // no path it writes, which is why the most privileged plugin here still
+    // declares no filesystem capability at all.
+    if (reverse) {
+        afterInput(&.{ "git", "apply", "--cached", "--reverse", "{}" }, patch);
+    } else {
+        afterInput(&.{ "git", "apply", "--cached", "{}" }, patch);
+    }
 }
 
-/// Discard a hunk: reverse it out of the worktree; for a staged hunk, also drop
-/// it from the index. Two `git apply`s, chained before the re-gather.
+/// Discard a hunk: reverse it back out. For a STAGED hunk that means index and
+/// worktree both, which is `--index` — one apply, where the fused shell line
+/// ran two (`--cached --reverse`, then `--reverse`) because it had no way to
+/// say "both" other than saying it twice.
 fn discardHunk(hi: usize, sel: ?Lines, staged: bool) void {
     const patch = buildPatch(hi, sel) orelse {
         weft.echo("git: patch too large");
         weft.setMode("git");
         return;
     };
-    // Unstaged hunk: reverse it out of the worktree. Staged hunk: reverse it out
-    // of the index (`--cached --reverse`) AND the worktree (the trailing
-    // `--reverse` gatherAfterPatch adds) — git discards the change entirely.
-    if (staged) gatherAfterPatch(patch, "--cached --reverse", true) else gatherAfterPatch(patch, "--reverse", false);
+    if (staged) {
+        afterInput(&.{ "git", "apply", "--index", "--reverse", "{}" }, patch);
+    } else {
+        afterInput(&.{ "git", "apply", "--reverse", "{}" }, patch);
+    }
 }
 
 // ── The commit draft ───────────────────────────────────────────────────────
@@ -1209,13 +1235,9 @@ var draft_ordinal: u32 = 0;
 
 /// What the effect said and whether it succeeded. Scratch, not state: the
 /// settle that reads it is nested inside the very delivery that wrote it.
-var commit_ok = false;
-var commit_note: [512]u8 = undefined;
-var commit_note_len: usize = 0;
-
 /// Open a commit draft. `prefill` (or "") is a shell command whose stdout seeds
 /// the message — `git log -1 --format=%B` for amend/reword.
-fn openDraft(flags: []const u8, prefill: []const u8) ?*Drafts.Slot {
+fn openDraft(flags: []const u8, prefill: []const []const u8) ?*Drafts.Slot {
     const slot = drafts.open(draft_tool) orelse {
         weft.echo("git: out of memory — could not open another commit draft");
         return null;
@@ -1240,14 +1262,9 @@ fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
 /// Seed a draft's message from `prefill`'s stdout (`git log -1 --format=%B` for
 /// amend, `fixup! …` for a fixup). The empty prefill is the plain commit: the
 /// entry stays exactly as it is, so nothing can land on top of what was typed.
-fn seedDraft(slot: *Drafts.Slot, prefill: []const u8) void {
+fn seedDraft(slot: *Drafts.Slot, prefill: []const []const u8) void {
     if (prefill.len == 0) return;
-    show(prefill, slot.name(), .draft); // read from the draft's own repository
-}
-
-/// A seeded message landed — start at the top of it.
-fn draftFill() void {
-    weft.jump(0);
+    show(prefill, slot.name(), .none); // read from the draft.s own repository
 }
 
 /// The draft this command is about — the entry it was invoked in — and, with
@@ -1262,8 +1279,8 @@ fn currentDraft() ?*Drafts.Slot {
 }
 
 /// `save` in a draft entry: write the message and run the commit it stands for.
-/// The exit status and git's own words come back through the `.commit` fill, so
-/// the draft closes only when git accepted it.
+/// git's exit status and git's own words come back as themselves, so the draft
+/// closes only when git accepted it.
 fn gitCommitSave() void {
     const slot = currentDraft() orelse return;
     const text = weft.slice(0, weft.byteLen());
@@ -1273,55 +1290,26 @@ fn gitCommitSave() void {
     }
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
-    const d = &slot.value;
     cur().committing = slot;
-    // `{}` is the SPOOLED message: the host writes it, `git commit -F` reads it
-    // (an absolute path outside the work tree is fine — git only opens it), and
-    // the host removes it whether or not the commit was accepted.
-    const cmd = std.fmt.bufPrint(
-        &cmd_buf,
-        "git commit {s} -F '{{}}' 2>&1; s=$?; " ++
-            "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
-        .{d.flagsOf()},
-    ) catch return;
     cur().restore_cursor = false;
-    showInput(cmd, msg_buf[0..n], cur().name(), .commit);
+    // `{}` is the SPOOLED message: the host writes it, `git commit -F` reads
+    // it, and the host removes it whether or not the commit was accepted.
+    var argv: Argv = .{};
+    argv.pushAll(&.{ "git", "commit" });
+    var flags = std.mem.tokenizeAny(u8, slot.value.flagsOf(), " ");
+    while (flags.next()) |flag| argv.push(flag);
+    argv.pushAll(&.{ "-F", "{}" });
+    afterNoted(argv.slice(), msg_buf[0..n]);
 }
 
-/// The commit ran: git's own words and exit status precede the status gather.
-fn commitFill() void {
-    loadRaw();
-    commit_ok = takeEffectOutcome();
-    renderStatus();
-    weft.run("git-commit-settle");
-}
-/// Split an "effect, then gather" fill: keep what the effect said, report
-/// whether it succeeded, and leave `raw` holding the gather alone — a command's
-/// prologue is not status.
-fn takeEffectOutcome() bool {
-    commit_note_len = 0;
-    const ci = std.mem.indexOf(u8, cur().raw[0..cur().raw_len], MARK_C) orelse return false;
-    commit_note_len = @min(ci, commit_note.len);
-    @memcpy(commit_note[0..commit_note_len], cur().raw[0..commit_note_len]);
-    var i = ci + MARK_C.len;
-    var status: usize = 0;
-    while (i < cur().raw_len and cur().raw[i] >= '0' and cur().raw[i] <= '9') : (i += 1) {
-        status = status * 10 + (cur().raw[i] - '0');
-    }
-    if (i < cur().raw_len and cur().raw[i] == '\n') i += 1;
-    std.mem.copyForwards(u8, cur().raw[0 .. cur().raw_len - i], cur().raw[i..cur().raw_len]);
-    cur().raw_len -= i;
-    return status == 0;
-}
-
-/// Deferred to a dispatching entry (like `git-note-drops-deliver`): a draft git
-/// accepted is closed like any other entry; one it refused stays, with the
-/// refusal shown.
+/// A draft git accepted is closed like any other entry; one it refused stays,
+/// with the refusal shown — git's own first line of stderr, which used to be
+/// recovered from the bytes ahead of a sentinel in stdout.
 fn gitCommitSettle() void {
     const slot = cur().committing orelse return;
     cur().committing = null;
-    if (!commit_ok) {
-        weft.echo(firstLine(commit_note[0..commit_note_len]));
+    if (!cur().effect_ok) {
+        weft.echo(cur().effect_note[0..cur().effect_note_len]);
         return;
     }
     // Retiring the entry is focus-scoped: land on it, then close it.
@@ -1331,26 +1319,14 @@ fn gitCommitSettle() void {
     weft.echo("committed");
 }
 
-fn firstLine(text: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < text.len) {
-        var e = i;
-        while (e < text.len and text[e] != '\n') e += 1;
-        const line = std.mem.trim(u8, text[i..e], " \t\r");
-        if (line.len > 0) return line;
-        i = e + 1;
-    }
-    return "commit: refused";
-}
-
 // ── The draft's own offers (amend/reword/fixup/squash) ─────────────────────
 // Each re-seats the draft under point: the entry stays, its meaning changes.
-fn reseat(slot: *Drafts.Slot, flags: []const u8, prefill: []const u8, note: []const u8) void {
+fn reseat(slot: *Drafts.Slot, flags: []const u8, prefill: []const []const u8, note: []const u8) void {
     setFlags(slot, flags);
     seedDraft(slot, prefill);
     weft.echo(note);
 }
-const head_message = "git log -1 --format=%B 2>/dev/null";
+const head_message: []const []const u8 = &.{ "git", "log", "-1", "--format=%B" };
 fn gitDraftAmend() void {
     reseat(currentDraft() orelse return, "--amend", head_message, "draft: amends HEAD");
 }
@@ -1371,17 +1347,13 @@ fn reseatOnto(kind: []const u8) void {
         weft.echo("no commit chosen to fix up");
         return;
     }
-    const prefill = std.fmt.bufPrint(
-        &op_buf,
-        "git log -1 --format='{s}! %s' {s} 2>/dev/null",
-        .{ kind, slot.value.onto.hash_() },
-    ) catch return;
-    reseat(slot, "", prefill, kind);
+    const fmt = std.fmt.bufPrint(&op_buf, "--format={s}! %s", .{kind}) catch return;
+    reseat(slot, "", &.{ "git", "log", "-1", fmt, slot.value.onto.hash_() }, kind);
 }
 
 // ── Opening a draft from the status buffer ─────────────────────────────────
 fn gitCommit() void {
-    _ = openDraft("", "");
+    _ = openDraft("", &.{});
 }
 /// Amend: edit the current message (pre-filled), include staged changes.
 fn gitAmend() void {
@@ -1393,7 +1365,7 @@ fn gitReword() void {
 }
 /// Extend: fold staged changes into HEAD, keep the message (no draft).
 fn gitExtend() void {
-    gatherAfterSeq("git commit --amend --no-edit");
+    after(&.{ "git", "commit", "--amend", "--no-edit" });
 }
 fn gitFixup() void {
     openOnto("fixup");
@@ -1408,31 +1380,26 @@ fn openOnto(kind: []const u8) void {
         weft.echo("no commit under point");
         return;
     };
-    const prefill = std.fmt.bufPrint(
-        &op_buf,
-        "git log -1 --format='{s}! %s' {s} 2>/dev/null",
-        .{ kind, onto.hash_() },
-    ) catch return;
-    const slot = openDraft("", prefill) orelse return;
+    const fmt = std.fmt.bufPrint(&op_buf, "--format={s}! %s", .{kind}) catch return;
+    const slot = openDraft("", &.{ "git", "log", "-1", fmt, onto.hash_() }) orelse return;
     slot.value.onto = onto;
 }
 
 // ── The SPC-g read-only views (unchanged behavior) ──────────────────────────
 fn gitLog() void {
-    show("git log --oneline --graph -30", "*git-log*", .log);
+    show(&.{ "git", "log", "--oneline", "--graph", "-30" }, "*git-log*", .log);
 }
 fn gitDiff() void {
-    show("git diff", "*git-diff*", .diff);
+    show(&.{ "git", "diff" }, "*git-diff*", .diff);
 }
 fn gitDiffStaged() void {
-    show("git diff --staged", "*git-diff-staged*", .diff);
+    show(&.{ "git", "diff", "--staged" }, "*git-diff-staged*", .diff);
 }
 fn gitBlame() void {
     // Absolute: the command runs in the repository, the buffer path may not be
     // spelled relative to it.
     const path = activePathAbs() orelse return;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git blame -- '{s}'", .{path}) catch return;
-    show(cmd, "*git-blame*", .none);
+    show(&.{ "git", "blame", "--", path }, "*git-blame*", .none);
 }
 
 // ── Confirmation is an interaction, not a mode ─────────────────────────────
@@ -1448,26 +1415,43 @@ fn gitBlame() void {
 // and read after it, with an unrelated background re-gather able to land in
 // between. A carried value cannot be overwritten by the next question.
 
-/// A confirmed mutation, composed from refs and OIDs — durable, so it needs no
-/// re-resolution against a working tree that may have moved.
-const StagedCmd = struct {
+/// A confirmed mutation: WHICH verb, and the one ref or OID it acts on.
+/// Composed from durable names, so it needs no re-resolution against a working
+/// tree that may have moved.
+///
+/// It used to be a 4 KiB buffer holding a SHELL LINE, assembled before the
+/// question and run verbatim after it. Naming the verb instead of spelling it
+/// means the answer cannot run something the question did not describe, and it
+/// costs a fixed-size struct rather than a kilobyte of command text carried
+/// through a continuation.
+const Staged = struct {
     session: u32,
-    len: usize,
-    buf: [1 << 12]u8,
+    verb: enum { reset_hard, stash_drop, branch_delete },
+    arg: [128]u8 = undefined,
+    arg_len: usize = 0,
+
+    fn argument(self: *const Staged) []const u8 {
+        return self.arg[0..self.arg_len];
+    }
 };
 
-/// Ask before running `cmd`. Safe answer first (`confirmSpec`), so accepting
+/// Ask before running `verb`. Safe answer first (`confirmSpec`), so accepting
 /// the leading candidate changes nothing.
-fn confirmThen(cmd: []const u8, question: []const u8) void {
-    var staged: StagedCmd = .{ .session = cur().id, .len = @min(cmd.len, 1 << 12), .buf = undefined };
-    @memcpy(staged.buf[0..staged.len], cmd[0..staged.len]);
-    _ = weft.confirmWith(StagedCmd, staged, question, runStaged);
+fn confirmThen(verb: @FieldType(Staged, "verb"), arg: []const u8, question: []const u8) void {
+    var staged: Staged = .{ .session = cur().id, .verb = verb };
+    staged.arg_len = @min(arg.len, staged.arg.len);
+    @memcpy(staged.arg[0..staged.arg_len], arg[0..staged.arg_len]);
+    _ = weft.confirmWith(Staged, staged, question, runStaged);
 }
 
-fn runStaged(yes: bool, staged: StagedCmd) void {
+fn runStaged(yes: bool, staged: Staged) void {
     if (!route_to(staged.session)) return;
     if (!yes) return weft.echo("cancelled");
-    gatherAfterSeq(staged.buf[0..staged.len]);
+    switch (staged.verb) {
+        .reset_hard => after(&.{ "git", "reset", "--hard", staged.argument() }),
+        .stash_drop => after(&.{ "git", "stash", "drop" }),
+        .branch_delete => after(&.{ "git", "branch", "-d", staged.argument() }),
+    }
 }
 
 /// Route a carried answer back to the repository that asked. A session that
@@ -1504,8 +1488,7 @@ fn gitShow() void {
     showCommit(t);
 }
 fn showCommit(t: Target) void {
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git show {s}", .{t.hash_()}) catch return;
-    show(cmd, "*git-show*", .diff);
+    show(&.{ "git", "show", t.hash_() }, "*git-show*", .diff);
     weft.setMode("git-view");
 }
 fn gitCherryPick() void {
@@ -1513,14 +1496,14 @@ fn gitCherryPick() void {
         weft.echo("cherry-pick: no commit under point");
         return;
     };
-    gatherAfterSeq1("git cherry-pick {s}", t.hash_());
+    after(&.{ "git", "cherry-pick", t.hash_() });
 }
 fn gitRevert() void {
     const t = commitAtCursor() orelse {
         weft.echo("revert: no commit under point");
         return;
     };
-    gatherAfterSeq1("git revert --no-edit {s}", t.hash_());
+    after(&.{ "git", "revert", "--no-edit", t.hash_() });
 }
 fn gitResetSoft() void {
     resetTo("--soft");
@@ -1532,13 +1515,11 @@ fn gitResetMixed() void {
 /// re-resolution against the working tree is needed or wanted.
 fn resetTo(kind: []const u8) void {
     if (cur().pending_target.kind != .commit) return;
-    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, cur().pending_target.hash_() }) catch return;
-    gatherAfterSeq(m);
+    after(&.{ "git", "reset", kind, cur().pending_target.hash_() });
 }
 fn gitResetHard() void {
     if (cur().pending_target.kind != .commit) return;
-    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{cur().pending_target.hash_()}) catch return;
-    confirmThen(m, "reset --hard (loses changes)?");
+    confirmThen(.reset_hard, cur().pending_target.hash_(), "reset --hard (loses changes)?");
 }
 
 // ── Branch transient (names come from the `*git-input*` prompt) ─────────────
@@ -1560,25 +1541,25 @@ fn gitBranchRename() void {
 
 // ── Stash transient ─────────────────────────────────────────────────────────
 fn gitStashSave() void {
-    gatherAfterSeq("git stash push");
+    after(&.{ "git", "stash", "push" });
 }
 fn gitStashPop() void {
-    gatherAfterSeq("git stash pop");
+    after(&.{ "git", "stash", "pop" });
 }
 fn gitStashApply() void {
-    gatherAfterSeq("git stash apply");
+    after(&.{ "git", "stash", "apply" });
 }
 fn gitStashList() void {
-    show("git stash list", "*git-stash*", .none);
+    show(&.{ "git", "stash", "list" }, "*git-stash*", .none);
     weft.setMode("git-view");
 }
 fn gitStashDrop() void {
-    confirmThen("git stash drop", "drop stash@{0}?");
+    confirmThen(.stash_drop, "", "drop stash@{0}?");
 }
 
 // ── Log transient (the inline Recent section covers the common case) ────────
 fn gitLogAll() void {
-    show("git log --oneline --graph --all -50", "*git-log*", .log);
+    show(&.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, "*git-log*", .log);
     weft.setMode("git-view");
 }
 
@@ -1616,14 +1597,11 @@ fn onInput(name: []const u8) void {
         return;
     }
     switch (act) {
-        .branch_checkout => gatherAfterSeq1("git checkout '{s}'", name),
-        .branch_create => gatherAfterSeq1("git checkout -b '{s}'", name),
-        .branch_new => gatherAfterSeq1("git branch '{s}'", name),
-        .branch_rename => gatherAfterSeq1("git branch -m '{s}'", name),
-        .branch_delete => {
-            const cmd = std.fmt.bufPrint(&op_buf, "git branch -d '{s}'", .{name}) catch return;
-            confirmThen(cmd, "delete branch?");
-        },
+        .branch_checkout => after(&.{ "git", "checkout", name }),
+        .branch_create => after(&.{ "git", "checkout", "-b", name }),
+        .branch_new => after(&.{ "git", "branch", name }),
+        .branch_rename => after(&.{ "git", "branch", "-m", name }),
+        .branch_delete => confirmThen(.branch_delete, name, "delete branch?"),
         .rebase_start => startRebase(name),
         .none => {},
     }
@@ -1674,8 +1652,8 @@ fn startRebase(nstr: []const u8) void {
     const base = std.fmt.bufPrint(&slot.value.base, "HEAD~{s}", .{nstr}) catch return;
     slot.value.base_len = base.len;
     weft.toolBacking(todo_tool);
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git log --reverse --format='%h %s' {s}..HEAD 2>/dev/null", .{base}) catch return;
-    show(cmd, slot.name(), .rebase); // listed from the plan's own repository
+    const range = std.fmt.bufPrint(&cmd_buf, "{s}..HEAD", .{base}) catch return;
+    show(&.{ "git", "log", "--reverse", "--format=%h %s", range }, slot.name(), .rebase_todo);
     weft.echo("rebase plan: edit the verbs, save to run, close to abandon");
 }
 /// The `git log` listing landed → rewrite `<hash> <subject>` lines into
@@ -1711,34 +1689,35 @@ fn gitRebaseSave() void {
     @memcpy(msg_buf[0..n], text[0..n]);
     const v = &slot.value;
     cur().sequencing = slot;
-    // `{}` is the SPOOLED plan. git runs `$GIT_SEQUENCE_EDITOR <todo>` while
-    // `git rebase -i` is still in flight, so the temp is alive exactly when the
-    // `cp` needs it and gone the moment the rebase returns — including a rebase
-    // that stopped on a conflict, where the old in-repo plan used to linger.
-    const cmd = std.fmt.bufPrint(
-        &cmd_buf,
-        "GIT_SEQUENCE_EDITOR='cp {{}}' GIT_EDITOR=true git rebase -i {s} 2>&1; s=$?; " ++
-            "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
-        .{v.base[0..v.base_len]},
-    ) catch return;
     cur().restore_cursor = false;
-    showInput(cmd, msg_buf[0..n], cur().name(), .sequence);
+    // `{}` is the SPOOLED plan, substituted INSIDE the config value: git runs
+    // `sequence.editor <todo>` while `git rebase -i` is still in flight, so the
+    // temp is alive exactly when the `cp` needs it and gone the moment the
+    // rebase returns — including a rebase that stopped on a conflict, where the
+    // old in-repo plan used to linger.
+    //
+    // `-c` rather than an environment variable, because there is no shell to
+    // set one in — and git's own config override is what the env var was
+    // standing in for.
+    afterNoted(&.{
+        "git",
+        "-c",
+        "sequence.editor=cp {}",
+        "-c",
+        "core.editor=true",
+        "rebase",
+        "-i",
+        v.base[0..v.base_len],
+    }, msg_buf[0..n]);
 }
 
-fn sequenceFill() void {
-    loadRaw();
-    commit_ok = takeEffectOutcome();
-    renderStatus();
-    weft.run("git-rebase-settle");
-}
-
-/// Deferred to a dispatching entry: a plan git ran is spent, and closes like
-/// any other entry; one it refused stays, with the refusal shown.
+/// A plan git ran is spent, and closes like any other entry; one it refused
+/// stays, with the refusal shown — git.s own words, off its own stderr.
 fn gitRebaseSettle() void {
     const slot = cur().sequencing orelse return;
     cur().sequencing = null;
-    if (!commit_ok) {
-        weft.echo(firstLine(commit_note[0..commit_note_len]));
+    if (!cur().effect_ok) {
+        weft.echo(cur().effect_note[0..cur().effect_note_len]);
         return;
     }
     // Retiring the entry is focus-scoped: land on it, then close it.
@@ -1748,13 +1727,13 @@ fn gitRebaseSettle() void {
     weft.echo("rebased");
 }
 fn gitRebaseContinue() void {
-    gatherAfterSeq("GIT_EDITOR=true git rebase --continue");
+    after(&.{ "git", "-c", "core.editor=true", "rebase", "--continue" });
 }
 fn gitRebaseAbort() void {
-    gatherAfterSeq("git rebase --abort");
+    after(&.{ "git", "rebase", "--abort" });
 }
 fn gitRebaseSkip() void {
-    gatherAfterSeq("GIT_EDITOR=true git rebase --skip");
+    after(&.{ "git", "-c", "core.editor=true", "rebase", "--skip" });
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────

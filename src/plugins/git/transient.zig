@@ -11,10 +11,8 @@ const model = @import("model.zig");
 const std = @import("std");
 const cur = model.cur;
 const gather_mod = @import("gather.zig");
-const gatherAfterSeq = gather_mod.gatherAfterSeq;
-
-/// Scratch for a transient's assembled command line.
-var op_buf: [1 << 14]u8 = undefined;
+const after = gather_mod.after;
+const Argv = gather_mod.Argv;
 
 // ── push/pull/fetch: flag transients (sticky menu + our own surface) ─────────
 // Flags accumulate in globals; a single key executes. On execute we refresh
@@ -59,12 +57,14 @@ pub fn gitPushToggleUpstream() void {
 }
 pub fn gitPushDo() void {
     weft.surfaceClose();
-    var w: usize = 0;
-    w += (std.fmt.bufPrint(op_buf[w..], "git push", .{}) catch return).len;
-    if (cur().push_force) w += (std.fmt.bufPrint(op_buf[w..], " --force-with-lease", .{}) catch return).len;
-    if (cur().push_upstream) w += (std.fmt.bufPrint(op_buf[w..], " --set-upstream origin HEAD", .{}) catch return).len;
+    // The flags ARE the argv now — where they used to be words appended to a
+    // string that a shell would later have to split back apart.
+    var argv: Argv = .{};
+    argv.pushAll(&.{ "git", "push" });
+    if (cur().push_force) argv.push("--force-with-lease");
+    if (cur().push_upstream) argv.pushAll(&.{ "--set-upstream", "origin", "HEAD" });
     weft.echo("pushing…");
-    gatherAfterSeq(op_buf[0..w]);
+    after(argv.slice());
 }
 
 pub fn gitPull() void {
@@ -87,7 +87,7 @@ pub fn gitPullToggleRebase() void {
 pub fn gitPullDo() void {
     weft.surfaceClose();
     weft.echo("pulling…");
-    if (cur().pull_rebase) gatherAfterSeq("git pull --rebase") else gatherAfterSeq("git pull");
+    if (cur().pull_rebase) after(&.{ "git", "pull", "--rebase" }) else after(&.{ "git", "pull" });
 }
 
 pub fn gitFetch() void {
@@ -115,12 +115,12 @@ pub fn gitFetchTogglePrune() void {
 }
 pub fn gitFetchDo() void {
     weft.surfaceClose();
-    var w: usize = 0;
-    w += (std.fmt.bufPrint(op_buf[w..], "git fetch", .{}) catch return).len;
-    if (cur().fetch_all) w += (std.fmt.bufPrint(op_buf[w..], " --all", .{}) catch return).len;
-    if (cur().fetch_prune) w += (std.fmt.bufPrint(op_buf[w..], " --prune", .{}) catch return).len;
+    var argv: Argv = .{};
+    argv.pushAll(&.{ "git", "fetch" });
+    if (cur().fetch_all) argv.push("--all");
+    if (cur().fetch_prune) argv.push("--prune");
     weft.echo("fetching…");
-    gatherAfterSeq(op_buf[0..w]);
+    after(argv.slice());
 }
 pub fn gitMenuCancelSurface() void {
     weft.surfaceClose();

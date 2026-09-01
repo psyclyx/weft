@@ -34,8 +34,6 @@ pub const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_
 
 /// Buffer for building a rebase plan's todo lines + the transient op command.
 pub var op_buf: [1 << 14]u8 = undefined;
-/// The command handed to `procToBuffer`: the session's `cd` guard + the body.
-pub var run_buf: [1 << 14]u8 = undefined;
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
 pub var tmp_buf: [1024]u8 = undefined;
 /// Scratch for the focused buffer's path made absolute (`activePathAbs`) —
@@ -46,20 +44,48 @@ pub var probe_buf: [1024]u8 = undefined;
 /// same shared scratch.
 pub var base_buf: [1024]u8 = undefined;
 
-/// ONE gather command: porcelain status (+ branch), the unstaged diff, the
-/// staged diff, and recent commits, delimited by RS-prefixed sentinel lines we
-/// can split on unambiguously (`\x1e\x1e{U,S,R}`). We repaint the buffer from
-/// the parse, so these markers never reach the user's eyes.
-pub const GATHER =
-    "git status --porcelain=v1 --branch 2>/dev/null; " ++
-    "printf '\\036\\036U\\n'; git diff 2>/dev/null; " ++
-    "printf '\\036\\036S\\n'; git diff --cached 2>/dev/null; " ++
-    "printf '\\036\\036R\\n'; git log --format='%h %s' -10 2>/dev/null";
-pub const MARK_U = "\x1e\x1eU";
-pub const MARK_S = "\x1e\x1eS";
-pub const MARK_R = "\x1e\x1eR";
-/// Precedes an effect's exit status when a fill carries one ahead of a gather.
-pub const MARK_C = "\x1e\x1eC";
+/// A gather is FOUR commands, and it always was — it merely had one output
+/// channel, so it was written as one shell line with sentinel lines
+/// (`\x1e\x1e{U,S,R}`) printed between the parts for the parser to split on.
+/// The sentinels were never about git; they were about the door.
+///
+/// `weft.exec` returns each command's stdout separately, so the parts arrive
+/// as parts. What the parser needs is where each region begins and ends, and
+/// the assembler records that as it appends (`Session.bounds`) instead of
+/// scanning the bytes for a marker that had to be chosen to never collide
+/// with a filename.
+pub const Part = enum(u8) { status = 0, unstaged = 1, staged = 2, recent = 3 };
+pub const part_count = 4;
+
+/// How a read-only view's text is coloured. These used to be members of a
+/// `Fill` enum that also carried the routing — which delivery this was, and
+/// for whom — because a fill token was one `u32` doing three jobs. The routing
+/// travels with the continuation now, so what is left here is only the
+/// question a view actually has: what does this text look like.
+pub const ViewStyle = enum { none, diff, log, rebase_todo };
+
+/// What runs after a gather assembles, and after a view's text lands. Set by
+/// `root.zig` at init.
+///
+/// A hook rather than a direct call because the SEQUENCING is root's: a
+/// settled gather has to parse, repaint, land the cursor, republish offers,
+/// and note anything dropped — a chain that reaches most of the plugin. This
+/// file's job ends when the bytes are in the model, and saying so with a
+/// function pointer keeps `gather.zig` readable without the rest of the
+/// plugin in your head, which is the property its module doc claims.
+pub var on_gathered: ?*const fn () void = null;
+pub var on_view_filled: ?*const fn (ViewStyle) void = null;
+
+/// The argv for each part. No shell, so no quoting, and a path with an
+/// apostrophe or a newline in it is one argument rather than a broken command.
+pub fn argvFor(part: Part) []const []const u8 {
+    return switch (part) {
+        .status => &.{ "git", "status", "--porcelain=v1", "--branch" },
+        .unstaged => &.{ "git", "diff" },
+        .staged => &.{ "git", "diff", "--cached" },
+        .recent => &.{ "git", "log", "--format=%h %s", "-10" },
+    };
+}
 
 /// Instance base: session 1 takes `*git*`, session 2 `*git:2*` (weft.zig's
 /// instanced-tool-buffer naming — a buffer name IS an instance's identity).
@@ -138,6 +164,27 @@ pub const RepoSession = struct {
 
     raw: [RAW_CAP]u8 = undefined,
     raw_len: usize = 0,
+    /// Where each gathered part ENDS in `raw`, in `Part` order. Recorded by
+    /// the assembler as it appends, which is what replaced scanning the bytes
+    /// for a sentinel: the boundary is known at the moment it is created, so
+    /// nothing has to be chosen to never collide with a filename.
+    bounds: [part_count]usize = @splat(0),
+    /// Parts of the in-flight gather still outstanding. A gather is done when
+    /// this reaches zero; until then the model is the previous one.
+    pending_parts: u8 = 0,
+    /// Each part's stdout, owned, held only between its arrival and the
+    /// assembly that consumes every part. Allocated rather than four more
+    /// fixed arrays: the four subprocesses finish in whatever order they
+    /// finish, so all four have to be holdable at once, and a `git diff` is
+    /// exactly the thing whose size the plugin does not get to decide.
+    part_bytes: [part_count]?[]u8 = @splat(null),
+
+    /// What the last noted mutation said and whether it succeeded. `git`'s own
+    /// words, off its own stderr, and its own exit status — where both used to
+    /// be recovered from a marker the command was made to print into stdout.
+    effect_ok: bool = false,
+    effect_note: [512]u8 = undefined,
+    effect_note_len: usize = 0,
     render_buf: [RENDER_CAP]u8 = undefined,
     out: usize = 0,
 
@@ -352,43 +399,6 @@ pub const Todos = weft.Instances(Todo);
 /// The tool identity a draft entry carries — what scopes its `save` provider.
 pub const draft_tool = "git-commit";
 pub const todo_tool = "git-rebase";
-
-// ── Fill routing: what an async gather's output IS, and whose ────────────
-/// Which fill a `show` issued. Declared at spawn, handed back at delivery, so
-/// the landing output routes to its own handler — never to whichever buffer
-/// happens to be focused when the command finishes.
-pub const Fill = enum(u32) {
-    none = 0, // nothing to do after
-    status, // the `*git*` projection: parse the raw output into the model
-    diff, // a raw diff/show listing: color it
-    log, // a `git log` listing: color it
-    rebase, // a rebase plan: rewrite the listing into `pick …` lines
-    draft, // a commit draft's seeded message
-    commit, // a commit's outcome, ahead of the status gather
-    sequence, // a rebase's outcome, ahead of the status gather
-};
-
-/// A fill token carries BOTH what landed and whose it is: the low byte is the
-/// `Fill`, the rest the session's id. Delivery therefore needs no guess about
-/// focus — the output of repository 2's gather can only ever parse into
-/// repository 2's model.
-///
-/// The id gets 24 bits, and that is not a limit anyone can reach: a session is
-/// half a megabyte and a wasm32 guest's linear memory tops out at 4 GiB, so the
-/// heap refuses (out loud, in `sessionFor`) some four thousand ids before the
-/// field could ever run out.
-pub fn fillToken(fill: Fill, s: *const RepoSession) u32 {
-    return @intFromEnum(fill) | (s.id << 8);
-}
-
-/// Which fills carry a status gather — the ones that make the projection
-/// provisional on the way out and land a new snapshot on the way back.
-pub fn gathers(fill: Fill) bool {
-    return switch (fill) {
-        .status, .commit, .sequence => true,
-        else => false,
-    };
-}
 
 /// Focus `name`, minting the buffer if it does not exist.
 pub fn focusBuffer(name: []const u8) bool {

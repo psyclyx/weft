@@ -13,9 +13,6 @@ const RepoSession = model.RepoSession;
 const cur = model.cur;
 const MAX_FILES = model.MAX_FILES;
 const MAX_HUNKS = model.MAX_HUNKS;
-const MARK_U = model.MARK_U;
-const MARK_S = model.MARK_S;
-const MARK_R = model.MARK_R;
 const render_order = model.render_order;
 const countLines = @import("render.zig").countLines;
 /// The parser needs to find an already-recorded file to attach a hunk to.
@@ -37,19 +34,17 @@ pub fn parse() void {
         cur().sec_present[i] = false;
         cur().sec_count[i] = 0;
     }
-    const data = cur().raw[0..cur().raw_len];
-    // Split on the sentinels. A missing marker ⇒ the command failed; render
-    // whatever prefix we have (usually just the branch header).
-    const ui = std.mem.indexOf(u8, data, MARK_U) orelse data.len;
-    const si = std.mem.indexOf(u8, data, MARK_S) orelse data.len;
-    const ri = std.mem.indexOf(u8, data, MARK_R) orelse data.len;
-    parsePorcelain(0, ui);
-    if (ui < si) parseDiff(ui + MARK_U.len, si, .unstaged);
-    if (si < ri) parseDiff(si + MARK_S.len, ri, .staged);
-    if (ri < data.len) {
-        cur().recent_start = ri + MARK_R.len;
-        cur().recent_end = data.len;
-    }
+    // Region boundaries, RECORDED by the assembler as it appended each
+    // command's stdout — not recovered by scanning for a sentinel. A part
+    // whose command produced nothing is an empty region, which reads the same
+    // as the old "marker missing ⇒ the command failed" case without needing a
+    // byte sequence chosen to never occur in a filename.
+    const b = cur().bounds;
+    parsePorcelain(0, b[@intFromEnum(model.Part.status)]);
+    parseDiff(b[@intFromEnum(model.Part.status)], b[@intFromEnum(model.Part.unstaged)], .unstaged);
+    parseDiff(b[@intFromEnum(model.Part.unstaged)], b[@intFromEnum(model.Part.staged)], .staged);
+    cur().recent_start = b[@intFromEnum(model.Part.staged)];
+    cur().recent_end = b[@intFromEnum(model.Part.recent)];
     // Re-apply the remembered file-fold state (files rebuilt default-expanded).
     for (cur().files[0..cur().file_count]) |*f| f.folded = isCollapsed(f.path_());
     // Present iff non-empty (recent by commit lines).
