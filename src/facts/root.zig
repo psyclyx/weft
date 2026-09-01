@@ -64,6 +64,15 @@ pub const Facts = struct {
     /// The active buffer's tool-backing identity, or "" when not a
     /// projection (`action.Ctx.tool`'s exact convention).
     tool: []const u8 = "",
+    /// What the focused ROW is, when the entry is a projection: the `role` its
+    /// producer gave that node (`git.file.unstaged`, `fs.directory`). Empty
+    /// when the entry is not a projection or point is on no row.
+    ///
+    /// This is the axis that lets a THIRD PARTY put a verb on a row it did not
+    /// produce: `provide("git.absorb", .{ .role = "git.file.unstaged" }, …)`
+    /// binds against what the row IS, so the producer never has to enumerate
+    /// what its rows afford and never has to know the extension exists.
+    role: []const u8 = "",
     /// The focused pane handle (doc/cwa-prior-docs-audit.md §5: "`pane` is a fact on
     /// head scopes, `principal` is identity, never a scope axis"). Mirrors
     /// `Head.focused_pane` — 0 is not a sentinel here either (see that
@@ -98,8 +107,10 @@ pub const Predicate = union(enum) {
     /// Buffer language equals this string exactly (see file doc: the
     /// caller, not this predicate, computes "language" from a name).
     lang: []const u8,
-    /// Active buffer's tool-backing identity equals this string exactly.
+    /// Active buffer.s tool-backing identity equals this string exactly.
     tool: []const u8,
+    /// The focused projection row.s role equals this string exactly.
+    role: []const u8,
     /// Every child matches (a bare leaf is the same as `all` of one child;
     /// an empty slice is vacuously true — the "unconstrained" predicate).
     all: []const Predicate,
@@ -123,6 +134,7 @@ pub const Predicate = union(enum) {
             .mode => |m| std.mem.eql(u8, m, f.mode),
             .lang => |l| std.mem.eql(u8, l, f.lang),
             .tool => |tl| std.mem.eql(u8, tl, f.tool),
+            .role => |r| std.mem.eql(u8, r, f.role),
             .all => |kids| {
                 for (kids) |k| if (!k.matches(f)) return false;
                 return true;
@@ -219,6 +231,7 @@ fn sameAxisDisjoint(a: Predicate, b: Predicate) bool {
         .mode => |v| b == .mode and !std.mem.eql(u8, v, b.mode),
         .lang => |v| b == .lang and !std.mem.eql(u8, v, b.lang),
         .tool => |v| b == .tool and !std.mem.eql(u8, v, b.tool),
+        .role => |v| b == .role and !std.mem.eql(u8, v, b.role),
         .locus => |v| b == .locus and v != b.locus,
         else => false,
     };
@@ -256,6 +269,7 @@ pub const Tag = enum(u8) {
     lang = 8,
     tool = 9,
     locus = 10,
+    role = 11,
 };
 
 /// How deep a decoded predicate may nest. A guest supplies these bytes, and
@@ -312,7 +326,7 @@ fn encodeInto(out: *std.ArrayList(u8), gpa: std.mem.Allocator, pred: Predicate) 
             try out.append(gpa, @intFromEnum(Tag.locus));
             try out.append(gpa, @intFromEnum(l));
         },
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s, kind| {
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s, kind| {
             try out.append(gpa, @intFromEnum(@field(Tag, @tagName(kind))));
             try putUv(out, gpa, s.len);
             try out.appendSlice(gpa, s);
@@ -396,7 +410,7 @@ pub fn dupe(gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error!Pre
             return .{ .not = owned };
         },
         .locus => |l| return .{ .locus = l },
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s, kind| {
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s, kind| {
             return @unionInit(Predicate, @tagName(kind), try gpa.dupe(u8, s));
         },
     }
@@ -430,7 +444,7 @@ pub fn free(gpa: std.mem.Allocator, pred: Predicate) void {
             gpa.destroy(k);
         },
         .locus => {},
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool => |s| gpa.free(s),
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s| gpa.free(s),
     }
 }
 
@@ -491,6 +505,30 @@ test "facts: predicates match merged buffer + interaction facts" {
     // eligibility (review A1/A3); an ordinary predicate here.
     try t.expect((Predicate{ .all = &.{ .{ .mode = "normal" }, .{ .ext = ".rs" } } }).matches(f));
     try t.expect(!(Predicate{ .all = &.{ .{ .mode = "insert" }, .{ .ext = ".rs" } } }).matches(f));
+}
+
+test "facts: role is a first-class axis, on the wire and in disjointness" {
+    const gpa = t.allocator;
+    // The axis a third party binds against to put a verb on a row it did not
+    // produce. It must survive the wire like any other leaf...
+    const pred: Predicate = .{ .any = &.{
+        .{ .role = "git.file.unstaged" },
+        .{ .role = "git.file.untracked" },
+    } };
+    const bytes = try encode(gpa, pred);
+    defer gpa.free(bytes);
+    const back = try decode(gpa, bytes);
+    defer free(gpa, back);
+    try t.expect(back.matches(.{ .role = "git.file.unstaged" }));
+    try t.expect(back.matches(.{ .role = "git.file.untracked" }));
+    try t.expect(!back.matches(.{ .role = "git.file.staged" }));
+
+    // ...and it must be PROVABLY disjoint from another role, or two providers
+    // narrowed to different row kinds would be reported as colliding.
+    try t.expect(disjoint(.{ .role = "git.file.staged" }, .{ .role = "git.file.unstaged" }));
+    try t.expect(!disjoint(.{ .role = "git.file.staged" }, .{ .role = "git.file.staged" }));
+    // Different axes are never provably disjoint — they can co-match.
+    try t.expect(!disjoint(.{ .role = "git.file.staged" }, .{ .mode = "git" }));
 }
 
 test "facts: a predicate survives the wire whole, combinators included" {

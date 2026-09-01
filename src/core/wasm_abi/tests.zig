@@ -3276,6 +3276,77 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     }
 }
 
+test "wasm plugin: a third party puts a verb on rows it did not produce" {
+    // The decomplection the projection is FOR. `projection_gate` publishes rows
+    // roled `git.file`; it declares nothing about what they afford and has
+    // never heard of the provider below. The provider binds against what the
+    // ROW IS — a fact the producer published as part of its tree — so the verb
+    // appears on those rows and nowhere else, and neither party names the
+    // other.
+    //
+    // Before this, the only way to attach a verb to a producer's rows was to
+    // fork the producer: it published its own offer table by hand, listing
+    // exactly the verbs it had anticipated.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "projection_gate", @embedFile("guest_projection_wasm"), .{});
+    defer plugin.deinit();
+
+    // A verb for FILE rows, from a stranger. Two providers, so the predicate
+    // is doing real work rather than being the only candidate.
+    try env.actions.provide(.{
+        .action = "row-verb",
+        .predicate = .{ .role = "git.file" },
+        .command = "on-a-file",
+        .owner = "third-party",
+    });
+    try env.actions.provide(.{
+        .action = "row-verb",
+        .predicate = .{ .role = "git.hunk" },
+        .command = "on-a-hunk",
+        .owner = "third-party",
+    });
+
+    _ = try command.run(&env.commands, &env.ctx, "proj-build", &.{});
+    const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
+    const editor = buf.textEditor().?;
+    const text = try editor.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+
+    const intent_mod = @import("../intent.zig");
+
+    // On a file row, the file verb wins; the hunk verb is not eligible at all.
+    editor.placeCursor(std.mem.indexOf(u8, text, "  a.zig").?);
+    {
+        const facts = intent_mod.factsFor(&env.ctx);
+        try t.expectEqualStrings("git.file", facts.role);
+        try t.expectEqualStrings("on-a-file", env.actions.resolveFacts("row-verb", facts).?);
+    }
+
+    // On a hunk row, the other one — same action name, different row.
+    editor.placeCursor(std.mem.indexOf(u8, text, "@@ -1,2").?);
+    {
+        const facts = intent_mod.factsFor(&env.ctx);
+        try t.expectEqualStrings("git.hunk", facts.role);
+        try t.expectEqualStrings("on-a-hunk", env.actions.resolveFacts("row-verb", facts).?);
+    }
+
+    // On the SECTION header, neither: a row a provider did not bind is a row
+    // the verb does not apply to, which is what "no offer" should mean.
+    editor.placeCursor(0);
+    {
+        const facts = intent_mod.factsFor(&env.ctx);
+        try t.expectEqualStrings("git.section", facts.role);
+        try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("row-verb", facts));
+    }
+}
+
 test "membrane: no projection door takes or returns an offset" {
     // The structural claim, read off the contract table rather than asserted
     // about a handler: a producer cannot name a rendered position, so "acted on

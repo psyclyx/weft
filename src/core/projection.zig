@@ -92,6 +92,9 @@ pub const View = struct {
     /// The rendered text of the last commit, owned. Kept so `render` can be
     /// asked what it produced without going back to the document.
     text: std.ArrayList(u8) = .empty,
+    /// WHO publishes this projection. The entry owns the view; this is what
+    /// keeps a second plugin from rebuilding or folding someone else.s rows.
+    owner: []u8 = &.{},
 
     pub fn init(gpa: Allocator) View {
         return .{ .gpa = gpa };
@@ -107,6 +110,7 @@ pub const View = struct {
         self.collapsed.deinit(self.gpa);
         self.gpa.free(self.focus);
         self.text.deinit(self.gpa);
+        self.gpa.free(self.owner);
         self.* = undefined;
     }
 

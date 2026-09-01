@@ -36,8 +36,29 @@ const cur = model.cur;
 /// (`projection.styleFor`), which is what will let a theme restyle a diff
 /// without this file changing.
 const role_section = "git.section";
-const role_file = "git.file";
-const role_hunk = "git.hunk";
+/// Roles are SECTION-SPECIFIC (`git.file.unstaged`, `git.file.staged`, …).
+///
+/// That is what lets eligibility be a predicate rather than a reason string:
+/// `stage` binds `any{role=git.file.unstaged, role=git.file.untracked}` and
+/// `unstage` binds `role=git.file.staged`, so which verb applies to a row is
+/// decided by the same engine that decides everything else, against a fact the
+/// producer published — instead of by this plugin computing a sentence for
+/// each verb about each row.
+fn roleFile(sec: Section) []const u8 {
+    return switch (sec) {
+        .untracked => "git.file.untracked",
+        .unstaged => "git.file.unstaged",
+        .staged => "git.file.staged",
+        .recent => "git.file",
+    };
+}
+fn roleHunk(sec: Section) []const u8 {
+    return switch (sec) {
+        .unstaged => "git.hunk.unstaged",
+        .staged => "git.hunk.staged",
+        else => "git.hunk",
+    };
+}
 const role_added = "git.diff.added";
 const role_removed = "git.diff.removed";
 const role_context = "git.diff.context";
@@ -207,7 +228,7 @@ fn addFile(b: weft.ProjectionBuilder, parent: u32, fi: usize) void {
     const f = &cur().files[fi];
     const file_node = b.addFmt(.{
         .key = keyOf(.{ .kind = .file, .section = f.section, .path = f.path, .plen = f.plen }),
-        .role = role_file,
+        .role = roleFile(f.section),
         .parent = parent,
         .foldable = f.n_hunks > 0,
         .focusable = true,
@@ -239,7 +260,7 @@ fn addHunk(b: weft.ProjectionBuilder, parent: u32, fi: usize, ord: usize, hi: us
     const header = it.first();
     const hunk_node = b.add(.{
         .key = owned,
-        .role = role_hunk,
+        .role = roleHunk(f.section),
         .text = header,
         .parent = parent,
         .focusable = true,

@@ -374,7 +374,17 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
 /// callers. No allocation either way — same profile as the original
 /// hand-rolled scan this used to describe verbatim, before the F5 adapter.
 pub fn resolve(self: *const Actions, name: []const u8, ctx: Ctx) ?[]const u8 {
-    const b = self.container.resolveOne(name, factsOf(ctx)) orelse return null;
+    return self.resolveFacts(name, factsOf(ctx));
+}
+
+/// Resolve against the FULL fact set, not the narrow mode/lang/tool triple.
+///
+/// `resolve` above rebuilds `Facts` from a `Ctx`, which silently drops every
+/// axis `Ctx` does not carry — path, tags, locus, and now `role`, the one a
+/// row-scoped provider binds on. A caller that already has real facts (the
+/// dispatch path, `intent.factsFor`) must not go through that narrowing.
+pub fn resolveFacts(self: *const Actions, name: []const u8, f: facts.Facts) ?[]const u8 {
+    const b = self.container.resolveOne(name, f) orelse return null;
     return b.provider.command;
 }
 

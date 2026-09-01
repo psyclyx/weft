@@ -18,6 +18,7 @@
 //! with callers; this is mechanism.
 
 const std = @import("std");
+const projection_mod = @import("projection.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -109,6 +110,12 @@ pub const Buffer = struct {
     /// an entry that nobody has placed behaves exactly as everything did
     /// before this field existed.
     place: Place = .process,
+    /// The node tree this entry IS, when a plugin projects one over it
+    /// (`core/projection.zig`). Owned HERE, not by the plugin that built it,
+    /// because a projection is a property of the ENTRY: it is what the rows
+    /// on screen mean, and it has to outlive a plugin reload the same way the
+    /// text does. `owner` inside it is what stops a second plugin driving it.
+    projection: ?*projection_mod.View = null,
     /// The declaration a `capture` declaration displaced — what break-out
     /// restores. Meaningless unless `declared_posture == .capture`, which is
     /// why capture can never be a one-way door.
@@ -239,6 +246,10 @@ pub fn restingModeFor(self: *const Buffers, posture: Posture) []const u8 {
 fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     _ = self;
     if (b.textEditor()) |ed| ed.deinit(gpa);
+    if (b.projection) |view| {
+        view.deinit();
+        gpa.destroy(view);
+    }
     b.semantic_focus.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);

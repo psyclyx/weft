@@ -44,10 +44,24 @@ pub fn hProjBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const buffers = p.activeCtx().buffers;
     const id = buffers.findByName(name) orelse return;
     const entry = buffers.get(id) orelse return;
-    const view = viewFor(p, name) orelse return;
-    view.target = entry.ref();
-    view.value.begin();
+    const view = viewFor(p, entry) orelse return;
+    view.begin();
+    // The entry is captured HERE, once. Nothing between now and the commit —
+    // a focus change, another plugin's fill — can redirect where it lands.
+    p.proj_building = entry.ref();
     results[0] = 0;
+}
+
+/// The entry whose projection has a build open. A build is not concurrent, so
+/// this is unambiguous, and it is a generation-checked `Ref` rather than a
+/// pointer: an entry closed mid-build resolves to nothing instead of to
+/// whatever took its slot.
+fn openBuild(p: *WasmPlugin) ?struct { entry: *Buffers.Buffer, view: *projection.View } {
+    const ref = p.proj_building orelse return null;
+    const entry = p.activeCtx().buffers.resolve(ref) orelse return null;
+    const view = entry.projection orelse return null;
+    if (!std.mem.eql(u8, view.owner, p.name)) return null;
+    return .{ .entry = entry, .view = view };
 }
 
 /// `wl_proj_node(key, key_len, role, role_len, text, text_len, parent, flags)
@@ -58,7 +72,8 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
-    const view = openBuild(p) orelse return;
+    const open = openBuild(p) orelse return;
+    const view = open.view;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
     const role = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
@@ -66,7 +81,7 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const text = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(text);
     const parent: ?u32 = if (args[6] < 0) null else @intCast(args[6]);
-    const ordinal = view.value.add(.{
+    const ordinal = view.add(.{
         .key = key,
         .role = role,
         .text = text,
@@ -85,8 +100,8 @@ pub fn hProjCommit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     _ = args;
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const view = openBuild(p) orelse return;
-    results[0] = repaint(p, view, .commit) orelse -1;
+    const open = openBuild(p) orelse return;
+    results[0] = repaint(p, open.entry, open.view, .commit) orelse -1;
 }
 
 /// Whether a repaint swaps a NEW tree in or re-lays the one already committed.
@@ -99,21 +114,19 @@ const Repaint = enum { commit, rerender };
 
 /// The whole render: remember where the cursor is BY KEY, lay the tree out,
 /// write it, repaint the two layers, and land the cursor on the key it was on.
-fn repaint(p: *WasmPlugin, view: *Projection, kind: Repaint) ?i32 {
+fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind: Repaint) ?i32 {
     const gpa = p.gpa;
-    const buffers = p.activeCtx().buffers;
-    const entry = buffers.resolve(view.target) orelse return null;
     const editor = entry.textEditor() orelse return null;
     const doc = &editor.doc;
 
     // WHERE THE CURSOR IS, as an identity, taken before anything moves. This is
     // the whole of what a producer used to do with `markRestore`, a captured
     // target, a fallback offset, and a re-find after the render.
-    view.value.rememberFocus(editor.cursorOffset());
+    view.rememberFocus(editor.cursorOffset());
 
     const text = switch (kind) {
-        .commit => view.value.commit() catch return null,
-        .rerender => view.value.render() catch return null,
+        .commit => view.commit() catch return null,
+        .rerender => view.render() catch return null,
     };
     const end = editor.text().byteLen();
     command.renderInto(gpa, doc, .plugin, p.name, &.{
@@ -122,14 +135,14 @@ fn repaint(p: *WasmPlugin, view: *Projection, kind: Repaint) ?i32 {
 
     paintStyles(p, view, doc, text.len);
     paintFolds(p, view, doc);
-    editor.placeCursor(@min(view.value.focusOffset(), editor.text().byteLen()));
-    return @bitCast(view.value.revision);
+    editor.placeCursor(@min(view.focusOffset(), editor.text().byteLen()));
+    return @bitCast(view.revision);
 }
 
 /// Roles → classes, in one bulk pass over the rendered bytes. The producer
 /// named WHAT each row is; `projection.styleFor` decides how that reads, which
 /// is what gives a theme something to bind and stops a plugin choosing colours.
-fn paintStyles(p: *WasmPlugin, view: *Projection, doc: anytype, len: usize) void {
+fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize) void {
     const gpa = p.gpa;
     const layer = p.activeCtx().caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
     const classes = gpa.alloc(u8, len) catch return;
@@ -137,7 +150,7 @@ fn paintStyles(p: *WasmPlugin, view: *Projection, doc: anytype, len: usize) void
     @memset(classes, 0);
     // Parents first, children after, so a child's own role wins over the range
     // its parent painted — the reading a nested row wants.
-    for (view.value.nodes.items) |n| {
+    for (view.nodes.items) |n| {
         const class = projection.styleFor(n.role);
         if (class == 0) continue;
         const start = @min(n.start, classes.len);
@@ -153,13 +166,13 @@ fn paintStyles(p: *WasmPlugin, view: *Projection, doc: anytype, len: usize) void
 
 /// One invisible span per collapsed node, from just past its own line to the
 /// end of its subtree — the header stays, the body goes.
-fn paintFolds(p: *WasmPlugin, view: *Projection, doc: anytype) void {
+fn paintFolds(p: *WasmPlugin, view: *projection.View, doc: anytype) void {
     const gpa = p.gpa;
     const layer = p.activeCtx().caps.layers.claim(gpa, doc, folds_layer_name, .local, p.name) catch return;
     layer.publishSpans(gpa, &.{}) catch return;
-    for (view.value.nodes.items) |n| {
+    for (view.nodes.items) |n| {
         if (!n.foldable) continue;
-        if (!view.value.isCollapsed(n.key)) continue;
+        if (!view.isCollapsed(n.key)) continue;
         if (n.end <= n.body) continue;
         layer.appendSpan(gpa, .{
             .start = n.body,
@@ -180,15 +193,11 @@ pub fn hProjAtCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         results[0] = -1;
         return;
     };
-    const entry = p.activeCtx().buffers.resolve(view.target) orelse {
+    const editor = p.activeCtx().buffers.active().textEditor() orelse {
         results[0] = -1;
         return;
     };
-    const editor = entry.textEditor() orelse {
-        results[0] = -1;
-        return;
-    };
-    const node = view.value.nodeAt(editor.cursorOffset()) orelse {
+    const node = view.nodeAt(editor.cursorOffset()) orelse {
         // Empty space is not an error: the caller reads a zero-length key and
         // does nothing, which is what "the cursor is on no row" means.
         shared.writeExact(caller, args, results, "");
@@ -207,13 +216,13 @@ pub fn hProjToggle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const view = activeView(p) orelse return;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
-    if (view.value.byKey(key) == null) return; // a row the tree does not name
-    view.value.toggleFold(key) catch return;
+    if (view.byKey(key) == null) return; // a row the tree does not name
+    view.toggleFold(key) catch return;
     // Re-lay the tree in hand. It used to swap the live tree through the
     // BUILDER to reuse `commit`, which emptied `nodes` for the length of the
     // swap — so the focus this repaint remembers was read from an empty tree,
     // came back null, and the cursor jumped to the top on every fold.
-    results[0] = repaint(p, view, .rerender) orelse -1;
+    results[0] = repaint(p, p.activeCtx().buffers.active(), view, .rerender) orelse -1;
 }
 
 /// `wl_proj_selection(key, key_len, out, cap) -> i32`: which body LINES of
@@ -230,10 +239,9 @@ pub fn hProjSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     const view = activeView(p) orelse return;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
-    const entry = p.activeCtx().buffers.resolve(view.target) orelse return;
-    const editor = entry.textEditor() orelse return;
+    const editor = p.activeCtx().buffers.active().textEditor() orelse return;
     const sel = editor.selectedRange() orelse return;
-    const lines = view.value.selectedLines(key, sel.start, sel.end) orelse return;
+    const lines = view.selectedLines(key, sel.start, sel.end) orelse return;
     var out: [8]u8 = undefined;
     std.mem.writeInt(u32, out[0..4], @intCast(lines.lo), .little);
     std.mem.writeInt(u32, out[4..8], @intCast(lines.hi), .little);
@@ -245,69 +253,49 @@ pub fn hProjSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 /// A plugin's projection plus the entry it was captured against. The `Buffers.Ref`
 /// is generation-checked, so an entry closed and its slot reused resolves to
 /// nothing rather than to somebody else's buffer.
-pub const Projection = struct {
-    value: projection.View,
-    target: Buffers.Ref,
-    /// The buffer name the build named, owned — the identity a second `begin`
-    /// is matched against.
-    name: []u8,
-};
-
 /// Find-or-create this plugin.s projection for `name`.
 ///
 /// A plugin may hold SEVERAL — one per entry it projects. Not generality for
 /// its own sake: git opens a session per repository, each with its own entry
 /// (`*git*`, `*git:2*`, …), and a single slot meant the second repository.s
 /// projection evicted the first.s, taking its fold state and node tree with it.
-fn viewFor(p: *WasmPlugin, name: []const u8) ?*Projection {
+/// Find-or-create the projection for `entry`, owned by the ENTRY.
+///
+/// It lived on the plugin before, which was wrong twice over: one slot meant
+/// git.s second repository evicted the first.s, and — the reason it moved —
+/// core cannot ask a plugin what row the cursor is on. A projection is what
+/// the rows on screen MEAN, so it belongs to the thing showing them, and
+/// `intent.factsFor` can read a role off it without knowing a plugin exists.
+fn viewFor(p: *WasmPlugin, entry: *Buffers.Buffer) ?*projection.View {
     const gpa = p.gpa;
-    for (p.projections.items) |existing| {
-        if (std.mem.eql(u8, existing.name, name)) return existing;
+    if (entry.projection) |existing| {
+        // Another plugin.s projection is not this one.s to rebuild.
+        if (!std.mem.eql(u8, existing.owner, p.name)) return null;
+        return existing;
     }
-    const owned = gpa.dupe(u8, name) catch return null;
-    const created = gpa.create(Projection) catch {
-        gpa.free(owned);
-        return null;
-    };
-    created.* = .{ .value = .init(gpa), .target = undefined, .name = owned };
-    p.projections.append(gpa, created) catch {
-        created.value.deinit();
-        gpa.free(owned);
+    const created = gpa.create(projection.View) catch return null;
+    created.* = .init(gpa);
+    created.owner = gpa.dupe(u8, p.name) catch {
         gpa.destroy(created);
         return null;
     };
+    entry.projection = created;
     return created;
 }
 
-/// The projection with a build OPEN — `node` and `commit` are about the build
-/// `begin` started, which is unambiguous because a build is not concurrent.
-fn openBuild(p: *WasmPlugin) ?*Projection {
-    for (p.projections.items) |view| {
-        if (view.value.open) return view;
-    }
-    return null;
+/// The projection the QUERY doors are about: the ACTIVE entry.s, and only if
+/// this plugin owns it. A verb asks what the cursor is on, and the cursor is
+/// in exactly one entry — so which projection answers is a fact about focus,
+/// not a guess and not last-one-wins.
+fn activeView(p: *WasmPlugin) ?*projection.View {
+    const view = p.activeCtx().buffers.active().projection orelse return null;
+    return if (std.mem.eql(u8, view.owner, p.name)) view else null;
 }
 
-/// The projection the QUERY doors are about: the one whose entry is active.
-/// A verb asks what the cursor is on, and the cursor is in exactly one entry —
-/// so which projection answers is a fact about focus, not a guess and not
-/// last-one-wins.
-fn activeView(p: *WasmPlugin) ?*Projection {
-    const bufs = p.activeCtx().buffers;
-    for (p.projections.items) |view| {
-        const entry = bufs.resolve(view.target) orelse continue;
-        if (entry.id == bufs.active_id) return view;
-    }
-    return null;
-}
-
-/// Release a plugin.s projections. Called from `WasmPlugin.deinit`, with the
-/// same rule as every other resource holding state on the plugin.s behalf.
+/// Drop this plugin.s claim on any open build. The VIEWS are not freed here:
+/// each belongs to its entry and dies with it, which is why a projection
+/// outlives the plugin that built it exactly as the text does. What must not
+/// outlive the plugin is a half-finished build pointing at one.
 pub fn release(p: *WasmPlugin) void {
-    for (p.projections.items) |view| {
-        view.value.deinit();
-        p.gpa.free(view.name);
-        p.gpa.destroy(view);
-    }
-    p.projections.deinit(p.gpa);
+    p.proj_building = null;
 }
