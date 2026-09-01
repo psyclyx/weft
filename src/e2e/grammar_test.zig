@@ -421,7 +421,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
 
     const focus_before = try focusedName(ed, gpa);
     defer gpa.free(focus_before);
-    const view_before = ed.head.semantic_focus.path().?.view;
+    const entry_before = ed.buffers.active_id;
     var rows_before = try rowNames(ed, gpa);
     defer freeNames(gpa, &rows_before);
 
@@ -475,7 +475,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     const focus_after = try focusedName(ed, gpa);
     defer gpa.free(focus_after);
     try t.expectEqualStrings(focus_before, focus_after);
-    try t.expectEqual(view_before, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(entry_before, ed.buffers.active_id);
     var rows_after = try rowNames(ed, gpa);
     defer freeNames(gpa, &rows_after);
     try t.expectEqual(rows_before.items.len, rows_after.items.len);
@@ -516,9 +516,9 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     try authorTree(ed);
 
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const listing_entry = ed.buffers.active_id;
 
-    // Open the directory in place, so one view holds both ends of the move.
+    // Open the directory in place, so ONE listing holds both ends of the move.
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
     const nested = (try nameColumn(ed, gpa, "inner.txt")).?;
@@ -534,7 +534,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     // The grammar names no plugin, no path, and no placement.
     try focusRowByName(ed, gpa, "inner.txt");
     ed.press("p", "p");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(listing_entry, ed.buffers.active_id);
     try t.expectEqual(@as(usize, 2), try countName(ed, gpa, "top.txt"));
     try t.expectEqual(@as(usize, 1), try countNameAt(ed, gpa, "top.txt", nested));
 
