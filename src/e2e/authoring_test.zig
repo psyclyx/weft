@@ -2269,22 +2269,46 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
 }
 
 /// The name column of the focused files view's row whose draft reads `want`.
-fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?semantic.scene.Node {
-    const path = ed.head.semantic_focus.path() orelse return null;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return null;
-    for (view.scene.content.container.children) |row| {
-        const column = row.content.container.children[2];
-        var snapshot = try ed.session.system.semantic.fields.get(column.content.field.ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, want)) return column;
+/// The listing buffer's row whose NAME is `want`, or null.
+///
+/// A listing is a text projection now, so a row is a node: its KEY is the
+/// model's own id (identity, unchanged by a rename) and its TEXT is what you
+/// see. This used to walk the scene's third column and snapshot a field —
+/// which is what choosing the scene plane bought, and what the text plane now
+/// gives without giving up search, yank or selection.
+fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?core.projection.Node {
+    _ = gpa;
+    const view = ed.buffers.active().projection orelse return null;
+    for (view.nodes.items) |node| {
+        if (std.mem.eql(u8, filesName(node.text), want)) return node;
     }
     return null;
 }
 
+/// A row.s indent, in bytes — its depth, which the scene carried as a layout
+/// column and the text carries as leading spaces.
+fn indentOf(row_text: []const u8) usize {
+    var i: usize = 0;
+    while (i < row_text.len and row_text[i] == ' ') i += 1;
+    return i;
+}
+
+/// A row.s name: past the indent and the glyph, which are structure.
+fn filesName(row_text: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < row_text.len and row_text[i] == ' ') i += 1;
+    if (i >= row_text.len) return "";
+    const glyph_len = std.unicode.utf8ByteSequenceLength(row_text[i]) catch 1;
+    i = @min(i + glyph_len, row_text.len);
+    while (i < row_text.len and row_text[i] == ' ') i += 1;
+    return std.mem.trimEnd(u8, row_text[i..], " \t\r");
+}
+
+/// Put POINT on the row named `want` — an ordinary cursor placement, because
+/// the row is ordinary text.
 fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
-    const column = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
-    const view = ed.head.semantic_focus.path().?.view;
-    _ = try ed.session.system.semantic.focusView(ed.head, gpa, view, column.id);
+    const node = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
+    ed.buffers.active().textEditor().?.placeCursor(node.start);
 }
 
 test "authoring/files: Vim Tab folds a directory open in place and back shut" {
@@ -2316,9 +2340,14 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     {
         const nest = (try filesRowNamed(ed, gpa, "nest")) orelse return error.TestExpectedEqual;
         const inner = (try filesRowNamed(ed, gpa, "inner.txt")) orelse return error.TestExpectedEqual;
-        // Spliced into the same view, indented, and still the same row focused.
-        try t.expect(inner.layout.column.? > nest.layout.column.?);
-        try t.expectEqual(nest.id, ed.head.semantic_focus.path().?.leaf().?);
+        // Spliced into the same listing, INDENTED, and still the same row under
+        // point. Depth is leading spaces in the row.s own text now — the same
+        // fact the scene carried as a layout column.
+        try t.expect(indentOf(inner.text) > indentOf(nest.text));
+        const at = ed.buffers.active().projection.?.subjectAt(
+            ed.buffers.active().textEditor().?.cursorOffset(),
+        ) orelse return error.NoRowUnderPoint;
+        try t.expectEqualStrings(nest.key, at.key);
     }
 
     // A draft made INSIDE the folded-open directory, so the round trip below

@@ -203,6 +203,73 @@ pub const Plugin = struct {
         }
     }
 
+/// WHAT A ROW AFFORDS, as predicates against what it IS.
+///
+/// The listing owns no keymap — the property the scene plane had, kept and made
+/// cheaper. A grammar binds `Return` to `std.target.activate` and `minus` to
+/// `std.hierarchy.step-out`; these `provide`s say those intentions reach here
+/// when point is on a row of a listing. Neither side names the other, and a
+/// third party can put its own verb on `fs.file` the same way.
+pub fn provideRowVerbs() void {
+    const on_row: weft.Predicate = .{ .any = &.{
+        .{ .role = files.text_rows.role_file },
+        .{ .role = files.text_rows.role_directory },
+        .{ .role = files.text_rows.role_symlink },
+        .{ .role = files.text_rows.role_other },
+        .{ .role = files.text_rows.role_dirty },
+    } };
+    weft.provide("std.target.activate", on_row, "files-enter", 0);
+    weft.provide("std.hierarchy.step-out", .{ .tool = "files" }, "files-up", 0);
+    // Saving a listing is applying what was typed into it — the same
+    // `std.persistence.save` a text buffer resolves, scoped to this tool.
+    weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
+}
+
+/// The session whose listing is focused, if any.
+fn focusedSession(self: *Plugin) ?*Session {
+    var buf: [64]u8 = undefined;
+    const active = weft.activeBufferName(&buf) orelse return null;
+    for (self.sessions.items) |session| {
+        if (std.mem.eql(u8, session.bufferName(), active)) return session;
+    }
+    return null;
+}
+
+/// Return on a row: open what it names, through the ordinary provider-aware
+/// `open`. A directory comes back as another listing (this same handler); a
+/// file comes back as an editor entry. Neither outcome is decided here.
+pub fn enterRow(self: *Plugin) void {
+    const session = self.focusedSession() orelse return;
+    const key = weft.projectionAtCursor() orelse return;
+    const id = files.text_rows.idOf(key) orelse return;
+    const name = for (session.draft.rows.items) |row| {
+        if (row.id == id) break row.draft.name;
+    } else return;
+    var joined: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&joined, "{s}/{s}", .{ session.path(), name }) catch return;
+    setOpeningPath(path);
+    weft.runStr("open", path);
+}
+
+/// `-`: the directory containing this one, opened the same way.
+pub fn stepOut(self: *Plugin) void {
+    const session = self.focusedSession() orelse return;
+    const here = session.path();
+    const cut = std.mem.lastIndexOfScalar(u8, here, '/') orelse return;
+    const up = if (cut == 0) "/" else here[0..cut];
+    setOpeningPath(up);
+    weft.runStr("open", up);
+}
+
+
+/// `save` in a listing: apply what was typed.
+pub fn applyFocused(self: *Plugin) void {
+    const session = self.focusedSession() orelse return;
+    _ = session.applyEdits() catch {
+        weft.echo("files: could not apply");
+    };
+}
+
     fn sessionForView(self: *Plugin, ref: semantic.view.Ref) ?*Session {
         for (self.sessions.items) |session| if (session.view_ref.eql(ref)) return session;
         return null;
@@ -282,6 +349,20 @@ const RowTarget = struct {
     fresh: bool = false,
 };
 
+/// The absolute path the next listing is FOR, when a descend knows it.
+///
+/// A child target.s `display_name` is a bare entry name — its publisher is the
+/// row-target machinery, not the directory opener — so a session reached by
+/// descending cannot recover where it is from the descriptor. The descend knows
+/// (it built the path to `open`), so it says.
+var opening_path: [1024]u8 = undefined;
+var opening_len: usize = 0;
+
+fn setOpeningPath(p: []const u8) void {
+    opening_len = @min(p.len, opening_path.len);
+    @memcpy(opening_path[0..opening_len], p[0..opening_len]);
+}
+
 /// The session whose listing the next `files-show` is for. Set immediately
 /// before the nested `weft.run` that consumes it, and cleared by it.
 ///
@@ -314,6 +395,15 @@ pub const Session = struct {
     /// with no sidebar-specific code anywhere.
     buf_name: [64]u8 = undefined,
     buf_len: usize = 0,
+    /// This listing.s directory, as the publisher named it. Kept so a row can
+    /// be opened by the ordinary `open` — the same door the grammar.s Return
+    /// reaches, so descending into a directory and opening a file are one path.
+    path_buf: [1024]u8 = undefined,
+    path_len: usize = 0,
+
+    pub fn path(self: *const Session) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
 
     pub fn bufferName(self: *const Session) []const u8 {
         return self.buf_name[0..self.buf_len];
@@ -424,6 +514,19 @@ pub const Session = struct {
     }
 
     fn load(self: *Session) !void {
+        if (opening_len > 0) {
+            self.path_len = @min(opening_len, self.path_buf.len);
+            @memcpy(self.path_buf[0..self.path_len], opening_path[0..self.path_len]);
+            opening_len = 0;
+        } else {
+            var described = weft.semanticTargetDescribe(self.target, self.plugin.gpa) catch {
+                return error.StaleTarget;
+            };
+            defer described.deinit();
+            const name = described.value.display_name;
+            self.path_len = @min(name.len, self.path_buf.len);
+            @memcpy(self.path_buf[0..self.path_len], name[0..self.path_len]);
+        }
         self.capabilities = try weft.semanticFsCapabilities(self.plugin.gpa, self.target, self.target_revision);
         var listing = try weft.semanticFsList(self.plugin.gpa, self.target, self.target_revision);
         defer listing.deinit();

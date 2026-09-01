@@ -374,11 +374,9 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
     try core.file.writeBytes(gpa, "bravo.txt", "BRAVO\n");
     try core.file.writeBytesMakingDirs(gpa, "nested", "nested/inner.txt", "INNER\n");
 
-    // The listing reads the place, so it needs the same grant a config gives
-    // it — `fs_read` rooted where the test runs.
     try ed.grantRooted("files", "fs_read", "/");
-    ed.run("files-list");
-    try t.expectEqualStrings("*files-list*", ed.bufferName());
+    ed.runStr("open", ".");
+    try t.expect(std.mem.startsWith(u8, ed.bufferName(), "*files"));
 
     // The entries are TEXT — which is the half the scene plane could not give.
     {
@@ -394,10 +392,13 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
     // with ordinary cursor motion.
     var hops: usize = 0;
     while (hops < 32) : (hops += 1) {
-        const at = ed.buffers.active().projection.?.subjectAt(
-            ed.buffers.active().textEditor().?.cursorOffset(),
-        );
-        if (at) |node| if (std.mem.eql(u8, node.key, "d:nested")) break;
+        const b = ed.buffers.active();
+        const proj = b.projection orelse return error.ListingHasNoProjection;
+        const at = proj.subjectAt((b.textEditor() orelse return error.ListingHasNoEditor).cursorOffset());
+        // Matched on the row.s TEXT: the key is the model.s own id, which is
+        // the point — identity is not the name, so a rename does not change
+        // which row a verb is about.
+        if (at) |node| if (std.mem.indexOf(u8, node.text, "nested") != null) break;
         ed.press("j", "");
     } else return error.NestedRowNeverFocused;
     ed.press("Return", "");
@@ -405,13 +406,11 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
         const text = try ed.textAlloc();
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "inner.txt") != null);
-        // ONE buffer for the listing — descending is a new tree in the same
-        // entry, not a buffer per directory to clean up after.
-        try t.expectEqualStrings("*files-list*", ed.bufferName());
+        try t.expect(std.mem.startsWith(u8, ed.bufferName(), "*files"));
     }
 
-    // And back up.
-    ed.press("^", "");
+    // And back up, through the grammar.s own `minus` → `std.hierarchy.step-out`.
+    ed.press("minus", "");
     {
         const text = try ed.textAlloc();
         defer gpa.free(text);

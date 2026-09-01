@@ -1444,7 +1444,6 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     // scene to have one.
     try t.expect(listing.focusedRole().len > 0);
     const start_key = rowKey(listing);
-    const start_off = listing.textEditor().?.cursorOffset();
     ed.press("j", "");
     try t.expect(!std.mem.eql(u8, start_key, rowKey(listing)));
     ed.press("k", "");
