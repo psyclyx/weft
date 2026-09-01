@@ -286,6 +286,7 @@ fn initExtra() void {
     // readable without the rest of this file in your head.
     model.on_gathered = onGathered;
     model.on_view_filled = onViewFilled;
+    model.on_view_project = render_mod.projectView;
     // git mode: navigation plus the interactive verbs. It declares no text
     // commit, and the `*git*` entry holds no editor at all, so typing refuses
     // STRUCTURALLY — there is nothing for a mode lock to protect. It is the
@@ -469,11 +470,8 @@ fn paintOwnEntry() void {
 }
 
 fn onViewFilled(style: model.ViewStyle) void {
-    // Colouring a read-only view is `render.zig`.s, beside the projection it
-    // is deliberately NOT: a view is one command's output shown verbatim, with
-    // no model behind it and no rows to name, which is why it still paints
-    // spans by offset and the projection never does.
-    render_mod.styleView(style);
+    // What is LEFT after the diff and log views became projections: the plan a
+    // rebase is edited in, which is plain text on purpose.
     if (style == .rebase_todo) rebaseTodoFill();
 }
 

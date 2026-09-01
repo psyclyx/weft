@@ -227,20 +227,38 @@ pub const Argv = struct {
 /// and are never parsed into the model.
 pub fn show(argv: []const []const u8, name: []const u8, style: model.ViewStyle) void {
     if (!model.focusBuffer(name)) weft.runStr("buffer-create", name);
-    _ = weft.execWith(ShowOf, .{ .session = cur().id, .style = style }, .{
-        .argv = rootedArgv(argv),
-    }, showLanded);
+    var who: ShowOf = .{ .session = cur().id, .style = style };
+    who.name_len = @min(name.len, who.name_buf.len);
+    @memcpy(who.name_buf[0..who.name_len], name[0..who.name_len]);
+    _ = weft.execWith(ShowOf, who, .{ .argv = rootedArgv(argv) }, showLanded);
 }
 
-const ShowOf = struct { session: u32, style: model.ViewStyle };
+/// The view's NAME travels with the request, rather than being recovered as
+/// "whatever is focused when the output lands". That was true, and true by an
+/// argument about what could not have run in between — the same argument
+/// `paintOwnEntry` had to make and then stopped being able to. A projection is
+/// published to a named buffer, so the name has to be here anyway.
+const ShowOf = struct {
+    session: u32,
+    style: model.ViewStyle,
+    name_buf: [64]u8 = undefined,
+    name_len: usize = 0,
+
+    fn name(self: *const ShowOf) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+};
 
 fn showLanded(r: weft.ExecDone, who: ShowOf) void {
     const s = model.sessionById(who.session) orelse return;
     model.routed = s;
-    // The view buffer is whatever is focused — `show` focused it before firing
-    // and a read cannot have moved it, since nothing else runs in between.
     var scratch: [1 << 16]u8 = undefined;
     const text = r.read(.out, 0, &scratch);
+    // A projected view IS its tree: publishing it writes the buffer, so there
+    // is nothing to edit in first and nothing to read back out.
+    if (model.on_view_project) |project| {
+        if (project(who.name(), who.style, text)) return;
+    }
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, text);
     weft.jump(0);
     if (model.on_view_filled) |f| f(who.style);

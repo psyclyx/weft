@@ -2108,13 +2108,22 @@ test "e2e/git: no verb reads a rendered byte range to choose its target" {
     // question a verb asks now is which KEY, and the answer is an identity.
     try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.cursor()"));
 
-    // The projection paints no spans by offset. `weft.style`/`weft.fold`
-    // survive in `render.zig` for the read-only VIEWS (`git show`, `git log`),
-    // which are one command's output shown verbatim — no model, no rows to
-    // name — and that distinction is the reason they are still legitimate.
-    try t.expect(std.mem.indexOf(u8, projection, "styleView") != null);
-    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.style("));
-    try t.expectEqual(@as(usize, 0), std.mem.count(u8, verbs, "weft.fold("));
+    // NO FILE of git paints by offset any more, and this gate used to carve out
+    // the one that did. `render.zig` kept `weft.style` for the read-only views
+    // (`git show`, `git log`) on the argument that they are one command's
+    // output shown verbatim — no model behind them, no rows to name. Two of
+    // those three were true, and the conclusion was still wrong: a line of
+    // `git log` has a hash, and the hash is its name. They are projections now,
+    // built straight from the command's stdout, so the exemption is gone and
+    // the claim is the plain one.
+    for ([_][]const u8{ verbs, projection, parse, patch }) |src| {
+        try t.expectEqual(@as(usize, 0), std.mem.count(u8, src, "weft.style("));
+        try t.expectEqual(@as(usize, 0), std.mem.count(u8, src, "weft.styleClear("));
+        try t.expectEqual(@as(usize, 0), std.mem.count(u8, src, "weft.fold("));
+    }
+    // A span still exists — over a NODE's own text, which is the one kind of
+    // position a producer may name (see `wl_proj_span`).
+    try t.expect(std.mem.indexOf(u8, projection, "b.span(node,") != null);
 }
 
 // ── Places: two projects open at once (doc/place.md) ──────────────────

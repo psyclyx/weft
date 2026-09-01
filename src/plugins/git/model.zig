@@ -72,6 +72,9 @@ pub const ViewStyle = enum { none, diff, log, rebase_todo };
 /// plugin in your head, which is the property its module doc claims.
 pub var on_gathered: ?*const fn () void = null;
 pub var on_view_filled: ?*const fn (ViewStyle) void = null;
+/// Publish this view as a projection, given the command's own output. Returns
+/// false for the styles that stay plain text, which then take `on_view_filled`.
+pub var on_view_project: ?*const fn (name: []const u8, ViewStyle, text: []const u8) bool = null;
 
 /// The argv for each part. No shell, so no quoting, and a path with an
 /// apostrophe or a newline in it is one argument rather than a broken command.

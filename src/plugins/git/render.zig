@@ -362,61 +362,91 @@ pub fn toggleFold(key: []const u8) void {
     _ = weft.projectionToggleFold(key);
 }
 
-/// Colour a read-only view's text (`git show`, `git log`, a blame). These own
-/// their own buffers and are NOT projections: they are one command's output
-/// shown verbatim, so they still paint spans by offset. The distinction is
-/// real — there is no model behind them and no row to name.
-pub fn styleView(style: model.ViewStyle) void {
+/// Publish a read-only view (`git show`, `git diff`, `git log`) as a
+/// PROJECTION, straight from the bytes the command produced.
+///
+/// These used to be the argument for keeping the offset styling door: one
+/// command's output shown verbatim, no model behind it, no row to name. Two of
+/// those three were true and the conclusion was still wrong. A line of `git
+/// log` is a row — it has a hash, and the hash is its name — and the code that
+/// insisted otherwise wrote the bytes into the buffer, read them all back out
+/// in scratch-sized chunks, split them into lines a second time, and painted
+/// each one at `base + i`. The bytes were in hand the whole time.
+///
+/// So the round-trip is gone with the offsets: `text` is the command's stdout,
+/// and what lands in the buffer is this tree. Returns false for the styles that
+/// are NOT projections and must not become one — `rebase_todo` is a plan the
+/// user EDITS, and a projection is regenerated from a model rather than typed
+/// into.
+pub fn projectView(name: []const u8, style: model.ViewStyle, text: []const u8) bool {
     switch (style) {
-        .none, .rebase_todo => {},
-        .diff => classify(styleDiffLine),
-        .log => classify(styleLogLine),
+        .none, .rebase_todo => return false,
+        .diff, .log => {},
     }
-}
-
-fn classify(line_fn: *const fn (base: usize, line: []const u8) void) void {
-    weft.styleClear();
-    const text = weft.slice(0, weft.byteLen());
+    const b = weft.project(name) orelse return false;
+    var ordinal: usize = 0;
     var i: usize = 0;
-    while (i < text.len) {
+    while (i < text.len) : (ordinal += 1) {
         var e = i;
         while (e < text.len and text[e] != '\n') e += 1;
-        line_fn(i, text[i..e]);
+        emitViewRow(b, style, ordinal, text[i..e]);
         i = e + 1;
     }
+    _ = b.commit();
+    return true;
 }
 
-fn styleDiffLine(base: usize, line: []const u8) void {
-    if (line.len == 0) return;
-    const cls: weft.StyleClass = if (std.mem.startsWith(u8, line, "diff --git") or
-        std.mem.startsWith(u8, line, "index "))
-        .muted
-    else if (std.mem.startsWith(u8, line, "+++ ") or std.mem.startsWith(u8, line, "--- "))
-        .muted
-    else if (std.mem.startsWith(u8, line, "@@"))
-        .header
-    else switch (line[0]) {
-        '+' => .added,
-        '-' => .removed,
-        else => .normal,
+fn emitViewRow(b: weft.ProjectionBuilder, style: model.ViewStyle, ordinal: usize, line: []const u8) void {
+    var row_key: [24]u8 = undefined;
+    const key = std.fmt.bufPrint(&row_key, "v{d}", .{ordinal}) catch return;
+    // Every row of a read-only view is somewhere the cursor rests; there is no
+    // structure/subject distinction to make when nothing is nested.
+    const node = b.add(.{
+        .key = key,
+        .role = if (style == .log) role_log_entry else diffRole(line),
+        .text = line,
+        .focusable = true,
+    }) orelse return;
+    if (style == .log) logSpans(b, node, line);
+}
+
+const role_log_entry = "git.log.entry";
+
+/// A diff line's role, which is also how it reads: `styleFor` resolves the last
+/// segment, so naming what the line IS is the whole of choosing its colour.
+/// `+++`/`---` are checked before `+`/`-` — a file header is not an addition.
+fn diffRole(line: []const u8) []const u8 {
+    if (line.len == 0) return "git.diff.text";
+    if (std.mem.startsWith(u8, line, "diff --git") or std.mem.startsWith(u8, line, "index ") or
+        std.mem.startsWith(u8, line, "+++ ") or std.mem.startsWith(u8, line, "--- "))
+        return "git.diff.muted";
+    if (std.mem.startsWith(u8, line, "@@")) return "git.diff.header";
+    return switch (line[0]) {
+        '+' => "git.diff.added",
+        '-' => "git.diff.removed",
+        else => "git.diff.text",
     };
-    if (cls != .normal) weft.style(base, base + line.len, cls);
 }
 
-fn styleLogLine(base: usize, line: []const u8) void {
+/// A log line's parts: the hash after any graph characters, and the `(refs)`
+/// that may follow it. Spans over the row's OWN text — the row is `--oneline
+/// --graph` output, so its shape is known and its position is not.
+fn logSpans(b: weft.ProjectionBuilder, node: u32, line: []const u8) void {
     var i: usize = 0;
     while (i < line.len and isGraph(line[i])) i += 1;
     var h = i;
     while (h < line.len and isHex(line[h])) h += 1;
     if (h == i) return;
-    weft.style(base + i, base + h, .location);
+    // The hash IS the commit, so it carries the commit role rather than a
+    // colour name — which is also what a third party would bind against.
+    b.span(node, i, h, "git.commit");
     var j = h;
     while (j < line.len and line[j] == ' ') j += 1;
     if (j < line.len and line[j] == '(') {
         var k = j;
         while (k < line.len and line[k] != ')') k += 1;
         if (k < line.len) k += 1;
-        weft.style(base + j, base + k, .header);
+        b.span(node, j, k, "git.log.header");
     }
 }
 
