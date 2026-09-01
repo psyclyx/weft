@@ -1138,6 +1138,41 @@ test "e2e/output: Return on a `file:line` in run output jumps there" {
     try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
 }
 
+// A pattern is an ARGUMENT, so a quote in it is a character to search for.
+// grep used to interpolate the pattern into `rg … -- '<pattern>'` and note in a
+// comment that an embedded single quote was "the one gap left" — meaning
+// searching for `don't` ran a malformed shell line, and a pattern chosen less
+// innocently ran a well-formed one of someone else's design.
+test "e2e/grep: a pattern containing a quote is searched for, not interpreted" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // One file holding the awkward text, and one that does not, so a match is
+    // a match rather than "the only file there is".
+    {
+        const r = try proj.oracle("printf 'it is don%st here\\n' \"'\" > quoted.txt");
+        gpa.free(r);
+        const r2 = try proj.oracle("printf 'const a = 1;\\n' > other.js");
+        gpa.free(r2);
+    }
+
+    ed.runStr("grep", "don't");
+    try t.expect(drainToolContains(&ed, "*grep*", "quoted.txt"));
+
+    // The match is really the line with the apostrophe in it — not a partial
+    // match on `don` that a mangled command might still have produced.
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "don't here") != null);
+}
+
 // Output rows are a PROJECTION: each is a node whose KEY indexes the location
 // table, and only a row that names a place is `focusable`. Two things follow
 // that the row-index mapping could not give:

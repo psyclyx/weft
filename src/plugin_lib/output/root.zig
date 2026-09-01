@@ -33,9 +33,8 @@ const Slot = struct {
     table: targets.Table = .{},
 };
 
-/// A slot index + 1 is that buffer's FILL TOKEN: the host hands it back at
-/// delivery, so a landing fill finds its own table without asking what is
-/// focused. Token 0 means "no fill to run" (the host's convention).
+/// One per output buffer, minted on first use and kept for `visit` to read
+/// after the command is long finished.
 var slots: [4]Slot = undefined;
 var slot_count: usize = 0;
 
@@ -54,19 +53,63 @@ pub fn installMode(mode: []const u8, visit_cmd: []const u8) void {
     weft.bindKey(mode, "q", "buffer-back");
 }
 
-/// Focus the `name` tool buffer (reused across runs — `buffer-create` does NOT
-/// dedupe by name, so re-creating would pile up duplicates), put it in `mode`,
-/// and fill it with `cmd`'s output asynchronously under its own fill token.
-pub fn show(cmd: []const u8, name: []const u8, mode: []const u8) void {
-    const token = tokenFor(name) orelse return;
-    if (!focus(name)) weft.runStr("buffer-create", name);
-    weft.setMode(mode);
-    weft.procToBuffer(cmd, name, token);
-}
-
 /// What a producer may add to one row while the raw text is in hand: its own
 /// spans, over the node it was just given. `grep` emphasises the match.
 pub const RowStyle = *const fn (b: weft.ProjectionBuilder, node: u32, line: []const u8, at: ?Target) void;
+
+/// One request, carried to its own continuation.
+///
+/// This replaced the FILL TOKEN, which was an integer the host handed back so a
+/// landing fill could find its own table. It worked, and it was a demux: the
+/// request and the thing it was for travelled separately, so the library kept a
+/// slot table indexed by a number the host had to be trusted to return
+/// unchanged. What the command was for now travels with the command.
+const Request = struct {
+    slot: usize,
+    row_style: ?RowStyle,
+    /// Whether stderr is worth showing. A build's errors are on stderr — which
+    /// is exactly what `make` exists to let you navigate, and exactly what the
+    /// stdout-only fill door silently dropped.
+    want_err: bool,
+};
+
+/// Focus the `name` tool buffer (reused across runs — `buffer-create` does NOT
+/// dedupe by name, so re-creating would pile up duplicates), put it in `mode`,
+/// and run `argv`, publishing its output as a projection when it lands.
+///
+/// ARGV, not a shell line. `grep` used to build `rg … -- '{s}'` and say out
+/// loud that a pattern containing a single quote was "the one gap left for a
+/// later version"; there is no quoting here to have a gap in. A caller that
+/// genuinely wants a shell — `run`, whose whole purpose is running a shell
+/// command — spells it `&.{ "sh", "-c", line }`, which is one argument and one
+/// deliberate decision rather than a string that happens to reach a shell.
+pub fn show(argv: []const []const u8, name: []const u8, mode: []const u8, opts: struct {
+    row_style: ?RowStyle = null,
+    want_err: bool = false,
+}) void {
+    const slot = slotFor(name) orelse return;
+    if (!focus(name)) weft.runStr("buffer-create", name);
+    weft.setMode(mode);
+    _ = weft.execWith(Request, .{
+        .slot = slot,
+        .row_style = opts.row_style,
+        .want_err = opts.want_err,
+    }, .{ .argv = argv }, landed);
+}
+
+/// The command finished: publish what it wrote as the buffer's projection.
+/// Nothing is read back out of the buffer — the bytes are right here, which is
+/// what the fill door could never say.
+fn landed(r: weft.ExecDone, req: Request) void {
+    var scratch: [1 << 16]u8 = undefined;
+    const out = r.read(.out, 0, &scratch);
+    if (out.len > 0 or !req.want_err) return fill(req, out);
+    // A build that printed nothing to stdout said whatever it had to say on
+    // stderr; showing an empty buffer instead is the failure mode this exists
+    // to end.
+    var err_scratch: [1 << 16]u8 = undefined;
+    fill(req, r.read(.err, 0, &err_scratch));
+}
 
 /// A row that names a place, and one that does not. Roles rather than a boolean
 /// because a role is what a THIRD PARTY binds a verb against — it `provide`s
@@ -78,36 +121,26 @@ const role_note = "output.note";
 /// The `path:line:col` stretch inside a result row.
 const role_location = "output.location";
 
-/// `on_fill_token`: read the raw output that just landed and PUBLISH it as a
-/// projection — one node per line, each carrying its location in the table.
-/// The host has BOUND the entry this fill captured, so the ambient reads mean
-/// it whatever is focused, and `token` says which of our tables it is. This is
-/// the ONE moment the text is authoritative; from here on it is display, and
-/// the projection is what makes that literally true — nothing downstream reads
-/// a byte of it.
-pub fn fill(token: u32, row_style: ?RowStyle) void {
-    const slot = slotAt(token) orelse return;
+/// Publish `text` as the buffer's projection — one node per line, each carrying
+/// its location in the table.
+///
+/// `text` is the command's own output, still in the continuation's hands. The
+/// predecessor wrote it into the buffer first and then read it all back out in
+/// scratch-sized chunks, re-splitting it into lines a second time, because the
+/// fill door delivered "your output has landed somewhere" rather than the
+/// output. This is the ONE moment the text is authoritative; from here on it is
+/// display, and the projection is what makes that literally true — nothing
+/// downstream reads a byte of it.
+fn fill(req: Request, text: []const u8) void {
+    const slot = &slots[req.slot];
     slot.table.clear(weft.allocator);
     const b = weft.project(slot.name) orelse return;
-
-    const total = weft.byteLen();
-    var base: usize = 0;
-    while (base < total) {
-        const chunk = weft.slice(base, total);
-        if (chunk.len == 0) break;
-        const tail = base + chunk.len == total;
-        // Whole lines only, so a row is never split across two reads. A single
-        // line longer than the read scratch is captured from its head.
-        const last_break = std.mem.lastIndexOfScalar(u8, chunk, '\n');
-        const usable = if (tail) chunk.len else (if (last_break) |br| br + 1 else chunk.len);
-        var i: usize = 0;
-        while (i < usable) {
-            var e = i;
-            while (e < usable and chunk[e] != '\n') e += 1;
-            emitRow(slot, b, chunk[i..e], row_style);
-            i = e + 1;
-        }
-        base += usable;
+    var i: usize = 0;
+    while (i < text.len) {
+        var e = i;
+        while (e < text.len and text[e] != '\n') e += 1;
+        emitRow(slot, b, text[i..e], req.row_style);
+        i = e + 1;
     }
     _ = b.commit();
 }
@@ -202,21 +235,16 @@ fn activeName() ?[]u8 {
     return null;
 }
 
-/// `name`'s fill token, minting its slot on first use; null when this plugin
-/// already tracks its full complement of output buffers.
-fn tokenFor(name: []const u8) ?u32 {
+/// `name`'s slot index, minting it on first use; null when this plugin already
+/// tracks its full complement of output buffers.
+fn slotFor(name: []const u8) ?usize {
     for (slots[0..slot_count], 0..) |*slot, i| {
-        if (std.mem.eql(u8, slot.name, name)) return @intCast(i + 1);
+        if (std.mem.eql(u8, slot.name, name)) return i;
     }
     if (slot_count == slots.len) return null;
     slots[slot_count] = .{ .name = weft.allocator.dupe(u8, name) catch return null };
     slot_count += 1;
-    return @intCast(slot_count);
-}
-
-fn slotAt(token: u32) ?*Slot {
-    if (token == 0 or token > slot_count) return null;
-    return &slots[token - 1];
+    return slot_count - 1;
 }
 
 /// Focus the buffer named `name`, if one is open.

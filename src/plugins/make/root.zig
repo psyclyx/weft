@@ -28,21 +28,18 @@ fn initExtra() void {
     output.installMode("build", "make-visit");
 }
 
-/// The fill landed: capture each row's location before the text is anyone's
-/// to restyle. The host bound the entry this fill captured, so nothing here
-/// asks what is focused.
-export fn on_fill_token(token: u32) void {
-    output.fill(token, null);
-}
-
+// A build says what went wrong on STDERR, which is the whole reason to have a
+// navigable build buffer — and which the stdout-only fill door dropped on the
+// floor. `want_err` is what makes `make-build` on a broken tree show the
+// errors rather than an empty window.
 fn makeBuild() void {
-    output.show("zig build", "*build*", "build");
+    output.show(&.{ "zig", "build" }, "*build*", "build", .{ .want_err = true });
 }
 fn makeTest() void {
-    output.show("zig build test", "*test*", "build");
+    output.show(&.{ "zig", "build", "test" }, "*test*", "build", .{ .want_err = true });
 }
 fn makeRun() void {
-    output.show("make", "*build*", "build");
+    output.show(&.{"make"}, "*build*", "build", .{ .want_err = true });
 }
 
 comptime {

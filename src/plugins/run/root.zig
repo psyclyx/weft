@@ -44,25 +44,26 @@ fn initExtra() void {
     output.installMode("output", "output-visit");
 }
 
-/// The fill landed: capture each row's location before the text is anyone's
-/// to restyle. The host bound the entry this fill captured, so nothing here
-/// asks what is focused.
-export fn on_fill_token(token: u32) void {
-    output.fill(token, null);
+// A shell, spelled out. `run` is the one consumer that genuinely wants one —
+// its whole purpose is running a shell command line — so it says `sh -c` and
+// hands the line over as ONE argument. That is a decision in the source rather
+// than a string that happens to reach a shell, and it is why every OTHER
+// consumer of this library no longer has a shell in its path at all.
+fn shell(line: []const u8) void {
+    output.show(&.{ "sh", "-c", line }, out_name, "output", .{ .want_err = true });
 }
 
 /// Run the command line passed as arg 0; no-op if none was given.
 fn runCommand() void {
-    const cmd = weft.argStr(0) orelse return;
-    output.show(cmd, out_name, "output");
+    shell(weft.argStr(0) orelse return);
 }
 /// Run the current line of the buffer as a shell command.
 fn runLine() void {
     const l = weft.lineAt(weft.cursor());
     const line = weft.slice(l.start, l.end); // borrows read scratch
-    // Copy out of the read scratch — `procToBuffer`/`runStr` need it stable.
+    // Copy out of the read scratch — the call below outlives this read.
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s}", .{line}) catch return;
-    output.show(cmd, out_name, "output");
+    shell(cmd);
 }
 
 comptime {

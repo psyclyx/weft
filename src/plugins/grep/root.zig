@@ -10,8 +10,6 @@ const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
 
-/// Scratch for the assembled shell command line (pattern + rg flags).
-var cmd_buf: [1 << 12]u8 = undefined;
 /// The last pattern searched, kept so the fill can emphasize its literal
 /// occurrences in each result line (regex patterns simply won't match — a
 /// graceful no-op, still colored file:line locations).
@@ -51,34 +49,29 @@ fn isWord(ch: u8) bool {
 }
 
 /// Create+focus `*grep*`, then fill it with `rg`'s matches for `pattern` async.
-/// The pattern is single-quoted so shell metacharacters in a simple pattern are
-/// inert (embedded single quotes are the one gap left for a later version), and
-/// `--` ends rg's options so a leading `-` in the pattern isn't read as a flag.
+///
+/// The pattern is an ARGUMENT. It used to be interpolated into a shell line
+/// inside single quotes, with a comment saying an embedded single quote was
+/// "the one gap left for a later version" — i.e. searching for `don't` ran a
+/// broken command, and searching for something less innocent ran a different
+/// one. There is no quoting here to have a gap in. `--` still ends rg's options
+/// so a leading `-` in the pattern is a pattern.
 fn runGrep(pattern: []const u8) void {
     if (pattern.len == 0) return; // empty pattern → no-op
     pattern_len = @min(pattern.len, pattern_buf.len);
     @memcpy(pattern_buf[0..pattern_len], pattern[0..pattern_len]);
-    const cmd = std.fmt.bufPrint(
-        &cmd_buf,
-        "rg --line-number --no-heading --color=never -- '{s}'",
-        .{pattern},
-    ) catch return;
-    output.show(cmd, "*grep*", "grep");
+    output.show(
+        &.{ "rg", "--line-number", "--no-heading", "--color=never", "--", pattern_buf[0..pattern_len] },
+        "*grep*",
+        "grep",
+        .{ .row_style = styleMatch },
+    );
 }
 
 /// Search for the pattern passed as arg 0; a no-op when none was given.
 fn grep() void {
     const pattern = weft.argStr(0) orelse return;
     runGrep(pattern);
-}
-
-// ── Fill: capture each row's location, then color the results ──────────────
-// The host fires `on_fill_token` once rg's async output has landed, bound to
-// the entry that fill captured. `output.fill` records the row → location table
-// (what Return navigates by) and paints the locations; grep adds what only it
-// knows — a literal match of the pattern.
-export fn on_fill_token(token: u32) void {
-    output.fill(token, styleMatch);
 }
 
 /// Emphasize a literal occurrence of the searched pattern in a result row.
