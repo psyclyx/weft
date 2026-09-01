@@ -1013,6 +1013,38 @@ pub fn bufferNamed(name: []const u8) bool {
     return false;
 }
 
+/// Focus the buffer called `name`; false when there is none.
+///
+/// ALREADY FOCUSED is a success that does NOTHING, and that is the part worth
+/// having once: switching to the buffer you are already in resets the head to
+/// that buffer's resting mode, which tears the surface off an open interaction.
+/// A background re-gather refocusing "its own" buffer must not answer a
+/// question the user is still looking at. Three plugins hand-rolled this scan
+/// and only one of them remembered.
+pub fn focusBuffer(name: []const u8) bool {
+    var active_buf: [256]u8 = undefined;
+    if (activeBufferName(&active_buf)) |active| {
+        if (std.mem.eql(u8, active, name)) return true;
+    }
+    var i: usize = 0;
+    while (i < bufferCount()) : (i += 1) {
+        const other = bufferName(i) orelse continue;
+        if (!std.mem.eql(u8, other, name)) continue;
+        const id = bufferId(i) orelse return false;
+        runInt("buffer-switch", id);
+        return true;
+    }
+    return false;
+}
+
+/// Focus `name`, creating the buffer if there is none. Tool plugins reuse one
+/// named buffer across runs, and `buffer-create` does NOT dedupe by name — so
+/// "create it if it isn't there" is the only spelling that doesn't pile up
+/// duplicates on the second invocation.
+pub fn focusOrCreateBuffer(name: []const u8) void {
+    if (!focusBuffer(name)) runStr("buffer-create", name);
+}
+
 /// The instance-`n` buffer name for `base`: `*base*` at 1, `*base:n*` above.
 pub fn instanceName(base: []const u8, n: u32, out: []u8) ?[]const u8 {
     const written = if (n <= 1)

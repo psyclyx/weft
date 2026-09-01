@@ -315,24 +315,6 @@ pub const Todos = weft.Instances(Todo);
 pub const draft_tool = "git-commit";
 pub const todo_tool = "git-rebase";
 
-/// Focus `name`, minting the buffer if it does not exist.
-pub fn focusBuffer(name: []const u8) bool {
-    // Already there: switching again would reset the head to the buffer's
-    // resting mode, which would tear the surface off an open interaction (a
-    // background re-gather must not answer a question the user is still on).
-    var buf: [64]u8 = undefined;
-    if (weft.activeBufferName(&buf)) |active| {
-        if (std.mem.eql(u8, active, name)) return true;
-    }
-    const count = weft.bufferCount();
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const bn = weft.bufferName(i) orelse continue;
-        if (std.mem.eql(u8, bn, name)) {
-            const id = weft.bufferId(i) orelse return false;
-            weft.runInt("buffer-switch", id);
-            return true;
-        }
-    }
-    return false;
-}
+/// Focus `name` — `weft`.s, since three plugins had a copy and only this one
+/// remembered that refocusing the CURRENT buffer must do nothing.
+pub const focusBuffer = weft.focusBuffer;

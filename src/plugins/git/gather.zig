@@ -61,7 +61,7 @@ pub fn gather() void {
     // `repaint` authors it. Created here, not by the fill door — which used to
     // do it as a side effect of being handed a buffer name to write into.
     const sess = model.curSession();
-    if (!model.focusBuffer(sess.name())) weft.runStr("buffer-create", sess.name());
+    weft.focusOrCreateBuffer(sess.name());
     weft.toolBacking(tool);
     s.gathering = true;
     s.raw_len = 0;
@@ -229,7 +229,7 @@ pub const Argv = struct {
 /// read-only views (`git log`, `git show`, a blame) that own their own buffer
 /// and are never parsed into the model.
 pub fn show(argv: []const []const u8, name: []const u8, style: model.ViewStyle) void {
-    if (!model.focusBuffer(name)) weft.runStr("buffer-create", name);
+    weft.focusOrCreateBuffer(name);
     var who: ShowOf = .{ .session = model.curSession().id, .style = style };
     who.name_len = @min(name.len, who.name_buf.len);
     @memcpy(who.name_buf[0..who.name_len], name[0..who.name_len]);

@@ -88,7 +88,7 @@ pub fn show(argv: []const []const u8, name: []const u8, mode: []const u8, opts: 
     want_err: bool = false,
 }) void {
     const slot = slotFor(name) orelse return;
-    if (!focus(name)) weft.runStr("buffer-create", name);
+    weft.focusOrCreateBuffer(name);
     weft.setMode(mode);
     _ = weft.execWith(Request, .{
         .slot = slot,
@@ -245,20 +245,6 @@ fn slotFor(name: []const u8) ?usize {
     slots[slot_count] = .{ .name = weft.allocator.dupe(u8, name) catch return null };
     slot_count += 1;
     return slot_count - 1;
-}
-
-/// Focus the buffer named `name`, if one is open.
-fn focus(name: []const u8) bool {
-    const count = weft.bufferCount();
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const other = weft.bufferName(i) orelse continue;
-        if (!std.mem.eql(u8, other, name)) continue;
-        const id = weft.bufferId(i) orelse return false;
-        weft.runInt("buffer-switch", id);
-        return true;
-    }
-    return false;
 }
 
 fn find(name: []const u8) ?*Slot {
