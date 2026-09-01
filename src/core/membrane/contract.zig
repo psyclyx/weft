@@ -48,6 +48,7 @@ const annotate = @import("../wasm_host/annotate.zig");
 const menu = @import("../wasm_host/menu.zig");
 const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
+const proj = @import("../wasm_host/projection.zig");
 const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
 const semantic = @import("../wasm_host/semantic.zig");
@@ -327,6 +328,14 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_exec", .handler = proc.hExec },
     .{ .name = "wl_exec_status", .handler = proc.hExecStatus },
     .{ .name = "wl_exec_read", .handler = proc.hExecRead },
+
+    // ── projection.zig — a node tree rendered into a text buffer ──────
+    .{ .name = "wl_proj_begin", .handler = proj.hProjBegin },
+    .{ .name = "wl_proj_node", .handler = proj.hProjNode },
+    .{ .name = "wl_proj_commit", .handler = proj.hProjCommit },
+    .{ .name = "wl_proj_at_cursor", .handler = proj.hProjAtCursor },
+    .{ .name = "wl_proj_toggle", .handler = proj.hProjToggle },
+    .{ .name = "wl_proj_selection", .handler = proj.hProjSelection },
 
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
     .{ .name = "wl_repl_start", .handler = sessions.hReplStart },

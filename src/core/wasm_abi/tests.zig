@@ -3168,6 +3168,106 @@ test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs p
     try t.expect(!std.mem.eql(u8, ok_at, fail_at));
 }
 
+// ── The projection: a node tree in, no offset out ──────────────────────────
+// `doc/plugin-api.md` §F1. What every tool plugin hand-wrote — layout with its
+// own output cursor, a parallel range table, a hit-test scan, style and fold
+// spans by offset, a captured target re-found after each rebuild, and a bounded
+// set of collapsed rows — is one primitive, and the guest that uses it holds no
+// permission at all.
+
+test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on the ROW" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "projection_gate", @embedFile("guest_projection_wasm"), .{});
+    defer plugin.deinit();
+
+    // A projection is a plugin authoring its own buffer. That never needed
+    // authority, and this guest declares none.
+    for (plugin.perms) |granted| try t.expect(!granted);
+
+    _ = try command.run(&env.commands, &env.ctx, "proj-build", &.{});
+    const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
+    {
+        const text = try buf.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        try t.expectEqualStrings(
+            \\Unstaged changes
+            \\  a.zig
+            \\  b.zig
+            \\@@ -1,2 +1,2 @@
+            \\-old
+            \\+new
+            \\ context
+            \\
+        , text);
+    }
+
+    // The cursor lands on the first row, by key rather than at offset zero.
+    const editor = buf.textEditor().?;
+    // Put it on the hunk's second body line and select into the third.
+    const text = try editor.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    const old_at = std.mem.indexOf(u8, text, "-old").?;
+    const new_end = std.mem.indexOf(u8, text, "+new").? + 4;
+    editor.placeCursor(old_at);
+    try editor.setMark(gpa);
+    editor.placeCursor(new_end);
+
+    _ = try command.run(&env.commands, &env.ctx, "proj-report", &.{});
+    {
+        const line = try execReport(&env, gpa, "*proj-report*");
+        defer gpa.free(line);
+        // The innermost row wins: the cursor is inside the file's range too,
+        // and the hunk is what it is ON.
+        try t.expect(std.mem.indexOf(u8, line, "at=b#0") != null);
+        // A selection reads back as LINE ORDINALS within the row — lines 1..3
+        // of the hunk (`@@` is ordinal 0). Never a byte range.
+        try t.expect(std.mem.indexOf(u8, line, "sel=1,3") != null);
+    }
+
+    // Fold `b`, then REBUILD with a row inserted above it. Both the fold and
+    // the cursor are keyed, so both survive an insertion that moved every
+    // offset below it — the case a positional memory gets wrong.
+    editor.placeCursor(std.mem.indexOf(u8, text, "  b.zig").?);
+    _ = try command.run(&env.commands, &env.ctx, "proj-fold-b", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "proj-rebuild", &.{});
+    {
+        const after = try buf.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(after);
+        try t.expect(std.mem.indexOf(u8, after, "  new.zig") != null);
+        // The cursor is on `  b.zig` still — three bytes further down than it
+        // was, and found by name rather than by where it used to be.
+        try t.expectEqual(std.mem.indexOf(u8, after, "  b.zig").?, buf.textEditor().?.cursorOffset());
+    }
+    _ = try command.run(&env.commands, &env.ctx, "proj-report", &.{});
+    {
+        const line = try execReport(&env, gpa, "*proj-report*");
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "at=b") != null);
+    }
+}
+
+test "membrane: no projection door takes or returns an offset" {
+    // The structural claim, read off the contract table rather than asserted
+    // about a handler: a producer cannot name a rendered position, so "acted on
+    // whatever row a stale offset now covers" is not a bug it can write. The
+    // two doors that DO return numbers return a revision and a pair of line
+    // ordinals, both of which survive a re-render; an offset does not.
+    var found: usize = 0;
+    for (contract.imports) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "wl_proj_")) continue;
+        found += 1;
+        try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
+    }
+    try t.expectEqual(@as(usize, 6), found);
+}
+
 // ── wl_exec: argv in, (status, stdout, stderr) out ─────────────────────────
 // The fill doors carry ONE of the three facts a command produces, so a plugin
 // recovered the other two by convention: git makes each command print its own

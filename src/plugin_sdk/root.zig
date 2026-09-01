@@ -167,6 +167,17 @@ pub const askWith = @import("ask.zig").askWith;
 pub const confirm = @import("ask.zig").confirm;
 pub const confirmWith = @import("ask.zig").confirmWith;
 
+// ── projection: publish a node tree; the host owns every offset ───────
+// See `projection.zig`. This is the door that lets a tool plugin stop
+// being 400 lines of offset bookkeeping — and, because nothing here
+// takes or returns an offset, stop being able to act on a stale row.
+pub const ProjectionNode = @import("projection.zig").Node;
+pub const ProjectionBuilder = @import("projection.zig").Builder;
+pub const project = @import("projection.zig").begin;
+pub const projectionAtCursor = @import("projection.zig").atCursor;
+pub const projectionToggleFold = @import("projection.zig").toggleFold;
+pub const projectionSelectedLines = @import("projection.zig").selectedLines;
+
 // ── Group B: read-only ───────────────────────────────────────────────
 pub fn cursor() usize {
     return e.wl_cursor();

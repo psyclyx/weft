@@ -57,6 +57,9 @@ pub const markdown = @import("markdown.zig");
 // a caps provider over the streaming membrane. See [[lsp-plugin-migration]].
 pub const position = @import("position.zig");
 pub const layers = @import("layers.zig");
+/// A node tree rendered into a text buffer, with the host owning every
+/// offset — the primitive every tool projection was hand-rolling.
+pub const projection = @import("projection.zig");
 /// BUILT AHEAD, NOT YET WIRED — same as `watch` above. Render-embeds
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");

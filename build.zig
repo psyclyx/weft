@@ -346,6 +346,9 @@ const guests = [_]Guest{
     // facts the fill doors could not carry (status, stderr, an argument that
     // is one argument) and that the spool contract survives the move to argv.
     .{ .name = "exec_gate", .import = "guest_exec_wasm", .install = false },
+    // The projection doors' gate guest: NO permissions at all, because a tool
+    // projection is a plugin authoring its own buffer and never needed any.
+    .{ .name = "projection_gate", .import = "guest_projection_wasm", .install = false },
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end.
     .{ .name = "badge", .import = "guest_badge_wasm", .install = false },

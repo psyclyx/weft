@@ -403,6 +403,14 @@ pub const imports = [_]Entry{
     .{ .name = "wl_exec_status", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "the delivered command's exit code, or -1 outside a delivery or for a child that died by signal" },
     .{ .name = "wl_exec_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "a window on the delivered command's stdout (`which` 0) or stderr (1) from `offset`; -1 outside a delivery" },
 
+    // ── projection.zig — a node tree rendered into a text buffer ──────
+    .{ .name = "wl_proj_begin", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "open a projection build over the named buffer; the entry is captured now so nothing can redirect where it lands" },
+    .{ .name = "wl_proj_node", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "append (key, role, text, parent ordinal or -1, flags) to the open build; returns its ordinal" },
+    .{ .name = "wl_proj_commit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "render the built tree into the captured buffer, repaint styles from roles and folds from the collapsed set, and land the cursor on the KEY it was on; returns the revision" },
+    .{ .name = "wl_proj_at_cursor", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the key of the innermost row the cursor is on; empty for no row" },
+    .{ .name = "wl_proj_toggle", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "flip a row fold by key and re-render from the tree in hand (no producer is consulted); returns the revision" },
+    .{ .name = "wl_proj_selection", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "which body LINES of a key the selection covers, as two little-endian u32 ordinals; -1 when it touches none" },
+
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
     .{ .name = "wl_repl_start", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .proc_timer, .doc = "start a persistent REPL streaming into a named comint buffer" },
     .{ .name = "wl_repl_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write a line to a REPL session's stdin" },
@@ -467,7 +475,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 234;
+const expected_import_count = 240;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

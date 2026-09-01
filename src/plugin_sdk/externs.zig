@@ -263,6 +263,12 @@ pub extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32
 pub extern "weft" fn wl_exec(argv: u32, argv_len: u32, argc: u32, input: u32, input_len: u32, at: u32, at_len: u32, token: u32) i32;
 pub extern "weft" fn wl_exec_status() i32;
 pub extern "weft" fn wl_exec_read(which: u32, offset: u32, out: u32, out_cap: u32) i32;
+pub extern "weft" fn wl_proj_begin(name: u32, name_len: u32) i32;
+pub extern "weft" fn wl_proj_node(key: u32, key_len: u32, role: u32, role_len: u32, text: u32, text_len: u32, parent: i32, flags: u32) i32;
+pub extern "weft" fn wl_proj_commit() i32;
+pub extern "weft" fn wl_proj_at_cursor(out: u32, out_cap: u32) i32;
+pub extern "weft" fn wl_proj_toggle(key: u32, key_len: u32) i32;
+pub extern "weft" fn wl_proj_selection(key: u32, key_len: u32, out: u32, out_cap: u32) i32;
 pub extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
 pub extern "weft" fn wl_fs_stat(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;

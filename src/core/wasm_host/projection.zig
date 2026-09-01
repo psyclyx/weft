@@ -1,0 +1,286 @@
+//! The projection doors: a guest publishes a NODE TREE, the host renders it
+//! into a text buffer and answers questions about it by KEY.
+//!
+//! Six doors, and what matters about them is what is NOT among them. There is
+//! no door that takes an offset and no door that returns one. A guest builds a
+//! tree, commits it, and afterwards asks only "which key is the cursor on" and
+//! "which lines of this key are selected". Everything between — laying the text
+//! out, painting styles from roles, hiding folded subtrees, hit-testing the
+//! cursor, and putting the cursor back on the row it was on before a rebuild —
+//! is `core/projection.zig`'s, once, for every producer.
+//!
+//! The buffer is written as the plugin's own peer through the same
+//! `command.renderInto` door `wl_edit` uses, so a projection is authored under
+//! the same authority as any other plugin edit and shows up in the same
+//! history. The style and fold layers are claimed exactly as `wl_style_clear`
+//! and `wl_fold_clear` claim them, so a projection composes with everything
+//! already reading those layers rather than needing a second painting path.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const wasm = @import("../wasm.zig");
+const command = @import("../command.zig");
+const Buffers = @import("../Buffers.zig");
+const projection = @import("../projection.zig");
+
+const shared = @import("plugin.zig");
+const WasmPlugin = shared.WasmPlugin;
+
+/// The layer names the projection paints into — the SAME two `wl_style_clear`
+/// and `wl_fold_clear` claim. A projection is not a second rendering path.
+const styles_layer_name = "styles";
+const folds_layer_name = "folds";
+
+/// `wl_proj_begin(name, name_len) -> i32`: open a build over the named buffer.
+/// 0 accepted, -1 refused. The buffer is resolved ONCE, here, and captured —
+/// so nothing that happens between `begin` and `commit` can redirect where the
+/// projection lands.
+pub fn hProjBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const buffers = p.activeCtx().buffers;
+    const id = buffers.findByName(name) orelse return;
+    const entry = buffers.get(id) orelse return;
+    const view = viewFor(p, name) orelse return;
+    view.target = entry.ref();
+    view.value.begin();
+    results[0] = 0;
+}
+
+/// `wl_proj_node(key, key_len, role, role_len, text, text_len, parent, flags)
+/// -> i32`: append a node to the open build; returns its ordinal, which a later
+/// node names as ITS parent. `parent` is -1 for a root. `flags` bit 0 is
+/// foldable.
+pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const view = p.projection orelse return;
+    const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(key);
+    const role = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(role);
+    const text = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(text);
+    const parent: ?u32 = if (args[6] < 0) null else @intCast(args[6]);
+    const ordinal = view.value.add(.{
+        .key = key,
+        .role = role,
+        .text = text,
+        .parent = parent,
+        .foldable = (args[7] & 1) != 0,
+    }) catch return;
+    results[0] = @intCast(ordinal);
+}
+
+/// `wl_proj_commit() -> i32`: render the built tree into the captured buffer,
+/// repaint styles and folds, and put the cursor back on the row it was on.
+/// Returns the new revision, or -1.
+pub fn hProjCommit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const view = p.projection orelse return;
+    results[0] = repaint(p, view, .commit) orelse -1;
+}
+
+/// Whether a repaint swaps a NEW tree in or re-lays the one already committed.
+///
+/// The distinction is not cosmetic. A fold changes the VIEW, so it re-lays the
+/// tree in hand: no producer is consulted, and the REVISION does not move —
+/// a decision made against this tree before the fold is still about the same
+/// model and must not be refused as stale.
+const Repaint = enum { commit, rerender };
+
+/// The whole render: remember where the cursor is BY KEY, lay the tree out,
+/// write it, repaint the two layers, and land the cursor on the key it was on.
+fn repaint(p: *WasmPlugin, view: *Projection, kind: Repaint) ?i32 {
+    const gpa = p.gpa;
+    const buffers = p.activeCtx().buffers;
+    const entry = buffers.resolve(view.target) orelse return null;
+    const editor = entry.textEditor() orelse return null;
+    const doc = &editor.doc;
+
+    // WHERE THE CURSOR IS, as an identity, taken before anything moves. This is
+    // the whole of what a producer used to do with `markRestore`, a captured
+    // target, a fallback offset, and a re-find after the render.
+    view.value.rememberFocus(editor.cursorOffset());
+
+    const text = switch (kind) {
+        .commit => view.value.commit() catch return null,
+        .rerender => view.value.render() catch return null,
+    };
+    const end = editor.text().byteLen();
+    command.renderInto(gpa, doc, .plugin, p.name, &.{
+        .{ .range = .{ .start = 0, .end = end }, .bytes = text },
+    }) catch return null;
+
+    paintStyles(p, view, doc, text.len);
+    paintFolds(p, view, doc);
+    editor.placeCursor(@min(view.value.focusOffset(), editor.text().byteLen()));
+    return @bitCast(view.value.revision);
+}
+
+/// Roles → classes, in one bulk pass over the rendered bytes. The producer
+/// named WHAT each row is; `projection.styleFor` decides how that reads, which
+/// is what gives a theme something to bind and stops a plugin choosing colours.
+fn paintStyles(p: *WasmPlugin, view: *Projection, doc: anytype, len: usize) void {
+    const gpa = p.gpa;
+    const layer = p.activeCtx().caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
+    const classes = gpa.alloc(u8, len) catch return;
+    defer gpa.free(classes);
+    @memset(classes, 0);
+    // Parents first, children after, so a child's own role wins over the range
+    // its parent painted — the reading a nested row wants.
+    for (view.value.nodes.items) |n| {
+        const class = projection.styleFor(n.role);
+        if (class == 0) continue;
+        const start = @min(n.start, classes.len);
+        // A node's OWN first line, not its whole subtree: a section header is
+        // emphasised, its files are not painted as the section.
+        const own_end = @min(n.body, classes.len);
+        if (start < own_end) @memset(classes[start..own_end], class);
+    }
+    const version = doc.version(gpa) catch return;
+    defer gpa.free(version);
+    layer.publishBulk(gpa, version, 0, classes) catch {};
+}
+
+/// One invisible span per collapsed node, from just past its own line to the
+/// end of its subtree — the header stays, the body goes.
+fn paintFolds(p: *WasmPlugin, view: *Projection, doc: anytype) void {
+    const gpa = p.gpa;
+    const layer = p.activeCtx().caps.layers.claim(gpa, doc, folds_layer_name, .local, p.name) catch return;
+    layer.publishSpans(gpa, &.{}) catch return;
+    for (view.value.nodes.items) |n| {
+        if (!n.foldable) continue;
+        if (!view.value.isCollapsed(n.key)) continue;
+        if (n.end <= n.body) continue;
+        layer.appendSpan(gpa, .{
+            .start = n.body,
+            .end = n.end,
+            .kind = 0,
+            .message = "",
+            .face = .{ .invisible = true, .foldable = true },
+        }) catch {};
+    }
+}
+
+/// `wl_proj_at_cursor(out, cap) -> i32`: the KEY of the innermost row the
+/// cursor is on. This is the only question a verb asks, and its answer is an
+/// identity — never the offset that produced it.
+pub fn hProjAtCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const view = p.projection orelse {
+        results[0] = -1;
+        return;
+    };
+    const entry = p.activeCtx().buffers.resolve(view.target) orelse {
+        results[0] = -1;
+        return;
+    };
+    const editor = entry.textEditor() orelse {
+        results[0] = -1;
+        return;
+    };
+    const node = view.value.nodeAt(editor.cursorOffset()) orelse {
+        // Empty space is not an error: the caller reads a zero-length key and
+        // does nothing, which is what "the cursor is on no row" means.
+        shared.writeExact(caller, args, results, "");
+        return;
+    };
+    shared.writeExact(caller, args, results, node.key);
+}
+
+/// `wl_proj_toggle(key, key_len) -> i32`: flip a row's fold and re-render.
+/// Unbounded — the collapsed set is exactly the keys you folded, where the
+/// table this replaces held 64 and apologised past that.
+pub fn hProjToggle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const view = p.projection orelse return;
+    const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(key);
+    if (view.value.byKey(key) == null) return; // a row the tree does not name
+    view.value.toggleFold(key) catch return;
+    // Re-lay the tree in hand. It used to swap the live tree through the
+    // BUILDER to reuse `commit`, which emptied `nodes` for the length of the
+    // swap — so the focus this repaint remembers was read from an empty tree,
+    // came back null, and the cursor jumped to the top on every fold.
+    results[0] = repaint(p, view, .rerender) orelse -1;
+}
+
+/// `wl_proj_selection(key, key_len, out, cap) -> i32`: which body LINES of
+/// `key` the selection covers, as two little-endian `u32` ordinals. -1 when the
+/// selection touches no line of that row.
+///
+/// Ordinals, not offsets: a partial hunk is named by "lines 2 through 4 of this
+/// row", which stays meaningful across a re-render and is refused outright once
+/// the revision moves — where a byte range silently means something else.
+pub fn hProjSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    results[0] = -1;
+    const view = p.projection orelse return;
+    const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(key);
+    const entry = p.activeCtx().buffers.resolve(view.target) orelse return;
+    const editor = entry.textEditor() orelse return;
+    const sel = editor.selectedRange() orelse return;
+    const lines = view.value.selectedLines(key, sel.start, sel.end) orelse return;
+    var out: [8]u8 = undefined;
+    std.mem.writeInt(u32, out[0..4], @intCast(lines.lo), .little);
+    std.mem.writeInt(u32, out[4..8], @intCast(lines.hi), .little);
+    shared.writeExact(caller, args[2..], results, &out);
+}
+
+// ── Where a plugin's projection lives ─────────────────────────────────
+
+/// A plugin's projection plus the entry it was captured against. The `Buffers.Ref`
+/// is generation-checked, so an entry closed and its slot reused resolves to
+/// nothing rather than to somebody else's buffer.
+pub const Projection = struct {
+    value: projection.View,
+    target: Buffers.Ref,
+    /// The buffer name the build named, owned — the identity a second `begin`
+    /// is matched against.
+    name: []u8,
+};
+
+/// Find-or-create this plugin's projection for `name`. One per plugin for now:
+/// a second buffer replaces the first, which is the honest shape until a
+/// producer needs two at once (and `wl_exec`'s `at` already shows how a second
+/// would be addressed — by the buffer it is about).
+fn viewFor(p: *WasmPlugin, name: []const u8) ?*Projection {
+    const gpa = p.gpa;
+    if (p.projection) |existing| {
+        if (std.mem.eql(u8, existing.name, name)) return existing;
+        existing.value.deinit();
+        gpa.free(existing.name);
+        gpa.destroy(existing);
+        p.projection = null;
+    }
+    const owned = gpa.dupe(u8, name) catch return null;
+    const created = gpa.create(Projection) catch {
+        gpa.free(owned);
+        return null;
+    };
+    created.* = .{ .value = .init(gpa), .target = undefined, .name = owned };
+    p.projection = created;
+    return created;
+}
+
+/// Release a plugin's projection. Called from `WasmPlugin.deinit`, with the
+/// same rule as every other resource holding state on the plugin's behalf.
+pub fn release(p: *WasmPlugin) void {
+    const view = p.projection orelse return;
+    view.value.deinit();
+    p.gpa.free(view.name);
+    p.gpa.destroy(view);
+    p.projection = null;
+}
