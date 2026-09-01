@@ -1138,6 +1138,49 @@ test "e2e/output: Return on a `file:line` in run output jumps there" {
     try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
 }
 
+// Output rows are a PROJECTION: each is a node whose KEY indexes the location
+// table, and only a row that names a place is `focusable`. Two things follow
+// that the row-index mapping could not give:
+//
+//   - a fresh fill lands on the first ROW THAT GOES SOMEWHERE, not on line 0.
+//     Every build tool prints a banner first, so "press Return" used to mean
+//     "press j past the preamble, then Return";
+//   - Return resolves through the key the cursor is on, not through a count of
+//     the newlines above it, so nothing about the rendering can move it.
+test "e2e/output: a fill lands on the first row that goes somewhere, and Return follows its key" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    {
+        const r = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
+        gpa.free(r);
+    }
+
+    // Two preamble lines that name no location, then the one that does.
+    ed.runStr("run-command", "printf 'building...\\nlinking...\\ntrace: app.js:2:5 boom\\n'");
+    try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
+
+    // No navigation at all — Return straight away.
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "app.js");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "target") == null);
+    try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+    try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
+}
+
 // ── Truncate-then-act: a path or a name must cross whole or not at all ──
 //
 // grep-visit and output-visit once copied the matched path into a fixed

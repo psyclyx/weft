@@ -92,6 +92,29 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(ordinal);
 }
 
+/// `wl_proj_span(node, start, end, role, role_len)`: style a stretch of node
+/// `node`'s OWN text.
+///
+/// The offsets are into the text this plugin passed to `wl_proj_node`, not into
+/// the document — which is why this door exists at all rather than a tool view
+/// reaching for `wl_style`. A producer naming bytes it wrote one call ago is
+/// naming something it knows; the same producer naming a document offset is
+/// naming something the next render moves. Nothing here can be turned into a
+/// document offset by the guest: the node's rendered start is added on this
+/// side, and never handed back.
+pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const open = openBuild(p) orelse return;
+    if (args[0] < 0) return;
+    const role = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
+    defer gpa.free(role);
+    const start: usize = if (args[1] < 0) 0 else @intCast(args[1]);
+    const end: usize = if (args[2] < 0) 0 else @intCast(args[2]);
+    open.view.span(@intCast(args[0]), start, end, role) catch {};
+}
+
 /// `wl_proj_commit() -> i32`: render the built tree into the captured buffer,
 /// repaint styles and folds, and put the cursor back on the row it was on.
 /// Returns the new revision, or -1.
@@ -152,12 +175,22 @@ fn paintStyles(p: *WasmPlugin, view: *projection.View, doc: anytype, len: usize)
     // its parent painted — the reading a nested row wants.
     for (view.nodes.items) |n| {
         const class = projection.styleFor(n.role);
-        if (class == 0) continue;
         const start = @min(n.start, classes.len);
         // A node's OWN first line, not its whole subtree: a section header is
         // emphasised, its files are not painted as the section.
         const own_end = @min(n.body, classes.len);
-        if (start < own_end) @memset(classes[start..own_end], class);
+        if (class != 0 and start < own_end) @memset(classes[start..own_end], class);
+        // Then the stretches INSIDE that line, which are more specific than the
+        // row's own role and therefore win over it. Offsets are the producer's,
+        // relative to text it wrote; the node's rendered start is added here,
+        // which is the only place that knows it.
+        for (n.spans.items) |s| {
+            const sc = projection.styleFor(s.role);
+            if (sc == 0) continue;
+            const lo = @min(start + s.start, classes.len);
+            const hi = @min(start + s.end, classes.len);
+            if (lo < hi) @memset(classes[lo..hi], sc);
+        }
     }
     const version = doc.version(gpa) catch return;
     defer gpa.free(version);

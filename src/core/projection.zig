@@ -31,6 +31,28 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// A stretch WITHIN one node's own text, styled by its own role — the matched
+/// substring in a search result, the path at the head of a compiler line.
+///
+/// The offsets are into the NODE'S TEXT, which the producer wrote, never into
+/// the document. That distinction is the whole reason this can exist here: a
+/// plugin naming a range of bytes it authored one call ago is naming something
+/// it knows; a plugin naming a document offset is naming something that moved.
+/// The host adds the node's own rendered start, so a row that shifts by a
+/// thousand bytes keeps its emphasis on the same characters.
+///
+/// This is what lets a tool view stop calling the offset styling door at all.
+/// `grep` used to paint its match with `weft.style(base + content_start + off,
+/// …)` — three offsets added together, one of them recovered by re-scanning
+/// the rendered line.
+pub const Span = struct {
+    start: u32,
+    end: u32,
+    /// Owned. Resolved through `styleFor` exactly as a node's role is, so the
+    /// theme sees one vocabulary and a producer still chooses no colours.
+    role: []u8,
+};
+
 /// What a node contributes to the projection.
 pub const Node = struct {
     /// The plugin's own identity for this row. Owned. Stable across rebuilds
@@ -55,6 +77,8 @@ pub const Node = struct {
     /// subjects; only the second kind is somewhere a verb can act, so only the
     /// second kind is where a fresh render should land.
     focusable: bool = false,
+    /// Styled stretches inside this node's own text. Owned.
+    spans: std.ArrayList(Span) = .empty,
 
     // ── Filled by `render`; display and only display ──────────────────
     /// The node's whole rendered extent, children included.
@@ -68,6 +92,8 @@ pub const Node = struct {
         gpa.free(self.key);
         gpa.free(self.role);
         gpa.free(self.text);
+        for (self.spans.items) |s| gpa.free(s.role);
+        self.spans.deinit(gpa);
     }
 };
 
@@ -154,6 +180,24 @@ pub const View = struct {
             .focusable = node.focusable,
         });
         return @intCast(self.building.items.len - 1);
+    }
+
+    /// Style `[start,end)` of node `ordinal`'s own text.
+    ///
+    /// CLAMPED, not refused: a producer computing a span from its own text can
+    /// be off by a byte at the end of a truncated row, and losing the whole
+    /// row's emphasis over that is worse than shortening the span. An
+    /// inverted or empty range says nothing and is dropped.
+    pub fn span(self: *View, ordinal: u32, start: usize, end: usize, role: []const u8) !void {
+        if (!self.open) return error.NoBuild;
+        if (ordinal >= self.building.items.len) return error.BadNode;
+        const n = &self.building.items[ordinal];
+        const lo = @min(start, n.text.len);
+        const hi = @min(end, n.text.len);
+        if (lo >= hi) return;
+        const owned = try self.gpa.dupe(u8, role);
+        errdefer self.gpa.free(owned);
+        try n.spans.append(self.gpa, .{ .start = @intCast(lo), .end = @intCast(hi), .role = owned });
     }
 
     /// Swap the built tree in and render it. Returns the text; the caller

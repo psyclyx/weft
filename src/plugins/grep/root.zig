@@ -83,13 +83,18 @@ export fn on_fill_token(token: u32) void {
 
 /// Emphasize a literal occurrence of the searched pattern in a result row.
 /// A regex pattern simply won't match — a graceful no-op, locations still lit.
-fn styleMatch(base: usize, line: []const u8, at: ?output.Target) void {
+///
+/// The offsets are into the ROW, which is the line we were just handed — no
+/// document position is involved, and none is available. This used to read
+/// `weft.style(base + content_start + off, …)`: three numbers added up, one of
+/// them (`base`) threaded down from a chunked scan of the whole buffer.
+fn styleMatch(b: weft.ProjectionBuilder, node: u32, line: []const u8, at: ?output.Target) void {
     if (pattern_len == 0) return;
     const content_start = if (at) |target| target.span_end else 0;
     if (content_start >= line.len) return;
     const content = line[content_start..];
     const off = std.mem.indexOf(u8, content, pattern_buf[0..pattern_len]) orelse return;
-    weft.style(base + content_start + off, base + content_start + off + pattern_len, .emphasis);
+    b.span(node, content_start + off, content_start + off + pattern_len, "output.emphasis");
 }
 
 /// Search for the identifier run surrounding the cursor.

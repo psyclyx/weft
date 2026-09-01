@@ -1872,7 +1872,12 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     }
     const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
-    try t.expectEqualStrings("weft-ok", s); // stdout, trailing newline trimmed
+    // One row, rendered as a projection: rows are newline-TERMINATED, so an
+    // output buffer now ends with one where the raw fill trimmed it. That is
+    // one blank line at the bottom of `*output*`, and it is what keeps the
+    // last row's range covering its own line end — a cursor resting there
+    // still hit-tests to the row it is on.
+    try t.expectEqualStrings("weft-ok\n", s);
     const doc = buf.?.textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
 }
@@ -3050,7 +3055,7 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
 
     const s = try out.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
-    try t.expectEqualStrings("captured", s); // the ORIGINATING entry
+    try t.expectEqualStrings("captured\n", s); // the ORIGINATING entry
     try t.expectEqual(@as(usize, 0), elsewhere.textEditor().?.text().byteLen());
     try t.expectEqualStrings("*elsewhere*", env.buffers.active().name); // delivery never refocuses
 }
@@ -3364,19 +3369,58 @@ test "wasm plugin: a third party puts a verb on rows it did not produce" {
     }
 }
 
-test "membrane: no projection door takes or returns an offset" {
+test "membrane: no projection door takes or returns a DOCUMENT offset" {
     // The structural claim, read off the contract table rather than asserted
     // about a handler: a producer cannot name a rendered position, so "acted on
     // whatever row a stale offset now covers" is not a bug it can write. The
     // two doors that DO return numbers return a revision and a pair of line
-    // ordinals, both of which survive a re-render; an offset does not.
+    // ordinals, both of which survive a re-render; a document offset does not.
+    //
+    // `wl_proj_span` is the ONE door with positional arguments, and they index
+    // the node's own text — bytes the producer passed to `wl_proj_node` one
+    // call earlier. That is not the hazard here. The hazard is a number whose
+    // meaning depends on a render the producer never saw; a number into a
+    // string it just wrote depends on nothing. The host adds the node's
+    // rendered start and never hands it back, so there is still no path by
+    // which a guest learns or names a position in the document.
     var found: usize = 0;
+    var spans_seen = false;
     for (contract.imports) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "wl_proj_")) continue;
         found += 1;
+        if (std.mem.eql(u8, entry.name, "wl_proj_span")) {
+            // Pinned so the exception cannot quietly widen into the rule: the
+            // paragraph above is true only while this is what the door means.
+            try t.expect(std.mem.indexOf(u8, entry.doc, "never the document") != null);
+            spans_seen = true;
+            continue;
+        }
         try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
     }
-    try t.expectEqual(@as(usize, 6), found);
+    try t.expect(spans_seen);
+    try t.expectEqual(@as(usize, 7), found);
+}
+
+test "projection: a span is clamped to its own node, however wrong the producer is" {
+    // The safety of `wl_proj_span` rests on a span never reaching outside the
+    // text it indexes — otherwise a producer that miscounted would paint its
+    // neighbours, which is the offset hazard wearing a different hat.
+    const projection = @import("../projection.zig");
+    var v: projection.View = .init(t.allocator);
+    defer v.deinit();
+    v.begin();
+    const a = try v.add(.{ .key = "a", .role = "output.text", .text = "hello", .parent = null, .foldable = false });
+    const b = try v.add(.{ .key = "b", .role = "output.text", .text = "world", .parent = null, .foldable = false });
+
+    try v.span(a, 1, 3, "output.match"); // ordinary
+    try v.span(a, 3, 99, "output.match"); // past the end: clamped to the node
+    try v.span(a, 4, 2, "output.match"); // inverted: says nothing
+    try v.span(b, 0, 5, "output.match");
+    try t.expectError(error.BadNode, v.span(7, 0, 1, "output.match"));
+
+    const node_a = &v.building.items[a];
+    try t.expectEqual(@as(usize, 2), node_a.spans.items.len);
+    try t.expectEqual(@as(u32, 5), node_a.spans.items[1].end); // "hello".len, not 99
 }
 
 // ── wl_exec: argv in, (status, stdout, stderr) out ─────────────────────────

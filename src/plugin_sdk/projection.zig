@@ -86,6 +86,28 @@ pub const Builder = struct {
         return self.add(with_text);
     }
 
+    /// Style `[start,end)` of `node`'s OWN text with `role`.
+    ///
+    /// The offsets index the text you just passed to `add`, not the document —
+    /// so this is the one place a projection producer counts bytes, and it
+    /// counts bytes it wrote. `grep` emphasises the matched substring of a
+    /// result line with it; before, that meant `weft.style(base + content_start
+    /// + off, …)`, three offsets added together with one of them recovered by
+    /// re-scanning the rendered row.
+    ///
+    /// Clamped to the node, so a producer that miscounts shortens its own
+    /// emphasis rather than painting its neighbours.
+    pub fn span(self: Builder, node: Ordinal, start: usize, end: usize, role: []const u8) void {
+        _ = self;
+        e.wl_proj_span(
+            @intCast(node),
+            @intCast(start),
+            @intCast(end),
+            p(role.ptr),
+            @intCast(role.len),
+        );
+    }
+
     /// Render the tree into the buffer, repaint styles and folds, and land the
     /// cursor on the key it was on. Returns the new revision — the number a
     /// decision made against this tree should carry, so one made against an

@@ -321,6 +321,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── projection.zig — a node tree rendered into a text buffer ──────
     .{ .name = "wl_proj_begin", .handler = proj.hProjBegin },
     .{ .name = "wl_proj_node", .handler = proj.hProjNode },
+    .{ .name = "wl_proj_span", .handler = proj.hProjSpan },
     .{ .name = "wl_proj_commit", .handler = proj.hProjCommit },
     .{ .name = "wl_proj_at_cursor", .handler = proj.hProjAtCursor },
     .{ .name = "wl_proj_toggle", .handler = proj.hProjToggle },
