@@ -143,16 +143,16 @@ fn indexOfName(names: []const []u8, want: []const u8) ?usize {
     return null;
 }
 
-/// The name of the row the head's semantic focus rests on.
+/// The name of the row POINT rests on. The listing.s focus is the cursor: a
+/// row is text, so "which row am I on" is where the caret is, and the answer
+/// is an IDENTITY because the host hit-tests it back to a node.
 fn focusedName(ed: *h.Editor, gpa: std.mem.Allocator) ![]u8 {
-    const path = ed.head.semantic_focus.path() orelse return error.TestExpectedEqual;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return error.TestExpectedEqual;
-    const leaf = path.leaf() orelse return error.TestExpectedEqual;
-    const node = view.node(leaf) orelse return error.TestExpectedEqual;
-    return switch (node.content) {
-        .field => |f| try fieldText(ed, gpa, f.ref),
-        else => error.TestExpectedEqual,
-    };
+    const b = ed.buffers.active();
+    const view = b.projection orelse return error.TestExpectedEqual;
+    const editor = b.textEditor() orelse return error.TestExpectedEqual;
+    const node = view.subjectAt(editor.cursorOffset()) orelse return error.TestExpectedEqual;
+    const edit = node.editable orelse return error.TestExpectedEqual;
+    return gpa.dupe(u8, node.text[edit.start..@min(edit.end, node.text.len)]);
 }
 
 /// Walk the rows with the grammar's own `j` until `want` has the focus,
@@ -189,8 +189,9 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     try authorTree(ed);
 
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    try t.expectEqualStrings("files", focusedView(ed).?.scene.role);
+    const listing = ed.buffers.active_id;
+    try t.expectEqualStrings("files", ed.buffers.active().tool);
+    try t.expect(ed.buffers.active().projection != null);
 
     // The tree is on the surface, and the focus starts on a row.
     {
@@ -221,7 +222,7 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // directory, and no expansion command.
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(listing, ed.buffers.active_id);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
@@ -250,8 +251,9 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // its contents. The grammar names neither the plugin nor the kind.
     const browser_entry = ed.buffers.active().id;
     ed.press("Return", "\r");
-    const child_view = ed.head.semantic_focus.path().?.view;
-    try t.expect(!child_view.eql(view_ref));
+    // Descending re-lists IN PLACE: one listing entry, a new tree in it, which
+    // is what keeps a docked sidebar from growing a buffer per directory.
+    try t.expectEqual(browser_entry, ed.buffers.active().id);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
@@ -262,14 +264,12 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // another entry and no view holds the focus.
     ed.press("q", "q");
     try t.expect(ed.buffers.active().id != browser_entry);
-    try t.expect(ed.head.semantic_focus.path() == null);
 
     // Return on a FILE row is the same key, the same intention, and the same
     // route: no tool claims a file, so the shell's placement policy opens it
     // as an ordinary editor entry. The grammar names neither files nor
     // buffers, and the browser is left exactly where it was.
     ed.runStr("open", ".");
-    const files_view = ed.head.semantic_focus.path().?.view;
     const files_entry = ed.buffers.active().id;
     try focusRowByName(ed, gpa, "top.txt");
     ed.press("Return", "\r");
@@ -279,10 +279,10 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
         defer gpa.free(text);
         try t.expectEqualStrings("top\n", text);
     }
-    // The browser entry and its view survive untouched — activating a row
-    // navigated the workspace, not the browser.
+    // The browser entry survives untouched — activating a row navigated the
+    // workspace, not the browser.
     try t.expect(ed.buffers.get(files_entry) != null);
-    try t.expect(ed.session.system.semantic.views.get(files_view) != null);
+    try t.expect(ed.buffers.get(files_entry).?.projection != null);
 }
 
 test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where nothing offers it, and is never text" {

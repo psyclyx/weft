@@ -645,6 +645,28 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
     try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
 
+    // MOVING IN A TOOL ENTRY IS MOVING THE CURSOR.
+    //
+    // `std.navigation.down`/`up` were only ever answered by the SEMANTIC plane:
+    // a scene offered them from its focused node, so a std-only grammar could
+    // drive a scene-backed view and nothing else. A tool entry whose view is a
+    // text PROJECTION has rows too, and in it "down" is unambiguous — there is
+    // no goal column to preserve, because a row is a row.
+    //
+    // Scoped to `.tool` deliberately. In an ordinary text buffer vertical
+    // motion is the GRAMMAR.s (vim.s `motion.down` is goal-column aware over
+    // rendered geometry, which `cursor-down` is not), so core answering there
+    // would quietly replace it.
+    inline for (.{
+        .{ "std.navigation.down", "cursor-down" },
+        .{ "std.navigation.up", "cursor-up" },
+    }) |pair| try actions.provide(.{
+        .action = pair[0],
+        .predicate = .{ .locus = .tool },
+        .command = pair[1],
+        .owner = "core",
+    });
+
     // The "default" (modeless) mode's baseline editing keys — so BARE weft (run
     // with no config at all) can still type/edit. These are the ONE binding set
     // core ships, precisely because they must exist before any config loads; a
