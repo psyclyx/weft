@@ -101,13 +101,15 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
 }
 
 fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Options) ![]scene.Action {
-    var dirty = false;
-    for (rows) |*row| {
-        if (model.rowHasPendingChanges(row)) {
-            dirty = true;
-            break;
-        }
-    }
+    // APPLY AND REVERT ARE ALWAYS OFFERED. They used to be enabled only when
+    // the MODEL held a pending change, which was a fair prediction while every
+    // edit went through a field — and is a wrong one now that the listing is
+    // edited in place: what you have typed is in the BUFFER, and the model does
+    // not know about it until something reads the rows back. Greying them out
+    // made `:e!` and `SPC v a` silently unavailable on exactly the drafts they
+    // exist for. Whether there is anything to do is decided when the action
+    // RUNS, which is the only moment it can be decided honestly.
+    _ = rows;
     const result = try arena.alloc(scene.Action, 8 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
     if (options.has_container) {
@@ -119,8 +121,8 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
     result[index + 2] = .{ .id = create_directory_action, .label = "New directory" };
     result[index + 3] = .{ .id = standard.paste_after, .label = "Paste into directory" };
     result[index + 4] = .{ .id = standard.paste_before, .label = "Paste into directory" };
-    result[index + 5] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
-    result[index + 6] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    result[index + 5] = .{ .id = standard.apply, .label = "Apply draft" };
+    result[index + 6] = .{ .id = standard.revert, .label = "Revert draft" };
     result[index + 7] = .{ .id = standard.set_working_target, .label = "Use as working target" };
     return result;
 }
@@ -441,7 +443,11 @@ test "projection keeps row ids and order stable across draft rename" {
     try std.testing.expect(first.value.actions[0].enabled);
     try std.testing.expectEqualStrings(standard.paste_after, first.value.actions[3].id);
     try std.testing.expect(first.value.actions[3].enabled);
-    try std.testing.expect(!first.value.actions[5].enabled);
+    // Apply is OFFERED even with a clean model: the draft lives in the buffer
+    // now, so "is there anything to apply" is not a question the scene can
+    // answer — the action answers it when it runs.
+    try std.testing.expectEqualStrings(standard.apply, first.value.actions[5].id);
+    try std.testing.expect(first.value.actions[5].enabled);
     try std.testing.expectEqualStrings(standard.set_working_target, first.value.actions[7].id);
     var with_container = try projectWith(std.testing.allocator, files.rows.items, &refs, .{ .has_container = true });
     defer with_container.deinit();

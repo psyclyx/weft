@@ -554,6 +554,129 @@ pub const Editor = struct {
     pub fn bufferName(self: *Editor) []const u8 {
         return self.buffers.active().name;
     }
+
+    /// WHICH VIEW IS SHOWING HERE — from whichever plane is live.
+    ///
+    /// These tests used to read `head.semantic_focus.path().?.view`, which was
+    /// only ever a PROXY for "the tool view this buffer is showing". Now that a
+    /// listing is an ordinary text buffer, it has no semantic focus at all and
+    /// the proxy panics. The entry says it directly.
+    pub fn toolView(self: *Editor) ?semantic_model.view.Ref {
+        // An explicit focus wins, for the same reason it does in
+        // `subjectHere`: a head that focused a view is looking at THAT,
+        // whatever buffer is underneath.
+        if (self.head.semantic_focus.path()) |path| return path.view;
+        return self.buffers.active().tool_view;
+    }
+
+    /// The SUBJECT UNDER POINT — the scene node the row the caret is on stands
+    /// for, or the focused leaf when a scene is what is showing. The same
+    /// question `core/builtins.zig`'s `rowSubjectHere` asks in production.
+    pub fn subjectHere(self: *Editor) ?semantic_model.scene.NodeId {
+        // AN EXPLICIT FOCUS WINS. A head that focused a scene is pointing at
+        // it, whatever buffer happens to be underneath; only when nothing is
+        // focused does the question fall to what point is on.
+        if (self.head.semantic_focus.path()) |path| {
+            if (path.leaf()) |leaf| return leaf;
+        }
+        const entry = self.buffers.active();
+        if (entry.projection) |projection| {
+            if (entry.textEditor()) |ed| {
+                if (projection.subjectAt(ed.cursorOffset())) |node| {
+                    if (std.fmt.parseInt(u64, node.key, 10)) |raw| {
+                        return @enumFromInt(raw);
+                    } else |_| {}
+                }
+            }
+        }
+        return (self.head.semantic_focus.path() orelse return null).leaf();
+    }
+
+    /// WHAT THE ROW UNDER POINT SAYS NOW — its editable region, read live out
+    /// of the document.
+    ///
+    /// Not `node.text`: that is what the producer PUBLISHED, and the point of
+    /// an in-place listing is that your typing changes the document without
+    /// republishing anything. The anchors bracketing the editable span are what
+    /// survive the typing, which is exactly how the row ferry reads it back.
+    pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
+        const entry = self.buffers.active();
+        const projection_view = entry.projection orelse return gpa.dupe(u8, "");
+        const editor = entry.textEditor() orelse return gpa.dupe(u8, "");
+        const subject = projection_view.subjectAt(editor.cursorOffset()) orelse return gpa.dupe(u8, "");
+        const node = subject.node;
+        const lo_h = node.anchor_start orelse return gpa.dupe(u8, "");
+        const hi_h = node.anchor_end orelse return gpa.dupe(u8, "");
+        const doc = &editor.doc;
+        const rope = editor.text();
+        const total = rope.byteLen();
+        const lo = @min(doc.anchorOffset(@enumFromInt(lo_h)), total);
+        const hi = @min(doc.anchorOffset(@enumFromInt(hi_h)), total);
+        if (hi <= lo) return gpa.dupe(u8, "");
+        const bytes = try gpa.alloc(u8, hi - lo);
+        errdefer gpa.free(bytes);
+        var sr = rope.streamReader(.{ .start = lo, .end = hi }, &.{});
+        try sr.interface.readSliceAll(bytes);
+        return bytes;
+    }
+
+    /// The stretch of `node` that `role` names, node-relative, or null.
+    ///
+    /// Tests used to re-derive "the name part of a row" by skipping an indent,
+    /// a glyph and a separator — a second copy of the producer's own format,
+    /// which broke the moment the listing grew a permissions column. The
+    /// producer publishes where its parts are; ask it.
+    pub fn partOf(node: *const core.projection.Node, role: []const u8) ?core.projection.Span {
+        for (node.spans.items) |s| {
+            if (std.mem.eql(u8, s.role, role)) return s;
+        }
+        return null;
+    }
+
+    /// The text of `node`'s `role` part.
+    pub fn partText(node: *const core.projection.Node, role: []const u8) []const u8 {
+        const s = partOf(node, role) orelse return "";
+        return node.text[@min(s.start, node.text.len)..@min(s.end, node.text.len)];
+    }
+
+    /// The EDITABLE FIELD of the row under point. Scene focus used to land on
+    /// the name leaf itself, so a test could read `path().?.field`; a
+    /// projection puts point on the ROW, whose name field is a child. Same
+    /// question, asked of the row.
+    pub fn fieldHere(self: *Editor) ?semantic_model.scene.FieldRef {
+        if (self.head.semantic_focus.path()) |path| {
+            if (path.field) |ref| return ref;
+        }
+        const instance = self.session.system.semantic.views.get(self.toolView() orelse return null) orelse return null;
+        const node = instance.node(self.subjectHere() orelse return null) orelse return null;
+        return fieldIn(node);
+    }
+
+    /// The FOCUSABLE field, not merely the first one — a row carries several
+    /// (mode, name), and focus landing on one of them is exactly what marked it
+    /// as the one a verb is about. Falls back to any field for a scene that
+    /// marks nothing focusable.
+    fn fieldIn(node: *const semantic_model.scene.Node) ?semantic_model.scene.FieldRef {
+        return focusableFieldIn(node) orelse anyFieldIn(node);
+    }
+
+    fn focusableFieldIn(node: *const semantic_model.scene.Node) ?semantic_model.scene.FieldRef {
+        if (node.focusable and node.content == .field) return node.content.field.ref;
+        if (node.content != .container) return null;
+        for (node.content.container.children) |*child| {
+            if (focusableFieldIn(child)) |ref| return ref;
+        }
+        return null;
+    }
+
+    fn anyFieldIn(node: *const semantic_model.scene.Node) ?semantic_model.scene.FieldRef {
+        if (node.content == .field) return node.content.field.ref;
+        if (node.content != .container) return null;
+        for (node.content.container.children) |*child| {
+            if (anyFieldIn(child)) |ref| return ref;
+        }
+        return null;
+    }
     /// Test-harness convenience: seeds `head`'s mode directly, no
     /// `*command.Context`/dispatch involved (mechanism-not-policy, task #19
     /// item 3) — distinct from `Head.setModeRaw`/`Ctx.setMode` by NAME, but

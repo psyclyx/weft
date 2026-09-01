@@ -31,6 +31,21 @@ const standard = model.action.standard;
 
 pub const provider_name = "core.view";
 
+/// Deepest scene path a projection subject may synthesize. A listing is root →
+/// row → column; anything deeper is a scene, which brings its own focus path.
+const max_path = 32;
+
+/// WHAT POINT IS ON, when the entry is a text projection. The head carries no
+/// semantic focus for one — a listing is a buffer — so offers derived from "the
+/// focused node" would be derived from nothing, and every std verb would fall
+/// to whatever generic floor was left, claiming that a file row affords folding
+/// and a listing affords everything. This is the same question asked of the
+/// plane that IS showing.
+pub const Here = struct {
+    view: model.view.Ref,
+    node: model.scene.NodeId,
+};
+
 /// One derived intent, the standard intention it publishes under, and the
 /// existing host route that carries it. Both halves live in one table so an
 /// intent can never acquire an intention without a route, or the reverse.
@@ -52,8 +67,12 @@ pub const bindings = [_]Binding{
     .{ .intent = .transfer_yank, .intention = "std.transfer.yank", .route = "selection-copy" },
     .{ .intent = .transfer_paste, .intention = "std.transfer.paste", .route = "selection-paste-after" },
     .{ .intent = .transfer_delete, .intention = "std.transfer.delete-to-register", .route = "selection-cut" },
-    .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "cursor-up" },
-    .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "cursor-down" },
+    // ROW steps, not line steps. `row-up`/`row-down` fall through to the
+    // ordinary cursor move when the entry is not a projection, so this is the
+    // same route for a scene and strictly better for a listing: it lands on
+    // the row's actionable part and keeps the column you were in.
+    .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "row-up" },
+    .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "row-down" },
     .{ .intent = .navigate_left, .intention = "std.navigation.left", .route = "cursor-left" },
     .{ .intent = .navigate_right, .intention = "std.navigation.right", .route = "cursor-right" },
     .{ .intent = .back, .intention = "std.navigation.back", .route = "navigate-back" },
@@ -93,6 +112,9 @@ pub const Publisher = struct {
     intentions: [offers.Intent.count]catalog.IntentionId,
     endpoints: [offers.Intent.count]catalog.EndpointToken,
     table: [offers.Intent.count]catalog.Offer = undefined,
+    /// Storage for a path SYNTHESIZED from a projection subject. Borrowed by
+    /// the `focus.Path` handed to `derive`, so it must outlive that call.
+    path_buf: [max_path]model.scene.NodeId = undefined,
     count: usize = 0,
     revision: u64 = 0,
     signature: ?Signature = null,
@@ -125,8 +147,9 @@ pub const Publisher = struct {
         cat: *catalog.Catalog,
         services: *const semantic.Services,
         head: *const Head,
+        here: ?Here,
     ) Allocator.Error!bool {
-        const path = head.semantic_focus.path() orelse return self.withdraw(cat);
+        const path = self.pathHere(services, head, here) orelse return self.withdraw(cat);
         const instance = services.views.get(path.view) orelse return self.withdraw(cat);
         const leaf = path.leaf() orelse return self.withdraw(cat);
         const next: Signature = .{
@@ -159,6 +182,20 @@ pub const Publisher = struct {
         });
         self.signature = next;
         return true;
+    }
+
+    /// The focused scene's path, or one synthesized from what point is on in a
+    /// text projection. Same question, whichever plane is showing.
+    fn pathHere(
+        self: *Publisher,
+        services: *const semantic.Services,
+        head: *const Head,
+        here: ?Here,
+    ) ?model.focus.Path {
+        if (head.semantic_focus.path()) |path| return path;
+        const subject = here orelse return null;
+        const instance = services.views.get(subject.view) orelse return null;
+        return (instance.focusPath(subject.node, &self.path_buf) catch return null) orelse null;
     }
 
     /// A head with no live semantic view offers nothing. Withdrawing is the
@@ -266,7 +303,7 @@ const Fixture = struct {
     }
 
     fn refresh(self: *Fixture) !bool {
-        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head);
+        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head, null);
     }
 
     fn context(self: *const Fixture) catalog.Context {
@@ -309,7 +346,9 @@ test "a focused files row publishes activation and its grid, never expansion" {
     try fixture.absent("std.hierarchy.toggle-expanded");
 
     const down = try fixture.resolve(&.{"std.navigation.down"});
-    try t.expectEqualStrings("cursor-down", fixture.routeOf(down.decision));
+    // A ROW step. Falls through to the plain cursor move when the entry is not
+    // a projection, so a scene reaches the same behaviour by the same route.
+    try t.expectEqualStrings("row-down", fixture.routeOf(down.decision));
     // A row of columns has a horizontal axis, and a focused view can be left.
     try t.expect((try fixture.resolve(&.{"std.navigation.right"})) == .decision);
     try t.expect((try fixture.resolve(&.{"std.navigation.back"})) == .decision);

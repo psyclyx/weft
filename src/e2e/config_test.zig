@@ -437,19 +437,19 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // retained semantic scene attached to an ordinary tool buffer, without a
     // file-browser-owned keymap mode.
     ed.chord("SPC f d");
-    const configured_directory_view = ed.head.semantic_focus.path().?.view;
+    const configured_directory_view = ed.toolView().?;
     try t.expectEqualStrings(
         "files",
         ed.session.system.semantic.views.get(configured_directory_view).?.scene.role,
     );
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
 
     // The alternate open binding is the same ordinary launcher contract. It
     // must reuse the retained semantic target/view rather than introducing a
     // second tool-specific surface for the same directory.
     ed.chord("SPC o d");
-    try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
+    try t.expectEqual(configured_directory_view, ed.toolView().?);
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
 
     // The config surface must cover the actions the REAL directory scene
     // advertises, not merely a hand-built generic fixture. This is deliberately
@@ -546,11 +546,11 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const files_name = sceneNodeWithRole(directory_row, "files.name") orelse return error.MissingNameField;
     _ = try ed.session.system.semantic.focusView(ed.head, gpa, configured_directory_view, files_name.id);
     ed.press("Return", "");
-    const child_view = ed.head.semantic_focus.path().?.view;
+    const child_view = ed.toolView().?;
     try t.expect(!child_view.eql(configured_directory_view));
     try t.expectEqualStrings("files", ed.session.system.semantic.views.get(child_view).?.scene.role);
     ed.press("minus", "");
-    try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(configured_directory_view, ed.toolView().?);
 
     // Now drive those bindings against a real retained scene. This fixture is
     // intentionally generic: it owns fields, actions, a target link, and an
@@ -641,9 +641,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
 
     ed.chord("SPC v j");
-    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(second_row.id, ed.subjectHere().?);
     ed.chord("SPC v k");
-    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(field_node.id, ed.subjectHere().?);
     const snapshots_before_edit = field.snapshot_calls;
     ed.chord("SPC v e");
     try t.expectEqual(@as(usize, 1), actions.edit_requests);
@@ -672,14 +672,14 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.permission_edits);
     try t.expectEqual(@as(usize, 1), actions.file_creates);
     try t.expectEqual(@as(usize, 1), actions.directory_creates);
-    try t.expectEqual(permission_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(permission_node.id, ed.subjectHere().?);
 
     // The next row movement is relative to the primary field from which the
     // action entered this secondary field, not the scene's first row.
     ed.chord("SPC v j");
-    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(second_row.id, ed.subjectHere().?);
     ed.chord("SPC v k");
-    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(field_node.id, ed.subjectHere().?);
 
     ed.chord("SPC v z");
     try t.expectEqual(@as(usize, 1), actions.plugin_actions);
@@ -711,7 +711,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     ed.chord("SPC v o");
     try t.expectEqual(@as(usize, 1), target_handler.opens);
-    try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(target_view, ed.toolView().?);
 
     // The config knows only an open action name. The view provider supplies a
     // named edge, an independent relation provider resolves it, and the usual
@@ -721,7 +721,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.container_opens);
     try t.expectEqual(@as(usize, 1), relation_provider.queries);
     try t.expectEqual(@as(usize, 2), target_handler.opens);
-    try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(target_view, ed.toolView().?);
 
     // Vim's modal editing remains a generic semantic-view consumer. A field
     // enters the ordinary insert posture, and Escape returns to the buffer's
@@ -730,9 +730,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // semantic actions as the config chords above.
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
     ed.press("j", "");
-    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(second_row.id, ed.subjectHere().?);
     ed.press("k", "");
-    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(field_node.id, ed.subjectHere().?);
     ed.press("i", "");
     try t.expectEqualStrings("insert", ed.head.currentMode());
     ed.typeText("x");
@@ -1392,8 +1392,14 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
 
     // Presenting the subject opened it through the ordinary `open`, into the
     // panel, and left the focus (and the editor's own entry) alone.
+    //
+    // The panel holds the LISTING BUFFER the files plugin publishes — not a
+    // buffer core made to carry a scene. That is the whole of why docking one
+    // is trivial: `presentIn` runs `open` and puts the resulting buffer in the
+    // pane, so a listing that IS a buffer needs no sidebar-specific path.
     const browser = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
-    try t.expect(std.mem.startsWith(u8, browser.name, "files: "));
+    try t.expect(std.mem.startsWith(u8, browser.name, "*files"));
+    try t.expect(browser.projection != null);
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expect(primary.pane().buffer_id != panel.pane().buffer_id);
 }

@@ -15,6 +15,7 @@ const Actions = @import("action.zig");
 const target_open = @import("target_open.zig");
 const semantic_model = @import("weft_semantic");
 const placement = @import("placement.zig");
+const action_here = @import("action_here.zig");
 
 const ok: Value = .nil;
 
@@ -35,12 +36,53 @@ fn semanticMove(ctx: *Context, movement: @import("weft_semantic").focus.Movement
 /// simply has no semantic action to consume, so the command is a harmless
 /// no-op there.
 fn invokeSemanticAction(ctx: *Context, action_name: []const u8) anyerror!Value {
-    const services = ctx.semantic orelse return ok;
-    _ = services.invokeFocusedAction(&ctx.head.interactions, ctx.head, ctx.gpa, action_name) catch |err| switch (err) {
-        error.ActionUnavailable, error.StaleView => return ok,
-        else => return err,
-    };
+    // ONE ACTION NAME, EITHER PLANE — `action_here` owns that rule, because the
+    // guest door `wl_semantic_action` needs exactly the same one.
+    if (try action_here.invokeHere(ctx, action_name, 0)) |_| return ok;
+    // Neither plane: an action nobody claims is a no-op, as it always was — an
+    // ordinary text buffer has no `view.apply` and says so by silence.
+    const cmd = ctx.actions.resolveFacts(action_name, ctx.capturedCtx().mergedFacts()) orelse return ok;
+    _ = try command.run(ctx.commands, ctx, cmd, &.{});
     return ok;
+}
+
+/// A handler that SHOWED ITS OWN BUFFER keeps the input: the scene it published
+/// for the open protocol is not what your keys are about.
+///
+/// Left focused, both planes offer the std vocabulary for the same entry and
+/// the resolver refuses the tie — correctly, because two owners really are
+/// claiming one intention. One listing, one plane.
+fn dropFocusIfShownAsBuffer(ctx: *Context) void {
+    const entry = ctx.buffers.active();
+    if (entry.projection == null) return;
+    const tool = entry.tool_view orelse return;
+    // ONLY THE DUPLICATE. This cleared any focus at all whenever a listing was
+    // showing, which is wrong the moment the two differ: a handler that opens
+    // some OTHER view and focuses it had that focus thrown away because a
+    // listing happened to be the active buffer.
+    const path = ctx.head.semantic_focus.path() orelse return;
+    if (!path.view.eql(tool)) return;
+    ctx.head.semantic_focus.clear();
+}
+
+/// The typed target the ROW UNDER POINT links to, when the active entry is a
+/// text projection. The producer.s scene still carries each row.s link; the
+/// projection just says which row you are on.
+fn rowTargetHere(ctx: *Context) ?semantic_model.target.Located {
+    const services = ctx.semantic orelse return null;
+    const subject = rowSubjectHere(ctx) orelse return null;
+    const view = services.views.get(subject.view) orelse return null;
+    const node = view.node(subject.node) orelse return null;
+    const link = node.target orelse return null;
+    return .{ .target = link.target, .revision = link.revision, .location = .whole };
+}
+
+/// The producer view and scene node the ROW UNDER POINT stands for, when the
+/// active entry is a text projection whose producer named its view.
+fn rowSubjectHere(ctx: *Context) ?struct { view: semantic_model.view.Ref, node: semantic_model.scene.NodeId } {
+    const view = ctx.buffers.active().tool_view orelse return null;
+    const row = action_here.subjectsHere(ctx).row orelse return null;
+    return .{ .view = view, .node = row };
 }
 
 /// Register a command trampoline for an open semantic action name. This is
@@ -112,9 +154,13 @@ fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
     // A scene may deliberately expose custom open behavior without linking a
     // registered target. Preserve that generic action-provider escape hatch;
     // a present typed link never falls through on stale/ambiguous resolution.
-    const located = try services.focusedTarget(ctx.head) orelse
+    // The focused scene node.s target, or — when the entry is a text
+    // PROJECTION — the target of the row under point. Same question, asked of
+    // whichever plane is showing.
+    const located = (try services.focusedTarget(ctx.head)) orelse rowTargetHere(ctx) orelse
         return invokeSemanticAction(ctx, semantic_model.action.standard.open);
     const result = try target_open.openLocated(services, ctx.head, ctx.gpa, located, null);
+    dropFocusIfShownAsBuffer(ctx);
     // No handler renders this kind. The shell's placement policy may still
     // open it as an ordinary workspace entry (§9.4) — that is an open, not a
     // claim, so it runs only once every handler has declined.
@@ -281,6 +327,61 @@ fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Move point to the next/previous ROW of a projection, landing where that row
+/// is ACTIONABLE — the start of its editable span when it has one, its own
+/// start otherwise.
+///
+/// A listing is text, so plain `cursor-down` works on it; what plain cursor
+/// motion cannot do is land you on the NAME. Column 0 of `  ▸ src` is an
+/// indent, and a grammar asking "may I insert here" gets `structural` there and
+/// `field` two characters along — so navigating a listing with `cursor-down`
+/// leaves you somewhere you cannot type. Rows are the unit of a projection;
+/// this moves in that unit.
+fn moveRow(ctx: *Context, delta: enum { next, prev }) anyerror!Value {
+    // A FOCUSED SCENE MOVES FIRST. The head pointing at a view is pointing at
+    // it whatever buffer is underneath — and a listing being the active buffer
+    // must not turn "next node" into "next row of something else".
+    if (try semanticMove(ctx, if (delta == .next) .next else .previous)) return ok;
+    const entry = ctx.buffers.active();
+    const view = entry.projection orelse {
+        // Not a projection: the ordinary line step, so one binding serves both.
+        return if (delta == .next) cCursorDown(ctx, .{}) else cCursorUp(ctx, .{});
+    };
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    // Anchored on the ROW point is in, not on point itself: from inside a row,
+    // "the previous row" measured against the caret finds that row again,
+    // because its own start is behind the caret.
+    const here = view.subjectAt(ed.cursorOffset());
+    // The ROW's start, not the part's: "the previous row" measured from inside
+    // a column would find columns, and there is only ever one row step.
+    const at = if (here) |s| s.node.start else ed.cursorOffset();
+    var best: ?*const @import("projection.zig").Node = null;
+    for (view.nodes.items) |*n| {
+        if (!n.focusable) continue;
+        switch (delta) {
+            .next => if (n.start > at and (best == null or n.start < best.?.start)) {
+                best = n;
+            },
+            .prev => if (n.start < at and (best == null or n.start > best.?.start)) {
+                best = n;
+            },
+        }
+    }
+    const target = best orelse return ok;
+    ed.placeCursor(target.restingOffset(if (here) |s| s.role else null));
+    return ok;
+}
+
+fn cRowDown(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return moveRow(ctx, .next);
+}
+
+fn cRowUp(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return moveRow(ctx, .prev);
+}
+
 // Word/WORD/line/doc motions and match-bracket moved to the `motions` plugin
 // (design §6.1 — they return a `range` an operator awaits). Core keeps only the
 // grapheme/line step primitive (`editor.step`, exposed via cursor-*) and the
@@ -347,6 +448,7 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     // (nothing leaks to a backing document) and inserts nothing
     // (doc/cwa-review.md §2.2).
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
+    if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);
     return ok;
@@ -355,9 +457,22 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
+    if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), "\t") catch |e| return editErr(e);
     return ok;
+}
+
+/// Is point inside a PROJECTION's editable span — a field made of text?
+///
+/// The same question `semanticFieldInput` asks of the scene plane, asked of the
+/// other one. A row's name is a field however it is spelled: it is one line and
+/// it holds a name, so a physical Return or Tab is consumed and writes nothing.
+/// Without this a Tab pressed while renaming put a literal tab in the filename
+/// — the exact leak `doc/cwa-review.md` §2.2 named, reopened by moving the
+/// field onto the text plane.
+fn fieldHere(ctx: *Context) bool {
+    return ctx.buffers.active().fieldAtPoint();
 }
 
 // ── Buffers ─────────────────────────────────────────────────────────
@@ -594,6 +709,8 @@ const table = [_]command.Command{
     command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
     command.define("cursor-up", "Move the cursor up one line.", cCursorUp),
     command.define("cursor-down", "Move the cursor down one line.", cCursorDown),
+    command.define("row-down", "Move to the next projection row, on its actionable part.", cRowDown),
+    command.define("row-up", "Move to the previous projection row, on its actionable part.", cRowUp),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),
     command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
@@ -627,6 +744,22 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // more specific provider can override this buffer-history implementation.
     try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
     try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
+
+    // NO BLANKET std VOCABULARY FOR A TOOL LOCUS.
+    //
+    // There was one here: eight `provide`s scoped to `.locus = .tool`, so any
+    // tool entry answered `down`, `activate`, `toggle-expanded`, the transfer
+    // verbs. It made a std-only grammar drive a listing, which was the point,
+    // and it was wrong in the way a blanket claim is always wrong — it said a
+    // FILE row affords folding and an empty listing affords yanking, because it
+    // could not see what point was on. `explain` then reported `ready` for a
+    // key that would do nothing.
+    //
+    // `view_offers.zig` derives the same vocabulary from what the SUBJECT
+    // advertises, and now asks that question of a text projection as well as of
+    // a scene. A verb is offered where it applies, disabled with a reason where
+    // the producer refused it, and absent where the row does not afford it —
+    // one rule, derived, for both planes.
 
     // The "default" (modeless) mode's baseline editing keys — so BARE weft (run
     // with no config at all) can still type/edit. These are the ONE binding set

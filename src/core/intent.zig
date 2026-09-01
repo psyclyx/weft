@@ -16,6 +16,7 @@ const command = @import("command.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
+const action_here = @import("action_here.zig");
 const action_offers = @import("action_offers.zig");
 const Head = @import("Head.zig");
 
@@ -236,8 +237,26 @@ pub const Plane = struct {
         self: *Plane,
         services: *const semantic.Services,
         head: *const Head,
+        here: ?view_offers.Here,
     ) Allocator.Error!void {
-        _ = try self.views.refresh(&self.catalog, services, head);
+        _ = try self.views.refresh(&self.catalog, services, head, here);
+    }
+
+    /// What point is on, when the active entry is a text PROJECTION and its
+    /// producer named the semantic view behind it. The view adapter derives
+    /// what a listing affords from this, exactly as it derives a scene's from
+    /// the focused node — one question, two planes.
+    fn hereFor(ctx: *command.Context) ?view_offers.Here {
+        const entry = ctx.buffers.active();
+        const view = entry.tool_view orelse return null;
+        if (action_here.subjectsHere(ctx).row) |node| return .{ .view = view, .node = node };
+        // NO ROW IS NOT NOTHING. An empty directory has a listing, and what it
+        // affords — paste, create — is the LISTING's, which is the same
+        // fallback `action_here` makes when it offers a verb to the view after
+        // the row declines.
+        const services = ctx.semantic orelse return null;
+        const instance = services.views.get(view) orelse return null;
+        return .{ .view = view, .node = instance.scene.id };
     }
 
     /// Republish the DERIVED table when the context or the provider set moved.
@@ -290,7 +309,7 @@ pub const Plane = struct {
     /// leaves the clock alone, so a repeat is a cache hit.
     pub fn snapshotFor(self: *Plane, ctx: *command.Context) ?*const catalog_mod.Snapshot {
         self.syncEntryShape(ctx.buffers.active().textEditor() != null) catch {};
-        if (ctx.semantic) |services| self.syncFocus(services, ctx.head) catch {};
+        if (ctx.semantic) |services| self.syncFocus(services, ctx.head, hereFor(ctx)) catch {};
         // The third built-in provider, synced HERE rather than on the dispatch
         // path, because "what would this key do" and "what does this key do"
         // must read the same table. Hung off `dispatchSpec` first, and the

@@ -3388,9 +3388,13 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
     for (contract.imports) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "wl_proj_")) continue;
         found += 1;
-        if (std.mem.eql(u8, entry.name, "wl_proj_span")) {
+        if (std.mem.eql(u8, entry.name, "wl_proj_span") or
+            std.mem.eql(u8, entry.name, "wl_proj_select"))
+        {
             // Pinned so the exception cannot quietly widen into the rule: the
-            // paragraph above is true only while this is what the door means.
+            // paragraph above is true only while these are what the doors mean.
+            // Both index the NODE.S OWN TEXT — one to style a stretch of it,
+            // one to select one — and the host adds the rendered start.
             try t.expect(std.mem.indexOf(u8, entry.doc, "never the document") != null);
             spans_seen = true;
             continue;
@@ -3398,7 +3402,7 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
         try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
     }
     try t.expect(spans_seen);
-    try t.expectEqual(@as(usize, 8), found);
+    try t.expectEqual(@as(usize, 9), found);
 }
 
 test "projection: an edited row is found by its ANCHORS, not by where it was rendered" {
@@ -3411,16 +3415,16 @@ test "projection: an edited row is found by its ANCHORS, not by where it was ren
     var v: projection.View = .init(t.allocator);
     defer v.deinit();
     v.begin();
-    const a = try v.add(.{ .key = "c1", .role = "git.commit", .text = "pick aaa one", .parent = null, .foldable = false, .editable = true });
-    const b = try v.add(.{ .key = "c2", .role = "git.commit", .text = "pick bbb two", .parent = null, .foldable = false, .editable = true });
+    const a = try v.add(.{ .key = "c1", .role = "git.commit", .text = "pick aaa one", .parent = null, .foldable = false, .editable = .{ .start = 0, .end = 12 } });
+    const b = try v.add(.{ .key = "c2", .role = "git.commit", .text = "pick bbb two", .parent = null, .foldable = false, .editable = .{ .start = 0, .end = 12 } });
     _ = try v.add(.{ .key = "hdr", .role = "git.header", .text = "# a comment", .parent = null, .foldable = false });
     _ = try v.commit();
 
     // Editable is not focusable and not foldable: three independent axes, and a
     // row that is one is not thereby the others.
-    try t.expect(v.nodes.items[a].editable);
-    try t.expect(v.nodes.items[b].editable);
-    try t.expect(!v.nodes.items[2].editable);
+    try t.expect(v.nodes.items[a].editable != null);
+    try t.expect(v.nodes.items[b].editable != null);
+    try t.expect(v.nodes.items[2].editable == null);
     try t.expect(!v.nodes.items[a].focusable);
 
     // Rendered positions are what the anchors are PLACED at, once. After this
@@ -3440,11 +3444,11 @@ test "projection: a span is clamped to its own node, however wrong the producer 
     const a = try v.add(.{ .key = "a", .role = "output.text", .text = "hello", .parent = null, .foldable = false });
     const b = try v.add(.{ .key = "b", .role = "output.text", .text = "world", .parent = null, .foldable = false });
 
-    try v.span(a, 1, 3, "output.match"); // ordinary
-    try v.span(a, 3, 99, "output.match"); // past the end: clamped to the node
-    try v.span(a, 4, 2, "output.match"); // inverted: says nothing
-    try v.span(b, 0, 5, "output.match");
-    try t.expectError(error.BadNode, v.span(7, 0, 1, "output.match"));
+    try v.span(a, 1, 3, "output.match", ""); // ordinary
+    try v.span(a, 3, 99, "output.match", ""); // past the end: clamped to the node
+    try v.span(a, 4, 2, "output.match", ""); // inverted: says nothing
+    try v.span(b, 0, 5, "output.match", "");
+    try t.expectError(error.BadNode, v.span(7, 0, 1, "output.match", ""));
 
     const node_a = &v.building.items[a];
     try t.expectEqual(@as(usize, 2), node_a.spans.items.len);

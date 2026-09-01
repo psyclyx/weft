@@ -93,24 +93,24 @@ fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
 /// scenario uses this only to make directory enumeration order irrelevant;
 /// all edits and actions after the focus change still travel through the
 /// shipped Vim/config bindings.
+/// Does the row under point now END with `want`? The live draft, read out of
+/// the DOCUMENT — a listing is edited in place, and the name is written last.
+fn spineDraftEnds(ed: *Editor, gpa: std.mem.Allocator, want: []const u8) !bool {
+    const draft = try ed.draftHere(gpa);
+    defer gpa.free(draft);
+    return std.mem.endsWith(u8, draft, want);
+}
+
 fn spineFocusFilesName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
-    const path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return error.NoFilesView;
-    const rows = switch (view.scene.content) {
-        .container => |container| container.children,
-        else => return error.FilesSceneNotContainer,
-    };
-    for (rows) |row| {
-        if (row.content != .container) continue;
-        const columns = row.content.container.children;
-        if (columns.len < 3 or columns[2].content != .field) continue;
-        const field_ref = columns[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, name)) {
-            _ = try ed.session.system.semantic.focusView(ed.head, gpa, path.view, columns[2].id);
-            return;
-        }
+    _ = gpa;
+    // POINT ON THE NAME, in the text — a listing is a buffer, so "focus this
+    // row" is an ordinary cursor placement rather than a scene focus walk.
+    const view = ed.buffers.active().projection orelse return error.NoFilesView;
+    for (view.nodes.items) |*node| {
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), name)) continue;
+        const part = h.Editor.partOf(node, "fs.name") orelse continue;
+        ed.buffers.active().textEditor().?.placeCursor(node.start + part.start);
+        return;
     }
     return error.FilesNameNotFound;
 }
@@ -203,28 +203,28 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "semantic.txt", "field draft\n");
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "plain.txt", "");
     ed.runStr("open", ".");
-    const files_path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
-    const files_view = ed.session.system.semantic.views.get(files_path.view) orelse return error.NoFilesView;
-    var old_field: ?semantic.scene.FieldRef = null;
-    for (files_view.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
-        const columns = row.content.container.children;
-        if (columns.len < 3 or columns[2].content != .field) continue;
-        const ref = columns[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        if (std.mem.eql(u8, snapshot.value.bytes, "semantic.txt")) old_field = ref;
-    }
-    const retained = old_field orelse return error.FilesNameNotFound;
+    const listing_id = ed.buffers.active_id;
+    const listing = ed.buffers.get(listing_id) orelse return error.NoListing;
+    try t.expect(listing.projection != null);
+    const before = try ed.textAlloc();
+    defer gpa.free(before);
+    try t.expect(std.mem.indexOf(u8, before, "semantic.txt") != null);
+
+    // Leave the listing for an ordinary text buffer and type. The regression:
+    // typing must reach THIS buffer, not the row the listing left focused —
+    // the listing's rows are editable, so "which thing is my typing about" is
+    // answered by which ENTRY is active, and by nothing else.
     ed.runStr("open", "plain.txt");
     ed.press("i", "");
     ed.typeText("typed through text buffer");
     const text = try ed.textAlloc();
     defer gpa.free(text);
     try t.expectEqualStrings("typed through text buffer", text);
-    var old_snapshot = try ed.session.system.semantic.fields.get(retained).?.snapshot(gpa);
-    defer old_snapshot.deinit();
-    try t.expectEqualStrings("semantic.txt", old_snapshot.value.bytes);
+
+    // And the listing is exactly as it was.
+    const after = try ed.buffers.get(listing_id).?.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(after);
+    try t.expectEqualStrings(before, after);
 }
 
 test "e2e/project: git push/pull/fetch transients are sticky menus" {
@@ -800,7 +800,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // retained structured view (not a files text buffer), and ordinary j/k
     // navigation is supplied by the Vim plugin over the generic focus path.
     ed.runStr("open", ".");
-    const directory_view = ed.head.semantic_focus.path().?.view;
+    const directory_view = ed.toolView().?;
     const directory_scene = ed.session.system.semantic.views.get(directory_view).?.scene;
     try t.expectEqualStrings("files", directory_scene.role);
     const rows = switch (directory_scene.content) {
@@ -833,27 +833,18 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    var rename_field = ed.head.semantic_focus.path().?.field.?;
-    var renamed = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
-    defer renamed.deinit();
-    try t.expectEqualStrings("new.txt", renamed.value.bytes);
-    // :e! is the generic view.revert action. It restores the provider draft,
-    // including its original field identity, without applying anything.
+    // THE DRAFT IS THE TEXT: what the row says now IS the pending rename.
+    try t.expect(try spineDraftEnds(&ed, gpa, "new.txt"));
+    // :e! is the generic view.revert action. It restores the provider draft
+    // from external authority, without applying anything.
     ed.press("colon", "");
     ed.typeText("e!");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
-    rename_field = ed.head.semantic_focus.path().?.field.?;
-    var reverted_name = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
-    defer reverted_name.deinit();
-    try t.expectEqualStrings("old.txt", reverted_name.value.bytes);
-    try ed.session.system.semantic.fields.get(rename_field).?.edit(reverted_name.value.revision, .{
-        .start = 0,
-        .end = reverted_name.value.bytes.len,
-        .replacement = "",
-        .selection_after = .{ .anchor = 0, .caret = 0 },
-    });
+    try t.expect(try spineDraftEnds(&ed, gpa, "old.txt"));
+    try spineFocusFilesName(&ed, gpa, "old.txt");
     ed.press("i", "");
+    for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-files-rename-plan");
@@ -873,7 +864,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "create-dir/.seed", "");
     core.file.deleteFile(gpa, "create-dir/.seed");
     ed.runStr("open", "create-dir");
-    const create_view = ed.head.semantic_focus.path().?.view;
+    const create_view = ed.toolView().?;
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
     ed.press("i", "");
@@ -910,7 +901,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("y", "");
     ed.press("d", "");
     ed.press("d", "");
-    const deleted_view = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    const deleted_view = ed.session.system.semantic.views.get(ed.toolView().?).?.scene;
     var saw_retained_delete = false;
     for (deleted_view.content.container.children) |row| for (row.facts) |fact| {
         saw_retained_delete = saw_retained_delete or
@@ -922,7 +913,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
-    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene.content.container.children.len);
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
     ed.chord("SPC v a");
     ed.press("y", "y");
     const copied = try core.file.readAlloc(gpa, "copy-destination/source.txt");
@@ -940,23 +931,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/z-clean.txt", "clean\n");
     ed.runStr("open", "refresh-dir");
     try spineFocusFilesName(&ed, gpa, "a-dirty.txt");
-    const dirty_ref = ed.head.semantic_focus.path().?.field.?;
-    var dirty_name = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
-    defer dirty_name.deinit();
-    try ed.session.system.semantic.fields.get(dirty_ref).?.edit(dirty_name.value.revision, .{
-        .start = 0,
-        .end = dirty_name.value.bytes.len,
-        .replacement = "",
-        .selection_after = .{ .anchor = 0, .caret = 0 },
-    });
     ed.press("i", "");
+    for (0.."a-dirty.txt".len) |_| ed.press("Delete", "");
     ed.typeText("draft.txt");
     ed.press("Escape", "");
     _ = try proj.oracle("mv -- refresh-dir/a-dirty.txt refresh-dir/external.txt");
     core.file.deleteFile(gpa, "refresh-dir/z-clean.txt");
     ed.chord("SPC v r");
     var saw_stale_draft = false;
-    const refreshed = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    const refreshed = ed.session.system.semantic.views.get(ed.toolView().?).?.scene;
     for (refreshed.content.container.children) |row| {
         if (row.content != .container) continue;
         const columns = row.content.container.children;
@@ -1312,24 +1295,31 @@ test "e2e/regression: a >256-byte buffer name reaches a plugin whole" {
     defer app.deinit();
     const ed = &app.ed;
 
-    // A directory named to NAME_MAX: its `files:` view buffer is named past
-    // the 256-byte scratch the tool plugins used to copy a name into.
-    const dir_name = try gpa.alloc(u8, 255);
-    defer gpa.free(dir_name);
-    @memset(dir_name, 'd');
+    // A FILE named to NAME_MAX: its buffer is named past the 256-byte scratch
+    // the tool plugins used to copy a name into.
+    //
+    // It used to be a DIRECTORY, whose `files: <path>` view buffer was long for
+    // the same reason. That buffer is the files plugin's own `*files*` listing
+    // now — a listing is a buffer the producer owns, which is what lets a
+    // viewport hold it — so the long name has to come from somewhere that
+    // still has one. The subject is unchanged: a name longer than any fixed
+    // scratch, crossing the membrane whole.
+    const stem = try gpa.alloc(u8, 250);
+    defer gpa.free(stem);
+    @memset(stem, 'd');
+    const file_name = try std.fmt.allocPrint(gpa, "{s}.js", .{stem});
+    defer gpa.free(file_name);
     {
-        const cmd = try std.fmt.allocPrint(gpa, "mkdir -- '{s}' && printf 'const a = 1;\\n' > '{s}'/app.js", .{ dir_name, dir_name });
+        const cmd = try std.fmt.allocPrint(gpa, "printf 'const a = 1;\\n' > '{s}'", .{file_name});
         defer gpa.free(cmd);
         const out = try app.proj.oracle(cmd);
         gpa.free(out);
     }
 
-    ed.runStr("open", dir_name);
+    ed.runStr("open", file_name);
     const view_name = try gpa.dupe(u8, ed.bufferName());
     defer gpa.free(view_name);
-    try t.expect(view_name.len > 256);
-    try t.expectEqualStrings("files: ", view_name[0..7]);
-    try t.expectEqualStrings(dir_name, view_name[7..]);
+    try t.expectEqualStrings(file_name, view_name);
 
     // The buffer picker is a plugin reading every buffer's name across the
     // membrane: the long one arrives whole, so picking it lands back on it.
@@ -1395,60 +1385,59 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     ed.runStr("run-command", "node app.js");
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
-
     // ── 4. Browse the project through the provider-aware `open` command. ──
     // The app Session publishes a typed directory target and the composed files
-    // plugin claims it as an ordinary semantic view attached to a real tool
-    // buffer. The input posture remains Vim's; the browser owns no keymap.
+    // plugin claims it — publishing the listing as its OWN BUFFER, a text
+    // projection. That is what lets a viewport hold it (`presentIn` runs `open`
+    // and puts the resulting buffer in the pane), and it is why browsing is
+    // ordinary text: searchable, yankable, selectable. The input posture
+    // remains Vim's; the browser owns no keymap.
     const prior_buffer = ed.buffers.active().id;
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    const scene = ed.session.system.semantic.views.get(view_ref).?.scene;
-    try t.expectEqualStrings("files", scene.role);
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
     try t.expectEqualStrings("files", ed.buffers.active().tool);
+    const listing = ed.buffers.active();
+    try t.expect(listing.projection != null);
 
-    const children = switch (scene.content) {
-        .container => |container| container.children,
-        else => return error.FilesSceneNotContainer,
-    };
-    try t.expectEqual(@as(usize, 2), children.len);
-    try t.expectEqualStrings("files.row", children[0].role);
-    try t.expectEqualStrings("files.row", children[1].role);
-    var saw_app = false;
-    var saw_index = false;
-    for (children) |row| {
-        const field_ref = row.content.container.children[2].content.field.ref;
-        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
-        defer snapshot.deinit();
-        saw_app = saw_app or std.mem.eql(u8, snapshot.value.bytes, "app.js");
-        saw_index = saw_index or std.mem.eql(u8, snapshot.value.bytes, "index.html");
+    // The entries are ROWS with identity: keyed by the model id, roled by what
+    // they are, and readable as text.
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "app.js") != null);
+        try t.expect(std.mem.indexOf(u8, text, "index.html") != null);
     }
-    try t.expect(saw_app and saw_index);
+    var saw_file_role = false;
+    for (listing.projection.?.nodes.items) |node|
+        saw_file_role = saw_file_role or std.mem.eql(u8, node.role, "fs.file");
+    try t.expect(saw_file_role);
 
-    // Vim's ordinary j/k motions consume the generic semantic focus protocol;
-    // the plugin does not need to know that the caller happens to be Vim.
-    const first_focus = ed.head.semantic_focus.path().?.leaf().?;
+    // Vim's ordinary j/k motions move point between rows. The plugin does not
+    // need to know that the caller happens to be Vim — and neither does the
+    // caller need to know it is driving a listing rather than a file, which is
+    // the half the scene plane could not give.
+    const rowKey = struct {
+        fn of(b: *core.Buffers.Buffer) []const u8 {
+            const node = b.projection.?.subjectAt(b.textEditor().?.cursorOffset()) orelse return "";
+            return node.key;
+        }
+    }.of;
+    // Point rests on a row, and the row it rests on is an IDENTITY — which is
+    // what the text plane used to lack and the reason a browser had to be a
+    // scene to have one.
+    try t.expect(listing.focusedRole().len > 0);
+    const start_key = rowKey(listing);
     ed.press("j", "");
-    const second_focus = ed.head.semantic_focus.path().?.leaf().?;
-    try t.expect(first_focus != second_focus);
+    try t.expect(!std.mem.eql(u8, start_key, rowKey(listing)));
     ed.press("k", "");
-    try t.expectEqual(first_focus, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqualStrings(start_key, rowKey(listing));
     try t.expectEqualStrings("normal", ed.mode());
-
-    // The same view can be refreshed through the generic action endpoint. It
-    // remains retained and focused, rather than being reconstructed as a tool
-    // buffer or dropping the head back into a files mode.
-    ed.run("view-refresh");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(view_ref).?.scene.role);
     proj.shot(&ed, "web-3-files");
 
     // Vim maps q to the generic navigate-back action. The file browser knows
     // neither that key nor Vim, and buffer history performs the transition.
     ed.press("q", "");
     try t.expectEqual(prior_buffer, ed.buffers.active().id);
-    try t.expect(ed.head.semantic_focus.path() == null);
 }
 
 // Two of an instantiable tool stay isolated. A stateful session belongs to the

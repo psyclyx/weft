@@ -753,8 +753,26 @@ const LocalDirectoryRelations = struct {
 
 fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref) anyerror!void {
     const services = ctx.semantic orelse return error.SemanticUnavailable;
+    // A handler that SHOWED you something keeps it. `files` publishes its
+    // listing as an ordinary text buffer and focuses that, which is what lets a
+    // viewport hold it — core attaching a scene-backed buffer on top would be
+    // the second display path all over again. A handler that only published a
+    // scene still gets core.s default presentation, below.
     switch (try core.target_open.openAndFocus(services, ctx.head, ctx.gpa, target)) {
         .opened => {
+            // WHAT IS SHOWING, not what CHANGED. This asked whether the active
+            // entry moved, which is false in the one case that matters most:
+            // opening the directory you are already looking at. Core then
+            // attached a second, scene-backed presentation on top of the
+            // listing buffer — a `files: .` entry with no projection, so every
+            // key that reads rows found none.
+            if (ctx.buffers.active().projection != null and ctx.buffers.active().tool_view != null) {
+                // The handler showed its own BUFFER — see
+                // `builtins.dropFocusIfShownAsBuffer` for why the scene it
+                // published for the open protocol must not keep the input.
+                ctx.head.semantic_focus.clear();
+                return;
+            }
             const descriptor = services.targets.get(target) orelse return error.StaleTarget;
             const base = std.fs.path.basename(descriptor.display_name);
             const name = try std.fmt.allocPrint(ctx.gpa, "files: {s}", .{if (base.len == 0) descriptor.display_name else base});

@@ -91,6 +91,18 @@ pub const Buffer = struct {
     /// between operations. An editable projection (mini.files files) is simply
     /// NOT read-only and takes `edit`.
     read_only: bool = false,
+    /// The semantic VIEW this entry.s producer publishes for it, when the
+    /// entry is a text projection rather than a scene.
+    ///
+    /// A listing renders as text and answers actions through the same view the
+    /// scene plane would have — so `view.apply`, a paste carrying the system
+    /// transfer, a named register, an interaction dialog all reach it through
+    /// the host plumbing that already exists, instead of each being
+    /// reimplemented on the guest side of the membrane. What differs is only
+    /// WHICH ROW: a scene answers from its focused node, a projection from the
+    /// row under point, whose KEY is that node.
+    tool_view: ?semantic.view.Ref = null,
+
     /// The buffer-local semantic cursor, restored when the buffer is selected
     /// again.
     semantic_focus: Head.SemanticFocus = .empty,
@@ -129,13 +141,37 @@ pub const Buffer = struct {
     /// through different code. That duplication predates this and is not fixed
     /// here; what is avoided is making it a THIRD place that has to agree
     /// about what a role is.
+    /// Is point inside a row.s EDITABLE span?
+    ///
+    /// A listing is `structural` — rows you navigate — and the NAME in the row
+    /// under point is a FIELD. That is not a contradiction: the posture is a
+    /// question about where point is, and a projection answers it per row.
+    /// Without this, a grammar refuses insert over a listing ("this entry takes
+    /// no text") and a rename can never be typed.
+    pub fn fieldAtPoint(self: *Buffer) bool {
+        const view = self.projection orelse return false;
+        const ed = self.textEditor() orelse return false;
+        const at = ed.cursorOffset();
+        for (view.nodes.items) |n| {
+            const edit = n.editable orelse continue;
+            if (at >= n.start + edit.start and at <= n.start + edit.end) return true;
+        }
+        return false;
+    }
+
     pub fn focusedRole(self: *Buffer) []const u8 {
         const view = self.projection orelse return "";
         const ed = self.textEditor() orelse return "";
         // `subjectAt`, not `nodeAt`: a role is what a verb ACTS ON, so point
         // inside a hunk's body names the hunk. See that method's doc.
-        const node = view.subjectAt(ed.cursorOffset()) orelse return "";
-        return node.role;
+        //
+        // The ROW's role, not the part's: `role` is the fact a third party
+        // binds against (`.{ .role = "fs.file" }`), and a file does not stop
+        // being one because point is in its permissions column. What the part
+        // is remains the projection's own business — styling, and which bytes
+        // are a field.
+        const subject = view.subjectAt(ed.cursorOffset()) orelse return "";
+        return subject.node.role;
     }
 
     pub fn ref(self: *const Buffer) Ref {

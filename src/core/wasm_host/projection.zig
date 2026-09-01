@@ -88,13 +88,14 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .parent = parent,
         .foldable = (args[7] & 1) != 0,
         .focusable = (args[7] & 2) != 0,
-        .editable = (args[7] & 4) != 0,
+        .editable = if ((args[7] & 4) != 0) .{ .start = @intCast(@max(args[8], 0)), .end = @intCast(@max(args[9], 0)) } else null,
     }) catch return;
     results[0] = @intCast(ordinal);
 }
 
-/// `wl_proj_span(node, start, end, role, role_len)`: style a stretch of node
-/// `node`'s OWN text.
+/// `wl_proj_span(node, start, end, role, role_len, key, key_len)`: name a
+/// stretch of node `node`'s OWN text — how it is STYLED, and optionally WHAT IT
+/// IS.
 ///
 /// The offsets are into the text this plugin passed to `wl_proj_node`, not into
 /// the document — which is why this door exists at all rather than a tool view
@@ -104,6 +105,12 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// naming something the next render moves. Nothing here can be turned into a
 /// document offset by the guest: the node's rendered start is added on this
 /// side, and never handed back.
+///
+/// A non-empty `key` makes the span a SUBJECT: point inside it names this PART
+/// rather than the whole row, so a listing's mode column and its name are two
+/// things a verb can be about without the row stopping being one line of text.
+/// That was §F2's fork — per-column identity used to mean leaving the text
+/// plane, and with it search, yank and selection.
 pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -112,9 +119,63 @@ pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     if (args[0] < 0) return;
     const role = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
     defer gpa.free(role);
+    const key: []const u8 = if (args[6] > 0)
+        caller.readMemory(gpa, @intCast(args[5]), @intCast(args[6])) catch return
+    else
+        "";
+    defer if (key.len != 0) gpa.free(@constCast(key));
     const start: usize = if (args[1] < 0) 0 else @intCast(args[1]);
     const end: usize = if (args[2] < 0) 0 else @intCast(args[2]);
-    open.view.span(@intCast(args[0]), start, end, role) catch {};
+    open.view.span(@intCast(args[0]), start, end, role, key) catch {};
+}
+
+/// `wl_tool_view(authority, slot, generation)`: name the SEMANTIC VIEW this
+/// entry.s producer publishes for it.
+///
+/// A listing renders as text and answers actions through the same view a scene
+/// would have. That is what lets `view.apply`, a paste carrying the system
+/// transfer, a named register and an interaction dialog reach it through the
+/// host plumbing that already exists — rather than each being reimplemented on
+/// the guest side, where the transfer and the register are not even visible.
+pub fn hToolView(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().buffers.active();
+    const view = entry.projection orelse return;
+    if (!std.mem.eql(u8, view.owner, p.name)) return;
+    if (args[2] == 0) return; // generation 0 is not a handle
+    entry.tool_view = .fromWire(.{
+        .authority = @bitCast(args[0]),
+        .slot = @bitCast(args[1]),
+        .generation = @bitCast(args[2]),
+    });
+}
+
+/// `wl_proj_select(node, start, end)`: select `[start,end)` of node `node`.s OWN
+/// text.
+///
+/// The companion to `wl_proj_span`, and for the same reason: a producer that
+/// just created a row wants its name SELECTED so the next keystroke replaces
+/// the placeholder rather than appending to it. Naming that range in document
+/// coordinates would be the stale-offset hazard; naming it in the node.s own
+/// text is naming bytes the producer wrote.
+pub fn hProjSelect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().buffers.active();
+    const view = entry.projection orelse return;
+    if (!std.mem.eql(u8, view.owner, p.name)) return;
+    const editor = entry.textEditor() orelse return;
+    if (args[0] < 0 or @as(usize, @intCast(args[0])) >= view.nodes.items.len) return;
+    const n = view.nodes.items[@intCast(args[0])];
+    const lo = @min(n.start + @as(usize, @intCast(@max(args[1], 0))), n.body);
+    const hi = @min(n.start + @as(usize, @intCast(@max(args[2], 0))), n.body);
+    if (lo >= hi) return;
+    editor.placeCursor(lo);
+    editor.setMark(p.gpa) catch return;
+    editor.placeCursor(hi);
 }
 
 /// `wl_proj_rows(out, cap) -> i32`: what every EDITABLE row says NOW, as
@@ -256,10 +317,17 @@ fn anchorEditableRows(view: *projection.View, doc: anytype) void {
         if (n.anchor_end) |h| doc.removeAnchor(@enumFromInt(h));
         n.anchor_start = null;
         n.anchor_end = null;
-        if (!n.editable or n.text.len == 0) continue;
-        const line_end = @min(n.start + n.text.len, doc.text().byteLen());
-        const a = doc.addAnchor(view.gpa, n.start, .left) catch continue;
-        const b = doc.addAnchor(view.gpa, line_end, .right) catch {
+        const edit = n.editable orelse continue;
+        if (n.text.len == 0) continue;
+        // The anchors bracket the EDITABLE SPAN, not the whole row: text typed
+        // outside it is not part of the field, so a keystroke on the indent or
+        // the glyph cannot rename anything.
+        const total = doc.text().byteLen();
+        const lo = @min(n.start + edit.start, total);
+        const hi = @min(n.start + edit.end, total);
+        if (lo >= hi) continue;
+        const a = doc.addAnchor(view.gpa, lo, .left) catch continue;
+        const b = doc.addAnchor(view.gpa, hi, .right) catch {
             doc.removeAnchor(a);
             continue;
         };

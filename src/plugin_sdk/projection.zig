@@ -53,11 +53,14 @@ pub const Node = struct {
     /// Whether the cursor may REST here. Structure rows (a title, a header)
     /// leave this false so a fresh render lands on something a verb can act on.
     focusable: bool = false,
-    /// Whether the user may TYPE into this row. `projectionRows` then says what
-    /// each such row has become — doc/plugin-api.md §F2's fork closed from the
-    /// text side: a row that is text AND has an identity, so a rebase plan or an
-    /// in-place rename does not have to leave the text plane to be editable.
-    editable: bool = false,
+    /// WHICH PART of this row the user may type into, or null for none.
+    ///
+    /// A span, not a flag: a row is not all name. `  ▸ src` is an indent, a
+    /// glyph and a name, and only the last is the user.s to change — whole-row
+    /// editing let a keystroke at the row start turn the glyph into text and
+    /// rename the entry to something nobody typed. `projectionRows` reports
+    /// this span, and nothing else.
+    editable: ?struct { start: usize, end: usize } = null,
 };
 
 /// A build in progress. Open one with `begin`, `add` rows, then `commit`.
@@ -68,7 +71,7 @@ pub const Builder = struct {
         _ = self;
         const flags: u32 = (if (node.foldable) @as(u32, 1) else 0) |
             (if (node.focusable) @as(u32, 2) else 0) |
-            (if (node.editable) @as(u32, 4) else 0);
+            (if (node.editable != null) @as(u32, 4) else 0);
         const parent: i32 = if (node.parent) |ord| @intCast(ord) else -1;
         const ordinal = e.wl_proj_node(
             p(node.key.ptr),
@@ -79,6 +82,8 @@ pub const Builder = struct {
             @intCast(node.text.len),
             parent,
             flags,
+            if (node.editable) |e2| @intCast(e2.start) else 0,
+            if (node.editable) |e2| @intCast(e2.end) else 0,
         );
         return if (ordinal < 0) null else @intCast(ordinal);
     }
@@ -105,6 +110,16 @@ pub const Builder = struct {
     /// Clamped to the node, so a producer that miscounts shortens its own
     /// emphasis rather than painting its neighbours.
     pub fn span(self: Builder, node: Ordinal, start: usize, end: usize, role: []const u8) void {
+        self.part(node, start, end, role, "");
+    }
+
+    /// `span`, and this stretch is ALSO A SUBJECT under `key`.
+    ///
+    /// A row is one line, but it need not be one thing: a listing.s mode column
+    /// and its name are two, and point in either names that one. Without this a
+    /// producer wanting per-column identity had to publish a scene instead and
+    /// give up being text — search, yank and selection with it.
+    pub fn part(self: Builder, node: Ordinal, start: usize, end: usize, role: []const u8, key: []const u8) void {
         _ = self;
         e.wl_proj_span(
             @intCast(node),
@@ -112,6 +127,8 @@ pub const Builder = struct {
             @intCast(end),
             p(role.ptr),
             @intCast(role.len),
+            p(key.ptr),
+            @intCast(key.len),
         );
     }
 
@@ -213,4 +230,28 @@ pub fn rows(out: []Row) []const Row {
         i = t_end + 1;
     }
     return out[0..count];
+}
+
+/// Select `[start,end)` of `node`'s OWN text — the companion to
+/// `Builder.span`, and the thing a producer needs right after creating a row:
+/// the new name is a PLACEHOLDER, so the next keystroke should replace it
+/// rather than append to it.
+///
+/// Node-relative, like every other position here. A selection named in document
+/// coordinates would be the stale-offset hazard wearing a different hat.
+pub fn select(node: Ordinal, start: usize, end: usize) void {
+    e.wl_proj_select(@intCast(node), @intCast(start), @intCast(end));
+}
+
+/// Name the SEMANTIC VIEW this entry's producer publishes for it.
+///
+/// A listing renders as text and answers actions through the same view a scene
+/// would have — so a paste carrying the system transfer, a named register, an
+/// interaction dialog and `view.apply` reach it through the host plumbing that
+/// already exists. Without this, each would have to be reimplemented on the
+/// guest side of the membrane, where the transfer and the register are not
+/// even visible.
+pub fn toolView(view: weft.semantic.view.Ref) void {
+    const wire = view.toWire();
+    e.wl_tool_view(wire.authority, wire.slot, wire.generation);
 }

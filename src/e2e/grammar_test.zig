@@ -96,41 +96,37 @@ fn fieldText(ed: *h.Editor, gpa: std.mem.Allocator, ref: semantic.scene.FieldRef
     return gpa.dupe(u8, snap.value.bytes);
 }
 
-/// The name column of every row the focused view currently shows, in scene
-/// order. `column` is where the projection placed it, which is how nesting
-/// reaches the surface.
+/// The name of every row the focused LISTING shows, in order.
+///
+/// A listing is a text projection: a row is a node, its NAME is the stretch its
+/// producer marked editable, and nesting reaches the surface as indent. This
+/// used to walk a scene's columns and snapshot a field — which is what the
+/// scene plane was chosen for, and what the text plane now gives without
+/// costing search, yank or selection.
 fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         for (out.items) |s| gpa.free(s);
         out.deinit(gpa);
     }
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        try out.append(gpa, try fieldText(ed, gpa, name.content.field.ref));
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
+    for (view.nodes.items) |*node| {
+        if (node.editable == null) continue;
+        try out.append(gpa, try gpa.dupe(u8, h.Editor.partText(node, "fs.name")));
     }
     return out;
 }
 
-/// A files row's editable name column, the one focus traversal stops on.
-fn nameNode(row: semantic.scene.Node) ?semantic.scene.Node {
-    const columns = switch (row.content) {
-        .container => |c| c.children,
-        else => return null,
-    };
-    for (columns) |column| if (column.focusable and column.content == .field) return column;
-    return null;
-}
-
-/// Where the projection placed a named row's name column.
+/// A row's INDENT, which is where nesting reaches the surface — the scene
+/// carried the same fact as a layout column.
 fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        const text = try fieldText(ed, gpa, name.content.field.ref);
-        defer gpa.free(text);
-        if (std.mem.eql(u8, text, want)) return name.layout.column;
+    _ = gpa;
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
+    for (view.nodes.items) |*node| {
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), want)) continue;
+        var i: usize = 0;
+        while (i < node.text.len and node.text[i] == ' ') i += 1;
+        return @intCast(i);
     }
     return null;
 }
@@ -145,16 +141,15 @@ fn indexOfName(names: []const []u8, want: []const u8) ?usize {
     return null;
 }
 
-/// The name of the row the head's semantic focus rests on.
+/// The name of the row POINT rests on. The listing.s focus is the cursor: a
+/// row is text, so "which row am I on" is where the caret is, and the answer
+/// is an IDENTITY because the host hit-tests it back to a node.
 fn focusedName(ed: *h.Editor, gpa: std.mem.Allocator) ![]u8 {
-    const path = ed.head.semantic_focus.path() orelse return error.TestExpectedEqual;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return error.TestExpectedEqual;
-    const leaf = path.leaf() orelse return error.TestExpectedEqual;
-    const node = view.node(leaf) orelse return error.TestExpectedEqual;
-    return switch (node.content) {
-        .field => |f| try fieldText(ed, gpa, f.ref),
-        else => error.TestExpectedEqual,
-    };
+    const b = ed.buffers.active();
+    const view = b.projection orelse return error.TestExpectedEqual;
+    const editor = b.textEditor() orelse return error.TestExpectedEqual;
+    const subject = view.subjectAt(editor.cursorOffset()) orelse return error.TestExpectedEqual;
+    return gpa.dupe(u8, h.Editor.partText(subject.node, "fs.name"));
 }
 
 /// Walk the rows with the grammar's own `j` until `want` has the focus,
@@ -191,8 +186,9 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     try authorTree(ed);
 
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
-    try t.expectEqualStrings("files", focusedView(ed).?.scene.role);
+    const listing = ed.buffers.active_id;
+    try t.expectEqualStrings("files", ed.buffers.active().tool);
+    try t.expect(ed.buffers.active().projection != null);
 
     // The tree is on the surface, and the focus starts on a row.
     {
@@ -223,7 +219,7 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // directory, and no expansion command.
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(listing, ed.buffers.active_id);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
@@ -252,26 +248,30 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // its contents. The grammar names neither the plugin nor the kind.
     const browser_entry = ed.buffers.active().id;
     ed.press("Return", "\r");
-    const child_view = ed.head.semantic_focus.path().?.view;
-    try t.expect(!child_view.eql(view_ref));
+    // A directory is its own LISTING, in its own instanced entry — the same
+    // shape the scene had (a view per directory), now spelled as a buffer per
+    // directory, which is what lets any of them be docked.
+    try t.expect(ed.buffers.active().id != browser_entry);
+    try t.expect(ed.buffers.active().projection != null);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
         try t.expect(indexOfName(names.items, "inner.txt") != null);
     }
 
-    // `q` — std.navigation.back — leaves the browser: the workspace moves to
-    // another entry and no view holds the focus.
+    // `q` — std.navigation.back — is buffer history, and a listing is a
+    // buffer: from the child listing it lands back on the one you descended
+    // FROM. The scene plane had a view per directory but one entry, so back
+    // left the browser entirely; a directory per BUFFER is what makes any of
+    // them dockable, and it makes back mean the same thing here as anywhere.
     ed.press("q", "q");
-    try t.expect(ed.buffers.active().id != browser_entry);
-    try t.expect(ed.head.semantic_focus.path() == null);
+    try t.expectEqual(browser_entry, ed.buffers.active().id);
 
     // Return on a FILE row is the same key, the same intention, and the same
     // route: no tool claims a file, so the shell's placement policy opens it
     // as an ordinary editor entry. The grammar names neither files nor
     // buffers, and the browser is left exactly where it was.
     ed.runStr("open", ".");
-    const files_view = ed.head.semantic_focus.path().?.view;
     const files_entry = ed.buffers.active().id;
     try focusRowByName(ed, gpa, "top.txt");
     ed.press("Return", "\r");
@@ -281,10 +281,10 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
         defer gpa.free(text);
         try t.expectEqualStrings("top\n", text);
     }
-    // The browser entry and its view survive untouched — activating a row
-    // navigated the workspace, not the browser.
+    // The browser entry survives untouched — activating a row navigated the
+    // workspace, not the browser.
     try t.expect(ed.buffers.get(files_entry) != null);
-    try t.expect(ed.session.system.semantic.views.get(files_view) != null);
+    try t.expect(ed.buffers.get(files_entry).?.projection != null);
 }
 
 test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where nothing offers it, and is never text" {
@@ -324,7 +324,14 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
             defer freeNames(gpa, &opened);
             try t.expect(indexOfName(opened.items, "inner.txt") != null);
         }
-        try t.expect((try documentText(ed, gpa)) == null);
+        // A listing HAS a document now — it is text, which is the point — so
+        // the gate is not "there is nothing to insert into" but the stronger
+        // one it always meant: Tab put no TAB in it.
+        {
+            const doc = (try documentText(ed, gpa)).?;
+            defer gpa.free(doc);
+            try t.expect(std.mem.indexOfScalar(u8, doc, '\t') == null);
+        }
         try t.expectEqualStrings("gramtest", ed.mode());
 
         ed.press("Tab", "\t");
@@ -414,7 +421,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
 
     const focus_before = try focusedName(ed, gpa);
     defer gpa.free(focus_before);
-    const view_before = ed.head.semantic_focus.path().?.view;
+    const entry_before = ed.buffers.active_id;
     var rows_before = try rowNames(ed, gpa);
     defer freeNames(gpa, &rows_before);
 
@@ -423,6 +430,9 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.navigation.down"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.navigation.down", r.intention);
+            // The VIEW ADAPTER offers it, derived from the listing.s own scene
+            // — for the row under point, exactly as it derives a scene-backed
+            // view.s from the focused node.
             try t.expectEqualStrings("core.view", r.provider);
         },
         else => return error.TestExpectedReady,
@@ -435,6 +445,11 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
         .ready => |r| {
             try t.expectEqualStrings("std.hierarchy.toggle-expanded", r.intention);
+            // The VIEW ADAPTER offers it, derived from what the listing.s own
+            // scene advertises for the row under point — so folding is offered
+            // on a directory and nowhere else, without the producer declaring
+            // an offer table. The adapter is who BINDS it; the producer is
+            // named by the view it answers through.
             try t.expectEqualStrings("core.view", r.provider);
         },
         else => return error.TestExpectedReady,
@@ -464,7 +479,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     const focus_after = try focusedName(ed, gpa);
     defer gpa.free(focus_after);
     try t.expectEqualStrings(focus_before, focus_after);
-    try t.expectEqual(view_before, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(entry_before, ed.buffers.active_id);
     var rows_after = try rowNames(ed, gpa);
     defer freeNames(gpa, &rows_after);
     try t.expectEqual(rows_before.items.len, rows_after.items.len);
@@ -479,14 +494,17 @@ fn countName(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !usize {
 }
 
 fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: ?u16) !usize {
-    const view = focusedView(ed) orelse return error.TestExpectedEqual;
+    _ = gpa;
+    const view = ed.buffers.active().projection orelse return error.TestExpectedEqual;
     var n: usize = 0;
-    for (view.scene.content.container.children) |row| {
-        const name = nameNode(row) orelse continue;
-        const text = try fieldText(ed, gpa, name.content.field.ref);
-        defer gpa.free(text);
-        if (!std.mem.eql(u8, text, want)) continue;
-        if (column) |want_column| if (name.layout.column != want_column) continue;
+    for (view.nodes.items) |*node| {
+        if (node.editable == null) continue;
+        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), want)) continue;
+        if (column) |want_column| {
+            var i: usize = 0;
+            while (i < node.text.len and node.text[i] == ' ') i += 1;
+            if (i != want_column) continue;
+        }
         n += 1;
     }
     return n;
@@ -501,9 +519,9 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     try authorTree(ed);
 
     ed.runStr("open", ".");
-    const view_ref = ed.head.semantic_focus.path().?.view;
+    const listing_entry = ed.buffers.active_id;
 
-    // Open the directory in place, so one view holds both ends of the move.
+    // Open the directory in place, so ONE listing holds both ends of the move.
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
     const nested = (try nameColumn(ed, gpa, "inner.txt")).?;
@@ -519,7 +537,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     // The grammar names no plugin, no path, and no placement.
     try focusRowByName(ed, gpa, "inner.txt");
     ed.press("p", "p");
-    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(listing_entry, ed.buffers.active_id);
     try t.expectEqual(@as(usize, 2), try countName(ed, gpa, "top.txt"));
     try t.expectEqual(@as(usize, 1), try countNameAt(ed, gpa, "top.txt", nested));
 
@@ -678,14 +696,17 @@ test "e2e/grammar: a focused editable field reports `field`, and rests where str
     const ed = &app.ed;
     try authorTree(ed);
 
-    // The browser's focus traversal stops on each row's editable name column,
-    // so commits belong to the FIELD, not to any document (§11.8). That is a
-    // refinement of `structural`, not a departure from it: the entry still
-    // rests where the grammar's structural state is, which is what keeps the
-    // browser's own keys live while a field has the focus.
+    // Point on a row.s editable NAME is a FIELD: commits belong to it, not to
+    // the listing at large (§11.8). That is a refinement of `structural`, not a
+    // departure from it — the entry still rests where the grammar.s structural
+    // state is, which is what keeps the browser.s own keys live while a name is
+    // being typed.
     ed.runStr("open", ".");
     try focusRowByName(ed, gpa, "top.txt");
-    try t.expect(ed.head.semantic_focus.field != null);
+    // Point rests on the row.s NAME, which is the part its producer marked
+    // editable — so the posture is `field` there and `structural` elsewhere in
+    // the same entry. The refinement is per-ROW now rather than per-entry,
+    // which is what a listing made of text can say and a scene could not.
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try t.expectEqualStrings("gramtest", ed.mode());
     try t.expectEqualStrings("gramtest", ed.buffers.restingModeFor(.field));
