@@ -88,6 +88,7 @@ pub fn hProjNode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .parent = parent,
         .foldable = (args[7] & 1) != 0,
         .focusable = (args[7] & 2) != 0,
+        .editable = (args[7] & 4) != 0,
     }) catch return;
     results[0] = @intCast(ordinal);
 }
@@ -114,6 +115,75 @@ pub fn hProjSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const start: usize = if (args[1] < 0) 0 else @intCast(args[1]);
     const end: usize = if (args[2] < 0) 0 else @intCast(args[2]);
     open.view.span(@intCast(args[0]), start, end, role) catch {};
+}
+
+/// `wl_proj_rows(out, cap) -> i32`: what every EDITABLE row says NOW, as
+/// `key\0text\0` pairs in rendered order. Returns bytes written, or -1.
+///
+/// This is the read half of §F2's fork closing. A producer publishes rows, the
+/// user types into them — reorders a rebase plan, renames a file in a listing —
+/// and then this says what each row it published has become, addressed by the
+/// KEY it chose rather than by where the line ended up. A row the user emptied
+/// or deleted comes back with empty text, which is how "dropped" is spelled.
+///
+/// No offset in either direction: the door takes none, returns none, and what
+/// it reads between is found by anchors the document shifted, not by a position
+/// anyone remembered.
+pub fn hProjRows(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().buffers.active();
+    const view = entry.projection orelse return;
+    if (!std.mem.eql(u8, view.owner, p.name)) return;
+    const editor = entry.textEditor() orelse return;
+    const doc = &editor.doc;
+    const cap: usize = @intCast(@as(u32, @bitCast(args[1])));
+
+    // IN THE ORDER THEY NOW APPEAR, not the order they were published. A user
+    // who moves a line up has said something about order — it is the whole
+    // point of an editable plan — so reporting publication order would report
+    // the one thing they changed as unchanged. The anchors already know.
+    var live = std.ArrayList(*const projection.Node).empty;
+    defer live.deinit(p.gpa);
+    for (view.nodes.items) |*n| {
+        if (n.anchor_start == null or n.anchor_end == null) continue;
+        live.append(p.gpa, n) catch return;
+    }
+    const By = struct {
+        d: @TypeOf(doc),
+        fn less(self: @This(), x: *const projection.Node, y: *const projection.Node) bool {
+            return self.d.anchorOffset(@enumFromInt(x.anchor_start.?)) <
+                self.d.anchorOffset(@enumFromInt(y.anchor_start.?));
+        }
+    };
+    std.mem.sort(*const projection.Node, live.items, By{ .d = doc }, By.less);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(p.gpa);
+    for (live.items) |n| {
+        const lo = doc.anchorOffset(@enumFromInt(n.anchor_start.?));
+        const hi = doc.anchorOffset(@enumFromInt(n.anchor_end.?));
+        out.appendSlice(p.gpa, n.key) catch return;
+        out.append(p.gpa, 0) catch return;
+        const rope = editor.text();
+        const total = rope.byteLen();
+        const s = @min(lo, total);
+        const e = @min(hi, total);
+        if (e > s) {
+            const bytes = p.gpa.alloc(u8, e - s) catch return;
+            defer p.gpa.free(bytes);
+            var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
+            sr.interface.readSliceAll(bytes) catch return;
+            // A row the user split with a newline reads to its first break: the
+            // rest is a NEW line, which is a row this producer never published
+            // and must not be handed back as if it had.
+            const cut = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
+            out.appendSlice(p.gpa, bytes[0..cut]) catch return;
+        }
+        out.append(p.gpa, 0) catch return;
+    }
+    const n = caller.writeMemory(@intCast(@as(u32, @bitCast(args[0]))), cap, out.items) catch return;
+    results[0] = @intCast(n);
 }
 
 /// `wl_proj_commit() -> i32`: render the built tree into the captured buffer,
@@ -159,8 +229,43 @@ fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind:
 
     paintStyles(p, view, doc, text.len);
     paintFolds(p, view, doc);
+    anchorEditableRows(view, doc);
     editor.placeCursor(@min(view.focusOffset(), editor.text().byteLen()));
     return @bitCast(view.revision);
+}
+
+/// Drop an anchor at each end of every EDITABLE row.
+///
+/// The anchors are the whole mechanism. A row the user may type into cannot be
+/// found afterwards by the offset it was rendered at — that is the same stale
+/// position this module exists to refuse — and it cannot be found by re-parsing
+/// the text either, because what the user typed is exactly what a re-parse
+/// would have to guess at. An anchor is neither: the document shifts it as the
+/// bytes around it move, so "where row 3 is now" needs nobody to have been
+/// careful.
+///
+/// Biased outward (`.left` at the start, `.right` at the end) so text typed at
+/// either edge of a row belongs to that row. A row deleted outright collapses
+/// its two anchors together and reads as empty, which is how a producer sees a
+/// dropped line.
+fn anchorEditableRows(view: *projection.View, doc: anytype) void {
+    for (view.nodes.items) |*n| {
+        // The PREVIOUS render's anchors, if any: released before new ones are
+        // taken, so a rebuild does not leak one per editable row per refresh.
+        if (n.anchor_start) |h| doc.removeAnchor(@enumFromInt(h));
+        if (n.anchor_end) |h| doc.removeAnchor(@enumFromInt(h));
+        n.anchor_start = null;
+        n.anchor_end = null;
+        if (!n.editable or n.text.len == 0) continue;
+        const line_end = @min(n.start + n.text.len, doc.text().byteLen());
+        const a = doc.addAnchor(view.gpa, n.start, .left) catch continue;
+        const b = doc.addAnchor(view.gpa, line_end, .right) catch {
+            doc.removeAnchor(a);
+            continue;
+        };
+        n.anchor_start = @intFromEnum(a);
+        n.anchor_end = @intFromEnum(b);
+    }
 }
 
 /// Roles → classes, in one bulk pass over the rendered bytes. The producer

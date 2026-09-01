@@ -77,8 +77,25 @@ pub const Node = struct {
     /// subjects; only the second kind is somewhere a verb can act, so only the
     /// second kind is where a fresh render should land.
     focusable: bool = false,
+    /// Whether the user may TYPE into this row, and the producer wants to know
+    /// what it says afterwards.
+    ///
+    /// This is doc/plugin-api.md §F2's fork, closed from the text side. The two
+    /// planes divided as "text, or identity-and-fields": a producer wanting a
+    /// row the user edits in place — a rebase plan, a rename in a directory
+    /// listing — had to leave the text plane and give up search, yank and
+    /// selection to get it. A row is text AND has an identity here, so editing
+    /// one is an ordinary edit, and `editedRows` says what each one now says.
+    editable: bool = false,
     /// Styled stretches inside this node's own text. Owned.
     spans: std.ArrayList(Span) = .empty,
+
+    /// Where this row's text BEGAN and ENDED, as anchors that shift with the
+    /// user's typing. Set for an editable node after a render; null otherwise.
+    /// Opaque here — the host mints and reads them, because only the host has
+    /// the document they live in.
+    anchor_start: ?u64 = null,
+    anchor_end: ?u64 = null,
 
     // ── Filled by `render`; display and only display ──────────────────
     /// The node's whole rendered extent, children included.
@@ -157,6 +174,7 @@ pub const View = struct {
         parent: ?u32,
         foldable: bool,
         focusable: bool = false,
+        editable: bool = false,
     }) !u32 {
         if (!self.open) return error.NoBuild;
         // A parent must already exist, so the tree cannot describe a cycle or
@@ -178,6 +196,7 @@ pub const View = struct {
             .parent = node.parent,
             .foldable = node.foldable,
             .focusable = node.focusable,
+            .editable = node.editable,
         });
         return @intCast(self.building.items.len - 1);
     }

@@ -53,6 +53,11 @@ pub const Node = struct {
     /// Whether the cursor may REST here. Structure rows (a title, a header)
     /// leave this false so a fresh render lands on something a verb can act on.
     focusable: bool = false,
+    /// Whether the user may TYPE into this row. `projectionRows` then says what
+    /// each such row has become — doc/plugin-api.md §F2's fork closed from the
+    /// text side: a row that is text AND has an identity, so a rebase plan or an
+    /// in-place rename does not have to leave the text plane to be editable.
+    editable: bool = false,
 };
 
 /// A build in progress. Open one with `begin`, `add` rows, then `commit`.
@@ -61,7 +66,9 @@ pub const Builder = struct {
     /// the host refused it (no open build, or a parent that does not exist).
     pub fn add(self: Builder, node: Node) ?Ordinal {
         _ = self;
-        const flags: u32 = (if (node.foldable) @as(u32, 1) else 0) | (if (node.focusable) @as(u32, 2) else 0);
+        const flags: u32 = (if (node.foldable) @as(u32, 1) else 0) |
+            (if (node.focusable) @as(u32, 2) else 0) |
+            (if (node.editable) @as(u32, 4) else 0);
         const parent: i32 = if (node.parent) |ord| @intCast(ord) else -1;
         const ordinal = e.wl_proj_node(
             p(node.key.ptr),
@@ -159,4 +166,51 @@ pub fn selectedLines(key: []const u8) ?struct { lo: usize, hi: usize } {
         .lo = std.mem.readInt(u32, out[0..4], .little),
         .hi = std.mem.readInt(u32, out[4..8], .little),
     };
+}
+
+/// One published row, as it reads NOW.
+pub const Row = struct {
+    /// The key this producer gave the row. Borrows the scratch below.
+    key: []const u8,
+    /// What the row says after whatever the user typed. Empty when the row was
+    /// deleted or blanked — which is how "dropped" is spelled, and why a
+    /// producer that treats empty as "unchanged" will silently keep something
+    /// the user meant to remove.
+    text: []const u8,
+};
+
+/// Scratch for one `rows()` read. A row list is bounded by what the producer
+/// published, and a producer that published more than this has bigger problems
+/// than the truncation.
+var rows_buf: [1 << 16]u8 = undefined;
+
+/// Every EDITABLE row, in rendered order, as it reads now.
+///
+/// This is the other half of `Node.editable`, and it is what lets a row be text
+/// AND have an identity — doc/plugin-api.md §F2's fork, from the text side. The
+/// user reorders a rebase plan, renames a file in a listing, blanks a line; a
+/// producer asks what each row it published has become, addressed by the KEY it
+/// chose. Not by position: the host tracks each row with anchors the document
+/// shifts, so nothing here depends on a line having stayed where it was put.
+///
+/// A row the user SPLIT reads to its first newline. The remainder is a line
+/// this producer never published, and it is not reported as one — a new row is
+/// the producer's own business to notice, out of the buffer's text.
+///
+/// The slices borrow a shared scratch; copy anything that must outlive the
+/// next call.
+pub fn rows(out: []Row) []const Row {
+    const n = e.wl_proj_rows(p(&rows_buf), @intCast(rows_buf.len));
+    if (n <= 0) return out[0..0];
+    var count: usize = 0;
+    var i: usize = 0;
+    const bytes = rows_buf[0..@intCast(n)];
+    while (i < bytes.len and count < out.len) {
+        const k_end = std.mem.indexOfScalarPos(u8, bytes, i, 0) orelse break;
+        const t_end = std.mem.indexOfScalarPos(u8, bytes, k_end + 1, 0) orelse break;
+        out[count] = .{ .key = bytes[i..k_end], .text = bytes[k_end + 1 .. t_end] };
+        count += 1;
+        i = t_end + 1;
+    }
+    return out[0..count];
 }

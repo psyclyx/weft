@@ -394,6 +394,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proj_begin", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "open a projection build over the named buffer; the entry is captured now so nothing can redirect where it lands" },
     .{ .name = "wl_proj_node", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "append (key, role, text, parent ordinal or -1, flags) to the open build; returns its ordinal" },
     .{ .name = "wl_proj_span", .params = &.{ .i32, .i32, .i32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "style [start,end) of node `node`'s OWN text with `role` (offsets are into the text the plugin passed, never the document)" },
+    .{ .name = "wl_proj_rows", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "what every EDITABLE row says now, as `key\\0text\\0` pairs; found by anchors the document shifted, so neither side names a position" },
     .{ .name = "wl_proj_commit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "render the built tree into the captured buffer, repaint styles from roles and folds from the collapsed set, and land the cursor on the KEY it was on; returns the revision" },
     .{ .name = "wl_proj_at_cursor", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the key of the innermost row the cursor is on; empty for no row" },
     .{ .name = "wl_proj_toggle", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "flip a row fold by key and re-render from the tree in hand (no producer is consulted); returns the revision" },
@@ -462,7 +463,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 227;
+const expected_import_count = 228;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

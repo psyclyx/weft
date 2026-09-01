@@ -25,6 +25,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "proj-rebuild", .call = rebuild },
     .{ .name = "proj-fold-b", .call = foldB },
     .{ .name = "proj-report", .call = report },
+    .{ .name = "proj-plan", .call = plan },
+    .{ .name = "proj-plan-report", .call = planReport },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -100,4 +102,43 @@ fn report() void {
     const line = std.fmt.bufPrint(&out, "at={s} sel={d},{d}", .{ at, sel_lo, sel_hi }) catch return;
     weft.runStr("buffer-create", "*proj-report*");
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, line);
+}
+
+// ── Editable rows: the plan a user types into ────────────────────────────
+// A projection whose rows are EDITABLE — the shape a rebase plan or an
+// in-place directory rename has. The guest publishes rows with keys; the user
+// reorders, retypes and deletes lines like any other text; the guest asks what
+// each row it published now says, addressed by its own key.
+//
+// This is doc/plugin-api.md §F2's fork closed from the text side: the row is
+// text (searchable, yankable, selectable) AND has an identity, which is the
+// combination the two planes used to make you choose between.
+
+const plan_view = "*plan*";
+
+fn plan() void {
+    weft.focusOrCreateBuffer(plan_view);
+    const b = weft.project(plan_view) orelse return;
+    _ = b.add(.{ .key = "a", .role = "plan.step", .text = "pick aaa first", .focusable = true, .editable = true });
+    _ = b.add(.{ .key = "b", .role = "plan.step", .text = "pick bbb second", .focusable = true, .editable = true });
+    _ = b.add(.{ .key = "c", .role = "plan.step", .text = "pick ccc third", .focusable = true, .editable = true });
+    // NOT editable: a comment is structure, and must not come back as a row.
+    _ = b.add(.{ .key = "note", .role = "plan.note", .text = "# reorder me" });
+    _ = b.commit();
+}
+
+var plan_out: [1024]u8 = undefined;
+
+/// Every published row as it reads NOW, in the order it now appears, written
+/// into a buffer of its own — a guest's only channel back.
+fn planReport() void {
+    var rows: [8]weft.ProjectionRow = undefined;
+    const live = weft.projectionRows(&rows);
+    var w: usize = 0;
+    for (live) |row| {
+        const seg = std.fmt.bufPrint(plan_out[w..], "{s}={s};", .{ row.key, row.text }) catch break;
+        w += seg.len;
+    }
+    weft.focusOrCreateBuffer("*plan-report*");
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, plan_out[0..w]);
 }

@@ -3398,7 +3398,35 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
         try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
     }
     try t.expect(spans_seen);
-    try t.expectEqual(@as(usize, 7), found);
+    try t.expectEqual(@as(usize, 8), found);
+}
+
+test "projection: an edited row is found by its ANCHORS, not by where it was rendered" {
+    // `wl_proj_rows` is the read half of an editable projection, and it only
+    // holds because the host anchors each row. The claim under it, checked here
+    // without a guest: a node's rendered `start` is a fact about the render,
+    // and the moment the user types above a row it is a lie — so the row has to
+    // be findable by something the document maintains.
+    const projection = @import("../projection.zig");
+    var v: projection.View = .init(t.allocator);
+    defer v.deinit();
+    v.begin();
+    const a = try v.add(.{ .key = "c1", .role = "git.commit", .text = "pick aaa one", .parent = null, .foldable = false, .editable = true });
+    const b = try v.add(.{ .key = "c2", .role = "git.commit", .text = "pick bbb two", .parent = null, .foldable = false, .editable = true });
+    _ = try v.add(.{ .key = "hdr", .role = "git.header", .text = "# a comment", .parent = null, .foldable = false });
+    _ = try v.commit();
+
+    // Editable is not focusable and not foldable: three independent axes, and a
+    // row that is one is not thereby the others.
+    try t.expect(v.nodes.items[a].editable);
+    try t.expect(v.nodes.items[b].editable);
+    try t.expect(!v.nodes.items[2].editable);
+    try t.expect(!v.nodes.items[a].focusable);
+
+    // Rendered positions are what the anchors are PLACED at, once. After this
+    // point nothing may read them to find a row.
+    try t.expectEqual(@as(usize, 0), v.nodes.items[a].start);
+    try t.expect(v.nodes.items[b].start > v.nodes.items[a].start);
 }
 
 test "projection: a span is clamped to its own node, however wrong the producer is" {
@@ -3901,4 +3929,80 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     }, .{ .handler = Sink.accept });
     try t.expect(!try env.head.pick.tick(&env.ctx));
     try t.expectEqualStrings("", env.head.pick.annots.items[0]);
+}
+
+test "wasm plugin: an EDITABLE projection row is read back by key, in the order it now appears" {
+    // doc/plugin-api.md §F2, closed from the text side. The fork was "text, or
+    // identity-and-fields": a producer wanting rows the user edits in place had
+    // to leave the text plane and give up search, yank and selection to get
+    // them. Here the rows are ordinary buffer text — edited with ordinary edits
+    // — and the producer still gets back what each row IT PUBLISHED now says,
+    // named by its own key.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "projection_gate", @embedFile("guest_projection_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "proj-plan", &.{});
+    const buf = namedBuffer(&env.buffers, "*plan*") orelse return error.TestExpectedEqual;
+    const editor = buf.textEditor().?;
+
+    // Untouched: three published rows, in publication order, saying what they
+    // were published as. The `# reorder me` comment is not editable and does
+    // not appear — a row a producer did not offer for editing is not one it is
+    // asked about.
+    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    {
+        const line = try execReport(&env, gpa, "*plan-report*");
+        defer gpa.free(line);
+        try t.expectEqualStrings("a=pick aaa first;b=pick bbb second;c=pick ccc third;", line);
+    }
+
+    // Now EDIT like a user. `pick` → `squash` on the second row, in place.
+    // Focused first, because an edit lands in the buffer you are IN — the
+    // report above left `*plan-report*` on top.
+    try env.buffers.switchTo(gpa, buf.id, &env.head, &env.keymap);
+    {
+        const text = try editor.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        const at = std.mem.indexOf(u8, text, "pick bbb").?;
+        std.debug.print("ACTIVE=[{s}] at={d}\n", .{ env.buffers.active().name, at });
+        env.ctx.edit(.{ .start = at, .end = at + 4 }, "squash") catch |err| std.debug.print("EDITERR {any}\n", .{err});
+    }
+    {
+        const doc_text = try editor.text().toOwnedSlice(gpa);
+        defer gpa.free(doc_text);
+        std.debug.print("PLANDOC=[{s}]\n", .{doc_text});
+    }
+    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    {
+        const line = try execReport(&env, gpa, "*plan-report*");
+        defer gpa.free(line);
+        // Row `b` reads what the user typed. Rows `a` and `c` are untouched,
+        // even though every byte after the edit moved — the anchors carried
+        // them, so no rendered position had to stay true.
+        try t.expectEqualStrings("a=pick aaa first;b=squash bbb second;c=pick ccc third;", line);
+    }
+
+    // DELETE the first row.s text entirely. It comes back empty, which is how a
+    // producer sees a dropped line — not as a missing key it has to notice.
+    try env.buffers.switchTo(gpa, buf.id, &env.head, &env.keymap);
+    {
+        const text = try editor.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        const at = std.mem.indexOf(u8, text, "pick aaa first").?;
+        try env.ctx.edit(.{ .start = at, .end = at + "pick aaa first".len }, "");
+    }
+    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    {
+        const line = try execReport(&env, gpa, "*plan-report*");
+        defer gpa.free(line);
+        try t.expectEqualStrings("a=;b=squash bbb second;c=pick ccc third;", line);
+    }
 }
