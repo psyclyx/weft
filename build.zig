@@ -231,6 +231,7 @@ const FilesPortableModules = struct {
     workspace: *std.Build.Module,
     projection: *std.Build.Module,
     actions: *std.Build.Module,
+    text_rows: *std.Build.Module,
     facade: *std.Build.Module,
 };
 
@@ -251,6 +252,11 @@ fn createFilesPortableModules(
         .target = target,
         .optimize = optimize,
     });
+    const text_rows = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/files/text_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const workspace = b.createModule(.{
         .root_source_file = b.path("src/plugin_lib/files/workspace.zig"),
         .target = target,
@@ -266,7 +272,7 @@ fn createFilesPortableModules(
         .target = target,
         .optimize = optimize,
     });
-    inline for (.{ model, workspace, projection, actions }) |module| {
+    inline for (.{ model, workspace, projection, actions, text_rows }) |module| {
         module.addImport("weft_semantic", semantic);
         module.addImport("weft_fs", fs);
     }
@@ -278,11 +284,14 @@ fn createFilesPortableModules(
     facade.addImport("weft_files_workspace", workspace);
     facade.addImport("weft_files_projection", projection);
     facade.addImport("weft_files_actions", actions);
+    facade.addImport("weft_files_text_rows", text_rows);
+    text_rows.addImport("weft_files_model", model);
     return .{
         .model = model,
         .workspace = workspace,
         .projection = projection,
         .actions = actions,
+        .text_rows = text_rows,
         .facade = facade,
     };
 }
@@ -926,6 +935,7 @@ pub fn build(b: *std.Build) void {
         files_modules.workspace,
         files_modules.projection,
         files_modules.actions,
+        files_modules.text_rows,
     }) |files_module| {
         files_module.addImport("weft_semantic", architecture.semantic);
         files_module.addImport("weft_fs", architecture.fs);

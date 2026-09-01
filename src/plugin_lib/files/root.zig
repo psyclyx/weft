@@ -11,6 +11,7 @@ pub const model = @import("weft_files_model");
 pub const workspace = @import("weft_files_workspace");
 pub const projection = @import("weft_files_projection");
 pub const actions = @import("weft_files_actions");
+pub const text_rows = @import("weft_files_text_rows");
 
 pub const Model = model.Model;
 pub const NodeId = model.NodeId;
