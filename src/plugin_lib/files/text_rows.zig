@@ -75,6 +75,27 @@ pub fn depthOf(rows: []const model.Row, row: model.Row) usize {
     return depth;
 }
 
+/// Is `row` under a COLLAPSED ancestor?
+///
+/// The model keeps a collapsed directory.s children rather than discarding them
+/// — a draft made below one survives the round trip — so "collapsed" is a
+/// question about ancestry, not about whether the rows exist. A listing that
+/// published them all would fold nothing.
+pub fn hidden(rows: []const model.Row, row: model.Row) bool {
+    var parent = row.parent;
+    var hops: usize = 0;
+    while (parent) |id| {
+        if (hops > rows.len) return false;
+        hops += 1;
+        const p = for (rows) |r| {
+            if (r.id == id) break r;
+        } else return false;
+        if (!p.expanded) return true;
+        parent = p.parent;
+    }
+    return false;
+}
+
 /// One row as a line, and where its NAME starts within it.
 pub const Line = struct {
     text: []const u8,
@@ -266,4 +287,32 @@ test "files rows: a raw-byte filename is SHOWN, not hidden, and not renamable" {
     var ok = "fine.txt".*;
     const good = [_]model.Row{mkRow(1, null, &ok, .regular)};
     try t.expect(renamable(good[0]));
+}
+
+test "files rows: a collapsed directory's children are hidden, not discarded" {
+    // The model KEEPS a collapsed row's children — a draft made below one has
+    // to survive the round trip — so "collapsed" is a question about ancestry.
+    // A listing that published every row would fold nothing.
+    var dir = "src".*;
+    var inner = "inner.txt".*;
+    var deep = "deep.txt".*;
+    var top = "top.txt".*;
+    var rows = [_]model.Row{
+        mkRow(1, null, &dir, .directory),
+        mkRow(2, 1, &inner, .regular),
+        mkRow(3, 2, &deep, .regular),
+        mkRow(4, null, &top, .regular),
+    };
+
+    rows[0].expanded = true;
+    rows[1].expanded = true;
+    for (rows) |r| try t.expect(!hidden(&rows, r));
+
+    // Collapsing the TOP one hides everything beneath it, however deep.
+    rows[0].expanded = false;
+    try t.expect(!hidden(&rows, rows[0]));
+    try t.expect(hidden(&rows, rows[1]));
+    try t.expect(hidden(&rows, rows[2]));
+    // …and nothing outside it.
+    try t.expect(!hidden(&rows, rows[3]));
 }

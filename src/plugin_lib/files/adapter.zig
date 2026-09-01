@@ -219,7 +219,19 @@ pub fn provideRowVerbs() void {
         .{ .role = files.text_rows.role_dirty },
     } };
     weft.provide("std.target.activate", on_row, "files-enter", 0);
-    weft.provide("std.hierarchy.step-out", .{ .tool = "files" }, "files-up", 0);
+    const in_files: weft.Predicate = .{ .tool = "files" };
+    weft.provide("std.hierarchy.step-out", in_files, "files-up", 0);
+    // The INTENTION spellings a grammar binds directly (`std.*`, doc §5.1)
+    // alongside the bare ACTION names a config binds through
+    // `bindActionGroup`. Two spellings of one verb is the vocabulary.s doing,
+    // not this plugin.s — it claims both so a grammar reaches the listing
+    // whichever way it asks.
+    inline for (.{
+        .{ "std.hierarchy.toggle-expanded", semantic.action.standard.toggle_expanded },
+        .{ "std.transfer.yank", semantic.action.standard.copy },
+        .{ "std.transfer.delete-to-register", semantic.action.standard.cut },
+        .{ "std.transfer.paste", semantic.action.standard.paste_after },
+    }) |pair| weft.provide(pair[0], in_files, actionCommandName(pair[1]), 0);
     // Saving a listing is applying what was typed into it — the same
     // `std.persistence.save` a text buffer resolves, scoped to this tool.
     weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
@@ -514,6 +526,7 @@ pub const Session = struct {
         if (name.len == 0 or !weft.bufferNamed(name)) return;
         const b = weft.project(name) orelse return;
         for (staged.rows.items) |row| {
+            if (files.text_rows.hidden(staged.rows.items, row)) continue;
             var key_buf: [24]u8 = undefined;
             var text_buf: [1024]u8 = undefined;
             const line = files.text_rows.lineOf(staged.rows.items, row, &text_buf) orelse continue;
