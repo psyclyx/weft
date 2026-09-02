@@ -17,7 +17,7 @@ const cmds = [_]weft.CommandEntry{
         .name = "insert-shell",
         .call = weft.thunk(insertShell),
         .params = "command",
-        .summary = "Run a shell command and insert its output at the cursor.",
+        .summary = "run a shell command and insert its output at the cursor",
     },
 };
 comptime {

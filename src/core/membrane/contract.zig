@@ -174,6 +174,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_count", .handler = commands.hCommandCount },
     .{ .name = "wl_command_name", .handler = commands.hCommandName },
     .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
+    .{ .name = "wl_command_owner", .handler = commands.hCommandOwner },
     .{ .name = "wl_command_arity", .handler = commands.hCommandArity },
     .{ .name = "wl_command_arity_required", .handler = commands.hCommandArityRequired },
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },

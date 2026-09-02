@@ -62,6 +62,14 @@ extern void host_menu(const char *name, int name_len);
 // import with a stub (it never registers commands).
 __attribute__((import_module("weft"), import_name("qjs_register")))
 extern int host_register(const char *name, int name_len);
+// The declare doors, identical in name and shape to the wasm plane's
+// `wl_declare_command*` and bound to the very same host bodies. `weft.command`
+// declares, then registers — the two halves a `.wasm` plugin does in describe()
+// and init(), which a JS plugin has no describe phase to separate.
+__attribute__((import_module("weft"), import_name("qjs_declare_command_doc")))
+extern void host_declare_command_doc(const char *name, int name_len,
+                                     const char *params, int params_len,
+                                     const char *summary, int summary_len);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
@@ -674,15 +682,34 @@ static JSValue g_on_output; // handler (handle) => void for proc-stream output
 static JSValue g_on_pick; // handler (index) => void for a pick accept
 static JSValue g_on_exit; // handler (handle) => void for a proc-stream child exit
 
-// weft.command(name, fn): register a command and remember its handler by the
-// host-assigned id.
+// weft.command(name, fn, summary?, params?): register a command and remember
+// its handler by the host-assigned id.
+//
+// `summary` and `params` are what a `.wasm` plugin's `CommandEntry` carries and
+// mean exactly the same: one line saying what this command IS, and the
+// parameter list a palette shows and asks for. They go through the same host
+// body its declaration does, so there is one definition of what a command
+// declaration is rather than one per plane.
+//
+// Left out, the command is UNDOCUMENTED — the same standing a bare `.wasm`
+// entry has. It used to be registered with the literal string "js", which is
+// not a summary: it named the plane, and the plane is what the command's OWNER
+// already says.
 static JSValue js_command(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]))
-        return JS_ThrowTypeError(ctx, "command(name, fn)");
+        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params]])");
     size_t nl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     if (!name) return JS_EXCEPTION;
+    size_t sl = 0, pl = 0;
+    const char *summary = argc >= 3 ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
+    const char *params = argc >= 4 ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
+    if (summary || params)
+        host_declare_command_doc(name, (int)nl, params ? params : "", (int)pl,
+                                 summary ? summary : "", (int)sl);
+    if (summary) JS_FreeCString(ctx, summary);
+    if (params) JS_FreeCString(ctx, params);
     int id = host_register(name, (int)nl);
     JS_FreeCString(ctx, name);
     if (id >= 0) JS_SetPropertyUint32(ctx, g_cmds, (uint32_t)id, JS_DupValue(ctx, argv[1]));

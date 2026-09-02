@@ -35,9 +35,9 @@ var list_buf: std.ArrayList(u8) = .empty;
 // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
 // second cost a grant over the whole filesystem.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "project-remember", .call = remember },
-    .{ .name = "project-recent", .call = recent },
-    .{ .name = "project-root", .call = projectRoot },
+    .{ .name = "project-remember", .call = remember, .summary = "remember this project so it shows up in recents" },
+    .{ .name = "project-recent", .call = recent, .summary = "open a project you were in recently" },
+    .{ .name = "project-root", .call = projectRoot, .summary = "say where this project's root is" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

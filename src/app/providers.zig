@@ -294,6 +294,7 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_command_count", .args = 0 },
     .{ .name = "wl_command_name", .args = 0 },
     .{ .name = "wl_command_summary", .args = 0 },
+    .{ .name = "wl_command_owner", .args = 0 },
     .{ .name = "wl_command_arity", .args = 0 },
     .{ .name = "wl_command_arity_required", .args = 0 },
     .{ .name = "wl_command_arg", .args = 0 },

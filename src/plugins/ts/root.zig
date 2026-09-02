@@ -10,19 +10,19 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ts-node-kind", .call = nodeKind },
-    .{ .name = "ts-select-node", .call = selectNode },
-    .{ .name = "ts-expand-selection", .call = expandSelection },
-    .{ .name = "ts-goto-parent", .call = gotoParent },
-    .{ .name = "ts-select-function", .call = selectFunction },
-    .{ .name = "ts-select-class", .call = selectClass },
-    .{ .name = "ts-select-call", .call = selectCall },
-    .{ .name = "ts-select-block", .call = selectBlock },
-    .{ .name = "ts-select-comment", .call = selectComment },
-    .{ .name = "ts-goto-first-child", .call = gotoFirstChild },
-    .{ .name = "ts-select-child", .call = selectChild },
-    .{ .name = "ts-raise", .call = raise },
-    .{ .name = "ts-query", .call = queryCount },
+    .{ .name = "ts-node-kind", .call = nodeKind, .summary = "say what syntax node the cursor is in" },
+    .{ .name = "ts-select-node", .call = selectNode, .summary = "select the syntax node under the cursor" },
+    .{ .name = "ts-expand-selection", .call = expandSelection, .summary = "grow the selection to the enclosing node" },
+    .{ .name = "ts-goto-parent", .call = gotoParent, .summary = "move to the enclosing node" },
+    .{ .name = "ts-select-function", .call = selectFunction, .summary = "select the enclosing function" },
+    .{ .name = "ts-select-class", .call = selectClass, .summary = "select the enclosing class" },
+    .{ .name = "ts-select-call", .call = selectCall, .summary = "select the enclosing call" },
+    .{ .name = "ts-select-block", .call = selectBlock, .summary = "select the enclosing block" },
+    .{ .name = "ts-select-comment", .call = selectComment, .summary = "select the enclosing comment" },
+    .{ .name = "ts-goto-first-child", .call = gotoFirstChild, .summary = "move to the first child node" },
+    .{ .name = "ts-select-child", .call = selectChild, .summary = "select the first child node" },
+    .{ .name = "ts-raise", .call = raise, .summary = "replace the enclosing node with this one" },
+    .{ .name = "ts-query", .call = queryCount, .summary = "count what a tree-sitter query matches here" },
 };
 
 var raise_buf: [1 << 15]u8 = undefined;

@@ -71,6 +71,15 @@ pub const proc_doors = struct {
     pub const wasmDoor = proc.wasmDoor;
 };
 
+/// The plugin-plane DECLARE doors — what a command says about itself, which is
+/// the one thing the two planes must never describe differently. Re-exported
+/// for the same reason `proc_doors` is.
+const declare = @import("wasm_host/declare.zig");
+pub const declare_doors = struct {
+    pub const doors = declare.doors;
+    pub const wasmDoor = declare.wasmDoorFor;
+};
+
 /// The plugin-plane READ doors, whose bodies BOTH membranes run. Re-exported
 /// for the same reason `proc_doors` is: the gate in `e2e/demolition_test.zig`
 /// reaches core only through this facade, and proves the two planes bind one

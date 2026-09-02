@@ -407,6 +407,46 @@ test "demolition: plugin-plane JS doors match their wasm twins exactly" {
 // actually binds from — so replacing one plane's handler with a hand-written
 // body of the right shape fails here, which is exactly what a divergence looks
 // like on its first commit.
+test "demolition: a command DECLARATION is one thing, not one per plane" {
+    // What a command says about itself — its summary, its argument shape — is
+    // the thing the two planes drifted on: the wasm plane declared it, the JS
+    // plane had no door for it, and so every JS command registered with the
+    // literal string "js" as its summary and no arguments. The palette could
+    // neither describe them nor ask for their parameters.
+    //
+    // The fix is not "add the door too" — that is how it drifted in the first
+    // place. It is ONE STORE (`plugin_resources.Resources.declared`, embedded
+    // by value in both plugin types) written by ONE PAIR OF BODIES, proven
+    // here by function pointer against the tables each membrane really binds.
+    const declare_doors = h.core.wasm_host.declare_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+
+    inline for (declare_doors.doors) |d| {
+        const HostFn = @TypeOf(d.wl);
+
+        // The `wl_*` handler is the trampoline generated from THIS door's
+        // shared body — nothing hand-written can sit here…
+        try t.expectEqual(declare_doors.wasmDoor(d.body, d.wl_gate), d.wl);
+
+        // …and it is what the wasm membrane actually binds.
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ d.name)) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, d.wl), wl_handler);
+
+        // The `qjs_*` handler runs the SAME body. Give the JS plane its own
+        // declare again — with a field the wasm one lacks, say — and this is
+        // the assertion that fails, on its first commit.
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ d.name)) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, d.qjs_gate)), qjs_handler);
+    }
+}
+
 test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
     const proc_doors = h.core.wasm_host.proc_doors;
     const wl_bound = h.core.membrane.wl_bound;

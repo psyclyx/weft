@@ -17,8 +17,8 @@ const weft = @import("weft");
 var buf: [1 << 16]u8 = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "duplicate-line", .call = duplicateLine },
-    .{ .name = "upcase-line", .call = upcaseLine },
+    .{ .name = "duplicate-line", .call = duplicateLine, .summary = "copy this line below itself" },
+    .{ .name = "upcase-line", .call = upcaseLine, .summary = "upper-case this line" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

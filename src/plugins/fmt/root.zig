@@ -18,8 +18,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "format-buffer", .call = formatBuffer, .summary = "Format the buffer with the formatter configured for its language." },
-    .{ .name = "filter", .call = filter, .params = "command", .summary = "Pipe the selection (or buffer) through a shell command." },
+    .{ .name = "format-buffer", .call = formatBuffer, .summary = "format the buffer with the formatter configured for its language" },
+    .{ .name = "filter", .call = filter, .params = "command", .summary = "pipe the selection (or buffer) through a shell command" },
 };
 
 fn describeExtra() void {

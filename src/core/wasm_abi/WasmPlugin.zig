@@ -72,47 +72,10 @@ pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 ///
 /// A bare `declareCommand` leaves both empty, which is the honest reading of
 /// "takes nothing, says nothing" and keeps every existing plugin correct.
-pub const DeclaredCommand = struct {
-    name: []u8,
-    summary: []u8 = &.{},
-    /// The declared parameter list, as written: space-separated names, each
-    /// bare (required) or bracketed (`[preset]`, optional). Owned; the
-    /// `ArgSpec` names below borrow slices of it.
-    params: []u8 = &.{},
-    args: []command.ArgSpec = &.{},
-
-    /// Parse a declared parameter list into `ArgSpec`s. Every guest argument
-    /// crosses as a string (the membrane carries nothing else), so the only
-    /// thing to read out of a token is its NAME and whether it is optional.
-    /// Malformed input degrades to fewer arguments, never to a wrong shape.
-    pub fn parseParams(gpa: Allocator, params: []const u8) Allocator.Error!struct { []u8, []command.ArgSpec } {
-        const owned = try gpa.dupe(u8, params);
-        errdefer gpa.free(owned);
-        var count: usize = 0;
-        var counter = std.mem.tokenizeAny(u8, owned, " \t");
-        while (counter.next()) |_| count += 1;
-        const specs = try gpa.alloc(command.ArgSpec, count);
-        errdefer gpa.free(specs);
-        var it = std.mem.tokenizeAny(u8, owned, " \t");
-        var i: usize = 0;
-        while (it.next()) |tok| : (i += 1) {
-            const optional = tok.len >= 2 and tok[0] == '[' and tok[tok.len - 1] == ']';
-            specs[i] = .{
-                .name = if (optional) tok[1 .. tok.len - 1] else tok,
-                .type = .string,
-                .optional = optional,
-            };
-        }
-        return .{ owned, specs };
-    }
-
-    pub fn deinit(self: *DeclaredCommand, gpa: Allocator) void {
-        gpa.free(self.name);
-        gpa.free(self.summary);
-        gpa.free(self.params);
-        gpa.free(self.args);
-    }
-};
+/// What a guest said one of its commands is — `plugin_resources`', because a
+/// `.js` plugin declares exactly the same thing and the two must not be able
+/// to differ. See `Resources.declared`.
+pub const DeclaredCommand = plugin_resources.Resources.DeclaredCommand;
 
 /// One accumulated pick item (owned) between `pickBegin` and `pickEnd`.
 /// `buffer` is the candidate's ACCEPT KEY when it names one: a generation-
@@ -282,8 +245,6 @@ commands: std.ArrayList(*WasmCmd) = .empty,
 
 // ── Perm handshake state ──
 phase: Phase = .describing,
-/// Commands the guest declared during `describe()` (owned).
-declared: std.ArrayList(DeclaredCommand) = .empty,
 /// Capability names the guest declared during `describe()` (owned).
 declared_caps: std.ArrayList([]u8) = .empty,
 perms: [perm_count]bool = @splat(false),
@@ -743,8 +704,7 @@ pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {
 }
 
 pub fn declaration(self: *WasmPlugin, name: []const u8) ?*const DeclaredCommand {
-    for (self.declared.items) |*d| if (std.mem.eql(u8, d.name, name)) return d;
-    return null;
+    return self.resources.declaration(name);
 }
 
 pub fn declaresCapability(self: *WasmPlugin, name: []const u8) bool {
@@ -859,8 +819,6 @@ pub fn deinit(self: *WasmPlugin) void {
     self.pick_items.deinit(gpa);
     self.surface.deinit(gpa);
     self.subs.deinit(gpa); // the SubBuffers service owns the entries
-    for (self.declared.items) |*d| d.deinit(gpa);
-    self.declared.deinit(gpa);
     for (self.declared_caps.items) |d| gpa.free(d);
     self.declared_caps.deinit(gpa);
     self.instance.deinit();

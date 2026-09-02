@@ -40,7 +40,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "http-get", .call = get, .params = "url", .summary = "Fetch a URL into its own buffer (http:// or https://)." },
+    .{ .name = "http-get", .call = get, .params = "url", .summary = "fetch a URL into its own buffer (http:// or https://)" },
 };
 
 fn describeExtra() void {

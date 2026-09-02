@@ -39,6 +39,7 @@ const fs_gate = @import("wasm_host/fs.zig");
 /// not be able to reach a proc door shaped differently from the one every
 /// other guest gets (doc/place.md §4.1a).
 const proc_doors = @import("wasm_host/proc.zig");
+const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
@@ -217,6 +218,12 @@ const config_handlers = .{
 /// ACTUALLY binds for a door, not a const that merely exists beside it.
 pub const plugin_handlers = .{
     .{ .name = "qjs_register", .handler = cRegister },
+    // The declare doors are `wasm_host/declare.zig`'s bodies, reached through
+    // this plane's trampoline — the same arrangement the proc doors have, and
+    // for the same reason: a JS plugin must not be able to say something about
+    // one of its commands that a `.wasm` plugin cannot, or the reverse.
+    .{ .name = "qjs_declare_command", .handler = cDeclareCommand },
+    .{ .name = "qjs_declare_command_doc", .handler = cDeclareCommandDoc },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
@@ -528,7 +535,15 @@ pub const JsPlugin = struct {
         // reaching the plain `false` set, and `self`/`self.bridge` are only
         // read again on the surviving success path.
         self.bridge.loading = true;
+        // A JS plugin has no `describe()` to separate declaring from
+        // registering, so its whole top-level body is the declaring window —
+        // `weft.command(name, fn, summary)` declares and registers in one call.
+        // Closed again after, for the reason the flag exists: a plugin must not
+        // rewrite what one of its commands claims to be after the palette has
+        // read it.
+        self.resources.accepting_declarations = true;
         const rc = try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        self.resources.accepting_declarations = false;
         self.bridge.loading = false;
         if (rc != 0) return error.ConfigException;
         return self;
@@ -723,6 +738,9 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
         }
     }.f;
 }
+
+const cDeclareCommand = jsDoor(declare_doors.declareBody, null);
+const cDeclareCommandDoc = jsDoor(declare_doors.declareDocBody, null);
 
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
@@ -1334,23 +1352,29 @@ fn jsCmdTramp(ctx: *command.Context, data: ?*anyopaque, args: []const command.Va
 /// dispatches to the JS plugin, and return its id (the array index the JS side
 /// keys its handler by, and the host passes to weft_on_command).
 ///
-/// WHY THIS ONE DOES NOT COLLAPSE onto `wl_register` (doc/place.md §4.1a),
-/// stated so the next reader doesn't have to rediscover it: the two doors
-/// share a name and a shape, but almost nothing of a body. `hRegister` mints a
-/// `WasmCmd` into `WasmPlugin.commands` bound to `wpCmdTrampoline`; this mints
-/// a `JsPlugin.Cmd` into `JsPlugin.cmds` bound to `jsCmdTramp` — two id
-/// registries whose entries are the identity the host dispatches by, so there
-/// is no shared state for one body to operate on, and the ~6 lines that would
-/// be common (read a name, append, bind, answer the index) are smaller than
-/// the seam it would take to share them.
+/// WHAT IS AND IS NOT SHARED WITH `wl_register`, now that the question has an
+/// answer rather than an excuse.
 ///
-/// The REAL divergence here is not the body, and it is not fixable by sharing
-/// one: `hRegister` cross-checks `p.declaresCommand(cname)` — an undeclared
-/// command FAILS THE LOAD — and this door cannot, because a `.js` plugin has
-/// no `describe()` handshake to populate a declaration from. A JS plugin can
-/// therefore register any command name; a `.wasm` plugin only the ones it
-/// declared. Closing that means giving the JS plane a manifest of its own, not
-/// giving it this function.
+/// SHARED — everything about what a command IS. Both doors read the same
+/// `Resources.declared` store, through the same `declaration()` lookup, filled
+/// by the same two declare bodies (`wasm_host/declare.zig`). A command's
+/// summary and argument shape therefore have ONE origin, and a field added to
+/// a declaration reaches both planes or neither. This used to be two things:
+/// the wasm plane read a declaration, and this one bound the literal string
+/// "js" with no arguments — which is how a JS command ended up undescribable
+/// by the palette and unable to be asked for its arguments.
+///
+/// NOT SHARED — the trampoline and the local id table, and that is not drift.
+/// `hRegister` mints a `WasmCmd` bound to `wpCmdTrampoline`, which manages
+/// dispatch depth and the guest's ephemeral scratch; this mints a
+/// `JsPlugin.Cmd` bound to `jsCmdTramp`, which calls a JS function by id.
+/// Those are two ways INTO two different guests, not two descriptions of one
+/// thing — nobody adds a field to a trampoline.
+///
+/// The remaining asymmetry is a RULE, not a definition: a `.wasm` plugin may
+/// only register a command it declared during `describe()`, and a `.js` plugin
+/// has no describe handshake, so it declares as it registers. Both write the
+/// same store; when it is open differs.
 fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
@@ -1372,10 +1396,18 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         results[0] = -1;
         return;
     };
+    // WHAT THIS COMMAND IS comes from the declaration, exactly as it does on
+    // the wasm plane — one store, one lookup. A JS plugin that called
+    // `weft.command(name, fn)` with no summary declared nothing, and reads
+    // back as undocumented, which is the same standing a bare `.wasm` entry
+    // has.
+    const decl = self.resources.declaration(name);
     _ = self.bridge.activeCtx().commands.bind(gpa, name, .{
         .name = c.name,
-        .summary = "js",
-        .args = &.{},
+        .summary = if (decl) |d| d.summary else "",
+        .args = if (decl) |d| d.args else &.{},
+        // A `.js` plugin owns its commands exactly as a `.wasm` one does.
+        .owner = self.name,
         .handler = jsCmdTramp,
         .data = c,
     }) catch {

@@ -29,9 +29,9 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "run-command", .call = runCommand, .params = "command", .summary = "Run a shell command, streaming it into *output*." },
-    .{ .name = "run-line", .call = runLine, .summary = "Run the current line as a shell command." },
-    .{ .name = "output-visit", .call = output.visit, .summary = "Open the location the focused output row names." },
+    .{ .name = "run-command", .call = runCommand, .params = "command", .summary = "run a shell command, streaming it into *output*" },
+    .{ .name = "run-line", .call = runLine, .summary = "run the current line as a shell command" },
+    .{ .name = "output-visit", .call = output.visit, .summary = "open the location the focused output row names" },
 };
 
 fn describeExtra() void {

@@ -27,10 +27,10 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "repl-start", .call = start, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer (default sh)." },
-    .{ .name = "repl-send", .call = send, .params = "text", .summary = "Send a line to this buffer's REPL." },
-    .{ .name = "repl-send-line", .call = sendLine, .summary = "Send the current line to this buffer's REPL." },
-    .{ .name = "repl-quit", .call = quit, .summary = "Stop this buffer's REPL; others stay live." },
+    .{ .name = "repl-start", .call = start, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
+    .{ .name = "repl-send", .call = send, .params = "text", .summary = "send a line to this buffer's REPL" },
+    .{ .name = "repl-send-line", .call = sendLine, .summary = "send the current line to this buffer's REPL" },
+    .{ .name = "repl-quit", .call = quit, .summary = "stop this buffer's REPL; others stay live" },
 };
 
 fn describeExtra() void {

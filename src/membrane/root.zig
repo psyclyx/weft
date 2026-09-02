@@ -248,6 +248,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_count", .params = &.{}, .results = &.{.u32}, .group = .commands, .doc = "the number of registered commands (introspection)" },
     .{ .name = "wl_command_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's name, into guest memory" },
     .{ .name = "wl_command_summary", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's one-line summary, into guest memory" },
+    .{ .name = "wl_command_owner", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "who the `i`-th command belongs to — the plugin that registered it, or `core`" },
     .{ .name = "wl_command_arity", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many arguments the `i`-th command declares, or -1 if unbound" },
     .{ .name = "wl_command_arity_required", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many of them a caller must supply (optional arguments trail), or -1" },
     .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
@@ -465,7 +466,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 230;
+const expected_import_count = 231;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

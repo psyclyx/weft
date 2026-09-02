@@ -190,9 +190,9 @@ weft.command("debug-start", () => {
     supportsRunInTerminalRequest: false,
   });
   weft.echo("debug: started " + s.buf);
-});
+}, "start a debug session");
 
-function stepCmd(name, command) {
+function stepCmd(name, command, summary) {
   weft.command(name, () => {
     const s = current();
     if (!s) {
@@ -200,12 +200,12 @@ function stepCmd(name, command) {
       return;
     }
     send(s, command, { threadId: s.thread });
-  });
+  }, summary);
 }
-stepCmd("debug-continue", "continue");
-stepCmd("debug-step-over", "next");
-stepCmd("debug-step-into", "stepIn");
-stepCmd("debug-step-out", "stepOut");
+stepCmd("debug-continue", "continue", "let the program run on");
+stepCmd("debug-step-over", "next", "step over this line");
+stepCmd("debug-step-into", "stepIn", "step into the call");
+stepCmd("debug-step-out", "stepOut", "run to the end of this frame");
 
 // Stop the FOCUSED session only — a second debugger keeps running.
 weft.command("debug-stop", () => {
@@ -220,4 +220,4 @@ weft.command("debug-stop", () => {
   send(s, "disconnect", { terminateDebuggee: true });
   weft.status("○ " + s.buf + " · stopping");
   weft.echo("debug: stopping " + s.buf);
-});
+}, "stop the focused debug session");

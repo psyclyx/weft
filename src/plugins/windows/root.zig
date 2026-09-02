@@ -8,11 +8,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "win-split", .call = split },
-    .{ .name = "win-vsplit", .call = vsplit },
-    .{ .name = "win-focus", .call = focus },
-    .{ .name = "win-close", .call = close },
-    .{ .name = "win-center", .call = center },
+    .{ .name = "win-split", .call = split, .summary = "split the window horizontally" },
+    .{ .name = "win-vsplit", .call = vsplit, .summary = "split the window vertically" },
+    .{ .name = "win-focus", .call = focus, .summary = "move focus to the next window" },
+    .{ .name = "win-close", .call = close, .summary = "close this window" },
+    .{ .name = "win-center", .call = center, .summary = "centre the cursor line in the window" },
 };
 
 fn split() void {

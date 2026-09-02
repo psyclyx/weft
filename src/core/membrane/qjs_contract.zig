@@ -128,6 +128,8 @@ pub const imports = [_]Entry{
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
+    e("qjs_declare_command", 2, 0, .plugin, "declare a command name — the twin of wl_declare_command, same body"),
+    e("qjs_declare_command_doc", 6, 0, .plugin, "declare a command with its parameter list and one-line summary — the twin of wl_declare_command_doc, same body"),
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
@@ -238,7 +240,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 40;
+const expected_count = 42;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -309,7 +311,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 15), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 25), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 27), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -344,10 +346,18 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     }
     try t.expectEqual(@as(usize, 2), shared);
 
-    // And the honest headline: a JS plugin reaches 40 doors where a wasm
-    // plugin reaches 215. Pinned so closing a gap is a visible, deliberate
+    // And the honest headline: a JS plugin reaches 42 doors where a wasm
+    // plugin reaches 217. Pinned so closing a gap is a visible, deliberate
     // number change rather than something that drifts either way.
-    try t.expectEqual(@as(usize, 40), imports.len);
+    //
+    // It went 40 → 42 by CLOSING one: the declare-command pair. A JS plugin
+    // had no way to say what its commands are for, so every one of them was
+    // registered with the literal string "js" as its summary and no argument
+    // shape — the palette could neither describe them nor ask for their
+    // arguments. Both doors are `wasm_host/declare.zig`'s bodies reached
+    // through this plane's trampoline, so there is one definition of what a
+    // command declaration is.
+    try t.expectEqual(@as(usize, 42), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

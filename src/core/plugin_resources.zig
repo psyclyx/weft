@@ -43,6 +43,7 @@ const proc_stream = @import("proc_stream.zig");
 const repl_session = @import("repl_session.zig");
 const net_session = @import("net_session.zig");
 const Pool = @import("task.zig").Pool;
+const command_mod = @import("command.zig");
 
 /// What a SHARED plugin-plane body receives, whichever transport called it:
 /// the calling plugin's resources, and the context of the entry that
@@ -85,6 +86,33 @@ pub const Resources = struct {
     /// Network connections (design §6.5) — the socket mirror of `sessions`.
     net_sessions: handles.Slots(net_session.Session) = .empty,
 
+    /// WHAT THIS GUEST'S COMMANDS SAY ABOUT THEMSELVES — name, one-line
+    /// summary, argument shape. Owned.
+    ///
+    /// It lives HERE, in the block both planes embed, because it is the thing
+    /// the two planes must never describe differently. They did: a `.wasm`
+    /// plugin declared a summary and an argument shape through
+    /// `declare_command_doc`, and a `.js` one had no such door at all — so
+    /// every JS command was registered with the literal string "js" in the
+    /// summary field, which is not a summary, and with no arguments, so the
+    /// palette could not ask for them. That is not a missing feature on one
+    /// side; it is one concept with two definitions, and the second one drifted
+    /// because there was a second one to drift.
+    ///
+    /// One store, one declare body, one lookup. A field added here reaches both
+    /// planes or neither.
+    declared: std.ArrayList(DeclaredCommand) = .empty,
+
+    /// Whether declarations are being ACCEPTED right now. Closed by default:
+    /// a store that took anything at any time would let a plugin rewrite its
+    /// own summary after the palette had read it.
+    ///
+    /// The wasm plane opens this only for `describe()`, which is what makes an
+    /// undeclared command fail its load; the JS plane, which has no describe
+    /// handshake, opens it for init and closes it after. The RULE each plane
+    /// enforces is its own — what a declaration IS is not.
+    accepting_declarations: bool = false,
+
     /// The finished `wl_exec` a delivery is currently handing back. Set just
     /// before the guest's `on_exec` runs and torn down the moment it returns,
     /// so the read doors answer only inside the callback that owns them and a
@@ -112,6 +140,58 @@ pub const Resources = struct {
         }
     };
 
+    /// What a guest said one of its commands is. Moved here from
+    /// `WasmPlugin` — see `declared` for why it cannot live on one plane.
+    pub const DeclaredCommand = struct {
+        name: []u8,
+        summary: []u8 = &.{},
+        /// The declared parameter list, as written: space-separated names, each
+        /// bare (required) or bracketed (`[preset]`, optional). Owned; the
+        /// `ArgSpec` names below borrow slices of it.
+        params: []u8 = &.{},
+        args: []command_mod.ArgSpec = &.{},
+
+        /// Parse a declared parameter list into `ArgSpec`s. Every guest argument
+        /// crosses as a string (the membrane carries nothing else), so the only
+        /// thing to read out of a token is its NAME and whether it is optional.
+        /// Malformed input degrades to fewer arguments, never to a wrong shape.
+        pub fn parseParams(gpa: Allocator, params: []const u8) Allocator.Error!struct { []u8, []command_mod.ArgSpec } {
+            const owned = try gpa.dupe(u8, params);
+            errdefer gpa.free(owned);
+            var count: usize = 0;
+            var counter = std.mem.tokenizeAny(u8, owned, " \t");
+            while (counter.next()) |_| count += 1;
+            const specs = try gpa.alloc(command_mod.ArgSpec, count);
+            errdefer gpa.free(specs);
+            var it = std.mem.tokenizeAny(u8, owned, " \t");
+            var i: usize = 0;
+            while (it.next()) |tok| : (i += 1) {
+                const optional = tok.len >= 2 and tok[0] == '[' and tok[tok.len - 1] == ']';
+                specs[i] = .{
+                    .name = if (optional) tok[1 .. tok.len - 1] else tok,
+                    .type = .string,
+                    .optional = optional,
+                };
+            }
+            return .{ owned, specs };
+        }
+
+        pub fn deinit(self: *DeclaredCommand, gpa: Allocator) void {
+            gpa.free(self.name);
+            gpa.free(self.summary);
+            gpa.free(self.params);
+            gpa.free(self.args);
+        }
+    };
+
+    /// What this guest said about `name`, or null. The ONE lookup both planes'
+    /// register doors go through, so a command's summary and argument shape
+    /// have a single origin.
+    pub fn declaration(self: *const Resources, name: []const u8) ?*const DeclaredCommand {
+        for (self.declared.items) |*d| if (std.mem.eql(u8, d.name, name)) return d;
+        return null;
+    }
+
     pub fn init(gpa: Allocator, name: []const u8, pool: ?*Pool, environ: std.process.Environ) Resources {
         return .{ .gpa = gpa, .name = name, .pool = pool, .environ = environ };
     }
@@ -124,6 +204,8 @@ pub const Resources = struct {
         self.sessions.deinit(self.gpa); // kill + join each
         self.net_sessions.deinit(self.gpa); // shut + join each
         if (self.exec) |*e| e.deinit(self.gpa); // an unload mid-callback
+        for (self.declared.items) |*d| d.deinit(self.gpa);
+        self.declared.deinit(self.gpa);
     }
 
     /// Whether anything here still has buffered output or a live reader — the

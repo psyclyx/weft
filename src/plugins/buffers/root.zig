@@ -16,8 +16,8 @@ var candidates: [1024]ordering.Candidate = undefined;
 var order: [1024]usize = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "buf-pick", .call = bufPick },
-    .{ .name = "buf-scratch", .call = bufScratch },
+    .{ .name = "buf-pick", .call = bufPick, .summary = "switch to another open buffer" },
+    .{ .name = "buf-scratch", .call = bufScratch, .summary = "open a scratch buffer" },
 };
 
 fn onPickAccept(pick_id: u32) void {

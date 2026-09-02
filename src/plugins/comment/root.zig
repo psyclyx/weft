@@ -16,9 +16,9 @@ const token = "// ";
 /// it (`plugin_sdk/plugin.zig`), including the id→command mapping this file
 /// used to assume was registration order.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "comment-line", .call = commentLine },
-    .{ .name = "comment-selection", .call = commentSelection },
-    .{ .name = "op.comment", .call = opComment },
+    .{ .name = "comment-line", .call = commentLine, .summary = "toggle this line's comment" },
+    .{ .name = "comment-selection", .call = commentSelection, .summary = "toggle the selection's comments" },
+    .{ .name = "op.comment", .call = opComment, .summary = "comment the operator's range" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

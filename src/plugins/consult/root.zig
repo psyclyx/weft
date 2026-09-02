@@ -57,8 +57,8 @@ fn beginTargets() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "consult-line", .call = consultLine },
-    .{ .name = "consult-imenu", .call = consultImenu },
+    .{ .name = "consult-line", .call = consultLine, .summary = "jump to a line by searching this buffer" },
+    .{ .name = "consult-imenu", .call = consultImenu, .summary = "jump to a definition in this buffer" },
 };
 
 fn onPickAccept(pick_id: u32) void {

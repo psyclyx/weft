@@ -77,6 +77,9 @@ var prefix_scratch: [1 << 12]u8 = undefined;
 /// A separate scratch for command-arg strings, so a handler can hold an arg
 /// while it reads the buffer through `slice`.
 var arg_scratch: [1 << 12]u8 = undefined;
+/// A command.s OWNER, apart again: one palette row reads a name, a summary and
+/// an owner, and each read would otherwise land on the last one.
+var owner_scratch: [1 << 8]u8 = undefined;
 /// A separate scratch for a command's declared ARGUMENT NAMES
 /// (`commandArg`) — the third of the introspection trio, and it needs its own
 /// so all three compose. A palette row is `commandName` + `commandSummary` +
@@ -774,12 +777,20 @@ pub fn commandName(i: usize) ?[]const u8 {
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
-/// The `i`-th command's summary (into `arg_scratch`, so it survives a paired
+/// The `i`-th command.s summary (into `arg_scratch`, so it survives a paired
 /// `commandName` read), or null.
 pub fn commandSummary(i: usize) ?[]const u8 {
     const n = e.wl_command_summary(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
+}
+/// WHO the `i`-th command belongs to — the plugin that registered it, or
+/// `core`. Into its OWN scratch, so a caller may hold a name, a summary and an
+/// owner at once, which is exactly what one palette row wants.
+pub fn commandOwner(i: usize) ?[]const u8 {
+    const n = e.wl_command_owner(@intCast(i), p(&owner_scratch), owner_scratch.len);
+    if (n < 0) return null;
+    return owner_scratch[0..@intCast(n)];
 }
 /// How many arguments the `i`-th command declares, or null if unbound.
 pub fn commandArity(i: usize) ?usize {

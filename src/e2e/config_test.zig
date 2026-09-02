@@ -1069,6 +1069,77 @@ fn pickRow(ed: *Editor, text: []const u8) ?usize {
     return null;
 }
 
+test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader_state);
+
+    ed.run("pick-commands");
+    ed.settle(2);
+
+    // DOCUMENTED IS LISTED. Each of these is a thing a person looks up by
+    // name, and each is a different plugin — so this is the namespace working,
+    // not one plugin's table.
+    for ([_][]const u8{ "git-log", "goto-definition", "grep", "buffers", "ts-raise" }) |want| {
+        if (pickRow(&ed, want) == null) {
+            std.debug.print("\n[e2e/config] documented command missing from the palette: '{s}'\n", .{want});
+            return error.DocumentedCommandNotListed;
+        }
+    }
+
+    // UNDOCUMENTED IS NOT. A keystroke (`vim-append`), a motion
+    // (`motion.doc-end`) and a trampoline one plugin runs on another's behalf
+    // (`files-show`) are not things anyone looks up by name, and a list that
+    // holds them is a list you scroll past. Silence is the DEFAULT, so a new
+    // internal command stays out without anyone remembering to hide it.
+    for ([_][]const u8{ "vim-append", "motion.doc-end", "files-show", "git-commit-settle" }) |hidden| {
+        if (pickRow(&ed, hidden) != null) {
+            std.debug.print("\n[e2e/config] undocumented command listed: '{s}'\n", .{hidden});
+            return error.UndocumentedCommandListed;
+        }
+    }
+
+    // A REFUSAL TO LIST IS NOT A REFUSAL TO RUN. The pick is free-text, so an
+    // undocumented command still runs when you type its name — which is what
+    // keeps this a matter of presentation rather than of authority.
+    try t.expect(ed.commands.resolve("vim-append") != null);
+
+    // EVERY ROW SAYS WHOSE IT IS, and the rows arrive grouped by that owner —
+    // a fuzzy pick has no headings, so the order is the grouping.
+    var seen: std.ArrayList([]const u8) = .empty;
+    defer seen.deinit(gpa);
+    var last: []const u8 = "";
+    for (ed.pick.items.items, ed.pick.docs.items) |item, doc| {
+        if (std.mem.indexOfScalar(u8, item, '.') != null) continue; // a dotted offer
+        const cut = std.mem.indexOf(u8, doc, " · ") orelse doc.len;
+        const owner = doc[0..cut];
+        try t.expect(owner.len > 0);
+        if (std.mem.eql(u8, owner, last)) continue;
+        // A new owner: it must not be one we already finished, or the list is
+        // interleaved and reads as no grouping at all.
+        for (seen.items) |prior| {
+            if (std.mem.eql(u8, prior, owner)) {
+                std.debug.print("\n[e2e/config] owner '{s}' appears in two runs\n", .{owner});
+                return error.PaletteNotGroupedByOwner;
+            }
+        }
+        try seen.append(gpa, owner);
+        last = owner;
+    }
+    // core leads: the editor.s own verbs are the ones with no prefix to type.
+    try t.expect(seen.items.len > 1);
+    try t.expectEqualStrings("core", seen.items[0]);
+    ed.press("Escape", "");
+    ed.settle(2);
+}
+
 /// Open the palette, narrow to one row, and accept it.
 fn paletteAccept(ed: *Editor, text: []const u8) void {
     ed.run("pick-commands");
@@ -1162,12 +1233,16 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     try bootShowcase(gpa, &proj, &ed, &loader_state);
     try ed.enableCollabCommands();
 
-    // 1. The row SAYS what it takes. A person reads the shape before
-    //    committing to the row, which is the point of showing it here.
+    // 1. The row SAYS WHOSE IT IS AND WHAT IT TAKES. A person reads both
+    //    before committing to the row, which is the point of showing them.
+    //    The owner leads because `goto-definition` and `rename` do not carry
+    //    their plugin in their names and the shape is meaningless until you
+    //    know what you are looking at.
     ed.run("pick-commands");
     ed.settle(2);
     const row = pickRow(&ed, "listen") orelse return error.ListenNotListed;
-    try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "<port> <access>"));
+    try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "core · "));
+    try t.expect(std.mem.indexOf(u8, ed.pick.docs.items[row], "<port> <access>") != null);
 
     // Every row still NAMES something runnable. Rendering a row's shape reads
     // the registry three times (name, summary, parameters) and each read lands

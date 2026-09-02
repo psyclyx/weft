@@ -13,11 +13,11 @@ const files_guest = @import("weft_files_adapter");
 var plugin: files_guest.Plugin = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "files", .call = browse },
+    .{ .name = "files", .call = browse, .summary = "browse a directory" },
     .{ .name = "files-show", .call = files_guest.showPending },
-    .{ .name = "files-enter", .call = enterRow, .summary = "Open what the focused listing row names." },
-    .{ .name = "files-up", .call = stepOut, .summary = "Open the directory containing this listing." },
-    .{ .name = "files-apply", .call = applyFocused, .summary = "Apply the renames typed into this listing." },
+    .{ .name = "files-enter", .call = enterRow, .summary = "open what the focused listing row names" },
+    .{ .name = "files-up", .call = stepOut, .summary = "open the directory containing this listing" },
+    .{ .name = "files-apply", .call = applyFocused, .summary = "apply the renames typed into this listing" },
 } ++ actionCommands();
 
 /// One command per standard verb the listing claims, generated from the same

@@ -27,8 +27,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "console-open", .call = open, .summary = "Open a command console of its own." },
-    .{ .name = "console-send", .call = send, .summary = "Run the current line in this console." },
+    .{ .name = "console-open", .call = open, .summary = "open a command console of its own" },
+    .{ .name = "console-send", .call = send, .summary = "run the current line in this console" },
 };
 
 fn describeExtra() void {

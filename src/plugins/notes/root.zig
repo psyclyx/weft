@@ -72,12 +72,12 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "notes-capture", .call = capture, .params = "text [file]", .summary = "Append a line to the notes file." },
-    .{ .name = "notes-open", .call = open, .params = "[file]", .summary = "Open the notes file itself." },
-    .{ .name = "notes-capture-here", .call = captureHere, .params = "[file]", .summary = "Append an embed naming where you are now." },
-    .{ .name = "notes-embeds", .call = embedsRefresh, .summary = "Render this note's embeds live beside their own bytes." },
-    .{ .name = "notes-embeds-off", .call = embedsOff, .summary = "Stop rendering this note's embeds." },
-    .{ .name = "notes-embed-activate", .call = embedActivate, .summary = "Open what the embed on this line designates." },
+    .{ .name = "notes-capture", .call = capture, .params = "text [file]", .summary = "append a line to the notes file" },
+    .{ .name = "notes-open", .call = open, .params = "[file]", .summary = "open the notes file itself" },
+    .{ .name = "notes-capture-here", .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
+    .{ .name = "notes-embeds", .call = embedsRefresh, .summary = "render this note's embeds live beside their own bytes" },
+    .{ .name = "notes-embeds-off", .call = embedsOff, .summary = "stop rendering this note's embeds" },
+    .{ .name = "notes-embed-activate", .call = embedActivate, .summary = "open what the embed on this line designates" },
 };
 
 fn describeExtra() void {

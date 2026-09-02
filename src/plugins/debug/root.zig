@@ -17,9 +17,9 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "debug-toggle-breakpoint", .call = toggle },
-    .{ .name = "debug-clear-breakpoints", .call = clearAll },
-    .{ .name = "debug-list-breakpoints", .call = list },
+    .{ .name = "debug-toggle-breakpoint", .call = toggle, .summary = "set or clear a breakpoint on this line" },
+    .{ .name = "debug-clear-breakpoints", .call = clearAll, .summary = "clear every breakpoint" },
+    .{ .name = "debug-list-breakpoints", .call = list, .summary = "list the breakpoints" },
 };
 
 /// The focused buffer changed: paint ITS breakpoints (the decorations layer is

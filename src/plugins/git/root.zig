@@ -179,6 +179,12 @@ const Cmd = struct {
     do: Do,
     route: Route = .focus,
     scope: Scope = .durable,
+    /// What this verb IS, for someone reading a list of them. Empty means
+    /// "not something you look up by name" — the row motions, the draft
+    /// re-seats, the settles one half of this plugin runs on the other.s
+    /// behalf. The palette lists what is DOCUMENTED, so silence here is a
+    /// decision rather than an omission.
+    summary: []const u8 = "",
 };
 
 /// The `fn () void` for one table entry — the shape's implementation, closed
@@ -210,21 +216,21 @@ fn callFor(comptime i: usize) *const fn () void {
     };
 }
 const base_cmds = [_]Cmd{
-    .{ .name = "git-status", .do = .{ .call = gitStatus }, .route = .repo },
-    .{ .name = "git-init", .do = .{ .run = &.{ "git", "init" } }, .route = .repo },
-    .{ .name = "git-refresh", .do = .{ .call = gitRefresh } },
-    .{ .name = "git-toggle-fold", .do = .{ .call = gitToggleFold } },
+    .{ .name = "git-status", .do = .{ .call = gitStatus }, .route = .repo, .summary = "show the repository's status" },
+    .{ .name = "git-init", .do = .{ .run = &.{ "git", "init" } }, .route = .repo, .summary = "start a repository here" },
+    .{ .name = "git-refresh", .do = .{ .call = gitRefresh }, .summary = "re-read the repository" },
+    .{ .name = "git-toggle-fold", .do = .{ .call = gitToggleFold }, .summary = "fold or unfold the section under the cursor" },
     // Row motion: core's cursor move, then republish — the offers describe
     // the row under point, so moving point is a new eligibility fact.
     .{ .name = "git-next-row", .do = .{ .call = gitNextRow } },
     .{ .name = "git-prev-row", .do = .{ .call = gitPrevRow } },
-    .{ .name = "git-stage", .do = .{ .call = gitStage }, .scope = .snapshot },
-    .{ .name = "git-unstage", .do = .{ .call = gitUnstage }, .scope = .snapshot },
-    .{ .name = "git-stage-all", .do = .{ .run = &.{ "git", "add", "-A" } } },
-    .{ .name = "git-unstage-all", .do = .{ .run = &.{ "git", "reset", "-q", "HEAD" } } },
-    .{ .name = "git-discard", .do = .{ .call = gitDiscard }, .scope = .arm },
-    .{ .name = "git-visit", .do = .{ .call = gitVisit } },
-    .{ .name = "git-commit", .do = .{ .draft = .{ .flags = "" } } },
+    .{ .name = "git-stage", .do = .{ .call = gitStage }, .scope = .snapshot, .summary = "stage what the cursor is on" },
+    .{ .name = "git-unstage", .do = .{ .call = gitUnstage }, .scope = .snapshot, .summary = "unstage what the cursor is on" },
+    .{ .name = "git-stage-all", .do = .{ .run = &.{ "git", "add", "-A" } }, .summary = "stage every change" },
+    .{ .name = "git-unstage-all", .do = .{ .run = &.{ "git", "reset", "-q", "HEAD" } }, .summary = "unstage everything" },
+    .{ .name = "git-discard", .do = .{ .call = gitDiscard }, .scope = .arm, .summary = "discard what the cursor is on" },
+    .{ .name = "git-visit", .do = .{ .call = gitVisit }, .summary = "open the file the cursor is on" },
+    .{ .name = "git-commit", .do = .{ .draft = .{ .flags = "" } }, .summary = "write a commit message" },
     // Saving a draft entry IS its commit; the settle runs on the fill's way
     // back. A draft names its own repository (`currentDraft` routes to it), so
     // both stay `.carried` — never "whatever git buffer was focused".
@@ -232,11 +238,11 @@ const base_cmds = [_]Cmd{
     .{ .name = "git-commit-settle", .do = .{ .call = gitCommitSettle }, .route = .carried },
     // Commit dispatch (the `c` transient): each opens a draft for the commit it
     // means; fixup/squash resolve the commit under point into its message.
-    .{ .name = "git-amend", .do = .{ .draft = .{ .flags = "--amend", .prefill = head_message } } },
-    .{ .name = "git-extend", .do = .{ .run = &.{ "git", "commit", "--amend", "--no-edit" } } },
-    .{ .name = "git-reword", .do = .{ .draft = .{ .flags = "--amend --only", .prefill = head_message } } },
-    .{ .name = "git-fixup", .do = .{ .call = gitFixup } },
-    .{ .name = "git-squash", .do = .{ .call = gitSquash } },
+    .{ .name = "git-amend", .do = .{ .draft = .{ .flags = "--amend", .prefill = head_message } }, .summary = "amend the last commit" },
+    .{ .name = "git-extend", .do = .{ .run = &.{ "git", "commit", "--amend", "--no-edit" } }, .summary = "add the staged changes to the last commit, message unchanged" },
+    .{ .name = "git-reword", .do = .{ .draft = .{ .flags = "--amend --only", .prefill = head_message } }, .summary = "reword the last commit" },
+    .{ .name = "git-fixup", .do = .{ .call = gitFixup }, .summary = "write a fixup for the commit under point" },
+    .{ .name = "git-squash", .do = .{ .call = gitSquash }, .summary = "write a squash for the commit under point" },
     // The draft entry's own offers — they re-seat the draft under point.
     .{ .name = "git-draft-close", .do = .{ .call = gitDraftClose }, .route = .carried },
     .{ .name = "git-draft-amend", .do = .{ .call = gitDraftAmend }, .route = .carried },
@@ -244,42 +250,42 @@ const base_cmds = [_]Cmd{
     .{ .name = "git-draft-fixup", .do = .{ .call = gitDraftFixup }, .route = .carried },
     .{ .name = "git-draft-squash", .do = .{ .call = gitDraftSquash }, .route = .carried },
     // Commit-scoped verbs on a recent-commit node.
-    .{ .name = "git-show", .do = .{ .call = gitShow } },
-    .{ .name = "git-cherry-pick", .do = .{ .call = gitCherryPick } },
-    .{ .name = "git-revert", .do = .{ .call = gitRevert } },
-    .{ .name = "git-reset-soft", .do = .{ .call = gitResetSoft } },
-    .{ .name = "git-reset-mixed", .do = .{ .call = gitResetMixed } },
-    .{ .name = "git-reset-hard", .do = .{ .call = gitResetHard } },
+    .{ .name = "git-show", .do = .{ .call = gitShow }, .summary = "show the commit under point" },
+    .{ .name = "git-cherry-pick", .do = .{ .call = gitCherryPick }, .summary = "cherry-pick the commit under point" },
+    .{ .name = "git-revert", .do = .{ .call = gitRevert }, .summary = "revert the commit under point" },
+    .{ .name = "git-reset-soft", .do = .{ .call = gitResetSoft }, .summary = "reset to the commit under point, keeping the index and tree" },
+    .{ .name = "git-reset-mixed", .do = .{ .call = gitResetMixed }, .summary = "reset to the commit under point, keeping the tree" },
+    .{ .name = "git-reset-hard", .do = .{ .call = gitResetHard }, .summary = "reset to the commit under point, discarding everything" },
     // Branch transient.
-    .{ .name = "git-branch-checkout", .do = .{ .branch = .{ .before = &.{ "git", "checkout" }, .label = "checkout branch: " } } },
-    .{ .name = "git-branch-create", .do = .{ .branch = .{ .before = &.{ "git", "checkout", "-b" }, .label = "create & checkout branch: " } } },
-    .{ .name = "git-branch-new", .do = .{ .branch = .{ .before = &.{ "git", "branch" }, .label = "new branch: " } } },
-    .{ .name = "git-branch-delete", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-d" }, .label = "delete branch: ", .confirm = true } } },
-    .{ .name = "git-branch-rename", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-m" }, .label = "rename current branch to: " } } },
+    .{ .name = "git-branch-checkout", .do = .{ .branch = .{ .before = &.{ "git", "checkout" }, .label = "checkout branch: " } }, .summary = "check out a branch" },
+    .{ .name = "git-branch-create", .do = .{ .branch = .{ .before = &.{ "git", "checkout", "-b" }, .label = "create & checkout branch: " } }, .summary = "create a branch and switch to it" },
+    .{ .name = "git-branch-new", .do = .{ .branch = .{ .before = &.{ "git", "branch" }, .label = "new branch: " } }, .summary = "create a branch here without switching" },
+    .{ .name = "git-branch-delete", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-d" }, .label = "delete branch: ", .confirm = true } }, .summary = "delete a branch" },
+    .{ .name = "git-branch-rename", .do = .{ .branch = .{ .before = &.{ "git", "branch", "-m" }, .label = "rename current branch to: " } }, .summary = "rename a branch" },
     // Stash transient.
-    .{ .name = "git-stash-save", .do = .{ .run = &.{ "git", "stash", "push" } } },
-    .{ .name = "git-stash-pop", .do = .{ .run = &.{ "git", "stash", "pop" } } },
-    .{ .name = "git-stash-apply", .do = .{ .run = &.{ "git", "stash", "apply" } } },
-    .{ .name = "git-stash-list", .do = .{ .view = .{ .argv = &.{ "git", "stash", "list" }, .name = "*git-stash*", .style = .none } } },
-    .{ .name = "git-stash-drop", .do = .{ .call = gitStashDrop } },
+    .{ .name = "git-stash-save", .do = .{ .run = &.{ "git", "stash", "push" } }, .summary = "stash the working tree" },
+    .{ .name = "git-stash-pop", .do = .{ .run = &.{ "git", "stash", "pop" } }, .summary = "re-apply the newest stash and drop it" },
+    .{ .name = "git-stash-apply", .do = .{ .run = &.{ "git", "stash", "apply" } }, .summary = "re-apply a stash, keeping it" },
+    .{ .name = "git-stash-list", .do = .{ .view = .{ .argv = &.{ "git", "stash", "list" }, .name = "*git-stash*", .style = .none } }, .summary = "list the stashes" },
+    .{ .name = "git-stash-drop", .do = .{ .call = gitStashDrop }, .summary = "drop a stash" },
     // Log transient.
-    .{ .name = "git-log-all", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, .name = "*git-log*", .style = .log } } },
+    .{ .name = "git-log-all", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, .name = "*git-log*", .style = .log } }, .summary = "show the log of every branch" },
     // Push/pull/fetch are TRANSIENTS: their open/toggle/run/cancel commands are
     // generated from the declarations in `transient.zig` and spliced in below
     // (`transient_cmds`), so there is nothing to list here.
     // Interactive rebase: the plan is an entry; saving it runs the rebase.
-    .{ .name = "git-rebase-interactive", .do = .{ .call = gitRebaseInteractive } },
-    .{ .name = "git-rebase-continue", .do = .{ .run = &.{ "git", "-c", "core.editor=true", "rebase", "--continue" } } },
-    .{ .name = "git-rebase-abort", .do = .{ .run = &.{ "git", "rebase", "--abort" } } },
-    .{ .name = "git-rebase-skip", .do = .{ .run = &.{ "git", "rebase", "--skip" } } },
+    .{ .name = "git-rebase-interactive", .do = .{ .call = gitRebaseInteractive }, .summary = "edit a rebase plan" },
+    .{ .name = "git-rebase-continue", .do = .{ .run = &.{ "git", "-c", "core.editor=true", "rebase", "--continue" } }, .summary = "carry on with the rebase" },
+    .{ .name = "git-rebase-abort", .do = .{ .run = &.{ "git", "rebase", "--abort" } }, .summary = "abandon the rebase" },
+    .{ .name = "git-rebase-skip", .do = .{ .run = &.{ "git", "rebase", "--skip" } }, .summary = "skip this commit and carry on" },
     .{ .name = "git-rebase-save", .do = .{ .call = gitRebaseSave }, .route = .carried },
     .{ .name = "git-rebase-settle", .do = .{ .call = gitRebaseSettle }, .route = .carried },
     .{ .name = "git-menu-cancel", .do = .{ .call = transient.gitMenuCancel } },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
-    .{ .name = "git-log", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "-30" }, .name = "*git-log*", .style = .log } } },
-    .{ .name = "git-diff", .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } } },
-    .{ .name = "git-diff-staged", .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } } },
-    .{ .name = "git-blame", .do = .{ .call = gitBlame } },
+    .{ .name = "git-log", .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "-30" }, .name = "*git-log*", .style = .log } }, .summary = "show the commit log" },
+    .{ .name = "git-diff", .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } }, .summary = "show the unstaged diff" },
+    .{ .name = "git-diff-staged", .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } }, .summary = "show the staged diff" },
+    .{ .name = "git-blame", .do = .{ .call = gitBlame }, .summary = "blame the file under point" },
 };
 
 /// The shared prompt's five editing commands (`input`, below), mapped into
@@ -310,7 +316,7 @@ const cmds = base_cmds ++ input_cmds ++ transient_cmds;
 /// index reaches the same entry's route and scope.
 const entries: [cmds.len]weft.CommandEntry = blk: {
     var arr: [cmds.len]weft.CommandEntry = undefined;
-    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = callFor(i) };
+    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = callFor(i), .summary = c.summary };
     break :blk arr;
 };
 

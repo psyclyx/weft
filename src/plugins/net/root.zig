@@ -31,10 +31,10 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "net-open", .call = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer." },
-    .{ .name = "net-open-tls", .call = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name." },
-    .{ .name = "net-send", .call = send, .params = "bytes", .summary = "Write bytes to this buffer's connection." },
-    .{ .name = "net-close", .call = close, .summary = "Hang up this buffer's connection; others stay live." },
+    .{ .name = "net-open", .call = open, .params = "host:port", .summary = "dial a host, streaming the socket into its own buffer" },
+    .{ .name = "net-open-tls", .call = openTls, .params = "host:port sni", .summary = "dial a host over TLS, verifying the given SNI name" },
+    .{ .name = "net-send", .call = send, .params = "bytes", .summary = "write bytes to this buffer's connection" },
+    .{ .name = "net-close", .call = close, .summary = "hang up this buffer's connection; others stay live" },
 };
 
 fn describeExtra() void {

@@ -693,6 +693,22 @@ pub const Command = struct {
     name: []const u8,
     summary: []const u8,
     args: []const ArgSpec,
+    /// WHO BOUND IT. Borrowed, and outlives the binding for the same reason
+    /// `name` does — a guest's is its plugin name, which the host holds for
+    /// the plugin's whole life.
+    ///
+    /// A fact core already had and threw away. It binds every guest command on
+    /// some plugin's behalf, and the same discipline is already written down
+    /// twice next door: `container.Binding.owner` and `catalog.Offer
+    /// .attribution` exist so a resolver can say whose answer won. A command
+    /// had no such field, so anything wanting to GROUP commands had to parse
+    /// their names — and a name is a convention nobody enforces, which lies
+    /// about exactly the cases that matter (`motion.line-start` is vim's,
+    /// `zig` is `modes`'). This is that fact, recorded.
+    ///
+    /// Mechanism, not policy: what a namespace is FOR — grouping a palette,
+    /// filtering one, attributing a refusal — is the asker's business.
+    owner: []const u8 = "core",
     /// `data` is the command's closure payload (null for comptime-typed
     /// commands; a VM trampoline for scripted ones).
     handler: *const fn (ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value,

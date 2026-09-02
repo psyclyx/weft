@@ -112,6 +112,7 @@ pub extern "weft" fn wl_run_argv(ptr: u32, len: u32, vec: u32, argc: u32) void;
 pub extern "weft" fn wl_command_count() u32;
 pub extern "weft" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft" fn wl_command_owner(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft" fn wl_command_arity(i: u32) i32;
 pub extern "weft" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;

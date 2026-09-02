@@ -99,6 +99,9 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .name = wc.name,
         .summary = decl.summary,
         .args = decl.args,
+        // Whose command this is. Borrowed from the plugin, which outlives
+        // every command it registers.
+        .owner = p.name,
         .handler = wpCmdTrampoline,
         .data = wc,
     }) catch {
@@ -241,6 +244,25 @@ pub fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.summary) catch 0);
+}
+
+/// `wl_command_owner(i, out, cap) -> i32`: WHO the `i`-th command belongs to.
+///
+/// A palette that wants to group by producer had exactly one way to guess
+/// before this: parse the name. That is a convention nobody enforces, and it
+/// is wrong for the cases grouping exists to fix — `motion.line-start` is
+/// vim's, `zig` is `modes`', `pair-paren` is `autopair`'s, and none of them
+/// say so. The registry knew all three at bind time.
+///
+/// A fact, not a policy: what to DO with a namespace is the asker's.
+pub fn hCommandOwner(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.activeCtx().commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.owner) catch 0);
 }
 
 // ── A command's SHAPE, read back (the signature-help half) ───────────────

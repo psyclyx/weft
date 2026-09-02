@@ -73,17 +73,17 @@ const posRequest = request.posRequest;
 
 // ── Plugin surface ───────────────────────────────────────────────────
 const base_cmds = [_]weft.CommandEntry{
-    .{ .name = "hover", .call = cmdHover },
-    .{ .name = "goto-definition", .call = cmdDefinition },
-    .{ .name = "references", .call = cmdReferences },
-    .{ .name = "symbols", .call = cmdSymbols },
-    .{ .name = "next-diagnostic", .call = cmdNextDiag },
-    .{ .name = "prev-diagnostic", .call = cmdPrevDiag },
-    .{ .name = "lsp-format", .call = cmdFormat },
-    .{ .name = "rename", .call = cmdRename },
-    .{ .name = "signature-help", .call = cmdSignature },
-    .{ .name = "inlay-hints", .call = cmdInlay },
-    .{ .name = "code-actions", .call = cmdCodeActions },
+    .{ .name = "hover", .call = cmdHover, .summary = "describe the symbol under the cursor" },
+    .{ .name = "goto-definition", .call = cmdDefinition, .summary = "jump to the definition" },
+    .{ .name = "references", .call = cmdReferences, .summary = "list references to the symbol" },
+    .{ .name = "symbols", .call = cmdSymbols, .summary = "pick a symbol in this file" },
+    .{ .name = "next-diagnostic", .call = cmdNextDiag, .summary = "go to the next diagnostic" },
+    .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .summary = "go to the previous diagnostic" },
+    .{ .name = "lsp-format", .call = cmdFormat, .summary = "format the buffer through the language server" },
+    .{ .name = "rename", .call = cmdRename, .summary = "rename the symbol everywhere" },
+    .{ .name = "signature-help", .call = cmdSignature, .summary = "show the call signature here" },
+    .{ .name = "inlay-hints", .call = cmdInlay, .summary = "toggle inlay hints" },
+    .{ .name = "code-actions", .call = cmdCodeActions, .summary = "offer the code actions available here" },
     // Internal: the deferred half of `on_poll`'s message dispatch (task #19
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.

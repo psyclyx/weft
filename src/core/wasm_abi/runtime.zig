@@ -166,10 +166,17 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     // where `p` survives to be returned.
     p.loading = true;
     p.phase = .describing;
+    // The wasm plane's own rule: a command must be DECLARED in `describe()`,
+    // so registering an undeclared one fails the load. The shared declare body
+    // reads this flag rather than `phase`, because the JS plane has no
+    // describe handshake and enforces a different rule over the same store —
+    // which is the point: the RULE is per-plane, what a declaration IS is not.
+    p.resources.accepting_declarations = true;
     contract.callOptionalExport("describe", &p.instance, .{}) catch |e| {
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
+    p.resources.accepting_declarations = false;
     // doc/contextual-workspace-architecture.md §13.5: `perms` is final now (describe() has
     // run) — if a grant table is wired, mint this plugin's POSSESSED
     // handles from it before `init()` runs, so even init-time fs/proc/etc
