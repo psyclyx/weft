@@ -902,7 +902,19 @@ pub fn build(b: *std.Build) void {
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");
     contract_step.dependOn(&run_lifecycle_tests.step);
-    inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_codec, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
+    inline for (.{
+        architecture.wire,
+        architecture.schema,
+        architecture.membrane,
+        architecture.semantic,
+        architecture.scene_codec,
+        architecture.fs,
+        architecture.fs_codec,
+        architecture.fs_runtime,
+        architecture.view_runtime,
+        architecture.target_runtime,
+        architecture.plugin_semantic,
+    }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);

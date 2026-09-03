@@ -4,7 +4,7 @@
 //! host→guest EXPORT entrypoints (describe/init/run/on_command/…). No
 //! wasmtime, no handler function pointers — this file has zero host-only
 //! dependencies, so it compiles under `wasm32-freestanding` and is imported
-//! directly by src/plugin_sdk/root.zig (the guest-side comptime tripwire) as well
+//! directly by src/plugin_sdk/externs.zig (the guest-side comptime tripwire) as well
 //! as by core/membrane/contract.zig (the host-side handler binding).
 //!
 //! Split from contract.zig (doc/extensibility-native-surface.md, task W0a-D): the
@@ -14,14 +14,14 @@
 //! table's data against a host-only `handlers` list by NAME (not position),
 //! comptime-checked both ways: every data entry must have a bound handler,
 //! and every handler must name a real data entry. See that file for the
-//! zip; see src/plugin_sdk/root.zig for the guest-side verification this data
+//! zip; see src/plugin_sdk/externs.zig for the guest-side verification this data
 //! enables.
 //!
 //! Zig 0.16 cannot reify a `extern fn` declaration OR a struct-of-decls from
 //! a runtime-driven comptime loop (no `@Type` builtin, no `usingnamespace`
 //! decl-merging) — so this table does not literally GENERATE the guest
-//! externs in src/plugin_sdk/root.zig; those stay hand-written. What it generates
-//! instead is a comptime VERIFICATION: weft.zig walks `imports` and, for
+//! externs in src/plugin_sdk/externs.zig; those stay hand-written. What it generates
+//! instead is a comptime VERIFICATION: externs.zig walks `imports` and, for
 //! each entry, uses `@field(@This(), entry.name)` + `@typeInfo` to confirm
 //! the hand-written extern's arity AND per-param/result signedness match
 //! this table exactly — a drift (wrong type, wrong count, or a missing
@@ -31,16 +31,17 @@
 //! forgetting or misspelling it no longer compiles.
 
 const std = @import("std");
+const census_mod = @import("census.zig");
 
 /// The wasm-level value crossing the membrane, carrying GUEST-SOURCE
 /// signedness. Every `wl_*` import is a scalar i32/u32 (or a `(ptr,len)`
 /// pair of them for bulk data) at the wasm level — both `i32` and `u32`
 /// lower to the same wasm valtype `i32`; wasmtime's `Linker`/`Caller` only
 /// ever see word count, never sign. This enum exists for the GUEST side:
-/// src/plugin_sdk/root.zig's hand-written externs mix `u32` (the common case)
+/// src/plugin_sdk/externs.zig's hand-written externs mix `u32` (the common case)
 /// and `i32` (sentinel -1 results, a handful of signed args) — this table
 /// records exactly which, transcribed from those externs, so the
-/// verification block in weft.zig can catch a signedness slip too, not
+/// verification block in externs.zig can catch a signedness slip too, not
 /// just an arity slip.
 pub const ValType = enum { i32, u32 };
 
@@ -104,8 +105,9 @@ pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
-    /// <name>(..)` in src/plugin_sdk/root.zig exactly.
+    /// <name>(..)` in src/plugin_sdk/externs.zig exactly.
     name: []const u8,
+    operation: census_mod.Operation = .{},
     params: []const ValType,
     results: []const ValType,
     group: Group,
@@ -154,7 +156,7 @@ pub const Entry = struct {
 /// zips this against `handlers` by name). Add or change an import here
 /// (params/results/group/perm/doc), bind its handler in contract.zig's
 /// `handlers` list, and mirror the extern's arity+signedness by hand in
-/// src/plugin_sdk/root.zig — forgetting any of the three now fails a build, not
+/// src/plugin_sdk/externs.zig — forgetting any of the three now fails a build, not
 /// a runtime.
 pub const imports = [_]Entry{
     // ── declare.zig — describe-phase declarations ──────────────────────
@@ -458,16 +460,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_slot_finish", .params = &.{.i32}, .results = &.{}, .group = .slot, .doc = "release a fired session and its results" },
 };
 
-/// The imports table's size, alongside `imports.len`, as a deliberate
-/// tripwire: bump this BY HAND alongside adding or removing a contract entry
-/// (and its guest extern in src/plugin_sdk/root.zig — see the comptime
-/// verification block in that file for what happens if you forget), so an
-/// accidental add/remove — a merge conflict, a copy-paste slip, a
-/// half-finished edit — fails the build with a pointed message instead of
-/// silently drifting the two ~124-entry tables apart again (the exact class
-/// this table exists to kill).
-const expected_import_count = 231;
-
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
 /// tree fires INTO a loaded guest, named once here instead of as a bare
@@ -491,6 +483,7 @@ const expected_import_count = 231;
 /// boundary is a REAL limit stated up front, not fudged.
 pub const Export = struct {
     name: []const u8,
+    operation: census_mod.Operation = .{},
     params: []const ValType,
     results: []const ValType,
     required: bool,
@@ -532,18 +525,42 @@ pub const exports = [_]Export{
     .{ .name = "on_semantic_relation_query", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized named-relation query synchronously" },
 };
 
-const expected_export_count = 18;
+const max_import_count: usize = 231;
+const max_export_count: usize = 18;
+const max_semantic_operation_count: usize = 249;
+
+fn censusDoors() [imports.len + exports.len]census_mod.Door {
+    var doors: [imports.len + exports.len]census_mod.Door = undefined;
+    for (imports, 0..) |entry, i| {
+        doors[i] = .{
+            .symbol = entry.name,
+            .direction = .guest_import,
+            .operation = entry.operation,
+        };
+    }
+    for (exports, 0..) |entry, i| {
+        doors[imports.len + i] = .{
+            .symbol = entry.name,
+            .direction = .host_export,
+            .operation = entry.operation,
+        };
+    }
+    return doors;
+}
+
+const census_doors = censusDoors();
+pub const census = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk census_mod.count(&census_doors);
+};
 
 comptime {
-    @setEvalBranchQuota(120_000); // the O(n²) duplicate-name scans below, n≈215
-    if (imports.len != expected_import_count) @compileError(std.fmt.comptimePrint(
-        "membrane/root.zig: imports table has {d} entries, expected {d}. " ++
-            "If you added or removed a wl_* host import, update `expected_import_count` here. " ++
-            "The guest extern in src/plugin_sdk/root.zig still needs adding/removing by hand (Zig " ++
-            "can't synthesize a top-level decl from this table) — but forgetting it now fails " ++
-            "the BUILD (weft.zig's comptime verification block), not silently.",
-        .{ imports.len, expected_import_count },
-    ));
+    @setEvalBranchQuota(1_000_000); // census and the O(n²) duplicate-name scans below, n=249
+    _ = census_mod.validate(&census_doors, .{
+        .imports = max_import_count,
+        .exports = max_export_count,
+        .semantic_operations = max_semantic_operation_count,
+    }) catch |err| @compileError("plugin membrane census exceeds its ratchet: " ++ @errorName(err));
     for (imports, 0..) |a, i| {
         if (!std.mem.startsWith(u8, a.name, "wl_"))
             @compileError("membrane/root.zig: '" ++ a.name ++ "' doesn't look like a wl_* import");
@@ -556,14 +573,6 @@ comptime {
                 @compileError("membrane/root.zig: duplicate wl_* import name '" ++ a.name ++ "'");
         }
     }
-    if (exports.len != expected_export_count) @compileError(std.fmt.comptimePrint(
-        "membrane/root.zig: exports table has {d} entries, expected {d}. " ++
-            "If you added a new host->guest call site (instance.callVoid/callI32 into a " ++
-            "loaded guest), add its (name, params, required) here and update " ++
-            "`expected_export_count` — the call site itself now only compiles through " ++
-            "contract.zig's typed helpers, which require a matching entry.",
-        .{ exports.len, expected_export_count },
-    ));
     for (exports, 0..) |a, i| {
         if (a.params.len > 16)
             @compileError("membrane/root.zig: export '" ++ a.name ++ "' has more params than the trampoline can carry (16)");
@@ -587,7 +596,8 @@ test "membrane contract data: every import entry is well-formed, documented, and
         const gop = try seen.getOrPut(t.allocator, entry.name);
         try t.expect(!gop.found_existing);
     }
-    try t.expectEqual(@as(usize, expected_import_count), imports.len);
+    try t.expectEqual(@as(usize, max_import_count), census.imports);
+    try t.expectEqual(@as(usize, max_semantic_operation_count), census.semantic_operations);
 }
 
 test "membrane contract data: exactly one door answers WHERE, and it is place-shaped" {
@@ -642,5 +652,5 @@ test "membrane contract data: every export entry is well-formed, documented, and
         const gop = try seen.getOrPut(t.allocator, entry.name);
         try t.expect(!gop.found_existing);
     }
-    try t.expectEqual(@as(usize, expected_export_count), exports.len);
+    try t.expectEqual(@as(usize, max_export_count), census.exports);
 }
