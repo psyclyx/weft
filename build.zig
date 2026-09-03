@@ -844,6 +844,37 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
     test_step.dependOn(&b.addRunArtifact(gfx_tests).step);
+
+    // The raster timing instrument. `latency_test.zig` measures dispatch and
+    // excludes rasterization by design; `popup_layout_test.zig` asserts
+    // geometry and refuses pixels. Nothing else times the frame, so a
+    // rasterizer regression was previously invisible to the whole suite.
+    // Running it is opt-in (it is a measurement, not an assertion), but
+    // COMPILING it is in the gate so it cannot rot the way `e2e-trap-kinds`
+    // did before it was wired in below.
+    const bench_raster_mod = b.createModule(.{
+        .root_source_file = b.path("src/gfx/bench_raster.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    // Same import set as `gfx_mod`: the bench's root sits in `src/gfx/`, so its
+    // relative `view.zig`/`region.zig` imports pull in that subtree and need
+    // the subtree's own dependencies resolvable here.
+    bench_raster_mod.addImport("weft_core", core_mod);
+    bench_raster_mod.addImport("weft_vk", vk_mod);
+    bench_raster_mod.addImport("weft_scene", scene_mod);
+    bench_raster_mod.addImport("weft_skia", skia_mod);
+    bench_raster_mod.addImport("weft_text", text_mod);
+    bench_raster_mod.addImport("weft_font_provider", font_provider_mod);
+    bench_raster_mod.addImport("weft_semantic", architecture.semantic);
+    bench_raster_mod.addImport("weft_view_runtime", architecture.view_runtime);
+    bench_raster_mod.addImport("stemma", stemma_dep.module("stemma"));
+    bench_raster_mod.linkSystemLibrary("vulkan", .{});
+    const bench_raster_exe = b.addExecutable(.{ .name = "weft-bench-raster", .root_module = bench_raster_mod });
+    const bench_raster_step = b.step("bench-raster", "Time the frame raster path against a real source file");
+    bench_raster_step.dependOn(&b.addRunArtifact(bench_raster_exe).step);
+    test_step.dependOn(&bench_raster_exe.step);
     // app/config_load.zig's tests @embedFile the guests, as core's do.
     embedGuests(b, app_mod);
     const app_tests = b.addTest(.{ .root_module = app_mod });

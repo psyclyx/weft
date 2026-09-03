@@ -45,7 +45,45 @@ struct WeftSkia {
     std::vector<uint8_t> pixels;        // width*height*4, the readback buffer
     sk_sp<SkSurface> surface;
     SkCanvas* canvas = nullptr;
+
+    // Glyph run accumulator. The view emits glyphs in reading order, so a text
+    // row is a long stretch sharing one (face, size, color) — drawing them one
+    // at a time rebuilt an SkFont and SkPaint per glyph and gave Skia no run to
+    // batch. We coalesce the stretch and flush it when any of those three
+    // change, or when a rect/clear/end has to observe the accumulated output.
+    // Flushing on rect is what preserves z-order: the view's item sequence is
+    // the paint order, so a pending run must land before a rect drawn after it.
+    std::vector<SkGlyphID> run_gids;
+    std::vector<SkPoint> run_pos;
+    uint32_t run_font_id = 0;
+    float run_size = 0;
+    SkColor4f run_color{0, 0, 0, 0};
 };
+
+static void weftFlushGlyphs(WeftSkia* s) {
+    if (!s || !s->canvas || s->run_gids.empty()) return;
+
+    auto it = s->faces.find(s->run_font_id);
+    if (it != s->faces.end()) {
+        SkFont font(it->second, s->run_size);
+        font.setEdging(SkFont::Edging::kAntiAlias);
+        font.setSubpixel(true);
+        font.setHinting(SkFontHinting::kNone);  // positions come from HarfBuzz
+
+        SkPaint paint;
+        paint.setColor4f(s->run_color, nullptr);
+        paint.setAntiAlias(true);
+
+        // Positions are absolute, so the origin stays at zero — identical
+        // geometry to the per-glyph path, which passed the position as the
+        // origin and the point as (0,0).
+        s->canvas->drawGlyphs(SkSpan<const SkGlyphID>(s->run_gids.data(), s->run_gids.size()),
+                              SkSpan<const SkPoint>(s->run_pos.data(), s->run_pos.size()),
+                              SkPoint::Make(0, 0), font, paint);
+    }
+    s->run_gids.clear();
+    s->run_pos.clear();
+}
 
 static SkImageInfo frameInfo(const WeftSkia* s) {
     // Legacy (null) color space: the Zig side hands us straight sRGB colors, so
@@ -134,16 +172,23 @@ extern "C" int weft_skia_begin(WeftSkia* s, uint32_t width, uint32_t height) {
         if (!s->surface) return 1;
     }
     s->canvas = s->surface->getCanvas();
+    // A frame always ends with a flush, so this is belt-and-braces: never carry
+    // a partial run across a frame boundary or a surface recreation.
+    s->run_gids.clear();
+    s->run_pos.clear();
     return s->canvas ? 0 : 1;
 }
 
 extern "C" void weft_skia_clear(WeftSkia* s, float r, float g, float b, float a) {
-    if (s && s->canvas) s->canvas->clear(SkColor4f{r, g, b, a}.toSkColor());
+    if (!s || !s->canvas) return;
+    weftFlushGlyphs(s);
+    s->canvas->clear(SkColor4f{r, g, b, a}.toSkColor());
 }
 
 extern "C" void weft_skia_draw_rect(WeftSkia* s, float x, float y, float w, float h,
                                     float r, float g, float b, float a) {
     if (!s || !s->canvas) return;
+    weftFlushGlyphs(s);  // z-order: a pending run was emitted before this rect
     SkPaint paint;
     paint.setColor4f(SkColor4f{r, g, b, a}, nullptr);
     paint.setAntiAlias(false);  // crisp cell-aligned selection/caret rects
@@ -154,26 +199,23 @@ extern "C" void weft_skia_draw_glyph(WeftSkia* s, uint32_t font_id, uint32_t gly
                                      float x, float y, float size,
                                      float r, float g, float b, float a) {
     if (!s || !s->canvas) return;
-    auto it = s->faces.find(font_id);
-    if (it == s->faces.end()) return;
 
-    SkFont font(it->second, size);
-    font.setEdging(SkFont::Edging::kAntiAlias);
-    font.setSubpixel(true);
-    font.setHinting(SkFontHinting::kNone);  // positions come from HarfBuzz
-
-    SkPaint paint;
-    paint.setColor4f(SkColor4f{r, g, b, a}, nullptr);
-    paint.setAntiAlias(true);
-
-    const SkGlyphID gid = static_cast<SkGlyphID>(glyph_id);
-    const SkPoint pos = SkPoint::Make(0, 0);
-    s->canvas->drawGlyphs(SkSpan<const SkGlyphID>(&gid, 1), SkSpan<const SkPoint>(&pos, 1),
-                          SkPoint::Make(x, y), font, paint);
+    const SkColor4f color{r, g, b, a};
+    const bool same_run = !s->run_gids.empty() && s->run_font_id == font_id &&
+                          s->run_size == size && s->run_color == color;
+    if (!same_run) {
+        weftFlushGlyphs(s);
+        s->run_font_id = font_id;
+        s->run_size = size;
+        s->run_color = color;
+    }
+    s->run_gids.push_back(static_cast<SkGlyphID>(glyph_id));
+    s->run_pos.push_back(SkPoint::Make(x, y));
 }
 
 extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
     if (!s || !s->surface) return nullptr;
+    weftFlushGlyphs(s);
     const size_t rb = static_cast<size_t>(s->width) * 4;
     if (row_bytes) *row_bytes = rb;
 

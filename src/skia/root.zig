@@ -2,6 +2,7 @@
 //! The view emits only explicit rectangles and positioned glyphs; this module
 //! translates them to SkCanvas calls and owns no editor or platform policy.
 
+const std = @import("std");
 const scene = @import("weft_scene");
 
 pub const VulkanInfo = extern struct {
@@ -69,17 +70,31 @@ pub const Skia = struct {
     }
 
     /// Draw one pane's explicit scene in view order.
+    ///
+    /// `linearToSrgbColor` is three `pow` calls, and a frame's items run to
+    /// thousands while using on the order of twenty distinct colors — a syntax
+    /// palette, reused down every row. Consecutive items almost always share
+    /// one, so a single-entry memo removes nearly all of the conversion work
+    /// without a hash or an allocation. It is a pure function, so the memo can
+    /// only ever return what a recomputation would.
     pub fn drawItems(self: *Skia, items: []const scene.DrawItem) void {
-        for (items) |item| switch (item) {
-            .rect => |rect| {
-                const c = scene.linearToSrgbColor(rect.color);
-                weft_skia_draw_rect(self.shim, rect.x, rect.y, rect.w, rect.h, c[0], c[1], c[2], c[3]);
-            },
-            .glyph => |glyph| {
-                const c = scene.linearToSrgbColor(glyph.color);
-                weft_skia_draw_glyph(self.shim, glyph.font_id, glyph.glyph_id, glyph.x, glyph.y, glyph.size, c[0], c[1], c[2], c[3]);
-            },
-        };
+        var last_in: scene.Color = .{ -1, -1, -1, -1 }; // outside the domain
+        var last_out: scene.Color = .{ 0, 0, 0, 0 };
+        for (items) |item| {
+            const in = switch (item) {
+                .rect => |rect| rect.color,
+                .glyph => |glyph| glyph.color,
+            };
+            if (!std.mem.eql(f32, &in, &last_in)) {
+                last_in = in;
+                last_out = scene.linearToSrgbColor(in);
+            }
+            const c = last_out;
+            switch (item) {
+                .rect => |rect| weft_skia_draw_rect(self.shim, rect.x, rect.y, rect.w, rect.h, c[0], c[1], c[2], c[3]),
+                .glyph => |glyph| weft_skia_draw_glyph(self.shim, glyph.font_id, glyph.glyph_id, glyph.x, glyph.y, glyph.size, c[0], c[1], c[2], c[3]),
+            }
+        }
     }
 
     /// Flush + read back. The returned pixels live until the next `begin`.
