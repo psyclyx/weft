@@ -71,10 +71,11 @@ across every run). 1920×1080, 56 rows, 10,837 draw items from the real
 | `end()` (`flushAndSubmit(kYes)` + `readPixels`) | **3.85 ms** | 1.30–1.58 ms |
 | **total raster + readback** | **11.1 ms** | **2.0–2.3 ms** |
 
-**That workload was wrong, and the user said so before the numbers did.** 10,837
-glyphs is a *completely full* 1080p screen of solid text. Real code is short
-lines and whitespace. Re-measured by `bench-raster` against an actual 863-line
-source file — 2,156 glyphs at 1600×1000, 2,437 at 1080p:
+**Those numbers are real `ReleaseFast` numbers — the build mode was not the
+problem. The WORKLOAD was.** 10,837 glyphs is a *completely full* 1080p screen
+of solid text; real code is short lines and whitespace. Re-measured by
+`bench-raster` against an actual 863-line source file — 2,156 glyphs at
+1600×1000, 2,437 at 1080p:
 
 | phase | before | after (landed) |
 |---|---|---|
@@ -85,10 +86,9 @@ source file — 2,156 glyphs at 1600×1000, 2,437 at 1080p:
 
 Framebuffer hash `0xb75df71b7a8a7a5b` on both sides. The real saving is
 ~1.6 ms/rebuilt frame, not 9 — a **5× on the raster path**, from a synthetic
-worst case that overstated it by roughly 5×. Two lessons, both worth keeping:
-a benchmark's workload is part of its claim, and the person who has been
-looking at the actual editor is a better estimator than a fresh measurement of
-the wrong thing.
+worst case that overstated the glyph count by roughly 5×. The lesson worth
+keeping: a benchmark's workload is part of its claim, and stating the build
+mode is not enough to make a number honest.
 
 Caveat on the instrument: it runs Skia's CPU path, so `end` there is deferred
 draw work, not the GPU readback. Timing the readback needs a Vulkan device.

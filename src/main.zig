@@ -402,7 +402,7 @@ pub fn main(init: std.process.Init) !void {
     // "share-presence", "off")`, and the `share-presence` command each opt out.
     const share_presence = collab.presenceDefault(args.share_presence, blk: {
         const raw = session.system.config_kv.get("collab", "share-presence") orelse break :blk null;
-        break :blk config_load.firstConfigRecord(raw);
+        break :blk core.framed.first(raw);
     });
     var collab_state: collab.Collab = undefined;
     collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, share_presence, args.listen, args.access);
@@ -483,11 +483,7 @@ pub fn main(init: std.process.Init) !void {
         .handler = cursor_config.setColorHandler,
         .data = view,
     });
-    inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
-        if (session.system.config_kv.get("theme", f.name)) |blob| {
-            if (config_load.firstConfigRecord(blob)) |hex| _ = view.theme.setColor(f.name, hex);
-        }
-    }
+    view.theme.applyOverrides(&session.system.config_kv);
 
     // Liveness, the last-announced host fingerprint, the self-reconnect handle,
     // and the interactive-connect handle/hostport all live on `collab_state` now
@@ -506,7 +502,7 @@ pub fn main(init: std.process.Init) !void {
     // forcing-function finding: every config value needs an owner).
     const which_key_delay_ns: u64 = blk: {
         if (session.system.config_kv.get("which_key", "delay-ms")) |raw| {
-            if (config_load.firstConfigRecord(raw)) |s| {
+            if (core.framed.first(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
         }
@@ -516,7 +512,7 @@ pub fn main(init: std.process.Init) !void {
     // for `flash-ms` then clear it. Duration is config (default 150ms).
     const flash_duration_ns: u64 = blk: {
         if (session.system.config_kv.get("editor", "flash-ms")) |raw| {
-            if (config_load.firstConfigRecord(raw)) |s| {
+            if (core.framed.first(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
         }

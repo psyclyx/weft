@@ -64,6 +64,29 @@ pub fn setColor(self: *Theme, name: []const u8, hex: []const u8) bool {
     return false;
 }
 
+/// Apply every configured palette override — `weft.set("theme", "<field>",
+/// "#rrggbb")` — over the shipped defaults.
+///
+/// The walk lives HERE, next to the fields it walks, rather than in `main.zig`
+/// where it used to sit: a comptime `inline for` over `Theme`'s own struct
+/// fields is the palette's business, and `main` had no reason to know the
+/// palette's shape in order to start an editor.
+///
+/// Why it reads the kv store rather than binding `palette/<name>` into the
+/// container the way `theme/<leaf>` binds a row role: `Container.bind` BORROWS
+/// a provider's payload (only slot names are duped), and a config-supplied hex
+/// string dies with the manifest that carried it. `theme/<leaf>` dodges this by
+/// binding `@tagName` of a closed enum — a static spelling that a colour has no
+/// equivalent of. The kv store owns its bytes for the process's life, so it is
+/// the honest owner until the palette gets one of its own.
+pub fn applyOverrides(self: *Theme, kv: *const core.kv.Store) void {
+    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+        if (kv.get("theme", f.name)) |blob| {
+            if (core.framed.first(blob)) |hex| _ = self.setColor(f.name, hex);
+        }
+    }
+}
+
 fn parseHexColor(hex: []const u8) ?[4]f32 {
     const h = if (hex.len > 0 and hex[0] == '#') hex[1..] else hex;
     if (h.len != 6) return null;

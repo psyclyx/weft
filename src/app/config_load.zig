@@ -87,30 +87,6 @@ pub fn configReloadHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
     return .nil;
 }
 
-/// Decode the first record of a framed config blob (uvarint count, then per
-/// record uvarint(len)++bytes — the encoding the config shim produces). Used to
-/// read a single-value `weft.set` (e.g. a theme color) host-side.
-pub fn firstConfigRecord(blob: []const u8) ?[]const u8 {
-    var cur = blob;
-    _ = getConfigUvarint(&cur) orelse return null; // record count
-    const n = getConfigUvarint(&cur) orelse return null;
-    if (n > cur.len) return null;
-    return cur[0..@intCast(n)];
-}
-fn getConfigUvarint(cur: *[]const u8) ?u64 {
-    var shift: u6 = 0;
-    var v: u64 = 0;
-    while (cur.len > 0) {
-        const b = cur.*[0];
-        cur.* = cur.*[1..];
-        v |= @as(u64, b & 0x7f) << shift;
-        if (b & 0x80 == 0) return v;
-        if (shift >= 57) return null;
-        shift += 7;
-    }
-    return null;
-}
-
 /// Resolve the reference-plugin directory: `$WEFT_PLUGIN_DIR` if set, else
 /// `<exe>/../lib/weft/plugins` (where `zig build` installs them). Falls back to
 /// a bare "plugins" if the exe path can't be found. Caller owns the result.
