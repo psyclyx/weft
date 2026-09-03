@@ -1,4 +1,5 @@
 const std = @import("std");
+const plugin_lib_tiers = @import("src/plugin_lib/tiers.zig");
 
 /// One wasm guest: a shipped plugin (`src/plugins/<name>/root.zig`) or a test
 /// fixture (`src/plugin_fixtures/<name>.zig`).
@@ -72,6 +73,15 @@ const Library = enum {
         };
     }
 
+    fn tier(self: Library) plugin_lib_tiers.Tier {
+        return switch (self) {
+            .rowkey, .jsonrpc, .sessions => .protocol_data,
+            .annotate, .output, .files, .prompt => .service_presentation,
+            .invoke => .interaction_orchestration,
+            .ex => .editor_composition,
+        };
+    }
+
     /// Libraries a library itself needs. `ex` is a command-line: a parser
     /// plus a prompt, and the prompt half is the same one git and lsp use —
     /// it does not get a private copy just because it got there first. It
@@ -85,6 +95,18 @@ const Library = enum {
         };
     }
 };
+
+comptime {
+    for (std.meta.tags(Library)) |consumer| {
+        for (consumer.deps()) |dependency| {
+            plugin_lib_tiers.validateEdge(consumer.tier(), dependency.tier()) catch |err|
+                @compileError(std.fmt.comptimePrint(
+                    "plugin library dependency {s} -> {s} violates tier direction: {s}",
+                    .{ @tagName(consumer), @tagName(dependency), @errorName(err) },
+                ));
+        }
+    }
+}
 
 /// Compiler-enforced subsystem boundaries. Cross-module code imports these
 /// names; relative imports are reserved for implementation files beneath the
@@ -919,6 +941,14 @@ pub fn build(b: *std.Build) void {
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
     }
+
+    const plugin_lib_tiers_mod = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/tiers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const plugin_lib_tiers_tests = b.addTest(.{ .root_module = plugin_lib_tiers_mod });
+    contract_step.dependOn(&b.addRunArtifact(plugin_lib_tiers_tests).step);
 
     // Compile-only Darwin choke point. Platform-neutral facades are analyzed
     // for the next supported host without trying to run a foreign artifact;
