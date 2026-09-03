@@ -55,7 +55,7 @@ buffer with a real cursor and a tool mode falls through to `normal`.
 
 **Fatally missing:**
 
-1. **`wl_net_read` does not exist.** The doors are connect/send/close
+1. **A guest cannot read a socket.** The doors are connect/send/close
    (`externs.zig:244-246`); the reader thread appends bytes into a host buffer
    (`net_session.zig:120-148`) and the guest never sees one. There is no
    `wl_buffer_slice` either, so a guest cannot read a non-focused buffer. **An
@@ -64,6 +64,11 @@ buffer with a real cursor and a tool mode falls through to `normal`.
    `resources.streams` — raw *proc* streams only (`wasm_host/activation.zig:26-33`,
    `plugin_resources.zig:82`). Net sessions live in a different registry that is
    never consulted.
+
+   *(1 and 2 are one defect, and the fix is subtraction, not addition — see §5a.
+   Three `Slots` registries of one shape become one, net inherits the stream
+   doors that already exist, and the wake follows because there is one registry
+   to scan. The first draft's "add `wl_net_read`" was the wrong instinct.)*
 3. **No append, and no incremental projection.** Every commit rewrites the whole
    buffer — `renderInto(..., .{ .start = 0, .end = end })`
    (`wasm_host/projection.zig:275-280`) — and then repositions the cursor
@@ -194,7 +199,10 @@ Today's graph is nearly flat, which is what this protects:
 
 ### Doors first — D1–D5 are the actual blockers
 
-**D1 — `wl_net_read` + net readiness in `on_poll`.** Two small host changes.
+**D1 — RETRACTED by the census (§5a). Net becomes a stream instead.** The three
+`Slots` registries merge into one, so net gains `wl_proc_read`/`send`/`close`
+rather than growing its own, and `on_poll` fires for a socket because there is
+one registry to scan. Was:
 Without them no protocol client can exist without shelling out to `nc`, giving
 up the audited native TLS that `core/net.zig` exists to provide. Highest value
 in the document.
@@ -283,6 +291,79 @@ falsifies the subject work in a day.
 
 **A2 — the IRC client**, as a demo rather than evidence. Kept because it is the
 user's stated goal and because D1–D3 are what make it possible.
+
+## 5a. The door census (231 doors, censused 2026-09-03)
+
+The worry that prompted this: the ABI grows about one door per idea, and the
+plan above proposed adding five more. `plugin-api.md` §2 diagnosed the cause —
+the only generic spine (slots + schema payloads) is used for plugin-to-plugin
+traffic and never for the built-ins.
+
+**The rule the census tests: a door should name an OPERATION, not a KIND.** If
+you can say "read from X" for three different X, that is one door taking a
+handle, not three doors.
+
+Splitting each of the 231 names into `<kind>_<verb>`, the verbs that recur
+across kinds:
+
+    close  10   len  7   count 6   read 5   begin 5   span 4   send 3
+
+**That histogram is misleading, and the correction is the finding.** Checked
+against actual signatures, most of those are different operations that share a
+word:
+
+- **`count` (6) does not unify.** `wl_arg_count`, `wl_command_count`,
+  `wl_buffer_count`, `wl_offer_count` are all `() -> u32` but ask different
+  questions about different collections. Merging them needs a "what am I
+  counting" parameter — the kind moved from the name into an argument, which is
+  not a win.
+- **`close` (10) is three families, not one.** `wl_surface_close()` takes **no
+  handle** (a plugin has one ambient surface). The six `wl_semantic_*_close`
+  take `(u32,u32,u32) -> u32` — a name-and-revision shape, not "close handle H".
+  Only `proc`/`net`/`annotate` are `(handle)`.
+- **`len` (7) is four families.** `wl_byte_len()` is ambient; `wl_annotate_len`
+  and `wl_buffer_byte_len` take an id; three `wl_semantic_*_request_len()` are
+  identical and ambient.
+
+### What genuinely unifies
+
+| merge | doors | net |
+|---|---|---|
+| `wl_proc_send` + `wl_net_send` + `wl_repl_send` → `wl_send(handle,ptr,len)` — identical signatures over three `Slots(T)` registries | 3 → 1 | **−2** |
+| `wl_proc_close` + `wl_net_close` (+ `wl_annotate_close`, with care — it is `Handles` not `Slots`) | 3 → 1 | **−2** |
+| three `wl_semantic_*_request_len()` — byte-identical | 3 → 1 | **−2** |
+| `wl_byte_len` / `wl_buffer_byte_len` — the ambient/explicit pair of one question; collapses when the subject is explicit | 2 → 1 | **−1** |
+| six `wl_semantic_*_close`, *if* the semantic plane has one id space (unverified) | 6 → 1 | −5 |
+
+**Firm: −7. With the semantic id space: −12.** Against 231 that is 3–5%, not
+the 20+ the histogram implied. Recording the smaller number because the larger
+one was my own and was wrong.
+
+### The structural win is bigger than the arithmetic
+
+    streams:      handles.Slots(proc_stream.ProcStream)
+    sessions:     handles.Slots(repl_session.Session)
+    net_sessions: handles.Slots(net_session.Session)
+
+Three registries of one shape (`plugin_resources.zig:82-87`). That is *why*
+there are three sets of send/close doors — and it is also why
+`notifyPollIfReady` scans only `streams`, so **a socket never wakes a guest**.
+Merging them fixes the door duplication and the wake bug as one change.
+
+It also deletes D1 from the plan above. Net does not need a read door; net needs
+to be a stream, and streams already have one. **The highest-value item in §5 was
+a door that should not exist.**
+
+`handles.zig` already learned this lesson one layer down — its own doc: *"Seven
+such registries were written out by hand … and each re-derived the same
+invariants — badly, in the places nobody thought to look twice."* The storage
+was unified; the ABI was not.
+
+### Where doors actually accumulate
+
+`semantic` 34 and `edit` 34 are 68 of 231 — nearly 30% in two groups. Any
+serious ratchet goes there, and `semantic` is the plane §2 of this document
+already found is only 4/39 presentation.
 
 ## 5b. A real bug the design process found
 
