@@ -660,7 +660,7 @@ test "ctx: paired transient — push then deinit restores the pre-push mode" {
     const gpa = t.allocator;
     var env = try TestEnv.init(gpa);
     defer env.deinit();
-    try env.keymap.markMenuMode(gpa, "leader");
+    try env.keymap.tagMode(gpa, "leader", "menu");
 
     const c = Ctx.capture(&env.ctx);
     var handle = try c.pushTransient(&env.keymap, "leader");
@@ -680,8 +680,8 @@ test "ctx: paired transient — nested pushes pop LIFO; a leaked outer frame is 
     const gpa = t.allocator;
     var env = try TestEnv.init(gpa);
     defer env.deinit();
-    try env.keymap.markMenuMode(gpa, "leader");
-    try env.keymap.markMenuMode(gpa, "leader-file");
+    try env.keymap.tagMode(gpa, "leader", "menu");
+    try env.keymap.tagMode(gpa, "leader-file", "menu");
 
     const c = Ctx.capture(&env.ctx);
     var outer = try c.pushTransient(&env.keymap, "leader");
@@ -701,8 +701,8 @@ test "ctx: paired transient — an out-of-order pop is refused, not silently mis
     const gpa = t.allocator;
     var env = try TestEnv.init(gpa);
     defer env.deinit();
-    try env.keymap.markMenuMode(gpa, "leader");
-    try env.keymap.markMenuMode(gpa, "leader-file");
+    try env.keymap.tagMode(gpa, "leader", "menu");
+    try env.keymap.tagMode(gpa, "leader-file", "menu");
 
     const c = Ctx.capture(&env.ctx);
     var outer = try c.pushTransient(&env.keymap, "leader");
@@ -730,7 +730,7 @@ test "ctx: W4 slice 1 — CAPTURE-TIME grant resolution + SCOPE-LIFETIME: a tran
     const gpa = t.allocator;
     var env = try TestEnv.init(gpa);
     defer env.deinit();
-    try env.keymap.markMenuMode(gpa, "leader");
+    try env.keymap.tagMode(gpa, "leader", "menu");
 
     var table = grants_mod.HandleTable.init(gpa);
     defer table.deinit();

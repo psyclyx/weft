@@ -1641,7 +1641,7 @@ test "e2e/config: every showcased binding names a command that exists" {
         var keys = mode.value_ptr.iterator();
         while (keys.next()) |key| {
             for (key.value_ptr.commands) |arm| {
-                if (core.catalog.isIntentionName(arm) or ed.keymap.isMenuMode(arm)) continue;
+                if (core.catalog.isIntentionName(arm) or ed.keymap.modeHasTag(arm, "menu")) continue;
                 if (embedderOwned(arm)) continue;
                 if (ed.commands.resolve(arm) == null) {
                     std.debug.print("[e2e/config] bound but unanswerable: {s} {s} -> {s}\n", .{ mode.key_ptr.*, key.key_ptr.*, arm });

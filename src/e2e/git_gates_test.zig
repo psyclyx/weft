@@ -289,8 +289,8 @@ test "e2e/git-gates: G3 no git mode is locked" {
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try t.expect(ed.keymap.isRestingMode("git"));
-    try t.expect(ed.keymap.isRestingMode("git-view"));
+    try t.expect(ed.keymap.modeHasTag("git", "resting"));
+    try t.expect(ed.keymap.modeHasTag("git-view", "resting"));
 
     // A REAL status projection, because that is what makes `git` the resting
     // mode. Escape out of a menu asks the ENTRY where to land — no menu names

@@ -1151,7 +1151,7 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     try t.expect(sess.system == editor_sys);
 
     // F1 — an open transient refuses the swap, same as `Host.swap` alone.
-    try editor_sys.keymap.markMenuMode(gpa, "leader");
+    try editor_sys.keymap.tagMode(gpa, "leader", "menu");
     const cc = sess.cmd_ctx.capturedCtx();
     var handle = try cc.pushTransient(&editor_sys.keymap, "leader");
     defer handle.deinit();

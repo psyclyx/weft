@@ -242,21 +242,21 @@ test "e2e/project: git push/pull/fetch transients are sticky menus" {
     // names the open command, and the mode is that name plus `-menu`. Nothing
     // declares stickiness either — a menu is sticky exactly when it has flags
     // to accumulate, which is why reset (a list of verbs) is not.
-    try t.expect(ed.keymap.isStickyMenu("git-push-menu"));
-    try t.expect(ed.keymap.isStickyMenu("git-pull-menu"));
-    try t.expect(ed.keymap.isStickyMenu("git-fetch-menu"));
-    try t.expect(ed.keymap.isMenuMode("git-push-menu"));
-    try t.expect(!ed.keymap.isStickyMenu("git-reset-menu"));
-    try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
+    try t.expect(ed.keymap.modeHasTag("git-push-menu", "sticky"));
+    try t.expect(ed.keymap.modeHasTag("git-pull-menu", "sticky"));
+    try t.expect(ed.keymap.modeHasTag("git-fetch-menu", "sticky"));
+    try t.expect(ed.keymap.modeHasTag("git-push-menu", "menu"));
+    try t.expect(!ed.keymap.modeHasTag("git-reset-menu", "sticky"));
+    try t.expect(ed.keymap.modeHasTag("git-reset-menu", "menu"));
 
     // The five flagless menus are the same declaration with `switches` left
     // out — one-shot, and their keys bind straight to git's own verbs, so no
     // wrapper command exists to route around.
-    try t.expect(ed.keymap.isMenuMode("git-branch-menu"));
-    try t.expect(ed.keymap.isMenuMode("git-stash-menu"));
-    try t.expect(ed.keymap.isMenuMode("git-log-choose-menu"));
-    try t.expect(ed.keymap.isMenuMode("git-commit-dispatch-menu"));
-    try t.expect(!ed.keymap.isStickyMenu("git-branch-menu"));
+    try t.expect(ed.keymap.modeHasTag("git-branch-menu", "menu"));
+    try t.expect(ed.keymap.modeHasTag("git-stash-menu", "menu"));
+    try t.expect(ed.keymap.modeHasTag("git-log-choose-menu", "menu"));
+    try t.expect(ed.keymap.modeHasTag("git-commit-dispatch-menu", "menu"));
+    try t.expect(!ed.keymap.modeHasTag("git-branch-menu", "sticky"));
     try t.expect(ed.commands.find("git-branch-stash") == null);
 
     // And the generated verbs are real, findable commands — the toggle named
@@ -1589,7 +1589,7 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "build\x00Return\x00make-visit\n") != null);
     try t.expect(std.mem.indexOf(u8, keys, "output\x00Return\x00output-visit\n") != null);
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
-    try t.expect(ed.keymap.isRestingMode("build"));
+    try t.expect(ed.keymap.modeHasTag("build", "resting"));
 }
 
 // ── Repository sessions (design §14.3; gate §18 "two repositories … remain
@@ -1764,8 +1764,8 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
 
     // The lock mechanism itself is gone (§19's demolition); resting-mode
     // declarations are what keep the projections' keys alive after Escape.
-    try t.expect(ed.keymap.isRestingMode("git"));
-    try t.expect(ed.keymap.isRestingMode("git-view"));
+    try t.expect(ed.keymap.modeHasTag("git", "resting"));
+    try t.expect(ed.keymap.modeHasTag("git-view", "resting"));
 
     // A real repo with one tracked file modified in the worktree: an
     // "Unstaged changes" row is what point lands on.

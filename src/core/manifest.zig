@@ -1362,7 +1362,7 @@ fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32)
     // cannot know exists — a plugin's name, spelled in core, per menu. Those
     // three live in `config/defaults.js` on the `menu-nav` layer now, declared
     // once for every menu instead of copied into each.
-    ctx.keymap.markMenuMode(gpa, name) catch {};
+    ctx.keymap.tagMode(gpa, name, "menu") catch {};
 }
 
 /// Surface a rejected `provide` to the config author (same message/channel

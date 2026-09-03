@@ -27,7 +27,7 @@ pub const CursorConfig = struct {
     /// return target is per-head state — see `Head.menu_return`.)
     pub fn resolveMode(self: *const CursorConfig, keymap: *const core.Keymap, head: *const core.Head, mode: []const u8) []const u8 {
         if (self.hasEntry(mode)) return mode;
-        if (keymap.isMenuMode(mode)) if (head.menuReturn(mode)) |ret| return ret;
+        if (keymap.modeHasTag(mode, "menu")) if (head.menuReturn(mode)) |ret| return ret;
         return mode;
     }
     pub fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {

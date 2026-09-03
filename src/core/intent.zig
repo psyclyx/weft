@@ -495,7 +495,7 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
         if (!catalog_mod.isIntentionName(name)) {
             // A flat arm that resolves ends the walk exactly as it would for
             // dispatch — no later intention is ever reached.
-            if (ctx.commands.resolve(name) != null or ctx.keymap.isMenuMode(name)) return .none;
+            if (ctx.commands.resolve(name) != null or ctx.keymap.modeHasTag(name, "menu")) return .none;
             continue;
         }
         if (first == null) first = name;

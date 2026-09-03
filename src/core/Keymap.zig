@@ -70,28 +70,27 @@ parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// `commitCommand`): a mode that does not declare one cannot commit,
 /// whatever it inherits BINDINGS from.
 commit_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
-/// Modes the config declared as prefix menus (leader/chord tables) — the
-/// which-key hint shows their bindings. Policy lives in config; this is
-/// just the mechanism that remembers the declaration. WHICH mode a given
-/// head should return to when it leaves one of these is head-scoped state
-/// (two heads can enter the same menu from different origins) — see
-/// `Head.menu_return`.
-menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
-/// Menu modes that STAY OPEN after a leaf key (the one-shot auto-pop is
-/// suppressed) — flag-accumulating transients (git's push/fetch option
-/// popups): toggle keys mutate state and re-render while the menu persists;
-/// only an explicit mode change (execute, or Escape → the return target)
-/// leaves. A subset of `menu_modes`, so which-key still lists the keys.
-sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
-
-/// Modes a buffer can REST in — the base editing mode (`normal`) and each tool
-/// projection (`files`, `grep`, `output`, `emacs`, `helix-normal`, a git status/
-/// diff/log view). `baseMode` stops at the first of these in a mode's fallback
-/// chain, so leaving a buffer remembers its resting mode rather than overshooting
-/// to the root `default` (which would strand a revisited file in a mode with no
-/// editing keys). Transient modes (visual/insert/op-pending/…) are NOT declared,
-/// so they resolve through to their base editing mode.
-resting_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
+/// `mode\x00tag` → the mode carries that tag. ONE set for every property a
+/// mode can have, because they were three identical sets before this
+/// (`menu_modes`, `sticky_menus`, `resting_modes`) and a fourth property would
+/// have been a fourth. A tag is DATA: core defines no vocabulary beyond the
+/// three names below that its own lookup wiring needs, and a plugin can invent
+/// a tag and read it back without core learning anything.
+///
+/// What each tag means is the reader's business, not this file's:
+///   `menu`    — a prefix menu (leader/chord table). which-key lists it; the
+///               fallback chain into `menu` → `menu-nav` is wired by `tagMode`.
+///               WHICH mode a head returns to on leaving is head-scoped state
+///               (two heads can enter one menu from different origins) — see
+///               `Head.menu_return`.
+///   `sticky`  — stays open after a leaf key instead of auto-popping (the
+///               flag-accumulating transients: git's push/fetch option popups).
+///   `resting` — a mode a buffer SETTLES in: the base editing mode and each
+///               tool projection. `baseMode` stops at the first of these in a
+///               fallback chain, so leaving a buffer remembers its resting mode
+///               instead of overshooting to `default` and stranding a revisited
+///               file in a mode with no editing keys.
+mode_tags: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -116,12 +115,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v);
     }
     self.commit_commands.deinit(gpa);
-    for (self.menu_modes.keys()) |k| gpa.free(k);
-    self.menu_modes.deinit(gpa);
-    for (self.sticky_menus.keys()) |k| gpa.free(k);
-    self.sticky_menus.deinit(gpa);
-    for (self.resting_modes.keys()) |k| gpa.free(k);
-    self.resting_modes.deinit(gpa);
+    for (self.mode_tags.keys()) |k| gpa.free(k);
+    self.mode_tags.deinit(gpa);
     self.* = .{};
 }
 
@@ -321,13 +316,13 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
         // caller skips it). Stop here rather than walking into the `menu-nav`
         // base a menu now falls back to for its navigation keys, which would
         // wrongly make a menu's base a non-menu and get captured.
-        if (self.isMenuMode(cur)) return cur;
+        if (self.modeHasTag(cur, tag_menu)) return cur;
         // A RESTING mode is a buffer's base: `normal` and each tool projection
         // (files/grep/output/git). Stop here so a transient mode (visual/
         // insert) resolves to its editing base while a tool buffer keeps its own
         // mode — WITHOUT overshooting `normal`→`default` to the root, which would
         // strand a revisited file in the editing-less `default` mode.
-        if (self.isRestingMode(cur)) return cur;
+        if (self.modeHasTag(cur, tag_resting)) return cur;
         cur = self.parents.get(cur) orelse return cur;
     }
     return cur;
@@ -402,56 +397,72 @@ pub fn navCommand(self: *const Keymap, key: []const u8) ?[]const u8 {
 /// which keys ride either layer; `config/defaults.js` binds both.
 pub const menu_mode = "menu";
 
-/// Declare `mode` a prefix menu (config policy — the leader/chord tables).
-/// which-key shows its bindings while it is active. A menu with no fallback of
-/// its own inherits `menu`, and through it `menu-nav` — so every menu leaves,
-/// paginates and pops a level for free, without each config wiring it.
-pub fn markMenuMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
-    const gop = try self.menu_modes.getOrPut(gpa, mode);
-    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
-    if (!self.parents.contains(menu_mode))
-        try self.setFallback(gpa, menu_mode, menu_nav_mode);
-    if (!std.mem.eql(u8, mode, menu_nav_mode) and !std.mem.eql(u8, mode, menu_mode) and
-        !self.parents.contains(mode))
-        try self.setFallback(gpa, mode, menu_mode);
+/// The tag a MENU carries. Core knows this string for exactly one reason —
+/// `tagMode` wires the `menu` → `menu-nav` fallback chain, which is structure,
+/// not policy. Everything else about menus (which keys leave one, what a menu
+/// looks like, whether which-key lists it) is the caller's.
+pub const tag_menu = "menu";
+/// A menu that stays open after a leaf key instead of auto-popping — the
+/// flag-accumulating transients. Read by dispatch; core never sets it.
+pub const tag_sticky = "sticky";
+/// A mode a buffer SETTLES in (see `baseMode`) — the declaration that stops
+/// "wrong mode in a tool buffer" jank.
+pub const tag_resting = "resting";
+
+/// Tag `mode` with a named property. Idempotent.
+///
+/// One set, not three. This was `menu_modes`, `sticky_menus` and
+/// `resting_modes` — three `StringArrayHashMap`s, three `markX`/`isX` pairs,
+/// three dupe-and-free blocks in `deinit`, all spelling the same idea. Every
+/// new property of a mode meant another one, which is to say every new property
+/// meant editing core. Now a tag is data: a plugin can invent one and read it
+/// back, and core learns nothing.
+///
+/// The one behaviour that stays here is the `menu` fallback chain, because it
+/// is about how LOOKUP works and lookup is core's: a menu inherits `menu`, and
+/// `menu` inherits `menu-nav`. What binds on either layer is config's.
+pub fn tagMode(self: *Keymap, gpa: Allocator, mode: []const u8, tag: []const u8) Allocator.Error!void {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, tag) orelse return;
+    const gop = try self.mode_tags.getOrPut(gpa, key);
+    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, key);
+
+    if (std.mem.eql(u8, tag, tag_menu)) {
+        if (!self.parents.contains(menu_mode))
+            try self.setFallback(gpa, menu_mode, menu_nav_mode);
+        if (!std.mem.eql(u8, mode, menu_nav_mode) and !std.mem.eql(u8, mode, menu_mode) and
+            !self.parents.contains(mode))
+            try self.setFallback(gpa, mode, menu_mode);
+    }
 }
 
-/// Whether `mode` was declared a prefix menu (see `markMenuMode`).
-pub fn isMenuMode(self: *const Keymap, mode: []const u8) bool {
-    return self.menu_modes.contains(mode);
+/// Whether `mode` carries `tag`.
+pub fn modeHasTag(self: *const Keymap, mode: []const u8, tag: []const u8) bool {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, tag) orelse return false;
+    return self.mode_tags.contains(key);
 }
 
-/// Declare `mode` a STICKY menu: it stays open after a leaf key instead of
-/// auto-popping to its return target (flag-accumulating transients). Implies
-/// menu-mode, so which-key still lists its keys.
-pub fn markStickyMenu(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
-    try self.markMenuMode(gpa, mode);
-    const gop = try self.sticky_menus.getOrPut(gpa, mode);
-    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+/// `mode\x00tag` — NUL-joined so no mode name can spell another pair (a
+/// separator that cannot occur in either half is what makes the flat set safe).
+fn tagKey(buf: []u8, mode: []const u8, tag: []const u8) ?[]const u8 {
+    if (mode.len + 1 + tag.len > buf.len) return null;
+    @memcpy(buf[0..mode.len], mode);
+    buf[mode.len] = 0;
+    @memcpy(buf[mode.len + 1 ..][0..tag.len], tag);
+    return buf[0 .. mode.len + 1 + tag.len];
 }
 
-/// Whether `mode` stays open after a leaf key (see `markStickyMenu`).
-pub fn isStickyMenu(self: *const Keymap, mode: []const u8) bool {
-    return self.sticky_menus.contains(mode);
-}
-
-/// Declare `mode` a RESTING mode — a mode a buffer settles in (see `resting_modes`
-/// + `baseMode`). Idempotent.
-pub fn markRestingMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
-    const gop = try self.resting_modes.getOrPut(gpa, mode);
-    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
-}
-
-/// Whether `mode` is one explicitly declared a resting mode.
-pub fn isRestingMode(self: *const Keymap, mode: []const u8) bool {
-    return self.resting_modes.contains(mode);
-}
-
-/// Whether ANY mode was declared restable. A keymap with no such declaration
-/// has no opinion about where an entry rests, so a caller keeps its own
-/// answer rather than substituting one this table never made.
-pub fn hasRestingModes(self: *const Keymap) bool {
-    return self.resting_modes.count() > 0;
+/// Whether ANY mode carries `tag`. A keymap with no `resting` declaration has
+/// no opinion about where an entry rests, so a caller keeps its own answer
+/// rather than substituting one this table never made — and the same question
+/// is worth asking of any tag, so it is asked generically.
+pub fn anyModeHasTag(self: *const Keymap, tag: []const u8) bool {
+    for (self.mode_tags.keys()) |k| {
+        const sep = std.mem.indexOfScalar(u8, k, 0) orelse continue;
+        if (std.mem.eql(u8, k[sep + 1 ..], tag)) return true;
+    }
+    return false;
 }
 
 /// Append `mode`'s own bindings (key → command) to `out`, in bind order.
@@ -508,7 +519,7 @@ fn addResolvedInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *
             if (std.mem.eql(u8, existing.key, k)) continue :outer;
         }
         try out.append(gpa, .{ .key = k, .command = v.commands[0], .arms = v.commands });
-        try out_group.append(gpa, self.isMenuMode(v.commands[0]));
+        try out_group.append(gpa, self.modeHasTag(v.commands[0], tag_menu));
     }
 }
 
@@ -834,11 +845,11 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     try km.bind(gpa, "leader", "c", "collab", prio_plugin, "vim");
 
     // which-key shows only for modes the config declared as menus.
-    try t.expect(!km.isMenuMode("leader")); // not declared yet
-    try km.markMenuMode(gpa, "leader");
-    try t.expect(km.isMenuMode("leader"));
-    try t.expect(!km.isMenuMode("normal")); // never declared
-    try t.expect(!km.isMenuMode("nope"));
+    try t.expect(!km.modeHasTag("leader", tag_menu)); // not declared yet
+    try km.tagMode(gpa, "leader", tag_menu);
+    try t.expect(km.modeHasTag("leader", tag_menu));
+    try t.expect(!km.modeHasTag("normal", tag_menu)); // never declared
+    try t.expect(!km.modeHasTag("nope", tag_menu));
 
     var hints: std.ArrayList(Binding) = .empty;
     defer hints.deinit(gpa);
@@ -853,13 +864,16 @@ test "keymap: sticky menus stay open (implies menu-mode)" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try t.expect(!km.isStickyMenu("git-flag-menu"));
-    try km.markStickyMenu(gpa, "git-flag-menu");
-    try t.expect(km.isStickyMenu("git-flag-menu"));
-    try t.expect(km.isMenuMode("git-flag-menu")); // sticky implies menu-mode
+    try t.expect(!km.modeHasTag("git-flag-menu", tag_sticky));
+    try km.tagMode(gpa, "git-flag-menu", tag_sticky);
+    try t.expect(km.modeHasTag("git-flag-menu", tag_sticky));
+    // Tags are INDEPENDENT. `markStickyMenu` used to imply menu-ness from
+    // inside the keymap; that implication is the declarer's opinion, so it now
+    // lives at the door that declares a sticky menu (`hStickyMenu` tags both).
+    try t.expect(!km.modeHasTag("git-flag-menu", tag_menu));
     // A plain menu isn't sticky — it still one-shot auto-pops.
-    try km.markMenuMode(gpa, "leader");
-    try t.expect(!km.isStickyMenu("leader"));
+    try km.tagMode(gpa, "leader", tag_menu);
+    try t.expect(!km.modeHasTag("leader", tag_sticky));
 }
 
 test "keymap: the global layer applies under every mode, overridable locally" {
@@ -892,7 +906,7 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
 
     // Declaring a menu auto-wires it to inherit menu-nav (no per-config wiring),
     // so its nav keys resolve through the fallback — but its OWN keys still win.
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", tag_menu);
     try km.bind(gpa, "leader", "f", "leader-file", prio_config, "cfg");
     try t.expectEqualStrings("leader-file", km.lookup("leader", "f").?); // own key
     try t.expectEqualStrings("menu-escape", km.lookup("leader", "BackSpace").?); // inherited nav
@@ -905,7 +919,7 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
 
     // A menu that already has its own fallback is left alone (not re-wired).
     try km.setFallback(gpa, "leader-git", "leader");
-    try km.markMenuMode(gpa, "leader-git");
+    try km.tagMode(gpa, "leader-git", tag_menu);
     try t.expectEqualStrings("leader", km.parents.get("leader-git").?);
 }
 

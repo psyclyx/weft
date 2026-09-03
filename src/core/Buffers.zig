@@ -486,14 +486,14 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // skipped rather than stamping the buffer with a menu mode. No per-mode
     // bookkeeping — it reuses the fallback declarations config already makes.
     const base = keymap.baseMode(head.currentMode());
-    if (!keymap.isMenuMode(base)) {
+    if (!keymap.modeHasTag(base, "menu")) {
         // …and a chain that never REACHES a resting mode (vim's `insert`
         // falls back to the modeless floor, not to `normal`) resolves through
         // the posture pairing instead of stranding the entry in the floor
         // mode — the mode-leak class pointed the other way. A keymap that
         // declares no resting modes has no opinion here, so its base-mode
         // answer stands unaltered.
-        const resting = if (!keymap.hasRestingModes() or keymap.isRestingMode(base))
+        const resting = if (!keymap.anyModeHasTag("resting") or keymap.modeHasTag(base, "resting"))
             base
         else
             self.restingModeFor(old.posture(old.semantic_focus.field != null));
@@ -622,7 +622,7 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     try km.setFallback(gpa, "visual", "normal"); // visual's base is normal
-    try km.markMenuMode(gpa, "leader-git");
+    try km.tagMode(gpa, "leader-git", "menu");
     var head: Head = .empty;
     defer head.deinit(gpa);
 

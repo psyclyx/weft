@@ -71,7 +71,7 @@ pub const MenuOverlay = struct {
         var dirty = false;
         const cur = head.currentMode();
         const in_chord = head.pending.len > 0;
-        const is_menu = keymap.isMenuMode(cur);
+        const is_menu = keymap.modeHasTag(cur, "menu");
         // What the overlay currently reflects: the pending chord if one's being
         // typed (`space f`), else the mode name. which-key re-renders whenever
         // this changes — each keystroke of a chord grows the pending prefix, so
@@ -383,8 +383,8 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     defer km.deinit(gpa);
     var head: core.Head = .empty;
     defer head.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
-    try km.markMenuMode(gpa, "leader-file");
+    try km.tagMode(gpa, "leader", "menu");
+    try km.tagMode(gpa, "leader-file", "menu");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
 
@@ -419,8 +419,8 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     defer km.deinit(gpa);
     var head: core.Head = .empty;
     defer head.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
-    try km.markMenuMode(gpa, "leader-file");
+    try km.tagMode(gpa, "leader", "menu");
+    try km.tagMode(gpa, "leader-file", "menu");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
 
@@ -453,7 +453,7 @@ test "menu overlay: F1 forces the popup immediately, bypassing the delay" {
     defer km.deinit(gpa);
     var head: core.Head = .empty;
     defer head.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", "menu");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
 
@@ -522,7 +522,7 @@ test "menu overlay: idle outside any menu is a stable state — no dirty every c
     defer km.deinit(gpa);
     var head: core.Head = .empty;
     defer head.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", "menu");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
     try head.setModeRaw(gpa, "normal");

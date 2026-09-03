@@ -1600,7 +1600,7 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     }
     // Declaring a menu marks the mode; the keys a menu answers are declared in
     // config on the `menu-nav` layer every menu inherits — see `applyMenu`.
-    br.activeCtx().keymap.markMenuMode(gpa, name) catch {};
+    br.activeCtx().keymap.tagMode(gpa, name, "menu") catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind

@@ -320,7 +320,7 @@ test "InProcClient: setMode traps NotDispatching outside a dispatch bracket, sam
     var head: Head = .empty;
     defer head.deinit(gpa);
     try head.setModeRaw(gpa, "normal");
-    try keymap.markRestingMode(gpa, "normal");
+    try keymap.tagMode(gpa, "normal", "resting");
 
     var ctx: command.Context = .{
         .gpa = gpa,
@@ -339,7 +339,7 @@ test "InProcClient: setMode traps NotDispatching outside a dispatch bracket, sam
 
     const prior = c.beginDispatch();
     defer c.endDispatch(prior);
-    try keymap.markRestingMode(gpa, "insert");
+    try keymap.tagMode(gpa, "insert", "resting");
     try c.setMode(gpa, "insert");
     try t.expectEqualStrings("insert", head.currentMode());
 }

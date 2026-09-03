@@ -486,7 +486,7 @@ fn prepareClose(self: *Pick, ctx: *command.Context) ![]u8 {
     // restoring prev_mode would leave the user stuck in the menu. Pop to the
     // menu's one-shot return target instead — the pick bypasses the keymap
     // dispatch site, so this is where that class of stickiness is fixed.
-    const restore = if (ctx.keymap.isMenuMode(self.prev_mode))
+    const restore = if (ctx.keymap.modeHasTag(self.prev_mode, "menu"))
         ctx.head.menuReturn(self.prev_mode) orelse self.prev_mode
     else
         self.prev_mode;

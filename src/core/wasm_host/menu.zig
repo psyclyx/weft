@@ -24,7 +24,7 @@ pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     const head = p.activeCtx().head;
     const n = if (head.pending.len > 0)
         head.completions(p.gpa, km, head.pending) catch 0
-    else if (km.isMenuMode(head.currentMode()))
+    else if (km.modeHasTag(head.currentMode(), "menu"))
         head.resolveBindings(p.gpa, km, head.currentMode()) catch 0
     else
         head.completions(p.gpa, km, "") catch 0;

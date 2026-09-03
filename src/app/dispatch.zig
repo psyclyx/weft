@@ -9,7 +9,7 @@
 //!
 //! **Menu enter/return (task #19 item 2): paired transients, not a bare
 //! `enterMode`.** A bound key whose command NAMES a declared menu mode
-//! (`ctx.keymap.isMenuMode(cmd_name)`, in `dispatchSpec`'s `.run` case) is
+//! (`ctx.keymap.modeHasTag(cmd_name, "menu")`, in `dispatchSpec`'s `.run` case) is
 //! the actual production shape of a menu open — real examples:
 //! `src/plugins/git/root.zig`'s `weft.bindKey("git", "c", "git-commit-dispatch")`,
 //! `git-branch-menu`, `git-stash-menu`, `git-log-menu`, `git-rebase-menu`,
@@ -183,7 +183,7 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const km = ctx.keymap;
     const head = ctx.head;
     const cur = head.currentMode();
-    if (!km.isMenuMode(cur)) return .nil; // not in a menu → leave the mode be
+    if (!km.modeHasTag(cur, "menu")) return .nil; // not in a menu → leave the mode be
     // Paired-transient path (task #19 item 2): if we're the one who pushed
     // this menu, leaving IS the pop — restores the exact pre-push mode,
     // whatever it was, no separate lookup needed.
@@ -319,7 +319,7 @@ fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, commit: core.TextCommi
 fn dotAtRest(ctx: *core.command.Context) bool {
     return ctx.head.commitCommand(ctx.keymap) == null and
         ctx.head.pending.len == 0 and
-        !ctx.keymap.isMenuMode(ctx.head.currentMode());
+        !ctx.keymap.modeHasTag(ctx.head.currentMode(), "menu");
 }
 
 /// Run at each dispatch's end (when recording): if we're back at rest, decide
@@ -466,7 +466,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // of silent. This should be UNREACHABLE; it is the tripwire proving it,
     // not a normal-operation code path (see `menu_test.zig`'s fault-
     // injection test, which pushes one on purpose and confirms this fires).
-    defer if (ctx.head.hasOpenTransients() and !ctx.keymap.isMenuMode(ctx.head.currentMode())) {
+    defer if (ctx.head.hasOpenTransients() and !ctx.keymap.modeHasTag(ctx.head.currentMode(), "menu")) {
         std.log.warn("dispatch: {d} open transient(s) survived a dispatch that left mode '{s}' (not a menu) — an unpaired push leaked; recovering by popping all", .{ ctx.head.transient_stack.items.len, ctx.head.currentMode() });
         ctx.head.dropAllTransients(ctx.gpa);
     };
@@ -535,7 +535,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             // records the pre-push mode as this frame's return target, so
             // leaving (the leaf auto-pop below, or `menu-escape`) is the
             // MATCHING pop, not an independent `menuReturn` lookup.
-            if (arm == .command and ctx.keymap.isMenuMode(cmd_name)) {
+            if (arm == .command and ctx.keymap.modeHasTag(cmd_name, "menu")) {
                 if (std.mem.eql(u8, ctx.head.currentMode(), cmd_name)) {
                     // Re-entering the menu we're ALREADY in (the bound key
                     // fires again while it's open) is idempotent, not a
@@ -556,7 +556,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             }
             // Snapshot a menu mode so a one-shot key pops back after the command
             // runs (unless the command itself changed the mode).
-            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.head.currentMode()))
+            const menu_before: ?[]u8 = if (ctx.keymap.modeHasTag(ctx.head.currentMode(), "menu"))
                 ctx.gpa.dupe(u8, ctx.head.currentMode()) catch null
             else
                 null;
@@ -575,7 +575,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
                 .command => core.command.invoke(ctx.commands, ctx, cmd_name, &.{}),
             }
             if (menu_before) |m| {
-                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.head.currentMode(), m)) {
+                if (!ctx.keymap.modeHasTag(m, "sticky") and std.mem.eql(u8, ctx.head.currentMode(), m)) {
                     // Still the same menu after the leaf: time to auto-pop.
                     // If WE pushed it (the branch above), pop through the
                     // paired mechanism (restores the exact pre-push mode);
@@ -658,7 +658,7 @@ fn chooseArm(ctx: *core.command.Context, arms: []const []const u8) ?Arm {
     var snap: ?*const core.catalog.Snapshot = null;
     for (arms, 0..) |name, i| {
         if (!core.catalog.isIntentionName(name)) {
-            if (ctx.commands.resolve(name) != null or ctx.keymap.isMenuMode(name)) return .{ .command = name };
+            if (ctx.commands.resolve(name) != null or ctx.keymap.modeHasTag(name, "menu")) return .{ .command = name };
             continue;
         }
         const plane = ctx.intent orelse {

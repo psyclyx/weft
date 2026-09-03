@@ -162,8 +162,8 @@ test "two heads: A in a menu mode does not move B out of normal" {
     // `dispatch.dispatchSpec` gives any bound command whose name NAMES a menu
     // mode (see its "legacy mode-menu path" comment) — the same mechanism a
     // real git-status keybinding uses.
-    try ed.keymap.markMenuMode(gpa, "tool-mode");
-    try ed.keymap.markRestingMode(gpa, "tool-mode");
+    try ed.keymap.tagMode(gpa, "tool-mode", "menu");
+    try ed.keymap.tagMode(gpa, "tool-mode", "resting");
     try ed.keymap.bind(gpa, "normal", "g", "tool-mode", core.Keymap.prio_config, "test");
 
     var b: SecondHead = undefined;
@@ -176,7 +176,7 @@ test "two heads: A in a menu mode does not move B out of normal" {
     // A enters the tool mode through a REAL keypress.
     ed.press("g", "");
     try t.expectEqualStrings("tool-mode", ed.mode());
-    try t.expect(ed.keymap.isRestingMode(ed.mode()));
+    try t.expect(ed.keymap.modeHasTag(ed.mode(), "resting"));
     try t.expectEqualStrings("normal", ed.head.menuReturn("tool-mode").?);
 
     // B never moved — still plain "normal", and it never recorded a menu

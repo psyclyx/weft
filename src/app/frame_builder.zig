@@ -445,7 +445,7 @@ pub const FrameBuilder = struct {
         // appeared — the "corner first, then middle" jump.
         var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
         defer wk_hints.deinit(gpa);
-        if (act.menu_shown and surface_n == 0 and !fx.head.pick.active and fx.head.interactions.active() == null and fx.keymap.isMenuMode(fx.head.currentMode())) {
+        if (act.menu_shown and surface_n == 0 and !fx.head.pick.active and fx.head.interactions.active() == null and fx.keymap.modeHasTag(fx.head.currentMode(), "menu")) {
             fx.keymap.ownBindings(gpa, fx.head.currentMode(), &wk_hints) catch {};
         }
         // Buffer tab strip (only with more than one buffer open). Name

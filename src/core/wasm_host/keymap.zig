@@ -150,7 +150,7 @@ pub fn setMode(gpa: Allocator, ctx: *command_mod.Context, id: anytype, mode: []c
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
     // transient sub-mode (insert/visual) returns HERE — this is what keeps a
     // tool projection (files) live after an in-place edit + Escape.
-    if (ctx.keymap.isRestingMode(mode)) {
+    if (ctx.keymap.modeHasTag(mode, "resting")) {
         const buf = ctx.buffers.active();
         const held = gpa.dupe(u8, mode) catch return;
         gpa.free(buf.mode);
@@ -226,7 +226,7 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.activeCtx().keymap.markMenuMode(p.gpa, mode) catch {};
+    p.activeCtx().keymap.tagMode(p.gpa, mode, "menu") catch {};
 }
 
 /// `resting_mode(mode)`: declare a mode a buffer can rest in, so `baseMode` stops
@@ -236,7 +236,7 @@ pub fn hRestingMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.activeCtx().keymap.markRestingMode(p.gpa, mode) catch {};
+    p.activeCtx().keymap.tagMode(p.gpa, mode, "resting") catch {};
 }
 
 /// `resting_posture(posture, mode)`: the GRAMMAR's half of §10.4 — the mode
@@ -251,7 +251,7 @@ pub fn hRestingPosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     defer p.gpa.free(mode);
     const ctx = p.activeCtx();
     ctx.buffers.setRestingFor(p.gpa, posture, mode) catch return;
-    ctx.keymap.markRestingMode(p.gpa, mode) catch {};
+    ctx.keymap.tagMode(p.gpa, mode, "resting") catch {};
 }
 
 /// `posture()`: read how the addressed entry rests (§10.4). The ONE read a
@@ -283,7 +283,14 @@ pub fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.activeCtx().keymap.markStickyMenu(p.gpa, mode) catch {};
+    // Both tags, at the DECLARATION site. `markStickyMenu` used to imply
+    // menu-ness inside the keymap, which made one tag secretly mean two — and
+    // the implication is the caller's opinion ("a sticky menu is still listed
+    // by which-key"), not a property of tagging. A guest that wants one and not
+    // the other can now say so.
+    const km = p.activeCtx().keymap;
+    km.tagMode(p.gpa, mode, "menu") catch {};
+    km.tagMode(p.gpa, mode, "sticky") catch {};
 }
 
 // ── Reading the tables ───────────────────────────────────────────────

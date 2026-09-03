@@ -383,7 +383,7 @@ pub fn setModeRawOwned(self: *Head, gpa: Allocator, owned_mode: []u8) void {
 /// `Ctx.enterMode`); host-side mode save/restore uses plain `setModeRaw`,
 /// so a restore-into-a-menu never records a bogus return target.
 pub fn enterModeRaw(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8) Allocator.Error!void {
-    if (km.isMenuMode(mode) and !std.mem.eql(u8, self.mode, mode)) {
+    if (km.modeHasTag(mode, "menu") and !std.mem.eql(u8, self.mode, mode)) {
         // If we came from another menu, inherit *its* return target so a chain
         // of menus collapses to a single hop back to the root non-menu mode;
         // otherwise return to exactly where we were.
@@ -722,7 +722,7 @@ test "head: menu return targets are per-head, not shared via the table" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", "menu");
 
     var a: Head = .empty;
     defer a.deinit(gpa);
@@ -747,8 +747,8 @@ test "head: menu return targets — guest entry records, nesting collapses to ro
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
-    try km.markMenuMode(gpa, "leader-file");
+    try km.tagMode(gpa, "leader", "menu");
+    try km.tagMode(gpa, "leader-file", "menu");
 
     var h: Head = .empty;
     defer h.deinit(gpa);
@@ -772,7 +772,7 @@ test "head: host-side setMode restore does NOT poison menu return targets" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", "menu");
 
     var h: Head = .empty;
     defer h.deinit(gpa);
@@ -795,7 +795,7 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     defer km.deinit(gpa);
     try km.bind(gpa, "normal", "i", "enter-insert", Keymap.prio_plugin, "vim");
     try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_plugin, "vim");
-    try km.markMenuMode(gpa, "leader");
+    try km.tagMode(gpa, "leader", "menu");
 
     var head_a: Head = .empty;
     defer head_a.deinit(gpa);

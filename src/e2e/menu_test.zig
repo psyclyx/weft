@@ -31,7 +31,7 @@ fn noop(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) a
 /// bound key whose command name IS a declared menu mode.
 fn initMenuKeymap(gpa: std.mem.Allocator, ed: *Editor) !void {
     _ = try ed.commands.bind(gpa, "test-leaf", .{ .name = "test-leaf", .summary = "test: no-op leaf", .args = &.{}, .handler = noop });
-    try ed.keymap.markMenuMode(gpa, "test-menu");
+    try ed.keymap.tagMode(gpa, "test-menu", "menu");
     try ed.keymap.bind(gpa, "normal", "m", "test-menu", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "test-menu", "x", "test-leaf", core.Keymap.prio_config, "test");
     ed.setMode("normal");
@@ -96,7 +96,9 @@ test "menu: sticky re-enter is NOT a second push; a sticky leaf leaves the menu 
     try initMenuKeymap(gpa, &ed);
     _ = try ed.commands.bind(gpa, "menu-escape", .{ .name = "menu-escape", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
 
-    try ed.keymap.markStickyMenu(gpa, "sticky-menu");
+    // Both tags, as the sticky-menu door does — see `hStickyMenu`.
+    try ed.keymap.tagMode(gpa, "sticky-menu", "menu");
+    try ed.keymap.tagMode(gpa, "sticky-menu", "sticky");
     try ed.keymap.bind(gpa, "normal", "p", "sticky-menu", core.Keymap.prio_config, "test");
     // Re-entry key, bound WITHIN the sticky menu to ITSELF — the shape a
     // config binding the same leader key inside its own menu would take.
@@ -146,8 +148,8 @@ test "menu: nested auto-entered menus pop LIFO (single hop) through the paired s
     // is no legacy single-key-press-jumps-to-root behavior this could
     // regress — this is a fresh, honestly-documented decision, not a
     // preserved one.
-    try ed.keymap.markMenuMode(gpa, "menu-a");
-    try ed.keymap.markMenuMode(gpa, "menu-b");
+    try ed.keymap.tagMode(gpa, "menu-a", "menu");
+    try ed.keymap.tagMode(gpa, "menu-b", "menu");
     try ed.keymap.bind(gpa, "normal", "a", "menu-a", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "menu-a", "b", "menu-b", core.Keymap.prio_config, "test");
 

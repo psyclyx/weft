@@ -406,7 +406,7 @@ pub fn attachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!vo
 pub fn detachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!void {
     const old = self.buffers.active();
     const base = self.keymap.baseMode(head.currentMode());
-    if (!self.keymap.isMenuMode(base)) {
+    if (!self.keymap.modeHasTag(base, "menu")) {
         const held = try gpa.dupe(u8, base);
         gpa.free(old.mode);
         old.mode = held;
@@ -904,7 +904,7 @@ test "system: F1 — swap REFUSES while a transient/menu is open, nothing repoin
     defer host.deinit();
     const editor_sys = try testSystem(gpa, pool, "editor");
     try host.hostSystem(editor_sys);
-    try editor_sys.keymap.markMenuMode(gpa, "leader");
+    try editor_sys.keymap.tagMode(gpa, "leader", "menu");
     const agent_sys = try testSystem(gpa, pool, "agent-ux");
     try host.hostSystem(agent_sys);
 

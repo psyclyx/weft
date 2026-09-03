@@ -1282,7 +1282,7 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     // The submenu is a menu mode: which-key shows it, and the dispatch enters it
     // when a leader key's command names it (that's why "f" → "leader-file" is a
     // group, not a leaf).
-    try t.expect(env.keymap.isMenuMode("leader-file"));
+    try t.expect(env.keymap.modeHasTag("leader-file", "menu"));
 
     // In the leader menu, "f" resolves to the submenu name (a group entry).
     try env.head.setModeRaw(gpa, "leader");

@@ -688,8 +688,8 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
 
     const Keymap = @import("../Keymap.zig");
     // "f" opens a submenu (its command IS a menu mode) → a GROUP; "g" is a leaf.
-    try env.keymap.markMenuMode(gpa, "leader");
-    try env.keymap.markMenuMode(gpa, "leader-file");
+    try env.keymap.tagMode(gpa, "leader", "menu");
+    try env.keymap.tagMode(gpa, "leader-file", "menu");
     try env.keymap.bind(gpa, "leader", "f", "leader-file", Keymap.prio_plugin, "test");
     try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
     try env.head.setModeRaw(gpa, "leader");
@@ -786,8 +786,8 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     // op-pending stays a menu mode (which-key renders its motions), but the
     // leader is now a key SEQUENCE — no `helix-leader` mode: `space` opens a
     // chord and `space g g` completes to git-status through the sequence engine.
-    try t.expect(!env.keymap.isMenuMode("helix-leader"));
-    try t.expect(env.keymap.isMenuMode("helix-op"));
+    try t.expect(!env.keymap.modeHasTag("helix-leader", "menu"));
+    try t.expect(env.keymap.modeHasTag("helix-op", "menu"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
     try t.expect((try env.head.feed(gpa, &env.keymap, "g")) == .pending);
     try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
@@ -820,7 +820,7 @@ test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a m
     // M-< normalized to M-less at bind time.
     try t.expectEqualStrings("beginning-of-buffer", env.keymap.lookup(env.head.currentMode(), "M-less").?);
     // `emacs` is NOT a menu mode — the C-x/C-c trees are key sequences (config).
-    try t.expect(!env.keymap.isMenuMode("emacs"));
+    try t.expect(!env.keymap.modeHasTag("emacs", "menu"));
 }
 
 test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls through" {
@@ -1100,7 +1100,7 @@ test "wasm plugin: init-phase table-config declarations are unaffected by dispat
     // (not a load-time trap) is the proof: `wl_resting_mode` stayed ungated.
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(env.keymap.isRestingMode("poked"));
+    try t.expect(env.keymap.modeHasTag("poked", "resting"));
 }
 
 test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {

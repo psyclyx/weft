@@ -2111,7 +2111,12 @@ pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer names.deinit(gpa);
     for (km.modes.keys()) |k| try names.put(gpa, k, {});
-    for (km.menu_modes.keys()) |k| try names.put(gpa, k, {});
+    // Tag keys are `mode\x00tag`; a mode that exists only as a menu declaration
+    // (no bindings of its own yet) still belongs in the structure snapshot.
+    for (km.mode_tags.keys()) |k| {
+        const sep = std.mem.indexOfScalar(u8, k, 0) orelse continue;
+        if (std.mem.eql(u8, k[sep + 1 ..], core.Keymap.tag_menu)) try names.put(gpa, k[0..sep], {});
+    }
     for (km.commit_commands.keys()) |k| try names.put(gpa, k, {});
 
     const list = try gpa.dupe([]const u8, names.keys());
@@ -2131,7 +2136,7 @@ pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     for (list) |mode| {
         const txt = km.commitCommand(mode) orelse "<none>";
         const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|resting={}|text={s}\n", .{
-            mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isRestingMode(mode), txt,
+            mode, km.modeHasTag(mode, "menu"), km.modeHasTag(mode, "sticky"), km.modeHasTag(mode, "resting"), txt,
         });
         defer gpa.free(line);
         try out.appendSlice(gpa, line);
