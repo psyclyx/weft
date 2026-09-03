@@ -1354,11 +1354,15 @@ fn ownerIsKnown(owner: []const u8, known_plugins: *const std.StringHashMapUnmana
 /// behavior, now tier-prioritized instead of hardcoded to config tier, so an
 /// imported manifest's `weft.menu` gets the imported rung too).
 fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32) void {
-    const km = ctx.keymap;
-    km.markMenuMode(gpa, name) catch {};
-    km.bind(gpa, name, "Escape", "menu-escape", prio, "config") catch {};
-    km.bind(gpa, name, "C-g", "menu-escape", prio, "config") catch {};
-    km.bind(gpa, name, "F1", "which-key-now", prio, "config") catch {};
+    _ = prio;
+    // Declaring a menu is a FACT about the mode — which-key lists it, and it
+    // inherits the `menu-nav` layer. What keys a menu answers is not core's
+    // opinion: this used to also bind Escape/C-g to `menu-escape` and F1 to
+    // `which-key-now`, the last of which is a command core does not own and
+    // cannot know exists — a plugin's name, spelled in core, per menu. Those
+    // three live in `config/defaults.js` on the `menu-nav` layer now, declared
+    // once for every menu instead of copied into each.
+    ctx.keymap.markMenuMode(gpa, name) catch {};
 }
 
 /// Surface a rejected `provide` to the config author (same message/channel

@@ -18,6 +18,7 @@ const EvalError = quickjs.EvalError;
 const PluginLoader = quickjs.PluginLoader;
 const jsDoor = quickjs.jsDoor;
 const plugin_handlers = quickjs.plugin_handlers;
+const Keymap = @import("../Keymap.zig");
 const quickjs_wasm = quickjs.quickjs_wasm;
 // Exposed by quickjs.zig for this suite — see the note at each declaration.
 const cAgentWrite = quickjs.cAgentWrite;
@@ -1287,11 +1288,18 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     try env.head.setModeRaw(gpa, "leader");
     try t.expectEqualStrings("leader-file", env.keymap.lookup(env.head.currentMode(), "f").?);
 
-    // Inside the submenu: its own keys bind, and Escape/C-g leave via menu-escape.
+    // Inside the submenu its own keys bind.
     try env.head.setModeRaw(gpa, "leader-file");
     try t.expectEqualStrings("save", env.keymap.lookup(env.head.currentMode(), "s").?);
+
+    // And it REACHES the shared menu layer, which is how a menu answers keys
+    // nobody bound on it. `weft.menu` used to bind Escape/C-g/F1 into the mode
+    // from inside core — including a command core does not own — so this test
+    // asserted core's opinion about which keys leave a menu. What core owns is
+    // the inheritance; which keys ride it is `config/defaults.js`'s business,
+    // and the binding below stands in for that file.
+    try env.keymap.bind(gpa, Keymap.menu_mode, "Escape", "menu-escape", Keymap.prio_config, "test");
     try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "Escape").?);
-    try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "C-g").?);
 }
 
 test "quickjs: every shipped example config evals without a JS error" {

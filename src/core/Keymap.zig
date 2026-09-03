@@ -391,15 +391,29 @@ pub fn navCommand(self: *const Keymap, key: []const u8) ?[]const u8 {
     return if (b.get(key)) |e| e.commands[0] else null;
 }
 
+/// The layer every menu inherits for keys it answers ORDINARILY — the ones
+/// that end a chord rather than acting on the hint mid-flight.
+///
+/// Split from `menu_nav_mode` because those are two jobs, and one layer doing
+/// both is a trap: `navCommand` deliberately PRESERVES `pending`, so a key that
+/// is supposed to abandon the chord (Escape) silently becomes a key that pages
+/// the hint and leaves you mid-chord. Core owns the chain — a menu falls back
+/// to `menu`, and `menu` falls back to `menu-nav` — and owns nothing about
+/// which keys ride either layer; `config/defaults.js` binds both.
+pub const menu_mode = "menu";
+
 /// Declare `mode` a prefix menu (config policy — the leader/chord tables).
 /// which-key shows its bindings while it is active. A menu with no fallback of
-/// its own inherits `menu-nav` (its nav keys) — so every menu paginates + pops
-/// a level for free, without each config wiring it.
+/// its own inherits `menu`, and through it `menu-nav` — so every menu leaves,
+/// paginates and pops a level for free, without each config wiring it.
 pub fn markMenuMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const gop = try self.menu_modes.getOrPut(gpa, mode);
     if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
-    if (!std.mem.eql(u8, mode, menu_nav_mode) and !self.parents.contains(mode))
-        try self.setFallback(gpa, mode, menu_nav_mode);
+    if (!self.parents.contains(menu_mode))
+        try self.setFallback(gpa, menu_mode, menu_nav_mode);
+    if (!std.mem.eql(u8, mode, menu_nav_mode) and !std.mem.eql(u8, mode, menu_mode) and
+        !self.parents.contains(mode))
+        try self.setFallback(gpa, mode, menu_mode);
 }
 
 /// Whether `mode` was declared a prefix menu (see `markMenuMode`).

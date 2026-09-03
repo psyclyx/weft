@@ -32,6 +32,20 @@ weft.bind("menu-nav", "C-p", "which-key-page-up");
 weft.bind("menu-nav", "PageDown", "which-key-page-down");
 weft.bind("menu-nav", "PageUp", "which-key-page-up");
 
+// How you LEAVE a menu, and how you ask for the hint now. `weft.menu(name)`
+// used to bind these three into every menu mode from inside core — including
+// F1 to `which-key-now`, a command core does not own and cannot know exists.
+// Declaring a menu is a fact about the mode; what keys it answers is this
+// file's business. Every menu inherits "menu", so once covers all of them.
+//
+// These sit on "menu" and not "menu-nav" because the two layers do different
+// jobs: a "menu-nav" key acts on the hint and KEEPS the chord pending, which
+// is right for paging and wrong for Escape. "menu" falls back to "menu-nav",
+// so a menu reaches both.
+weft.bind("menu", "Escape", "menu-escape");
+weft.bind("menu", "C-g", "menu-escape");
+weft.bind("menu", "F1", "which-key-now");
+
 
 // ── Syntax grammars ───────────────────────────────────────────────────
 // Weft ships NO languages. Core knows how to load a tree-sitter grammar and

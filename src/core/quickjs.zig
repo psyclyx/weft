@@ -1598,12 +1598,9 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         m.addMenu(name) catch {};
         return;
     }
-    const km = br.activeCtx().keymap;
-    const Keymap = @import("Keymap.zig");
-    km.markMenuMode(gpa, name) catch {};
-    km.bind(gpa, name, "Escape", "menu-escape", Keymap.prio_config, "config") catch {};
-    km.bind(gpa, name, "C-g", "menu-escape", Keymap.prio_config, "config") catch {};
-    km.bind(gpa, name, "F1", "which-key-now", Keymap.prio_config, "config") catch {}; // force the hint now
+    // Declaring a menu marks the mode; the keys a menu answers are declared in
+    // config on the `menu-nav` layer every menu inherits — see `applyMenu`.
+    br.activeCtx().keymap.markMenuMode(gpa, name) catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind
