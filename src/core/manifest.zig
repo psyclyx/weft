@@ -337,7 +337,7 @@ pub fn keymapPriorityForTier(tier: Tier) i32 {
 /// pre-select cursor sharing.
 /// Grow this list, never widen the check to "assume unknown owners are
 /// fine".
-const core_value_namespaces = [_][]const u8{ "theme", "editor", "collab" };
+const core_value_namespaces = [_][]const u8{ "theme", "palette", "editor", "collab" };
 
 /// Config evaluation's output value (§2.3). Every `weft.*` call the config
 /// (or a `weft.use`-imported file) makes lands here as ONE entry in the
@@ -822,13 +822,36 @@ pub const Manifest = struct {
                 continue;
             }
             if (actx.config) |store| store.put(gpa, d.owner, d.key, d.value) catch {};
-            // A THEME VALUE IS A BINDING. `theme/<leaf>` is what core resolves
-            // when it paints a projection row, so a theme that only reached the
-            // value store reached nothing: the table was overridable in
-            // principle and unreachable in practice, which was the whole of
-            // what phase 9 had left.
-            if (std.mem.eql(u8, d.owner, "theme"))
-                applyTheme(actx.ctx, d.key, d.value, self.owner, self.tier);
+            // A VALUE IS A BINDING, when something declared a slot to receive
+            // it. `weft.set(ns, key, v)` binds `ns/key` — and that is the whole
+            // rule. This applier does not know what a theme is, what a colour
+            // is, or what any future family means: the CONSUMER that declared
+            // the slot interprets the bytes (`projection.styleForIn` reads a
+            // style class name, `palette.colorFor` reads a hex colour), and an
+            // undeclared slot is simply not a binding, which is the check a
+            // typo hits.
+            //
+            // It used to be `if (owner == "theme") applyTheme(...)` plus a
+            // 60-line function in core that knew both interpretations — so
+            // every new value family meant editing core. A value that only
+            // reached the store above reached nothing on screen; a value that
+            // reaches its slot restyles every producer that named the role.
+            var slot_buf: [192]u8 = undefined;
+            const slot = std.fmt.bufPrint(&slot_buf, "{s}/{s}", .{ d.owner, d.key }) catch continue;
+            // `bind` copies the slot name and the payload, so the stack buffer
+            // and the manifest's bytes may both die here.
+            actx.ctx.actions.container.bind(.{
+                .slot = slot,
+                .provider = .{ .value = framed.first(d.value) orelse d.value },
+                .predicate = .{ .all = &.{} },
+                .tier = self.tier,
+                .owner = self.owner,
+            }) catch |e| switch (e) {
+                // Not every namespace is a slot family — most values are just
+                // config a plugin reads back. Silence is correct here.
+                error.UnknownSlot => {},
+                else => {},
+            };
         }
         for (self.echoes.items) |d| {
             actx.ctx.head.echo.clearRetainingCapacity();
@@ -1327,53 +1350,6 @@ fn ownerIsKnown(owner: []const u8, known_plugins: *const std.StringHashMapUnmana
     return false;
 }
 
-/// `weft.set("theme", <leaf>, <class>)` — bind the style class core resolves
-/// for every role whose LAST dotted segment is `<leaf>`, so one line themes
-/// `git.hunk`, `fs.hunk`, and anything else that calls its rows hunks.
-///
-/// Only a DECLARED leaf binds. The slot family is core's (`projection
-/// .declareTheme`), and a name outside it would need a slot nobody declared —
-/// refused out loud rather than accepted and silently doing nothing.
-///
-/// A value that is not a class name is left alone: the palette entries
-/// (`accent`, `cursor`, `syn_comment`) share this namespace and are read by the
-/// renderer, not by the container.
-fn applyTheme(
-    ctx: *command.Context,
-    leaf: []const u8,
-    class: []const u8,
-    owner: []const u8,
-    tier: container_mod.Tier,
-) void {
-    const projection = @import("projection.zig");
-    // The staged value is FRAMED (`weft.set` carries a list, one record for a
-    // plain string), which is why the binding takes the record and not the
-    // blob: `resolveOne`'s consumer compares the class by name, and a
-    // length-prefixed "emphasis" is not one.
-    const value = framed.first(class) orelse return;
-    const parsed = std.meta.stringToEnum(projection.Class, value) orelse return;
-    inline for (projection.default_theme) |row| {
-        if (std.mem.eql(u8, row.leaf, leaf)) {
-            ctx.actions.container.bind(.{
-                .slot = projection.theme_slot_prefix ++ row.leaf,
-                // `@tagName`, not the manifest's bytes: the container BORROWS a
-                // provider's payload, and the manifest is destroyed as soon as
-                // it has been applied. A class name is one of a closed set, so
-                // there is a static spelling of it to point at.
-                .provider = .{ .value = @tagName(parsed) },
-                .predicate = .{ .all = &.{} },
-                .tier = tier,
-                .owner = owner,
-            }) catch {};
-            return;
-        }
-    }
-    std.log.warn(
-        "config: weft.set(\"theme\", \"{s}\", \"{s}\") — no such theme leaf; it is not a row role core knows",
-        .{ leaf, class },
-    );
-}
-
 /// `weft.menu(name)` application (see quickjs.zig's old `cMenu` doc — same
 /// behavior, now tier-prioritized instead of hardcoded to config tier, so an
 /// imported manifest's `weft.menu` gets the imported rung too).
@@ -1413,13 +1389,13 @@ test "manifest: staging + hash — two identical manifests hash identically" {
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
     try a.addBind("normal", "j", &.{"cursor-down"});
-    try a.addValue("theme", "accent", "#8ec07c");
+    try a.addValue("palette", "accent", "#8ec07c");
     try a.addPlugin("vim");
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
     try b.addBind("normal", "j", &.{"cursor-down"});
-    try b.addValue("theme", "accent", "#8ec07c");
+    try b.addValue("palette", "accent", "#8ec07c");
     try b.addPlugin("vim");
 
     try t.expectEqual(a.hash(), b.hash());

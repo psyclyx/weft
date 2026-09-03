@@ -273,6 +273,10 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // theme restyles a diff, or styles a role core never heard of, the same
     // way anything else overrides anything else.
     try projection_mod.declareTheme(&self.container);
+    // And the level below it: what a named colour actually IS. Core declares
+    // the vocabulary and binds none of it — an unbound slot means "whatever
+    // the view ships", so there is no second copy of the palette to drift.
+    try @import("palette.zig").declare(&self.container);
     try self.intent.init(gpa);
     errdefer self.intent.deinit(gpa);
     try self.intent.attachActions(gpa, &self.actions);

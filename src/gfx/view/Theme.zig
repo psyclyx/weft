@@ -48,53 +48,36 @@ pub fn linearized(self: Theme) Theme {
     return out;
 }
 
-/// Set the named color from an sRGB hex string ("#rrggbb" or "rrggbb"),
-/// re-linearizing just that field — the mutation owns the sRGB→linear cost,
-/// so the per-span draw path stays a plain lookup. Config's `weft.color` and
-/// the `set-color` command both route here; theme is DATA, not a constant.
-/// Returns false on an unknown name or malformed hex (caller may warn).
-pub fn setColor(self: *Theme, name: []const u8, hex: []const u8) bool {
-    const srgb = parseHexColor(hex) orelse return false;
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) {
-            @field(self, f.name) = scene.srgbToLinearColor(srgb);
-            return true;
-        }
+// `Theme`'s fields ARE the palette vocabulary, so the two must not drift:
+// adding a colour here without making it addressable from a config stops
+// compiling rather than shipping an unthemeable colour.
+comptime {
+    const fields = @typeInfo(Theme).@"struct".fields;
+    if (fields.len != core.palette.names.len)
+        @compileError("Theme fields and core.palette.names differ in length");
+    for (fields, core.palette.names) |f, n| {
+        if (!std.mem.eql(u8, f.name, n))
+            @compileError("Theme field '" ++ f.name ++ "' does not match palette name '" ++ n ++ "'");
     }
-    return false;
 }
 
-/// Apply every configured palette override — `weft.set("theme", "<field>",
-/// "#rrggbb")` — over the shipped defaults.
+/// Re-read every `palette/<name>` binding over the shipped defaults.
 ///
-/// The walk lives HERE, next to the fields it walks, rather than in `main.zig`
-/// where it used to sit: a comptime `inline for` over `Theme`'s own struct
-/// fields is the palette's business, and `main` had no reason to know the
+/// This is a RESOLVE, not a one-shot apply: it starts from `self` and only
+/// overwrites what something has actually bound, so calling it again after a
+/// rebind is how a colourscheme changes live. The walk lives here, next to the
+/// fields it walks — `main.zig` used to do it, and had no reason to know the
 /// palette's shape in order to start an editor.
 ///
-/// Why it reads the kv store rather than binding `palette/<name>` into the
-/// container the way `theme/<leaf>` binds a row role: `Container.bind` BORROWS
-/// a provider's payload (only slot names are duped), and a config-supplied hex
-/// string dies with the manifest that carried it. `theme/<leaf>` dodges this by
-/// binding `@tagName` of a closed enum — a static spelling that a colour has no
-/// equivalent of. The kv store owns its bytes for the process's life, so it is
-/// the honest owner until the palette gets one of its own.
-pub fn applyOverrides(self: *Theme, kv: *const core.kv.Store) void {
+/// Resolution happens HERE and not per-span for the reason the module doc
+/// gives: the mutation owns the sRGB→linear cost so the draw path stays a
+/// plain field read.
+pub fn resolve(self: *Theme, container: *const core.container.Container, facts: core.facts.Facts) void {
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
-        if (kv.get("theme", f.name)) |blob| {
-            if (core.framed.first(blob)) |hex| _ = self.setColor(f.name, hex);
+        if (core.palette.colorFor(container, facts, f.name)) |srgb| {
+            @field(self, f.name) = scene.srgbToLinearColor(srgb);
         }
     }
-}
-
-fn parseHexColor(hex: []const u8) ?[4]f32 {
-    const h = if (hex.len > 0 and hex[0] == '#') hex[1..] else hex;
-    if (h.len != 6) return null;
-    const r = std.fmt.parseInt(u8, h[0..2], 16) catch return null;
-    const g = std.fmt.parseInt(u8, h[2..4], 16) catch return null;
-    const b = std.fmt.parseInt(u8, h[4..6], 16) catch return null;
-    const s = 1.0 / 255.0;
-    return .{ @as(f32, @floatFromInt(r)) * s, @as(f32, @floatFromInt(g)) * s, @as(f32, @floatFromInt(b)) * s, 1 };
 }
 
 /// Map a surface span's semantic role to a color, so a colorscheme restyles
@@ -158,19 +141,46 @@ pub fn styleColor(self: *const Theme, class: StyleClass) [4]f32 {
 
 const testing = std.testing;
 
-test "theme: setColor updates a named field from hex; rejects bad input" {
-    var th: Theme = .{};
-    // sRGB #ff0000 → stored linearized: red ~1.0, green/blue 0.
-    try testing.expect(th.setColor("accent", "#ff0000"));
+test "theme: a bound palette slot overrides a shipped default; the rest stand" {
+    var c = core.container.Container.init(testing.allocator);
+    defer c.deinit();
+    try core.palette.declare(&c);
+
+    var th: Theme = (Theme{}).linearized();
+    const shipped_bg = th.background;
+
+    try c.bind(.{
+        .slot = core.palette.slotFor("accent").?,
+        .provider = .{ .value = "#ff0000" },
+        .predicate = .{ .all = &.{} },
+        .tier = .config,
+        .owner = "test",
+    });
+    th.resolve(&c, .{});
+
+    // The bound one moved...
     try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[0], 0.001);
     try testing.expectApproxEqAbs(@as(f32, 0.0), th.accent[1], 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[3], 0.001); // alpha
-    // Works without the leading '#', too.
-    try testing.expect(th.setColor("background", "000000"));
-    try testing.expectApproxEqAbs(@as(f32, 0.0), th.background[0], 0.001);
-    // Unknown field and malformed hex are rejected (and leave the field alone).
-    try testing.expect(!th.setColor("nope", "#ffffff"));
-    try testing.expect(!th.setColor("accent", "zzzzzz"));
-    try testing.expect(!th.setColor("accent", "#12"));
-    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[0], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[3], 0.001);
+    // ...and nothing else did: an unbound slot means "whatever weft ships".
+    try testing.expectEqual(shipped_bg, th.background);
+}
+
+test "theme: a malformed colour leaves the default standing" {
+    var c = core.container.Container.init(testing.allocator);
+    defer c.deinit();
+    try core.palette.declare(&c);
+
+    var th: Theme = (Theme{}).linearized();
+    const shipped = th.accent;
+    try c.bind(.{
+        .slot = core.palette.slotFor("accent").?,
+        .provider = .{ .value = "zzzzzz" },
+        .predicate = .{ .all = &.{} },
+        .tier = .config,
+        .owner = "test",
+    });
+    th.resolve(&c, .{});
+    // Not black, not garbage — unchanged. A typo must not blank the editor.
+    try testing.expectEqual(shipped, th.accent);
 }

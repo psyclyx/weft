@@ -340,6 +340,23 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
             core.projection.Class.normal,
             core.projection.styleForIn(container, no_facts, "some.plugin.thing"),
         );
+
+        // AND THE COLOUR HALF OF THE SAME VERB. `weft.set("theme", "accent",
+        // "#8ec07c")` is the level below a row role: what a named colour IS.
+        // It used to be dropped on the floor here and re-read out of the kv
+        // store by `main.zig` at startup, because a binding's payload was
+        // borrowed and a hex string had no static spelling to bind. Asserted
+        // through `colorFor` — the function `Theme.resolve` calls — for the
+        // same reason the block above asserts through `styleForIn`.
+        const accent = core.palette.colorFor(container, no_facts, "accent") orelse
+            return error.ConfigAccentNotBound;
+        // #8ec07c
+        try t.expectApproxEqAbs(@as(f32, 0x8e) / 255.0, accent[0], 0.001);
+        try t.expectApproxEqAbs(@as(f32, 0xc0) / 255.0, accent[1], 0.001);
+        try t.expectApproxEqAbs(@as(f32, 0x7c) / 255.0, accent[2], 0.001);
+        // A colour the config never mentioned stays unbound, so the view keeps
+        // whatever it ships rather than resolving to black.
+        try t.expect(core.palette.colorFor(container, no_facts, "md_link") == null);
     }
 
     // Every open structured-view action exposed by the sample configuration
@@ -940,10 +957,10 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     try t.expect(std.mem.indexOf(u8, raw_a, "200") != null);
 
     // 4. Theme values — a DIFFERENT config-value namespace than which_key's,
-    //    exercising the "theme" core namespace side of the ownership check.
+    //    exercising the "palette" core namespace side of the ownership check.
     inline for (.{ "accent", "cursor", "selection" }) |field| {
-        const va = ed_a.config_kv.get("theme", field).?;
-        const vb = ed_b.config_kv.get("theme", field).?;
+        const va = ed_a.config_kv.get("palette", field).?;
+        const vb = ed_b.config_kv.get("palette", field).?;
         try t.expectEqualStrings(va, vb);
     }
 
@@ -1712,7 +1729,7 @@ test "e2e/config: the showcased weft.set values land under their owners" {
         .{ .owner = "which_key", .key = "placement", .value = "corner" },
         .{ .owner = "editor", .key = "flash-ms", .value = "150" }, // core knobs
         .{ .owner = "collab", .key = "share-presence", .value = "on" }, // the app service
-        .{ .owner = "theme", .key = "accent", .value = "#8ec07c" },
+        .{ .owner = "palette", .key = "accent", .value = "#8ec07c" }, // the colour family
     };
     for (values) |v| {
         const blob = ed.config_kv.get(v.owner, v.key) orelse {

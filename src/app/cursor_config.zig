@@ -52,10 +52,24 @@ fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
     return null;
 }
 
+/// `set-color <name> <#rrggbb>` — a BINDING at the transient tier, then a
+/// re-resolve, rather than a poke at the view's struct. So the interactive
+/// command and a config's `weft.set("theme", ...)` are the same mechanism at
+/// different tiers, and the interactive one wins because `transient` outranks
+/// `config` — which is what makes trying a colour out at runtime work without
+/// losing it to the next config apply.
 pub fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = ctx;
     const v: *view_mod.View = @ptrCast(@alignCast(data.?));
-    if (!v.theme.setColor(args[0].string, args[1].string)) return error.InvalidArgument;
+    const slot = core.palette.slotFor(args[0].string) orelse return error.InvalidArgument;
+    if (core.palette.parseHex(args[1].string) == null) return error.InvalidArgument;
+    ctx.actions.container.bind(.{
+        .slot = slot,
+        .provider = .{ .value = args[1].string },
+        .predicate = .{ .all = &.{} },
+        .tier = .transient,
+        .owner = "set-color",
+    }) catch return error.InvalidArgument;
+    v.theme.resolve(ctx.actions.container, ctx.capturedCtx().mergedFacts());
     return .nil;
 }
 

@@ -483,7 +483,7 @@ pub fn main(init: std.process.Init) !void {
         .handler = cursor_config.setColorHandler,
         .data = view,
     });
-    view.theme.applyOverrides(&session.system.config_kv);
+    view.theme.resolve(&session.system.container, .{});
 
     // Liveness, the last-announced host fingerprint, the self-reconnect handle,
     // and the interactive-connect handle/hostport all live on `collab_state` now

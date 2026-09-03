@@ -231,8 +231,44 @@ pub const Container = struct {
     pub fn deinit(self: *Container) void {
         for (self.slots.keys()) |k| self.gpa.free(k);
         self.slots.deinit(self.gpa);
+        for (self.bindings.items) |b| freePayload(self.gpa, b.provider);
         self.bindings.deinit(self.gpa);
         self.* = undefined;
+    }
+
+    /// Copy a provider's STRING payload into container-owned memory.
+    ///
+    /// Slot names have always been duped (`declareSlot`); payloads were not,
+    /// which made "your bytes must outlive the binding" an invariant nothing
+    /// enforced. Every caller with a dynamic payload had to find a static
+    /// spelling for it — `manifest.zig`'s theme binding reaches for
+    /// `@tagName` of a closed enum precisely because a config string would
+    /// dangle when its manifest is freed. That works right up until the value
+    /// is one no enum spells, like a colour, and then there is no move left.
+    ///
+    /// The erased handle variants (`ui_provider`'s `call`/`ctx`,
+    /// `caps_provider`'s `seq`, `schema_provider`'s `seq`) stay borrowed and
+    /// binder-owned: `Container` never dereferences them, and duping a
+    /// function pointer would mean nothing. Only the bytes it stores get
+    /// copied.
+    fn dupePayload(gpa: Allocator, p: ProviderRef) Allocator.Error!ProviderRef {
+        return switch (p) {
+            .command => |s| .{ .command = try gpa.dupe(u8, s) },
+            .value => |s| .{ .value = try gpa.dupe(u8, s) },
+            .caps_provider => |c| .{ .caps_provider = .{ .id = try gpa.dupe(u8, c.id), .seq = c.seq } },
+            .schema_provider => |c| .{ .schema_provider = .{ .owner = try gpa.dupe(u8, c.owner), .seq = c.seq } },
+            .ui_provider => p,
+        };
+    }
+
+    fn freePayload(gpa: Allocator, p: ProviderRef) void {
+        switch (p) {
+            .command => |s| gpa.free(s),
+            .value => |s| gpa.free(s),
+            .caps_provider => |c| gpa.free(c.id),
+            .schema_provider => |c| gpa.free(c.owner),
+            .ui_provider => {},
+        }
     }
 
     /// Declare (or idempotently re-declare) a slot. A manifest/plugin may
@@ -274,7 +310,18 @@ pub const Container = struct {
                 return error.SlotCollision;
             }
         }
-        try self.bindings.append(self.gpa, binding);
+        var owned = binding;
+        // Point at the DECLARATION's name, which `declareSlot` already duped
+        // and the container already owns for as long as the slot exists. The
+        // caller's spelling was equal to it by construction (`slots.get`
+        // matched), so this changes no behaviour — it removes the requirement
+        // that a binder hold a static string. Together with the payload dupe
+        // below, that is what lets a slot name be COMPUTED (`ns ++ "/" ++ key`
+        // out of a config) instead of comptime-concatenated per known family.
+        owned.slot = decl.name;
+        owned.provider = try dupePayload(self.gpa, binding.provider);
+        errdefer freePayload(self.gpa, owned.provider);
+        try self.bindings.append(self.gpa, owned);
         self.epoch +%= 1;
     }
 
@@ -308,6 +355,7 @@ pub const Container = struct {
         var i: usize = 0;
         while (i < self.bindings.items.len) {
             if (self.bindings.items[i].domain == domain and std.mem.startsWith(u8, self.bindings.items[i].owner, prefix)) {
+                freePayload(self.gpa, self.bindings.items[i].provider);
                 _ = self.bindings.swapRemove(i);
             } else i += 1;
         }
@@ -330,6 +378,7 @@ pub const Container = struct {
         var i: usize = 0;
         while (i < self.bindings.items.len) {
             if (self.bindings.items[i].domain == domain and std.mem.eql(u8, self.bindings.items[i].owner, owner)) {
+                freePayload(self.gpa, self.bindings.items[i].provider);
                 _ = self.bindings.swapRemove(i);
             } else i += 1;
         }

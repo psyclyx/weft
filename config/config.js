@@ -511,14 +511,21 @@ weft.bind("insert", "braceright", "pair-close-brace");
 weft.bind("insert", "bracketright", "pair-close-bracket");
 
 // ── Theme ────────────────────────────────────────────────────────────
-// Theme is data: override any Theme field by name with an sRGB hex. A whole
-// colorscheme is just a block of these — a fragment you weft.use(); the
-// runtime `set-color` command does the same thing live.
-weft.set("theme", "accent", "#8ec07c");
-weft.set("theme", "cursor", "#fabd2f");
-weft.set("theme", "selection", "#3c4a5e");
-weft.set("theme", "syn_comment", "#7c6f64");
-weft.set("theme", "diag_error", "#fb4934");
+// TWO FAMILIES, and the namespace says which. `weft.set(ns, key, value)` binds
+// the slot `ns/key` — that is the whole rule, and core's config applier knows
+// nothing beyond it. Whoever DECLARED the slot reads the value:
+//
+//   palette/<name>  what a colour IS      — an sRGB hex, read by the renderer
+//   theme/<role>    how a ROW ROLE reads  — a style class, read by projection
+//
+// A whole colorscheme is just a block of the first kind — a fragment you
+// weft.use(); the runtime `set-color` command binds the same slot live, at a
+// tier that outranks this file.
+weft.set("palette", "accent", "#8ec07c");
+weft.set("palette", "cursor", "#fabd2f");
+weft.set("palette", "selection", "#3c4a5e");
+weft.set("palette", "syn_comment", "#7c6f64");
+weft.set("palette", "diag_error", "#fb4934");
 
 // A ROW ROLE is themed by its last dotted segment, so one line covers every
 // producer that calls its rows the same thing: `git.hunk` and `fs.hunk` are

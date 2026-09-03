@@ -23,6 +23,7 @@ pub const task = @import("task.zig");
 pub const async_loop = @import("async.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const framed = @import("framed.zig");
+pub const palette = @import("palette.zig");
 pub const kv = @import("kv.zig");
 pub const kv_file = @import("kv_file.zig");
 pub const proc = @import("proc.zig");

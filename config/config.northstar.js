@@ -368,11 +368,11 @@ weft.bind("insert", "bracketright", "pair-close-bracket");
 // ── Theme: per-key value bindings on the `theme` slot, config priority over
 // the core defaults. "A colorscheme is a block of these" now has a precise
 // meaning — a manifest fragment you weft.use().
-weft.set("theme", "accent", "#8ec07c");
-weft.set("theme", "cursor", "#fabd2f");
-weft.set("theme", "selection", "#3c4a5e");
-weft.set("theme", "syn_comment", "#7c6f64");
-weft.set("theme", "diag_error", "#fb4934");
+weft.set("palette", "accent", "#8ec07c");
+weft.set("palette", "cursor", "#fabd2f");
+weft.set("palette", "selection", "#3c4a5e");
+weft.set("palette", "syn_comment", "#7c6f64");
+weft.set("palette", "diag_error", "#fb4934");
 
 // A ROW ROLE is themed by its last dotted segment, so one line covers every
 // producer that calls its rows the same thing: `git.hunk` and `fs.hunk` are

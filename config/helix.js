@@ -26,13 +26,13 @@ weft.set("which_key", "delay-ms", "350");
 weft.bind("global", "F1", "which-key-now");
 
 // A gruvbox-dark-ish theme (theme is data — a colorscheme is just a block).
-weft.set("theme", "background", "#282828");
-weft.set("theme", "foreground", "#ebdbb2");
-weft.set("theme", "accent", "#b8bb26");
-weft.set("theme", "cursor", "#fe8019");
-weft.set("theme", "selection", "#504945");
-weft.set("theme", "heading", "#fabd2f");
-weft.set("theme", "status", "#a89984");
+weft.set("palette", "background", "#282828");
+weft.set("palette", "foreground", "#ebdbb2");
+weft.set("palette", "accent", "#b8bb26");
+weft.set("palette", "cursor", "#fe8019");
+weft.set("palette", "selection", "#504945");
+weft.set("palette", "heading", "#fabd2f");
+weft.set("palette", "status", "#a89984");
 
 // Doom-style leader as key SEQUENCES in helix-normal — `space f f`, etc. A menu
 // (`space f`) is just a prefix of longer sequences; which-key completes it. No

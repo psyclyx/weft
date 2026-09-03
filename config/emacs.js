@@ -110,10 +110,10 @@ weft.bind("emacs", "C-M-i", "complete");
 weft.bind("emacs", "M-/", "complete");
 
 // Theme as data — a calm light-on-dark block (emacs default-ish).
-weft.set("theme", "background", "#1d1f21");
-weft.set("theme", "foreground", "#c5c8c6");
-weft.set("theme", "accent", "#81a2be");
-weft.set("theme", "cursor", "#c5c8c6");
-weft.set("theme", "selection", "#373b41");
+weft.set("palette", "background", "#1d1f21");
+weft.set("palette", "foreground", "#c5c8c6");
+weft.set("palette", "accent", "#81a2be");
+weft.set("palette", "cursor", "#c5c8c6");
+weft.set("palette", "selection", "#373b41");
 
 weft.echo("weft: emacs config — C-x/C-c chords, M-x palette, C-x g git");
