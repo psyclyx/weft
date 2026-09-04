@@ -45,6 +45,10 @@ const census_mod = @import("census.zig");
 /// just an arity slip.
 pub const ValType = enum { i32, u32 };
 
+pub const abi_major = "1";
+pub const abi_namespace = "weft:abi/1";
+pub const export_prefix = "weft:abi/1/";
+
 /// Which `wasm_host/*.zig` module owns an entry's handler. Also the table's
 /// sort key: entries below are grouped contiguously (not call-historical
 /// order) so a reviewer can see one module's whole surface at a glance.
@@ -481,12 +485,15 @@ pub const imports = [_]Entry{
 /// SDK), and its signature crosses the wasm boundary where Zig's comptime
 /// cannot reach (the guest may not even be Zig — see quickjs.zig). That
 /// boundary is a REAL limit stated up front, not fudged.
+pub const ExportTransport = enum { full_plugin, run_guest };
+
 pub const Export = struct {
     name: []const u8,
     operation: census_mod.Operation = .{},
     params: []const ValType,
     results: []const ValType,
     required: bool,
+    transport: ExportTransport = .full_plugin,
     doc: []const u8,
 };
 
@@ -499,7 +506,7 @@ pub const Export = struct {
 pub const exports = [_]Export{
     .{ .name = "describe", .params = &.{}, .results = &.{}, .required = false, .doc = "describe-phase: declare commands/capabilities/perms (no authority yet); a static-manifest guest may omit it" },
     .{ .name = "init", .params = &.{}, .results = &.{}, .required = true, .doc = "register commands/keymap/etc, cross-checked against describe()'s declarations" },
-    .{ .name = "run", .params = &.{}, .results = &.{}, .required = true, .doc = "the milestone-2 minimal-ABI entrypoint (runGuest's one-shot guest, not the full plugin lifecycle)" },
+    .{ .name = "run", .params = &.{}, .results = &.{}, .required = true, .transport = .run_guest, .doc = "the milestone-2 minimal-ABI entrypoint (runGuest's one-shot guest, not the full plugin lifecycle)" },
     .{ .name = "on_command", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "dispatch a registered command by id; args/result cross via wl_arg_*/wl_set_result_*" },
     .{ .name = "on_complete", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a completion session (handle); missing/trapped -> the host declines it" },
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
@@ -523,6 +530,26 @@ pub const exports = [_]Export{
     .{ .name = "on_semantic_target_open", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "open one revision-stamped located target through a tokenized handler" },
     .{ .name = "on_semantic_target_settle", .params = &.{ .i32, .i32, .i32, .i32, .i32 }, .results = &.{}, .required = false, .doc = "settle one provisional target view after core admission and focus" },
     .{ .name = "on_semantic_relation_query", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized named-relation query synchronously" },
+};
+
+pub const legacy_callback_names = [_][]const u8{
+    "describe",
+    "init",
+    "on_command",
+    "on_complete",
+    "on_pick_accept",
+    "on_menu",
+    "on_activate",
+    "on_poll",
+    "on_fill_token",
+    "on_exec",
+    "on_slot_fire",
+    "on_semantic_field_edit",
+    "on_semantic_action",
+    "on_semantic_target_probe",
+    "on_semantic_target_open",
+    "on_semantic_target_settle",
+    "on_semantic_relation_query",
 };
 
 const max_import_count: usize = 231;
@@ -653,4 +680,36 @@ test "membrane contract data: every export entry is well-formed, documented, and
         try t.expect(!gop.found_existing);
     }
     try t.expectEqual(@as(usize, max_export_count), census.exports);
+}
+
+test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini callback" {
+    try t.expectEqualStrings("1", abi_major);
+    try t.expectEqualStrings("weft:abi/1", abi_namespace);
+    try t.expectEqualStrings("weft:abi/1/", export_prefix);
+    var full: usize = 0;
+    var mini: usize = 0;
+    for (exports) |entry| switch (entry.transport) {
+        .full_plugin => {
+            full += 1;
+            try t.expect(!std.mem.eql(u8, entry.name, "run"));
+        },
+        .run_guest => {
+            mini += 1;
+            try t.expectEqualStrings("run", entry.name);
+        },
+    };
+    try t.expectEqual(@as(usize, 17), full);
+    try t.expectEqual(@as(usize, 1), mini);
+    try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
+    for (legacy_callback_names, 0..) |name, i| {
+        var found = false;
+        for (exports) |entry| {
+            if (entry.transport == .full_plugin and std.mem.eql(u8, name, entry.name)) found = true;
+        }
+        try t.expect(found);
+        for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
+    }
+    try t.expectEqual(@as(usize, 231), census.imports);
+    try t.expectEqual(@as(usize, 18), census.exports);
+    try t.expectEqual(@as(usize, 249), census.semantic_operations);
 }

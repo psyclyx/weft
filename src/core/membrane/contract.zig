@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
+const preflight = @import("../wasm_abi/preflight.zig");
 const HostFn = wasm.Linker.HostFn;
 
 const contract_data = @import("weft_membrane");
@@ -399,6 +400,58 @@ fn zip() [contract_data.imports.len]Entry {
 /// mirror the extern in src/plugin_sdk/root.zig by hand (comptime-verified, see
 /// that file).
 pub const imports: [contract_data.imports.len]Entry = zip();
+
+fn wasmType(comptime params: []const contract_data.ValType, comptime results: []const contract_data.ValType) wasm.ExternType {
+    return .{
+        .kind = .function,
+        .params = &([_]wasm.ValKind{.i32} ** params.len),
+        .results = &([_]wasm.ValKind{.i32} ** results.len),
+    };
+}
+
+fn preflightImportRows() [contract_data.imports.len]preflight.ContractRow {
+    var rows: [contract_data.imports.len]preflight.ContractRow = undefined;
+    inline for (contract_data.imports, 0..) |entry, i| {
+        rows[i] = .{ .name = entry.name, .ty = wasmType(entry.params, entry.results) };
+    }
+    return rows;
+}
+
+fn fullPluginExportCount() usize {
+    var count: usize = 0;
+    for (contract_data.exports) |entry| {
+        if (entry.transport == .full_plugin) count += 1;
+    }
+    return count;
+}
+
+const plugin_import_rows = preflightImportRows();
+const plugin_callback_count = fullPluginExportCount();
+
+fn preflightCallbackRows() [plugin_callback_count]preflight.ContractRow {
+    var rows: [plugin_callback_count]preflight.ContractRow = undefined;
+    var i: usize = 0;
+    inline for (contract_data.exports) |entry| {
+        if (entry.transport != .full_plugin) continue;
+        rows[i] = .{ .name = entry.name, .ty = wasmType(entry.params, entry.results) };
+        i += 1;
+    }
+    return rows;
+}
+
+const plugin_callback_rows = preflightCallbackRows();
+
+pub const plugin_abi_contract = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk preflight.Contract.init(.{
+        .major = contract_data.abi_major,
+        .namespace = contract_data.abi_namespace,
+        .export_prefix = contract_data.export_prefix,
+        .imports = &plugin_import_rows,
+        .callbacks = &plugin_callback_rows,
+        .legacy_callbacks = &contract_data.legacy_callback_names,
+    }) catch |err| @compileError("invalid production plugin ABI contract: " ++ @errorName(err));
+};
 
 // ── Host→guest export call sites: typed helpers over contract_data.exports ─
 
