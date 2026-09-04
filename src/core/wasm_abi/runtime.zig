@@ -24,6 +24,35 @@ const wasm_host = @import("../wasm_host.zig");
 const WasmPlugin = @import("WasmPlugin.zig");
 const SyntaxResolver = WasmPlugin.SyntaxResolver;
 const contract = @import("../membrane/contract.zig");
+const preflight = @import("preflight.zig");
+
+const Incompatible = error{IncompatiblePluginAbi};
+
+fn rejectLimit(name: []const u8, refusal: wasm.InterfaceLimit) Incompatible {
+    std.log.warn("plugin '{s}' ABI refused: {s} limit {d}, found {d}", .{
+        name,
+        @tagName(refusal.kind),
+        refusal.limit,
+        refusal.found,
+    });
+    return error.IncompatiblePluginAbi;
+}
+
+fn rejectPreflight(name: []const u8, refusal: preflight.Refusal) Incompatible {
+    switch (refusal) {
+        .legacy_import_namespace => |r| std.log.warn("plugin '{s}' uses legacy import 'weft.{s}'; rebuild for {s}", .{ name, r.field, contract.abi_namespace }),
+        .legacy_callback_export => |r| std.log.warn("plugin '{s}' uses legacy callback '{s}'; rebuild for {s}", .{ name, r.name, contract.abi_namespace }),
+        .malformed_reserved_name => |r| std.log.warn("plugin '{s}' has malformed {s} ABI name '{s}'", .{ name, @tagName(r.direction), r.name }),
+        .unsupported_abi_namespace => |r| std.log.warn("plugin '{s}' requires ABI namespace '{s}', host supports '{s}'", .{ name, r.found, r.supported }),
+        .foreign_import_namespace => |r| std.log.warn("plugin '{s}' imports unsupported module '{s}.{s}'", .{ name, r.module, r.field }),
+        .unknown_import => |r| std.log.warn("plugin '{s}' requires unsupported host import '{s}'", .{ name, r.field }),
+        .unknown_callback => |r| std.log.warn("plugin '{s}' requires unsupported host callback '{s}'", .{ name, r.name }),
+        .import_type_mismatch => |r| std.log.warn("plugin '{s}' host import '{s}' has type {s}, expected {s}", .{ name, r.field, @tagName(r.found.kind), @tagName(r.expected.kind) }),
+        .callback_type_mismatch => |r| std.log.warn("plugin '{s}' callback '{s}' has type {s}, expected {s}", .{ name, r.name, @tagName(r.found.kind), @tagName(r.expected.kind) }),
+        .missing_init => std.log.warn("plugin '{s}' does not export '{s}init'", .{ name, contract.export_prefix }),
+    }
+    return error.IncompatiblePluginAbi;
+}
 
 /// The embedded reference guest (compiled from `src/plugin_fixtures/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
@@ -145,11 +174,22 @@ pub const LoadOptions = struct {
 /// fails the load and rolls the partial plugin back — the same contract
 /// abi.zig enforces in-process.
 pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, opts: LoadOptions) !*WasmPlugin {
-    // `construct` owns the pre-handshake resources via errdefer; once it
-    // returns, `deinit` is the single owner of teardown. Keeping the two
-    // phases in separate functions is what makes that clean: no errdefer in
-    // this scope can double-free what `deinit` already released.
-    const p = try construct(engine, ctx, name, opts, wasm_bytes);
+    var module = try engine.compileCached(wasm_bytes);
+    var module_owned = true;
+    defer if (module_owned) module.deinit();
+
+    var inspection = try module.inspectInterface(ctx.gpa, .{});
+    switch (inspection) {
+        .limit => |refusal| return rejectLimit(name, refusal),
+        .interface => |*interface| {
+            defer interface.deinit();
+            if (preflight.validate(interface, &contract.plugin_abi_contract)) |refusal|
+                return rejectPreflight(name, refusal);
+        },
+    }
+
+    module_owned = false;
+    const p = try construct(engine, ctx, name, opts, module);
 
     // describe(): declarations only (optional export — a guest with a static
     // manifest may skip it). Then [approval], then init(): registrations,
@@ -193,7 +233,9 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
 /// exactly what preceded it, and `p` is destroyed WITHOUT `deinit` on failure
 /// — so no resource is released twice. On success the returned `p` is fully
 /// constructed (instance live) with no pending errdefer.
-fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts: LoadOptions, wasm_bytes: []const u8) !*WasmPlugin {
+fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts: LoadOptions, module_in: wasm.Module) !*WasmPlugin {
+    var module = module_in;
+    errdefer module.deinit();
     const gpa = ctx.gpa;
     const p = try gpa.create(WasmPlugin);
     errdefer gpa.destroy(p);
@@ -203,8 +245,6 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     errdefer if (semantic_owner) |owner| if (ctx.semantic) |services| {
         _ = services.releaseOwner(gpa, owner);
     };
-    var module = try engine.compileCached(wasm_bytes);
-    errdefer module.deinit();
     var linker = try wasm.Linker.init(engine);
     errdefer linker.deinit();
     p.* = .{

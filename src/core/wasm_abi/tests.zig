@@ -562,6 +562,10 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     try runGuest(&engine, &ctx, "wasm.hello", guest_hello);
+    try t.expectError(
+        error.IncompatiblePluginAbi,
+        loadPlugin(&engine, &ctx, "wasm.hello-as-plugin", guest_hello, .{}),
+    );
 
     // The .wasm guest inserted "wasm!" at the cursor through the host edit.
     const s = try buffers.active().textEditor().?.text().toOwnedSlice(gpa);
