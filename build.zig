@@ -950,6 +950,20 @@ pub fn build(b: *std.Build) void {
     const plugin_lib_tiers_tests = b.addTest(.{ .root_module = plugin_lib_tiers_mod });
     contract_step.dependOn(&b.addRunArtifact(plugin_lib_tiers_tests).step);
 
+    const plugin_abi_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/plugin_abi_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addWasm(b, plugin_abi_test_mod);
+    const plugin_abi_tests = b.addTest(.{ .root_module = plugin_abi_test_mod });
+    const plugin_abi_step = b.step(
+        "test-plugin-abi",
+        "Run focused Wasmtime interface and plugin ABI preflight tests",
+    );
+    plugin_abi_step.dependOn(&b.addRunArtifact(plugin_abi_tests).step);
+
     // Compile-only Darwin choke point. Platform-neutral facades are analyzed
     // for the next supported host without trying to run a foreign artifact;
     // the Linux provider is created only in the native `.linux` branch below.

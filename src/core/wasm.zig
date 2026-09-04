@@ -233,6 +233,136 @@ pub const Engine = struct {
     }
 };
 
+pub const ExternKind = enum(u8) {
+    function = c.WASM_EXTERN_FUNC,
+    global = c.WASM_EXTERN_GLOBAL,
+    table = c.WASM_EXTERN_TABLE,
+    memory = c.WASM_EXTERN_MEMORY,
+    tag = c.WASM_EXTERN_TAG,
+    _,
+};
+
+pub const ValKind = enum(u8) {
+    i32 = c.WASM_I32,
+    i64 = c.WASM_I64,
+    f32 = c.WASM_F32,
+    f64 = c.WASM_F64,
+    externref = c.WASM_EXTERNREF,
+    funcref = c.WASM_FUNCREF,
+    _,
+};
+
+pub const ExternType = struct {
+    kind: ExternKind,
+    params: []const ValKind = &.{},
+    results: []const ValKind = &.{},
+};
+
+pub const ModuleImport = struct {
+    module: []const u8,
+    name: []const u8,
+    ty: ExternType,
+};
+
+pub const ModuleExport = struct {
+    name: []const u8,
+    ty: ExternType,
+};
+
+pub const InterfaceLimits = struct {
+    imports: usize = 1024,
+    exports: usize = 1024,
+    name_bytes: usize = 256,
+    params: usize = 16,
+    results: usize = 8,
+    total_name_bytes: usize = 256 * 1024,
+};
+
+pub const LimitKind = enum {
+    imports,
+    exports,
+    module_name,
+    field_name,
+    export_name,
+    params,
+    results,
+    total_name_bytes,
+};
+
+pub const InterfaceLimit = struct {
+    kind: LimitKind,
+    limit: usize,
+    found: usize,
+};
+
+pub const OwnedInterface = struct {
+    arena: std.heap.ArenaAllocator,
+    imports: []const ModuleImport,
+    exports: []const ModuleExport,
+
+    pub fn deinit(self: *OwnedInterface) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const Inspection = union(enum) {
+    interface: OwnedInterface,
+    limit: InterfaceLimit,
+};
+
+fn limit(kind: LimitKind, maximum: usize, found: usize) Inspection {
+    return .{ .limit = .{ .kind = kind, .limit = maximum, .found = found } };
+}
+
+fn nameSlice(name: *const c.wasm_name_t) []const u8 {
+    if (name.size == 0) return &.{};
+    return name.data[0..name.size];
+}
+
+fn checkedNameTotal(total: *usize, n: usize, maximum: usize) ?Inspection {
+    total.* = std.math.add(usize, total.*, n) catch return limit(
+        .total_name_bytes,
+        maximum,
+        std.math.maxInt(usize),
+    );
+    if (total.* > maximum) return limit(.total_name_bytes, maximum, total.*);
+    return null;
+}
+
+fn checkExternLimits(ty: *const c.wasm_externtype_t, limits: InterfaceLimits) ?Inspection {
+    if (c.wasm_externtype_kind(ty) != c.WASM_EXTERN_FUNC) return null;
+    const fn_ty = c.wasm_externtype_as_functype_const(ty).?;
+    const params = c.wasm_functype_params(fn_ty);
+    const results = c.wasm_functype_results(fn_ty);
+    if (params[0].size > limits.params) return limit(.params, limits.params, params[0].size);
+    if (results[0].size > limits.results) return limit(.results, limits.results, results[0].size);
+    return null;
+}
+
+fn copyValKinds(
+    arena: Allocator,
+    values: [*c]const c.wasm_valtype_vec_t,
+) Allocator.Error![]const ValKind {
+    if (values[0].size == 0) return &.{};
+    const out = try arena.alloc(ValKind, values[0].size);
+    for (0..values[0].size) |i| {
+        out[i] = @enumFromInt(c.wasm_valtype_kind(values[0].data[i].?));
+    }
+    return out;
+}
+
+fn copyExternType(arena: Allocator, ty: *const c.wasm_externtype_t) Allocator.Error!ExternType {
+    const kind: ExternKind = @enumFromInt(c.wasm_externtype_kind(ty));
+    if (kind != .function) return .{ .kind = kind };
+    const fn_ty = c.wasm_externtype_as_functype_const(ty).?;
+    return .{
+        .kind = .function,
+        .params = try copyValKinds(arena, c.wasm_functype_params(fn_ty)),
+        .results = try copyValKinds(arena, c.wasm_functype_results(fn_ty)),
+    };
+}
+
 pub const Module = struct {
     module: *c.wasmtime_module_t,
 
@@ -245,6 +375,78 @@ pub const Module = struct {
     /// image), so one compile can serve many owners.
     pub fn clone(self: *const Module) Module {
         return .{ .module = c.wasmtime_module_clone(self.module).? };
+    }
+
+    pub fn inspectInterface(
+        self: *const Module,
+        gpa: Allocator,
+        limits: InterfaceLimits,
+    ) Allocator.Error!Inspection {
+        var raw_imports: c.wasm_importtype_vec_t = undefined;
+        c.wasmtime_module_imports(self.module, &raw_imports);
+        defer c.wasm_importtype_vec_delete(&raw_imports);
+
+        var raw_exports: c.wasm_exporttype_vec_t = undefined;
+        c.wasmtime_module_exports(self.module, &raw_exports);
+        defer c.wasm_exporttype_vec_delete(&raw_exports);
+
+        if (raw_imports.size > limits.imports)
+            return limit(.imports, limits.imports, raw_imports.size);
+        if (raw_exports.size > limits.exports)
+            return limit(.exports, limits.exports, raw_exports.size);
+
+        var total_names: usize = 0;
+        for (0..raw_imports.size) |i| {
+            const entry = raw_imports.data[i].?;
+            const module_name = nameSlice(c.wasm_importtype_module(entry).?);
+            const field_name = nameSlice(c.wasm_importtype_name(entry).?);
+            if (module_name.len > limits.name_bytes)
+                return limit(.module_name, limits.name_bytes, module_name.len);
+            if (field_name.len > limits.name_bytes)
+                return limit(.field_name, limits.name_bytes, field_name.len);
+            if (checkedNameTotal(&total_names, module_name.len, limits.total_name_bytes)) |result|
+                return result;
+            if (checkedNameTotal(&total_names, field_name.len, limits.total_name_bytes)) |result|
+                return result;
+            if (checkExternLimits(c.wasm_importtype_type(entry).?, limits)) |result| return result;
+        }
+        for (0..raw_exports.size) |i| {
+            const entry = raw_exports.data[i].?;
+            const export_name = nameSlice(c.wasm_exporttype_name(entry).?);
+            if (export_name.len > limits.name_bytes)
+                return limit(.export_name, limits.name_bytes, export_name.len);
+            if (checkedNameTotal(&total_names, export_name.len, limits.total_name_bytes)) |result|
+                return result;
+            if (checkExternLimits(c.wasm_exporttype_type(entry).?, limits)) |result| return result;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        const imports = try allocator.alloc(ModuleImport, raw_imports.size);
+        const exports = try allocator.alloc(ModuleExport, raw_exports.size);
+
+        for (0..raw_imports.size) |i| {
+            const entry = raw_imports.data[i].?;
+            imports[i] = .{
+                .module = try allocator.dupe(u8, nameSlice(c.wasm_importtype_module(entry).?)),
+                .name = try allocator.dupe(u8, nameSlice(c.wasm_importtype_name(entry).?)),
+                .ty = try copyExternType(allocator, c.wasm_importtype_type(entry).?),
+            };
+        }
+        for (0..raw_exports.size) |i| {
+            const entry = raw_exports.data[i].?;
+            exports[i] = .{
+                .name = try allocator.dupe(u8, nameSlice(c.wasm_exporttype_name(entry).?)),
+                .ty = try copyExternType(allocator, c.wasm_exporttype_type(entry).?),
+            };
+        }
+
+        return .{ .interface = .{
+            .arena = arena,
+            .imports = imports,
+            .exports = exports,
+        } };
     }
 
     /// Serialize this module's compiled image into an owned byte slice, for the
@@ -604,6 +806,211 @@ const import_wasm = [_]u8{
     0x0a, 0x0a, 0x01, 0x08, 0x00, 0x20, 0x00, 0x10, 0x00,
     0x10, 0x00, 0x0b,
 };
+
+test "wasm: module interface owns import and export function types" {
+    const gpa = t.allocator;
+    var engine = try Engine.init(gpa);
+    defer engine.deinit();
+    var module = try engine.compile(&import_wasm);
+    defer module.deinit();
+
+    var inspection = try module.inspectInterface(gpa, .{});
+    switch (inspection) {
+        .limit => return error.TestUnexpectedResult,
+        .interface => |*interface| {
+            defer interface.deinit();
+            try t.expectEqual(@as(usize, 1), interface.imports.len);
+            try t.expectEqualStrings("env", interface.imports[0].module);
+            try t.expectEqualStrings("host_add1", interface.imports[0].name);
+            try t.expectEqual(ExternKind.function, interface.imports[0].ty.kind);
+            try t.expectEqualSlices(ValKind, &.{.i32}, interface.imports[0].ty.params);
+            try t.expectEqualSlices(ValKind, &.{.i32}, interface.imports[0].ty.results);
+
+            try t.expectEqual(@as(usize, 1), interface.exports.len);
+            try t.expectEqualStrings("run", interface.exports[0].name);
+            try t.expectEqual(ExternKind.function, interface.exports[0].ty.kind);
+            try t.expectEqualSlices(ValKind, &.{.i32}, interface.exports[0].ty.params);
+            try t.expectEqualSlices(ValKind, &.{.i32}, interface.exports[0].ty.results);
+        },
+    }
+}
+
+fn expectInterface(module: *const Module, gpa: Allocator, limits: InterfaceLimits) !OwnedInterface {
+    const inspection = try module.inspectInterface(gpa, limits);
+    return switch (inspection) {
+        .interface => |interface| interface,
+        .limit => error.TestUnexpectedResult,
+    };
+}
+
+fn expectLimit(
+    module: *const Module,
+    limits: InterfaceLimits,
+    kind: LimitKind,
+    maximum: usize,
+    found: usize,
+) !void {
+    var inspection = try module.inspectInterface(t.allocator, limits);
+    switch (inspection) {
+        .interface => |*interface| {
+            interface.deinit();
+            return error.TestUnexpectedResult;
+        },
+        .limit => |got| {
+            try t.expectEqual(kind, got.kind);
+            try t.expectEqual(maximum, got.limit);
+            try t.expectEqual(found, got.found);
+        },
+    }
+}
+
+test "wasm: module interface preserves non-function export kind" {
+    const gpa = t.allocator;
+    var engine = try Engine.init(gpa);
+    defer engine.deinit();
+    var module = try engine.compile(&mem_wasm);
+    defer module.deinit();
+    var interface = try expectInterface(&module, gpa, .{});
+    defer interface.deinit();
+
+    try t.expectEqualStrings("memory", interface.exports[0].name);
+    try t.expectEqual(ExternKind.memory, interface.exports[0].ty.kind);
+    try t.expectEqual(@as(usize, 0), interface.exports[0].ty.params.len);
+    try t.expectEqual(@as(usize, 0), interface.exports[0].ty.results.len);
+}
+
+test "wasm: module interface limits accept equality and refuse limit plus one" {
+    const gpa = t.allocator;
+    var engine = try Engine.init(gpa);
+    defer engine.deinit();
+    var imported = try engine.compile(&import_wasm);
+    defer imported.deinit();
+    var memory = try engine.compile(&mem_wasm);
+    defer memory.deinit();
+
+    var at_limit = try expectInterface(&imported, gpa, .{
+        .imports = 1,
+        .exports = 1,
+        .name_bytes = 9,
+        .params = 1,
+        .results = 1,
+        .total_name_bytes = 15,
+    });
+    at_limit.deinit();
+
+    // Field equality is covered by `host_add1` above. These two checks make
+    // module-name and export-name equality observable independently.
+    try expectLimit(&imported, .{ .name_bytes = 3 }, .field_name, 3, 9);
+    var export_name_at_limit = try expectInterface(&memory, gpa, .{ .name_bytes = 6 });
+    export_name_at_limit.deinit();
+
+    try expectLimit(&imported, .{ .imports = 0 }, .imports, 0, 1);
+    try expectLimit(&memory, .{ .exports = 1 }, .exports, 1, 2);
+    try expectLimit(&imported, .{ .name_bytes = 2 }, .module_name, 2, 3);
+    try expectLimit(&imported, .{ .name_bytes = 8 }, .field_name, 8, 9);
+    try expectLimit(&memory, .{ .name_bytes = 5 }, .export_name, 5, 6);
+    try expectLimit(&imported, .{ .params = 0 }, .params, 0, 1);
+    try expectLimit(&imported, .{ .results = 0 }, .results, 0, 1);
+    try expectLimit(&imported, .{ .total_name_bytes = 14 }, .total_name_bytes, 14, 15);
+}
+
+const empty_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+};
+
+// One imported ()->() function with empty module and field names, exported
+// again under an empty name. Empty names and zero-arity vectors are legal.
+const empty_names_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x05,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x07, 0x04, 0x01,
+    0x00, 0x00, 0x00,
+};
+
+test "wasm: module interface default limits are the approved production bounds" {
+    const limits: InterfaceLimits = .{};
+    try t.expectEqual(@as(usize, 1024), limits.imports);
+    try t.expectEqual(@as(usize, 1024), limits.exports);
+    try t.expectEqual(@as(usize, 256), limits.name_bytes);
+    try t.expectEqual(@as(usize, 16), limits.params);
+    try t.expectEqual(@as(usize, 8), limits.results);
+    try t.expectEqual(@as(usize, 256 * 1024), limits.total_name_bytes);
+}
+
+test "wasm: module interface handles null vectors and legal empty names" {
+    const gpa = t.allocator;
+    var engine = try Engine.init(gpa);
+    defer engine.deinit();
+
+    var empty_module = try engine.compile(&empty_wasm);
+    defer empty_module.deinit();
+    var empty_interface = try expectInterface(&empty_module, gpa, .{});
+    defer empty_interface.deinit();
+    try t.expectEqual(@as(usize, 0), empty_interface.imports.len);
+    try t.expectEqual(@as(usize, 0), empty_interface.exports.len);
+
+    var named_module = try engine.compile(&empty_names_wasm);
+    defer named_module.deinit();
+    var named_interface = try expectInterface(&named_module, gpa, .{});
+    defer named_interface.deinit();
+    try t.expectEqual(@as(usize, 0), named_interface.imports[0].module.len);
+    try t.expectEqual(@as(usize, 0), named_interface.imports[0].name.len);
+    try t.expectEqual(@as(usize, 0), named_interface.imports[0].ty.params.len);
+    try t.expectEqual(@as(usize, 0), named_interface.imports[0].ty.results.len);
+    try t.expectEqual(@as(usize, 0), named_interface.exports[0].name.len);
+}
+
+fn expectSameInterface(a: *const OwnedInterface, b: *const OwnedInterface) !void {
+    try t.expectEqual(a.imports.len, b.imports.len);
+    try t.expectEqual(a.exports.len, b.exports.len);
+    for (a.imports, b.imports) |left, right| {
+        try t.expectEqualStrings(left.module, right.module);
+        try t.expectEqualStrings(left.name, right.name);
+        try t.expectEqual(left.ty.kind, right.ty.kind);
+        try t.expectEqualSlices(ValKind, left.ty.params, right.ty.params);
+        try t.expectEqualSlices(ValKind, left.ty.results, right.ty.results);
+    }
+    for (a.exports, b.exports) |left, right| {
+        try t.expectEqualStrings(left.name, right.name);
+        try t.expectEqual(left.ty.kind, right.ty.kind);
+        try t.expectEqualSlices(ValKind, left.ty.params, right.ty.params);
+        try t.expectEqualSlices(ValKind, left.ty.results, right.ty.results);
+    }
+}
+
+test "wasm: serialized module preserves the inspected interface" {
+    const gpa = t.allocator;
+    var engine = try Engine.init(gpa);
+    defer engine.deinit();
+    var module = try engine.compile(&import_wasm);
+    defer module.deinit();
+    const image = try module.serialize(gpa);
+    defer gpa.free(image);
+    var restored = engine.deserialize(image) orelse return error.TestUnexpectedResult;
+    defer restored.deinit();
+
+    var original_interface = try expectInterface(&module, gpa, .{});
+    defer original_interface.deinit();
+    var restored_interface = try expectInterface(&restored, gpa, .{});
+    defer restored_interface.deinit();
+    try expectSameInterface(&original_interface, &restored_interface);
+}
+
+fn inspectAllocationFailureCase(gpa: Allocator, module: *const Module) !void {
+    var inspection = try module.inspectInterface(gpa, .{});
+    switch (inspection) {
+        .interface => |*interface| interface.deinit(),
+        .limit => return error.TestUnexpectedResult,
+    }
+}
+
+test "wasm: interface inspection frees every partial allocation" {
+    var engine = try Engine.init(t.allocator);
+    defer engine.deinit();
+    var module = try engine.compile(&import_wasm);
+    defer module.deinit();
+    try t.checkAllAllocationFailures(t.allocator, inspectAllocationFailureCase, .{&module});
+}
 
 var host_calls: usize = 0;
 fn hostAdd1(data: ?*anyopaque, caller: *Caller, args: []const i32, results: []i32) void {
