@@ -36,9 +36,9 @@ const bindings = [_]Binding{
     .{ .key = "C-backslash", .intentions = &.{"std.input.break-out"} },
 };
 
-export fn describe() void {}
+fn describe() callconv(.c) void {}
 
-export fn init() void {
+fn init() callconv(.c) void {
     // §10.4: this grammar has ONE state, and it commits nothing — so it is
     // the honest answer for every posture (and a mode a buffer rests in).
     // Declared rather than defaulted: core stamps the pairing on entry
@@ -48,4 +48,9 @@ export fn init() void {
     weft.restingPosture(.structural, mode);
     for (bindings) |b| weft.bindKeys(mode, b.key, b.intentions);
     weft.setMode(mode);
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
 }

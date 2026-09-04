@@ -10,19 +10,25 @@ const weft = @import("weft");
 
 /// Declare-phase (no authority): announce the command the host will cross-check
 /// every `register` against.
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("wasm-mark");
 }
 
 /// Post-approval: register the declared command.
-export fn init() void {
+fn init() callconv(.c) void {
     _ = weft.register("wasm-mark");
 }
 
 /// The host dispatches a registered command back here by id. `wasm-mark`
 /// inserts a marker at the cursor through the host edit gate.
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
     const off = weft.cursor();
     weft.edit(.{ .start = off, .end = off }, "[wasm]");
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

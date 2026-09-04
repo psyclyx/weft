@@ -27,6 +27,22 @@
 
 const std = @import("std");
 const weft = @import("root.zig");
+const contract = @import("weft_membrane");
+
+pub fn exportCallback(comptime logical_name: []const u8, comptime function: anytype) void {
+    const entry = comptime blk: {
+        for (contract.exports) |candidate| {
+            if (candidate.transport == .full_plugin and std.mem.eql(u8, candidate.name, logical_name))
+                break :blk candidate;
+        }
+        @compileError("unknown full-plugin callback: " ++ logical_name);
+    };
+    const function_type = @typeInfo(@TypeOf(function)).pointer.child;
+    const function_info = @typeInfo(function_type).@"fn";
+    if (function_info.params.len != entry.params.len)
+        @compileError("callback arity does not match membrane contract: " ++ logical_name);
+    @export(function, .{ .name = contract.export_prefix ++ logical_name });
+}
 
 /// One command. `call` is the erased entry point — write `weft.thunk(handler)`
 /// rather than a bare function pointer whenever the handler takes arguments.
@@ -150,11 +166,11 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
         }
 
         pub fn exportAll() void {
-            @export(&describeFn, .{ .name = "describe" });
-            @export(&initFn, .{ .name = "init" });
-            @export(&onCommand, .{ .name = "on_command" });
-            @export(&onExec, .{ .name = "on_exec" });
-            @export(&onPickAccept, .{ .name = "on_pick_accept" });
+            exportCallback("describe", &describeFn);
+            exportCallback("init", &initFn);
+            exportCallback("on_command", &onCommand);
+            exportCallback("on_exec", &onExec);
+            exportCallback("on_pick_accept", &onPickAccept);
         }
 
         /// The host id for a command this plugin declared, by name — for the

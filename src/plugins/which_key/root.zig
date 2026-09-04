@@ -158,11 +158,15 @@ fn render() void {
 
 /// Core fires this when a menu mode is entered (open=1) or left (open=0). On
 /// open, the current mode IS the menu; render its first page.
-export fn on_menu(open: u32) void {
+fn on_menu(open: u32) callconv(.c) void {
     if (open == 0) {
         weft.surfaceClose();
         return;
     }
     scroll_off = 0; // a fresh menu starts at the top
     render();
+}
+
+comptime {
+    weft.exportCallback("on_menu", &on_menu);
 }

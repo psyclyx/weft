@@ -8,20 +8,26 @@ const weft = @import("weft");
 
 var id_dup_up: u32 = 0;
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("dup-up");
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     id_dup_up = weft.register("dup-up");
     // Wire a key, as a config would (late-bound: the target resolves at press).
     weft.bindKey("default", "C-d", "dup-up");
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
     // Compose two other commands through the registry — the config-as-glue
     // pattern. Each authors as its own plugin peer, grade-gated.
     weft.run("duplicate-line");
     weft.run("upcase-line");
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

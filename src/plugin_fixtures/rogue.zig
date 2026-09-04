@@ -5,14 +5,20 @@
 
 const weft = @import("weft");
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("declared"); // declares one name…
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     _ = weft.register("undeclared"); // …but registers a different one → reject
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

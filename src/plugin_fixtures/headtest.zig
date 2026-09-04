@@ -52,12 +52,12 @@ const cmds = [_]Cmd{
     .{ .name = "head-capture", .handler = capture },
 };
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.proc);
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     for (cmds) |c| _ = weft.register(c.name);
     // task #19 item 4: a TABLE-CONFIG declaration (system-scoped — Keymap
     // owns it, not Head — membrane/root.zig's `.head_gated` doc), legal from
@@ -68,7 +68,7 @@ export fn init() void {
     weft.restingMode("poked");
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
@@ -130,8 +130,15 @@ fn pollCount() void {
 /// whole call). `poll_count` increments FIRST, so it still counts a real
 /// on_poll firing even though everything after the trap point is dead code
 /// from here on.
-export fn on_poll() void {
+fn on_poll() callconv(.c) void {
     poll_count += 1;
     weft.setMode("polled");
     weft.echo("polled");
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
+    weft.exportCallback("on_poll", &on_poll);
 }

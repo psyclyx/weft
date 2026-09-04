@@ -20,15 +20,15 @@ const weft = @import("weft");
 /// to reach `@intCast`, its neighbours, and an ordinary out-of-range index.
 const bogus = [_]u32{ 0x8000_0000, 0xFFFF_FFFF, 0x7FFF_FFFF, 9999, 1 };
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("hostile-handles");
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     _ = weft.register("hostile-handles");
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
     var scratch: [16]u8 = undefined;
     for (bogus) |h| {
@@ -51,4 +51,10 @@ export fn on_command(id: u32) void {
     }
     // Reached only if every call above was refused rather than fatal.
     weft.echo("survived");
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

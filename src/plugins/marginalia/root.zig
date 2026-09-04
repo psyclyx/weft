@@ -56,14 +56,14 @@ var note_used: usize = 0;
 var table_buf: [1 << 15]u8 = undefined;
 var mode_buf: [1 << 12]u8 = undefined;
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     // No commands: this plugin has no verbs. It answers a question and
     // nothing else, which is also why it needs no permission of its own
     // beyond whatever `fs_read` the config chooses to grant it.
     weft.requestPerm(.fs_read);
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     // BIND, never declare: core declares `ui/pick-annotate` because core has
     // to decode the answers. A second declaration would be ignored anyway
     // (`Container.declareSlot` keeps the first), so binding is the honest
@@ -103,7 +103,7 @@ var keys_storage: [256][]const u8 = undefined;
 /// whichever row happened to come first (see `humanAge`).
 var stats_storage: [256]weft.FsStat = undefined;
 
-export fn on_slot_fire(session: i32) void {
+fn on_slot_fire(session: i32) callconv(.c) void {
     var round = annotate.ask(@bitCast(session)) orelse return;
     const category = categoryOf(round.category);
     if (!enabled(category)) return; // declined — not "answered with blanks"
@@ -290,4 +290,10 @@ fn commandNote(command: []const u8, index: []const u8) []const u8 {
         return std.fmt.bufPrint(&note_buf, "{s}", .{row.key}) catch "";
     }
     return "";
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

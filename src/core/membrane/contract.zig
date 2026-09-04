@@ -31,6 +31,8 @@ const HostFn = wasm.Linker.HostFn;
 const contract_data = @import("weft_membrane");
 pub const ValType = contract_data.ValType;
 pub const Group = contract_data.Group;
+pub const abi_namespace = contract_data.abi_namespace;
+pub const export_prefix = contract_data.export_prefix;
 pub const Perm = contract_data.Perm;
 
 const activation = @import("../wasm_host/activation.zig");
@@ -473,9 +475,10 @@ fn findExport(comptime name: []const u8) contract_data.Export {
 /// call site's own `try`/`catch` (as today) decides what a failure means.
 pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
+    if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (!e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is optional in contract_data.exports — use callOptionalExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(name, &arr);
+    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
 }
 
 /// Call an OPTIONAL guest export (`required = false`, e.g. `on_menu`): a
@@ -488,9 +491,10 @@ pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, a
 /// two patterns differ today; unifying them would be a behavior change).
 pub fn callOptionalExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
+    if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is required in contract_data.exports — use callRequiredExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(name, &arr);
+    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

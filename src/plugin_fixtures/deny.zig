@@ -8,19 +8,25 @@
 
 const weft = @import("weft");
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("go");
     // Deliberately NOT weft.requestPerm(.fs_read) — the point of the test.
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     _ = weft.register("go");
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
     // Must trap before returning here — if it ever returns, mark the result
     // so a regression (silent -1) is visible to the host-side test too.
     _ = weft.fsRead("whatever");
     weft.setResultStr("did not trap");
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

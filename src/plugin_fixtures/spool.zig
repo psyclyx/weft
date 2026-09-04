@@ -19,7 +19,7 @@ const cmds = [_]Cmd{
     .{ .name = "spool-fail", .handler = fail },
 };
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
@@ -27,11 +27,11 @@ export fn describe() void {
     // subprocess a real file needs neither fs_write nor fs_read.
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     for (cmds) |c| _ = weft.register(c.name);
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
@@ -51,4 +51,10 @@ fn ok() void {
 /// of it and prove the temp is gone on the failure path too.
 fn fail() void {
     weft.procSpool("read -r l < {}; printf 'in=%s at=%s' \"$l\" '{}'; exit 3", "goodbye spool\n", "*spool-fail*", 0);
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

@@ -11,15 +11,15 @@ const weft = @import("weft");
 
 const seps = " \t\n\r(){}[].,;:\"'`<>=+-*/\\|&!?@#$%^~";
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCapability("edit/completion");
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     weft.provideCompletion();
 }
 
-export fn on_complete(session: u32) void {
+fn on_complete(session: u32) callconv(.c) void {
     const prefix = weft.completionPrefix();
     if (prefix.len == 0) {
         weft.capsDecline(session);
@@ -35,4 +35,10 @@ export fn on_complete(session: u32) void {
         rank += 1;
     }
     weft.capsCommit(session);
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_complete", &on_complete);
 }

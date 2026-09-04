@@ -119,6 +119,6 @@ pub const initSemanticRelationBridge = semantic_relation.initBridge;
 /// handler are declared; nothing here hand-lists them anymore.
 pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     for (contract.imports) |entry| {
-        try linker.defineFn("weft", entry.name, entry.params.len, entry.results.len, entry.handler, p);
+        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, entry.handler, p);
     }
 }

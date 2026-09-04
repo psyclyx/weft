@@ -1,5 +1,5 @@
 //! `weft` (guest side) — the ABI a `.wasm` plugin sees, and the ONLY door it
-//! has: every call here bottoms out in an `extern "weft"` host import (the
+//! has: every call here bottoms out in an `extern "weft:abi/1"` host import (the
 //! grant), scalars cross as i32/u32, and bulk bytes cross through the guest's
 //! own linear memory — either the host reads `(ptr, len)` out of us (writes:
 //! `edit`, `kvPut`) or fills a scratch buffer we hand it `(ptr, cap)` and
@@ -148,6 +148,7 @@ pub fn requestPerm(perm: Perm) void {
 pub const CommandEntry = @import("plugin.zig").Entry;
 pub const PluginHooks = @import("plugin.zig").Hooks;
 pub const plugin = @import("plugin.zig").plugin;
+pub const exportCallback = @import("plugin.zig").exportCallback;
 pub const thunk = @import("plugin.zig").thunk;
 
 // ── exec: an argv in, (status, stdout, stderr) out ────────────────────

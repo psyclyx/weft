@@ -25,9 +25,9 @@ const fields = [_]schema.Schema.Field{
 };
 pub const badge_schema: schema.Schema = .{ .@"struct" = &fields };
 
-export fn describe() void {}
+fn describe() callconv(.c) void {}
 
-export fn init() void {
+fn init() callconv(.c) void {
     weft.slotDeclare("ui/badge", .query, .ordered_union, &badge_schema);
     weft.slotBind("ui/badge", .{ .all = &.{} }, .plugin, 0);
 
@@ -44,7 +44,7 @@ export fn init() void {
     } }, .plugin, 0);
 }
 
-export fn on_slot_fire(session: i32) void {
+fn on_slot_fire(session: i32) callconv(.c) void {
     const vals = [_]schema.Value{
         .{ .str = "3 failing" },
         .{ .scalar = .{ .u32 = 3 } },
@@ -55,4 +55,10 @@ export fn on_slot_fire(session: i32) void {
         .{ .range = .{ .version = "stale-guest-claimed-version", .start = 10, .end = 14 } },
     };
     weft.payloadPush(@bitCast(session), 1, &badge_schema, .{ .@"struct" = &vals });
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

@@ -106,7 +106,7 @@ pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, w
     try linker.defineFn("weft", "edit", 4, 0, hostEdit, &host);
     var instance = try linker.instantiate(&module);
     defer instance.deinit();
-    try contract.callRequiredExport("run", &instance, .{});
+    try instance.callVoid("run", &.{});
 }
 
 pub const LoadOptions = struct {

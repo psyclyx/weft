@@ -126,7 +126,7 @@ fn initExtra() void {
 
 var tag_storage: [256][]const u8 = undefined;
 
-export fn on_slot_fire(session: i32) void {
+fn on_slot_fire(session: i32) callconv(.c) void {
     var round = annotate.ask(@bitCast(session)) orelse return;
     // Only completion rows. Every other category names rows this plugin
     // cannot resolve, and declining is cheaper than answering with blanks.
@@ -167,7 +167,7 @@ fn kindTag(kind: u8) []const u8 {
 /// provider registration is one; the predicate is per language, resolved here as
 /// "which session serves this buffer". No server for it (or not ready yet) ⇒
 /// decline, so the merge isn't left waiting on us.
-export fn on_complete(session: u32) void {
+fn on_complete(session: u32) callconv(.c) void {
     const s = ensureActive() orelse {
         weft.capsDecline(session);
         return;
@@ -194,7 +194,7 @@ export fn on_complete(session: u32) void {
 /// runs with a real one. `pending_msg` is valid synchronously across the
 /// nested call (nothing re-parses that session's buffer until the NEXT loop
 /// iteration's `conn.next()`).
-export fn on_poll() void {
+fn on_poll() callconv(.c) void {
     // Indexed, and re-reading `sessions.items` each step: the nested `weft.run`
     // below is a real dispatching entry, so what it drives may mint a session
     // and grow the table under us. A session is never removed, so index `i`
@@ -221,7 +221,7 @@ fn lspDeliverInternal() void {
 /// the one that server has open, so diagnostics flow without waiting for a
 /// request. Every OTHER session is left untouched — that is what makes two
 /// languages two independent servers.
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     if (session_mod.pick_n > 0) resetPickTargets();
     weft.decorateClear();
     const s = ensureActive() orelse return;
@@ -917,4 +917,11 @@ fn asInt(v: rpc.Value) ?i64 {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .pick = onPickAccept }).exportAll();
+}
+
+comptime {
+    weft.exportCallback("on_slot_fire", &on_slot_fire);
+    weft.exportCallback("on_complete", &on_complete);
+    weft.exportCallback("on_poll", &on_poll);
+    weft.exportCallback("on_activate", &on_activate);
 }

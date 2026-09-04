@@ -90,7 +90,7 @@ fn describeExtra() void {
 /// as a pushed offer table gets today — there is no cursor-motion feed to
 /// republish against, so `notes-embed-activate` says so when the cursor is not
 /// on an embed line rather than guessing another arm's meaning.
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     const entry = activeEntry() orelse return offerActivate(false);
     offerActivate(refresh(entry) > 0);
 }
@@ -354,4 +354,8 @@ fn release(held: *?Note) void {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+}
+
+comptime {
+    weft.exportCallback("on_activate", &on_activate);
 }

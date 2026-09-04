@@ -41,15 +41,15 @@ var id_read: u32 = 0;
 /// than echoed so the test reads a value instead of scraping an echo line.
 var answer: [256]u8 = undefined;
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.declareCommand("badge-read");
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     id_read = weft.register("badge-read");
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     _ = id;
     const fire = weft.Fire.open("ui/badge", &.{}) orelse {
         weft.setResultStr("no-provider");
@@ -107,4 +107,10 @@ fn decode(payload: []const u8) !Badge {
     const count = try (try cur.field("count") orelse return error.SchemaMismatch).asU32();
     const loc = try (try cur.field("loc") orelse return error.SchemaMismatch).asRange();
     return .{ .text = text, .count = count, .version = loc.version };
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

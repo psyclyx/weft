@@ -8,12 +8,12 @@ const semantic = weft.semantic;
 
 var child: semantic.target.Located = undefined;
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     weft.requestPerm(.fs_read);
     weft.declareCommand("fixture-close-child-directory");
 }
 
-export fn init() void {
+fn init() callconv(.c) void {
     _ = weft.register("fixture-close-child-directory");
     const parent: semantic.target.Located = .{
         .target = .{ .authority = .here, .slot = 0, .generation = 1 },
@@ -43,7 +43,13 @@ export fn init() void {
         !std.mem.eql(u8, entry.name.bytes, descriptor.value.display_name)) unreachable;
 }
 
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     if (id != 0) return;
     weft.setResultInt(if (weft.semanticTargetClose(child.target)) 1 else 0);
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

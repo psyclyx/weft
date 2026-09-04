@@ -65,7 +65,7 @@ fn apply() void {
 /// The environment landed in `*direnv*`. Read it back and publish it FOR THIS
 /// PLACE — the host bound the entry this fill captured, so `envPublish` names
 /// the place the command was run in, not wherever focus has since moved.
-export fn on_fill_token(token: u32) void {
+fn on_fill_token(token: u32) callconv(.c) void {
     if (token != apply_token) return;
     const total = weft.byteLen();
     if (total == 0) return weft.echo("direnv: nothing to apply here");
@@ -100,4 +100,8 @@ export fn on_fill_token(token: u32) void {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+}
+
+comptime {
+    weft.exportCallback("on_fill_token", &on_fill_token);
 }

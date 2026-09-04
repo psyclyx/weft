@@ -39,13 +39,13 @@ const cmds = [_]Cmd{
     .{ .name = "marks-off", .handler = off },
 };
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     for (cmds) |c| weft.declareCommand(c.name);
 }
-export fn init() void {
+fn init() callconv(.c) void {
     for (cmds) |c| _ = weft.register(c.name);
 }
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
@@ -116,4 +116,10 @@ fn off() void {
     const held = slot(entry) orelse return;
     held.*.?.anno.close();
     held.* = null;
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

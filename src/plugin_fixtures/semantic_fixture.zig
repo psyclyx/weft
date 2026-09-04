@@ -9,7 +9,7 @@ var field_ref: semantic.scene.FieldRef = undefined;
 var target_ref: semantic.target.Ref = undefined;
 var view_ref: semantic.view.Ref = undefined;
 
-export fn init() void {
+fn init() callconv(.c) void {
     if (!weft.semanticActionProvider()) unreachable;
     const target_definition: semantic.target.Definition = .{
         .kind = .directory,
@@ -79,7 +79,7 @@ export fn init() void {
 /// immutable descriptor and this guest claims only the synthetic directory
 /// target it published above.  Probes are deliberately total from the host's
 /// perspective; malformed or unrelated requests simply decline.
-export fn on_semantic_target_probe(token: u32) void {
+fn on_semantic_target_probe(token: u32) callconv(.c) void {
     if (token != 77) {
         _ = weft.semanticTargetHandlerProbeNone();
         return;
@@ -103,7 +103,7 @@ export fn on_semantic_target_probe(token: u32) void {
 /// descriptor revision.  The host performs its own revision/ownership checks
 /// after this callback returns; these guest checks make the provider's intent
 /// explicit and keep stale requests from being treated as opens.
-export fn on_semantic_target_open(token: u32) void {
+fn on_semantic_target_open(token: u32) callconv(.c) void {
     if (token != 77) {
         _ = weft.semanticTargetHandlerOpenError(error.Rejected);
         return;
@@ -130,7 +130,7 @@ export fn on_semantic_target_open(token: u32) void {
 /// Relation publication is independent from target handling. This fixture
 /// answers only the named edge for its exact target revision; the response
 /// contains a destination, not an echoed relation name.
-export fn on_semantic_relation_query(token: u32) void {
+fn on_semantic_relation_query(token: u32) callconv(.c) void {
     if (token != 88) {
         _ = weft.semanticRelationRespondNone();
         return;
@@ -158,7 +158,7 @@ fn hasFact(descriptor: semantic.target.Descriptor, name: []const u8, value: []co
     return false;
 }
 
-export fn on_semantic_action() void {
+fn on_semantic_action() callconv(.c) void {
     var request = weft.semanticActionCurrent(weft.allocator) catch return;
     defer request.deinit();
     if (std.mem.eql(u8, request.value.action, "fixture.open")) {
@@ -168,7 +168,7 @@ export fn on_semantic_action() void {
     }
 }
 
-export fn on_semantic_field_edit(token: u32) void {
+fn on_semantic_field_edit(token: u32) callconv(.c) void {
     if (token != 41) return;
     var edit = weft.semanticFieldCurrentEdit(weft.allocator) catch return;
     defer edit.deinit();
@@ -181,4 +181,13 @@ export fn on_semantic_field_edit(token: u32) void {
         },
         .single_line = true,
     }) catch {};
+}
+
+comptime {
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_semantic_target_probe", &on_semantic_target_probe);
+    weft.exportCallback("on_semantic_target_open", &on_semantic_target_open);
+    weft.exportCallback("on_semantic_relation_query", &on_semantic_relation_query);
+    weft.exportCallback("on_semantic_action", &on_semantic_action);
+    weft.exportCallback("on_semantic_field_edit", &on_semantic_field_edit);
 }

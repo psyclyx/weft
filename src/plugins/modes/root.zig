@@ -59,7 +59,7 @@ fn describeExtra() void {
 /// honor. A per-head-aware activation echo is real future work, not solved
 /// here (see `wasm_host/commands.zig`'s doc for the same "no ctx flows in"
 /// limitation `on_menu` documents).
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     const path = weft.activatePath();
     const l = langFor(path) orelse return;
     const msg = std.fmt.bufPrint(&echo_buf, "mode: {s}", .{l.name}) catch return;
@@ -95,4 +95,8 @@ fn runSubst(template: []const u8, path: []const u8) void {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+}
+
+comptime {
+    weft.exportCallback("on_activate", &on_activate);
 }

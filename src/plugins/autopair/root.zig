@@ -118,19 +118,19 @@ const closers = [_]Closer{
 var pair_ids: [pairs.len]u32 = @splat(std.math.maxInt(u32));
 var closer_ids: [closers.len]u32 = @splat(std.math.maxInt(u32));
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     loadPairs();
     loadQuoteLangs();
     for (pairs[0..pairs_len]) |pr| weft.declareCommand(pr.name);
     for (closers) |c| weft.declareCommand(c.name);
 }
-export fn init() void {
+fn init() callconv(.c) void {
     loadPairs();
     loadQuoteLangs();
     for (pairs[0..pairs_len], 0..) |pr, i| pair_ids[i] = weft.register(pr.name);
     for (closers, 0..) |c, i| closer_ids[i] = weft.register(c.name);
 }
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     for (pair_ids[0..pairs_len], 0..) |registered, i| {
         if (registered == id) return insertPair(pairs[i]);
     }
@@ -153,7 +153,7 @@ fn skipClose(ch: u8) void {
     }
 }
 /// Track the focused buffer's extension, for the quote-language check.
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     const path = weft.activatePath();
     if (std.mem.lastIndexOfScalar(u8, path, '.')) |i| {
         cur_ext_len = @min(path.len - i, cur_ext.len);
@@ -187,4 +187,11 @@ fn insertPair(pr: Pair) void {
     @memcpy(buf[pr.open.len..][0..pr.close.len], pr.close);
     weft.edit(.{ .start = off, .end = off }, buf[0..n]);
     weft.jump(off + pr.open.len);
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
+    weft.exportCallback("on_activate", &on_activate);
 }

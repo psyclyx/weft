@@ -48,7 +48,7 @@ comptime {
 /// (`projectRoot`), not a value this plugin has to keep chasing focus to hold
 /// current — and a tool buffer with no path of its own still answers, because
 /// it carries the place of the entry that produced it.
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     _ = recordActive();
 }
 
@@ -125,4 +125,8 @@ fn prepend(list: []const u8, path: []const u8) ?[]const u8 {
 fn countLines(list: []const u8) usize {
     if (list.len == 0) return 0;
     return std.mem.count(u8, list, "\n") + 1;
+}
+
+comptime {
+    weft.exportCallback("on_activate", &on_activate);
 }

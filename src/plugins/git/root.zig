@@ -518,7 +518,7 @@ fn onViewFilled(style: model.ViewStyle) void {
 /// A buffer took focus. One offer table is live for the `git` tool identity,
 /// so it has to describe the repository the user is now looking at — this is
 /// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     if (focusedSession()) |s| model.Repos.routed = s;
 }
 
@@ -1422,3 +1422,7 @@ fn gitRebaseSettle() void {
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────
+
+comptime {
+    weft.exportCallback("on_activate", &on_activate);
+}

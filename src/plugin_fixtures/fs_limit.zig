@@ -34,15 +34,15 @@ const cmds = [_]Cmd{
     .{ .name = "try-exists", .handler = tryExists },
 };
 
-export fn describe() void {
+fn describe() callconv(.c) void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.fs_read);
     weft.requestPerm(.fs_write);
 }
-export fn init() void {
+fn init() callconv(.c) void {
     for (cmds) |c| _ = weft.register(c.name);
 }
-export fn on_command(id: u32) void {
+fn on_command(id: u32) callconv(.c) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
@@ -76,4 +76,10 @@ fn tryWrite() void {
 fn tryExists() void {
     const path = weft.argStr(0) orelse return;
     weft.setResultInt(@intFromEnum(weft.fsExists(path)));
+}
+
+comptime {
+    weft.exportCallback("describe", &describe);
+    weft.exportCallback("init", &init);
+    weft.exportCallback("on_command", &on_command);
 }

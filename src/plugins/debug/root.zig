@@ -24,7 +24,7 @@ const cmds = [_]weft.CommandEntry{
 
 /// The focused buffer changed: paint ITS breakpoints (the decorations layer is
 /// per-buffer, so a switch would otherwise show nothing).
-export fn on_activate() void {
+fn on_activate() callconv(.c) void {
     render();
 }
 
@@ -84,4 +84,8 @@ const Offsets = struct {
 
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
+}
+
+comptime {
+    weft.exportCallback("on_activate", &on_activate);
 }
