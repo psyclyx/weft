@@ -103,16 +103,7 @@ fn spineDraftEnds(ed: *Editor, gpa: std.mem.Allocator, want: []const u8) !bool {
 
 fn spineFocusFilesName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
     _ = gpa;
-    // POINT ON THE NAME, in the text — a listing is a buffer, so "focus this
-    // row" is an ordinary cursor placement rather than a scene focus walk.
-    const view = ed.buffers.active().projection orelse return error.NoFilesView;
-    for (view.nodes.items) |*node| {
-        if (!std.mem.eql(u8, h.Editor.partText(node, "fs.name"), name)) continue;
-        const part = h.Editor.partOf(node, "fs.name") orelse continue;
-        ed.buffers.active().textEditor().?.placeCursor(node.start + part.start);
-        return;
-    }
-    return error.FilesNameNotFound;
+    try ed.focusFilesName(name);
 }
 
 const SpineCollabClock = struct {
@@ -205,8 +196,8 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     ed.runStr("open", ".");
     const listing_id = ed.buffers.active_id;
     const listing = ed.buffers.get(listing_id) orelse return error.NoListing;
-    try t.expect(listing.projection != null);
-    const before = try ed.textAlloc();
+    try t.expect(listing.editor == null);
+    const before = try ed.semanticText(ed.toolView().?);
     defer gpa.free(before);
     try t.expect(std.mem.indexOf(u8, before, "semantic.txt") != null);
 
@@ -222,7 +213,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try t.expectEqualStrings("typed through text buffer", text);
 
     // And the listing is exactly as it was.
-    const after = try ed.buffers.get(listing_id).?.textEditor().?.text().toOwnedSlice(gpa);
+    const after = try ed.semanticText(ed.buffers.get(listing_id).?.semantic_focus.view.?);
     defer gpa.free(after);
     try t.expectEqualStrings(before, after);
 }
@@ -833,7 +824,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    // THE DRAFT IS THE TEXT: what the row says now IS the pending rename.
+    // The field provider owns the pending rename before it is applied.
     try t.expect(try spineDraftEnds(&ed, gpa, "new.txt"));
     // :e! is the generic view.revert action. It restores the provider draft
     // from external authority, without applying anything.
@@ -1386,51 +1377,28 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
     // ── 4. Browse the project through the provider-aware `open` command. ──
-    // The app Session publishes a typed directory target and the composed files
-    // plugin claims it — publishing the listing as its OWN BUFFER, a text
-    // projection. That is what lets a viewport hold it (`presentIn` runs `open`
-    // and puts the resulting buffer in the pane), and it is why browsing is
-    // ordinary text: searchable, yankable, selectable. The input posture
-    // remains Vim's; the browser owns no keymap.
+    // The directory opener presents retained objects in a workspace entry.
+    // The same entry can be placed in a docked viewport.
     const prior_buffer = ed.buffers.active().id;
     ed.runStr("open", ".");
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files:"));
     try t.expectEqualStrings("files", ed.buffers.active().tool);
     const listing = ed.buffers.active();
-    try t.expect(listing.projection != null);
+    try t.expect(listing.editor == null);
 
     // The entries are ROWS with identity: keyed by the model id, roled by what
     // they are, and readable as text.
     {
-        const text = try ed.textAlloc();
+        const text = try ed.semanticText(ed.toolView().?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "app.js") != null);
         try t.expect(std.mem.indexOf(u8, text, "index.html") != null);
     }
-    var saw_file_role = false;
-    for (listing.projection.?.nodes.items) |node|
-        saw_file_role = saw_file_role or std.mem.eql(u8, node.role, "fs.file");
-    try t.expect(saw_file_role);
-
-    // Vim's ordinary j/k motions move point between rows. The plugin does not
-    // need to know that the caller happens to be Vim — and neither does the
-    // caller need to know it is driving a listing rather than a file, which is
-    // the half the scene plane could not give.
-    const rowKey = struct {
-        fn of(b: *core.Buffers.Buffer) []const u8 {
-            const node = b.projection.?.subjectAt(b.textEditor().?.cursorOffset()) orelse return "";
-            return node.key;
-        }
-    }.of;
-    // Point rests on a row, and the row it rests on is an IDENTITY — which is
-    // what the text plane used to lack and the reason a browser had to be a
-    // scene to have one.
-    try t.expect(listing.focusedRole().len > 0);
-    const start_key = rowKey(listing);
+    const start_key = ed.subjectHere().?;
     ed.press("j", "");
-    try t.expect(!std.mem.eql(u8, start_key, rowKey(listing)));
+    try t.expect(start_key != ed.subjectHere().?);
     ed.press("k", "");
-    try t.expectEqualStrings(start_key, rowKey(listing));
+    try t.expectEqual(start_key, ed.subjectHere().?);
     try t.expectEqualStrings("normal", ed.mode());
     proj.shot(&ed, "web-3-files");
 

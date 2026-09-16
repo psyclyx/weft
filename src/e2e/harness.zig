@@ -600,6 +600,12 @@ pub const Editor = struct {
     /// republishing anything. The anchors bracketing the editable span are what
     /// survive the typing, which is exactly how the row ferry reads it back.
     pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
+        if (self.head.semantic_focus.path()) |path| {
+            const provider = self.session.system.semantic.fields.get(path.field orelse return gpa.dupe(u8, "")) orelse return error.StaleField;
+            var field_snapshot = try provider.snapshot(gpa);
+            defer field_snapshot.deinit();
+            return gpa.dupe(u8, field_snapshot.value.bytes);
+        }
         const entry = self.buffers.active();
         const projection_view = entry.projection orelse return gpa.dupe(u8, "");
         const editor = entry.textEditor() orelse return gpa.dupe(u8, "");
@@ -626,6 +632,41 @@ pub const Editor = struct {
     /// a glyph and a separator — a second copy of the producer's own format,
     /// which broke the moment the listing grew a permissions column. The
     /// producer publishes where its parts are; ask it.
+    /// Rendered labels/fields for assertions; never a backing document.
+    pub fn semanticText(self: *Editor, view_ref: semantic_model.view.Ref) ![]u8 {
+        const instance = self.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const rows = try view_mod.semantic.rowsFor(arena.allocator(), .{ .view = view_ref, .root = &instance.scene, .fields = &self.session.system.semantic.fields });
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.gpa);
+        for (rows) |row| {
+            for (row.spans) |span| {
+                try out.appendSlice(self.gpa, span.text);
+                try out.append(self.gpa, ' ');
+            }
+            try out.append(self.gpa, '\n');
+        }
+        return out.toOwnedSlice(self.gpa);
+    }
+
+    pub fn focusFilesName(self: *Editor, name: []const u8) !void {
+        const view_ref = self.toolView() orelse return error.NoFilesView;
+        const instance = self.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
+        for (instance.scene.content.container.children) |row| {
+            for (row.content.container.children) |node| {
+                if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+                var snap = try self.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(self.gpa);
+                defer snap.deinit();
+                if (!std.mem.eql(u8, snap.value.bytes, name)) continue;
+                _ = try self.session.system.semantic.focusView(self.head, self.gpa, view_ref, node.id);
+                try self.session.system.semantic.fields.get(node.content.field.ref).?.edit(snap.value.revision, .{ .start = 0, .end = 0, .replacement = "", .selection_after = .{ .anchor = 0, .caret = 0 } });
+                return;
+            }
+        }
+        return error.FilesNameNotFound;
+    }
+
     pub fn partOf(node: *const core.projection.Node, role: []const u8) ?core.projection.Span {
         for (node.spans.items) |s| {
             if (std.mem.eql(u8, s.role, role)) return s;

@@ -41,6 +41,7 @@ pub const SnapshotEntry = struct {
     revision: []const u8,
     kind: contract.Kind,
     mode: ?u32 = null,
+    size: ?u64 = null,
     contents: []const u8 = &.{},
     link_target: []const u8 = &.{},
 };
@@ -57,6 +58,7 @@ pub const Observation = struct {
     name: []u8,
     kind: contract.Kind,
     mode: ?u32,
+    size: ?u64 = null,
 };
 
 pub const Draft = struct {
@@ -1032,7 +1034,7 @@ fn observationMatches(base: Observation, latest: SnapshotEntry) bool {
 }
 
 fn cloneObservation(gpa: std.mem.Allocator, entry: SnapshotEntry) !Observation {
-    var observation = Observation{ .identity = entry.identity, .revision = &.{}, .name = &.{}, .kind = entry.kind, .mode = entry.mode };
+    var observation = Observation{ .identity = entry.identity, .revision = &.{}, .name = &.{}, .kind = entry.kind, .mode = entry.mode, .size = entry.size };
     errdefer freeObservationWith(gpa, &observation);
     observation.revision = try gpa.dupe(u8, entry.revision);
     observation.name = try gpa.dupe(u8, entry.name);
@@ -1046,6 +1048,7 @@ fn cloneStoredObservation(gpa: std.mem.Allocator, source: Observation) !Observat
         .name = &.{},
         .kind = source.kind,
         .mode = source.mode,
+        .size = source.size,
     };
     errdefer freeObservationWith(gpa, &observation);
     observation.revision = try gpa.dupe(u8, source.revision);

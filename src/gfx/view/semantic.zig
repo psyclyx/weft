@@ -31,6 +31,10 @@ pub const Span = struct {
     column: u16,
     tone: Tone,
     focusable: bool,
+    compact_column: ?u16 = null,
+    compact_below: u16 = 0,
+    hide_below: u16 = 0,
+    selection: ?struct { anchor: usize, caret: usize } = null,
 };
 
 pub const Row = struct {
@@ -98,6 +102,7 @@ const Builder = struct {
     }
 
     fn spanFor(self: *Builder, node: *const semantic.scene.Node, depth: usize, preceding: []const Span) Allocator.Error!Span {
+        var selection: ?struct { anchor: usize, caret: usize } = null;
         const text = switch (node.content) {
             .label => |label| try displayBytes(self.arena, label),
             .action => |action| blk: {
@@ -111,8 +116,20 @@ const Builder = struct {
                 var snapshot = provider.snapshot(self.arena) catch
                     break :blk try self.arena.dupe(u8, "<field unavailable>");
                 defer snapshot.deinit();
-                const bytes = if (snapshot.value.bytes.len == 0) field.placeholder else snapshot.value.bytes;
-                break :blk try displayBytes(self.arena, bytes);
+                const bytes = snapshot.value.bytes;
+                if (self.document.focused != node.id) {
+                    for (node.facts) |fact| if (std.mem.eql(u8, fact.name, "display"))
+                        break :blk try displayBytes(self.arena, fact.value);
+                }
+                if (self.document.active and self.document.focused == node.id) {
+                    const anchor = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.anchor)]);
+                    const caret = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.caret)]);
+                    selection = .{ .anchor = visualWidth(anchor), .caret = visualWidth(caret) };
+                }
+                const displayed = try displayBytes(self.arena, if (bytes.len == 0) field.placeholder else bytes);
+                for (node.facts) |fact| if (std.mem.eql(u8, fact.name, "suffix"))
+                    break :blk try std.fmt.allocPrint(self.arena, "{s}{s}", .{ displayed, fact.value });
+                break :blk displayed;
             },
             .container => unreachable,
         };
@@ -128,6 +145,10 @@ const Builder = struct {
             .column = node.layout.column orelse @intCast(@min(natural_column, std.math.maxInt(u16))),
             .tone = toneFor(node),
             .focusable = node.focusable,
+            .compact_column = numberFact(node, "compact-column"),
+            .compact_below = numberFact(node, "compact-below") orelse 0,
+            .hide_below = numberFact(node, "hide-below") orelse 0,
+            .selection = if (selection) |sel| .{ .anchor = sel.anchor, .caret = sel.caret } else null,
         };
     }
 };
@@ -135,28 +156,31 @@ const Builder = struct {
 /// Render a semantic tool view in the pane body. Text editing, modal state,
 /// and filesystem meaning are absent here; fields and stable focus are the
 /// only behavior-facing inputs.
-pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), document: data.Document, body: region.Rect) ![]const Hit {
+pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), document: data.Document, body: region.Rect, top_row: *usize) ![]const Hit {
     const rows = try rowsFor(scratch, document);
     var hits: std.ArrayList(Hit) = .empty;
     var content = body;
     if (document.title.len != 0 and body.h >= 2 * v.line_h) {
-        const inset = v.cell_w;
-        try popup.propLine(v, scratch, runs, document.title, body.x + inset, body.y + v.ascent, v.theme.accent);
-        try rects.append(scratch, .{
-            .x = body.x + inset,
-            .y = body.y + v.line_h - 1,
-            .w = @max(0, body.w - 2 * inset),
-            .h = 1,
-            .color = v.theme.status,
-        });
-        content = .{
-            .x = body.x + inset,
-            .y = body.y + v.line_h * 1.5,
-            .w = @max(0, body.w - 2 * inset),
-            .h = @max(0, body.h - v.line_h * 1.5),
-        };
+        try popup.propLine(v, scratch, runs, firstCells(document.title, @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w)), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
+        content.y += v.line_h;
+        content.h -= v.line_h;
     }
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows, content, false);
+    content.x += v.cell_w;
+    content.w = @max(0, content.w - v.cell_w);
+    const visible = @max(1, @as(usize, @intFromFloat(@max(0, content.h) / v.line_h)));
+    top_row.* = @min(top_row.*, rows.len -| visible);
+    const reveal = document.active and (v.semantic_last_view == null or !v.semantic_last_view.?.eql(document.view) or v.semantic_last_node != document.focused);
+    if (document.active) {
+        v.semantic_last_view = document.view;
+        v.semantic_last_node = document.focused;
+    }
+    if (reveal) for (rows, 0..) |row, index| {
+        if (!row.focused) continue;
+        if (index < top_row.*) top_row.* = index;
+        if (index >= top_row.* + visible) top_row.* = index + 1 - visible;
+        break;
+    };
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, true);
     return hits.toOwnedSlice(hit_arena);
 }
 
@@ -198,11 +222,31 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
-        if (row.focused) try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = v.theme.selection });
+        if (row.focused) {
+            var color = v.theme.background;
+            for (0..3) |i| color[i] = color[i] * 0.8 + v.theme.selection[i] * 0.2;
+            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = color });
+        }
+        const editing_metadata = for (row.spans) |span| {
+            if (span.selection != null and span.hide_below != 0) break true;
+        } else false;
         for (row.spans) |span| {
-            const x = body.x + @as(f32, @floatFromInt(span.column)) * v.cell_w;
+            const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
+            // Secondary fields remain reachable even when their metadata is
+            // hidden in a narrow pane; focusing one temporarily reveals it.
+            if (cells < span.hide_below and span.selection == null) continue;
+            const column = if (!editing_metadata and cells < span.compact_below) span.compact_column orelse span.column else span.column;
+            const x = body.x + @as(f32, @floatFromInt(column)) * v.cell_w;
             if (clip_width and x >= body.x + body.w) continue;
-            try popup.propLine(v, scratch, runs, span.text, x, y + v.ascent, colorFor(v, span.tone));
+            const available_cells: usize = @intFromFloat(@max(0, body.x + body.w - x) / v.cell_w);
+            if (span.selection) |sel| {
+                const start = @min(@min(sel.anchor, sel.caret), available_cells);
+                const end = @min(@max(sel.anchor, sel.caret), available_cells);
+                if (end > start) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(start)) * v.cell_w, .y = y, .w = @as(f32, @floatFromInt(end - start)) * v.cell_w, .h = v.line_h, .color = v.theme.selection });
+                if (sel.caret < available_cells) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, .y = y, .w = 2, .h = v.line_h, .color = v.theme.cursor });
+            }
+            const text = if (clip_width) firstCells(span.text, available_cells) else span.text;
+            try popup.propLine(v, scratch, runs, text, x, y + v.ascent, colorFor(v, span.tone));
             if (!span.focusable) continue;
             const available = @max(0, body.x + body.w - x);
             const width = @min(available, @max(v.cell_w, @as(f32, @floatFromInt(visualWidth(span.text))) * v.cell_w));
@@ -244,6 +288,20 @@ fn toneFor(node: *const semantic.scene.Node) Tone {
         if (std.mem.eql(u8, fact.value, "symlink")) return .warning;
     };
     return .normal;
+}
+
+fn numberFact(node: *const semantic.scene.Node, name: []const u8) ?u16 {
+    for (node.facts) |fact| if (std.mem.eql(u8, fact.name, name))
+        return std.fmt.parseInt(u16, fact.value, 10) catch null;
+    return null;
+}
+
+fn firstCells(text: []const u8, count: usize) []const u8 {
+    var end: usize = 0;
+    var cells: usize = 0;
+    while (end < text.len and cells < count) : (cells += 1)
+        end += std.unicode.utf8ByteSequenceLength(text[end]) catch 1;
+    return text[0..@min(end, text.len)];
 }
 
 fn visualWidth(text: []const u8) usize {
@@ -320,4 +378,43 @@ test "semantic display escapes hostile raw bytes without changing identity" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqualStrings("a\\n\\xFFé", try displayBytes(arena.allocator(), "a\n\xffé"));
+}
+
+test "field presentation preserves kind styling, suffix, and escaped selection positions" {
+    const view_runtime = @import("weft_view_runtime");
+    const Memory = struct {
+        pub fn snapshot(_: *@This(), gpa: Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+            var result = view_runtime.field.OwnedSnapshot.init(gpa);
+            result.value = .{ .revision = "1", .bytes = "a\né", .selection = .{ .anchor = 1, .caret = 4 } };
+            return result;
+        }
+        pub fn edit(_: *@This(), _: []const u8, _: view_runtime.field.Edit) view_runtime.field.Error!void {}
+    };
+    var memory: Memory = .{};
+    var fields = view_runtime.field.Registry.init(.here);
+    defer fields.deinit(std.testing.allocator);
+    const field = try fields.insert(std.testing.allocator, @enumFromInt(1), .init(&memory));
+    const root: semantic.scene.Node = .{
+        .id = @enumFromInt(2),
+        .facts = &.{ .{ .name = "tone", .value = "accent" }, .{ .name = "suffix", .value = "/" }, .{ .name = "compact-column", .value = "2" }, .{ .name = "compact-below", .value = "60" } },
+        .layout = .{ .column = 23 },
+        .focusable = true,
+        .content = .{ .field = .{ .ref = field } },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const doc: data.Document = .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = root.id, .fields = &fields };
+    const rows = try rowsFor(arena.allocator(), doc);
+    const span = rows[0].spans[0];
+    try std.testing.expectEqualStrings("a\\né/", span.text);
+    try std.testing.expectEqual(Tone.accent, span.tone);
+    try std.testing.expectEqual(@as(usize, 1), span.selection.?.anchor);
+    try std.testing.expectEqual(@as(usize, 4), span.selection.?.caret);
+    try std.testing.expectEqual(@as(u16, 23), span.column);
+    try std.testing.expectEqual(@as(?u16, 2), span.compact_column);
+    var inactive = doc;
+    inactive.active = false;
+    const background = try rowsFor(arena.allocator(), inactive);
+    try std.testing.expectEqualStrings(span.text, background[0].spans[0].text);
+    try std.testing.expect(background[0].spans[0].selection == null);
 }

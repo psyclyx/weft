@@ -86,9 +86,18 @@ fn snapshotEntries(
             .revision = entry.observation.revision.token,
             .kind = entry.observation.kind,
             .mode = entry.observation.metadata.mode,
+            .size = entry.observation.metadata.size,
             .link_target = entry.observation.metadata.link_target orelse &.{},
         };
     }
+    // A fresh browser has a deterministic directory-first listing. Reconcile
+    // still owns identity and preserves an existing draft's deliberate order.
+    std.mem.sort(model.SnapshotEntry, entries, {}, struct {
+        fn less(_: void, a: model.SnapshotEntry, b: model.SnapshotEntry) bool {
+            if ((a.kind == .directory) != (b.kind == .directory)) return a.kind == .directory;
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.less);
     return entries;
 }
 

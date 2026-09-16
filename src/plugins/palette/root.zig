@@ -139,7 +139,7 @@ fn palette() void {
 /// summary its author wrote. Before this the palette listed the whole registry,
 /// which is ~330 rows of which most are keystrokes (`vim-append`,
 /// `motion.doc-end`, `pair-paren`) or trampolines one plugin runs on another's
-/// behalf (`files-show`, `git-commit-settle`). None of those are things a
+/// behalf (`git-commit-settle`). None of those are things a
 /// person looks up by name, and a list that contains them is a list you scroll
 /// past rather than read. The default is silence, which is the right default:
 /// a new internal command stays out without anyone remembering to hide it.

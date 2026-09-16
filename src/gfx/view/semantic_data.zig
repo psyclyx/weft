@@ -12,6 +12,7 @@ pub const Document = struct {
     /// supplies the buffer name without baking file-browser chrome into them.
     title: []const u8 = &.{},
     focused: ?semantic.scene.NodeId = null,
+    active: bool = true,
     fields: *const view_runtime.field.Registry,
 };
 

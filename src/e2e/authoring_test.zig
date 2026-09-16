@@ -244,37 +244,29 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
-test "files: editing a listing row is ordinary text editing, and leaves you where you were" {
+test "files: editing a name field leaves you in the same object entry" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
 
-    // Open the current directory through the ordinary provider-aware `open`.
-    // The files plugin claims it through the generic target-handler ABI and
-    // publishes its listing as a TEXT PROJECTION — no files buffer of core's
-    // making, and no files mode.
+    // Opening a directory creates a semantic workspace entry with no document.
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
     const listing = ed.buffers.active_id;
-    try t.expect(ed.buffers.get(listing).?.projection != null);
+    try t.expect(ed.buffers.get(listing).?.editor == null);
     try focusFilesRow(ed, gpa, "note.txt");
 
-    // Enter the ordinary Vim insert posture ON THE ROW and type. Renaming is
-    // editing text now — which is the half the scene plane could not give,
-    // and why the plugin needs no field editor of its own.
+    // Ordinary insert commands edit the focused name field.
     ed.press("i", "");
     ed.typeText("x");
     ed.press("Escape", "");
     try t.expectEqualStrings("normal", ed.mode());
     try t.expectEqual(listing, ed.buffers.active_id);
     {
-        // What the user SEES — the document — not the last published tree.
-        // A projection is republished from the model; the typing that has not
-        // been applied yet lives in the buffer, which is the whole point of an
-        // editable row.
-        const text = try ed.textAlloc();
+        // The provider owns the draft immediately, before apply.
+        const text = try ed.draftHere(gpa);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "xnote.txt") != null);
     }
@@ -1487,7 +1479,7 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     for (0..7) |_| ed.press("Delete", ""); // `old.txt`
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    // THE DRAFT IS THE TEXT: what the row says now IS the pending rename,
+    // The field provider owns the draft: what the row says now IS the pending rename,
     // which is the whole of editing in place. Nothing has to be committed into
     // a field for the change to exist.
     try t.expect(try rowDraftEnds(ed, gpa, "new.txt"));
@@ -1971,7 +1963,7 @@ test "authoring/files: generic create and permissions actions apply from an empt
     try t.expectEqual(@as(usize, 2), staged.scene.content.container.children.len);
     for (staged.scene.content.container.children) |row| {
         const columns = row.content.container.children;
-        try t.expectEqual(@as(usize, 3), columns.len);
+        try t.expectEqual(@as(usize, 4), columns.len);
         try t.expectEqualStrings("files.metadata", columns[0].role);
         try t.expectEqualStrings("files.mode", columns[1].role);
         try t.expectEqualStrings("files.name", columns[2].role);
@@ -2217,7 +2209,7 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
     const view_ref = ed.toolView().?;
-    // THE DRAFT IS THE TEXT. A listing row is edited in place, so what the
+    // The field provider owns the draft. A listing row is edited in place, so what the
     // rename currently says is what the row currently says — read from the
     // part its producer published as the name, not from a field snapshot the
     // typing no longer goes through.
@@ -2243,61 +2235,28 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
     try t.expectEqual(view_ref, ed.toolView().?);
 }
 
-/// The name column of the focused files view's row whose draft reads `want`.
-/// The listing buffer's row whose NAME is `want`, or null.
-///
-/// A listing is a text projection now, so a row is a node: its KEY is the
-/// model's own id (identity, unchanged by a rename) and its TEXT is what you
-/// see. This used to walk the scene's third column and snapshot a field —
-/// which is what choosing the scene plane bought, and what the text plane now
-/// gives without giving up search, yank or selection.
-fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?*const core.projection.Node {
-    _ = gpa;
-    const view = ed.buffers.active().projection orelse return null;
-    for (view.nodes.items) |*node| {
-        if (std.mem.eql(u8, filesName(node), want)) return node;
-    }
+/// Find a semantic name field by its provider's current draft value.
+fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?*const semantic.scene.Node {
+    const view = ed.session.system.semantic.views.get(ed.toolView() orelse return null) orelse return null;
+    for (view.scene.content.container.children) |*row| for (row.content.container.children) |*node| {
+        if (!std.mem.eql(u8, node.role, "files.name")) continue;
+        var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
+        defer snap.deinit();
+        if (std.mem.eql(u8, snap.value.bytes, want)) return node;
+    };
     return null;
 }
 
-/// A row.s indent, in bytes — its depth, which the scene carried as a layout
-/// column and the text carries as leading spaces.
-fn indentOf(row_text: []const u8) usize {
-    var i: usize = 0;
-    while (i < row_text.len and row_text[i] == ' ') i += 1;
-    return i;
-}
-
-/// Does the row under point now END with `want`?
-///
-/// The live draft, read out of the DOCUMENT — a listing is edited in place, so
-/// what the row says is what you typed, and no field holds it until something
-/// applies. `endsWith` because the name is written last by construction, which
-/// is the same property that makes the row parseable at all.
+/// Read the live field, never rendered labels or a backing document.
 fn rowDraftEnds(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !bool {
     const draft = try ed.draftHere(gpa);
     defer gpa.free(draft);
     return std.mem.endsWith(u8, draft, want);
 }
 
-/// A row.s name — the stretch its producer PUBLISHED as the name, not a
-/// second reading of the row.s format. A listing has more than one column and
-/// re-deriving "everything past the glyph" quietly swallowed the first of them.
-fn filesName(node: *const core.projection.Node) []const u8 {
-    return h.Editor.partText(node, files_name_role);
-}
-
-const files_name_role = "fs.name";
-const files_mode_role = "fs.mode";
-
-/// Put POINT on the NAME of the row named `want` — an ordinary cursor
-/// placement, because the row is ordinary text, and on the name because that is
-/// the part of it a person edits (the row.s EDITABLE span).
 fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
-    const node = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
-    const part = h.Editor.partOf(node, files_name_role);
-    const at = if (part) |s| node.start + s.start else node.start;
-    ed.buffers.active().textEditor().?.placeCursor(at);
+    _ = gpa;
+    try ed.focusFilesName(want);
 }
 
 test "authoring/files: Vim Tab folds a directory open in place and back shut" {
@@ -2329,16 +2288,8 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     {
         const nest = (try filesRowNamed(ed, gpa, "nest")) orelse return error.TestExpectedEqual;
         const inner = (try filesRowNamed(ed, gpa, "inner.txt")) orelse return error.TestExpectedEqual;
-        // Spliced into the same listing, INDENTED, and still the same row under
-        // point. Depth is leading spaces in the row.s own text now — the same
-        // fact the scene carried as a layout column.
-        try t.expect(indentOf(inner.text) > indentOf(nest.text));
-        const at = ed.buffers.active().projection.?.subjectAt(
-            ed.buffers.active().textEditor().?.cursorOffset(),
-        ) orelse return error.NoRowUnderPoint;
-        // The same ROW under point: `at` may name a PART of it (the column
-        // the caret is in), and the row is what encloses that.
-        try t.expectEqualStrings(nest.key, at.node.key);
+        try t.expect(inner.layout.column.? > nest.layout.column.?);
+        try t.expectEqual(nest.id, ed.subjectHere().?);
     }
 
     // A draft made INSIDE the folded-open directory, so the round trip below

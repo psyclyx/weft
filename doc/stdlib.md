@@ -193,7 +193,7 @@ Today's graph is nearly flat, which is what this protects:
     annotate  jsonrpc  output  prompt  rowkey  sessions   ← no deps
     invoke ← prompt
     ex     ← invoke, prompt
-    files  ← files_{model,projection,actions,text_rows,workspace}, fs, semantic
+    files  ← files_{model,projection,actions,workspace}, fs, semantic
 
 ## 5. The plan
 
@@ -237,7 +237,14 @@ here; recorded so the omission is not lost.
 
 ### Then the library work
 
-**L1 — finish the migration `files` is stuck in.** It runs the scene plane and
+**L1 — superseded by the semantic explorer cutover (2026-09-16).**
+The explorer now keeps its draft in objects and edits names/permissions through
+fields. Its text serialization and parser have been removed. Semantic pane
+rendering and scrolling supply the presentation capabilities that previously
+motivated the text workaround; directory navigation reuses one workspace entry.
+See [files.md](files.md). The original proposed direction below is historical.
+
+**Original L1 proposal:** It runs the scene plane and
 the text plane simultaneously; glyphs, depth, visibility, mode formatting and
 row identity each exist twice, and `publishDraft` (`adapter.zig:1016`) drives
 both with five rollback paths woven through. Delete the scene plane: ~810 lines

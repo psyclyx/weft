@@ -606,6 +606,7 @@ pub const Services = struct {
         delete_next,
         move_previous,
         move_next,
+        clear_selection,
     };
 
     pub const ActionEffect = union(enum) {
@@ -956,7 +957,7 @@ pub const Services = struct {
                 };
             },
             .delete_previous => blk: {
-                const start = if (selection_start != selection_end) selection_start else selection_start -| 1;
+                const start = if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, selection_start);
                 break :blk .{
                     .start = start,
                     .end = selection_end,
@@ -965,7 +966,7 @@ pub const Services = struct {
                 };
             },
             .delete_next => blk: {
-                const end = if (selection_start != selection_end) selection_end else @min(selection_end + 1, value.bytes.len);
+                const end = if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, selection_end);
                 break :blk .{
                     .start = selection_start,
                     .end = end,
@@ -974,13 +975,14 @@ pub const Services = struct {
                 };
             },
             .move_previous => blk: {
-                const offset = if (selection_start != selection_end) selection_start else selection_start -| 1;
+                const offset = if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, selection_start);
                 break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
             },
             .move_next => blk: {
-                const offset = if (selection_start != selection_end) selection_end else @min(selection_end + 1, value.bytes.len);
+                const offset = if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, selection_end);
                 break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
             },
+            .clear_selection => .{ .start = caret, .end = caret, .replacement = &.{}, .selection_after = collapsed(caret) },
         };
         try provider.edit(value.revision, edit);
         return true;
@@ -1014,6 +1016,32 @@ pub const Services = struct {
         return true;
     }
 };
+
+// Valid UTF-8 characters move as a unit. A raw filesystem byte that is not
+// part of a valid character remains independently addressable.
+fn previousFieldBoundary(bytes: []const u8, at: usize) usize {
+    if (at == 0) return 0;
+    var start = at - 1;
+    var n: usize = 0;
+    while (start > 0 and bytes[start] & 0xc0 == 0x80 and n < 3) : (n += 1) start -= 1;
+    return if (std.unicode.utf8ValidateSlice(bytes[start..at])) start else at - 1;
+}
+
+fn nextFieldBoundary(bytes: []const u8, at: usize) usize {
+    if (at >= bytes.len) return bytes.len;
+    const n = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return at + 1;
+    return if (at + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[at..][0..n])) at + n else at + 1;
+}
+
+test "field motion preserves UTF-8 while retaining access to raw name bytes" {
+    const bytes = "aé界\xffz";
+    try std.testing.expectEqual(@as(usize, 3), nextFieldBoundary(bytes, 1));
+    try std.testing.expectEqual(@as(usize, 6), nextFieldBoundary(bytes, 3));
+    try std.testing.expectEqual(@as(usize, 7), nextFieldBoundary(bytes, 6));
+    try std.testing.expectEqual(@as(usize, 3), previousFieldBoundary(bytes, 6));
+    try std.testing.expectEqual(@as(usize, 1), previousFieldBoundary(bytes, 3));
+    try std.testing.expectEqual(@as(usize, 6), previousFieldBoundary(bytes, 7));
+}
 
 fn equalStrengthCount(candidates: []const target_runtime.resolver.Candidate, strength: target_runtime.resolver.Strength) usize {
     var count: usize = 0;

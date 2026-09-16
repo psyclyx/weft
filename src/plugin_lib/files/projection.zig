@@ -40,7 +40,7 @@ pub const Options = struct {
 
 pub const metadata_column: u16 = 0;
 pub const mode_column: u16 = 4;
-pub const name_column: u16 = 11;
+pub const name_column: u16 = 23;
 pub const original_column: u16 = 48;
 /// Cells a row shifts right per level of nesting. Depth is layout, so an
 /// expanded subtree needs no node kind, no wrapper, and no second renderer.
@@ -61,6 +61,7 @@ const field_domain: u64 = 2;
 const metadata_domain: u64 = 3;
 const original_domain: u64 = 4;
 const mode_domain: u64 = 5;
+const size_domain: u64 = 6;
 const root_id: scene.NodeId = @enumFromInt((7 << 61) | 1);
 const id_payload_mask: u64 = (@as(u64, 1) << 61) - 1;
 
@@ -101,14 +102,8 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
 }
 
 fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Options) ![]scene.Action {
-    // APPLY AND REVERT ARE ALWAYS OFFERED. They used to be enabled only when
-    // the MODEL held a pending change, which was a fair prediction while every
-    // edit went through a field — and is a wrong one now that the listing is
-    // edited in place: what you have typed is in the BUFFER, and the model does
-    // not know about it until something reads the rows back. Greying them out
-    // made `:e!` and `SPC v a` silently unavailable on exactly the drafts they
-    // exist for. Whether there is anything to do is decided when the action
-    // RUNS, which is the only moment it can be decided honestly.
+    // Keep refresh/apply/revert discoverable; the provider decides whether
+    // the current draft has work when invoked.
     _ = rows;
     const result = try arena.alloc(scene.Action, 8 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
@@ -170,41 +165,51 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, d
     // Metadata, mode, and name are structural columns even when the provider
     // cannot edit modes. Rows therefore never shift horizontally as their
     // kind or capability changes.
-    const child_count: usize = 3 + @as(usize, if (original_visible) 1 else 0);
+    const child_count: usize = 4 + @as(usize, if (original_visible) 1 else 0);
     const children = try arena.alloc(scene.Node, child_count);
     const leaf_facts = try toneFacts(arena, row);
     children[0] = .{
         .id = try stableId(row.id, metadata_domain),
         .role = "files.metadata",
         .layout = .{ .column = metadata_column +| indent },
-        .facts = leaf_facts,
+        .facts = if (row.pending == .observed and row.conflict == .none) &.{.{ .name = "tone", .value = "muted" }} else leaf_facts,
         .content = .{ .label = kindGlyph(row) },
     };
     children[1] = .{
         .id = try stableId(row.id, mode_domain),
         .role = "files.mode",
         .layout = .{ .column = mode_column +| indent, .min_cells = 4 },
-        .facts = leaf_facts,
+        .facts = try modeFacts(arena, row),
         .content = if (binding.mode_field) |mode_field|
             .{ .field = .{ .ref = mode_field, .placeholder = "mode", .single_line = true } }
         else
-            .{ .label = try modeLabel(arena, row.draft.mode) },
+            .{ .label = try permissionLabel(arena, row) },
     };
     children[2] = .{
         .id = try stableId(row.id, field_domain),
         .role = "files.name",
         .layout = .{ .column = name_column +| indent },
-        .facts = leaf_facts,
+        .facts = try nameFacts(arena, row, indent),
         .target = binding.target,
         .focusable = true,
         .content = .{ .field = .{ .ref = binding.field, .single_line = true } },
     };
+    children[3] = .{
+        .id = try stableId(row.id, size_domain),
+        .role = "files.metadata",
+        .layout = .{ .column = 15 +| indent },
+        .facts = &.{ .{ .name = "tone", .value = "muted" }, .{ .name = "hide-below", .value = "60" } },
+        .content = .{ .label = if (row.current orelse row.base) |observed|
+            if (observed.size) |size| try sizeLabel(arena, size) else "      -"
+        else
+            "      -" },
+    };
     if (original_visible) {
         const original = row.base.?.name;
-        children[3] = .{
+        children[4] = .{
             .id = try stableId(row.id, original_domain),
             .role = "files.original-name",
-            .layout = .{ .column = original_column +| indent },
+            .layout = .{ .column = @max(original_column, name_column +| @as(u16, @intCast(@min(row.draft.name.len, 60000))) + 3) +| indent },
             .facts = leaf_facts,
             .content = .{ .label = try prefixedEscapedLabel(arena, "original: ", original) },
         };
@@ -284,9 +289,58 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     return actions;
 }
 
-fn modeLabel(arena: std.mem.Allocator, mode: ?u32) ![]const u8 {
-    if (mode) |value| return std.fmt.allocPrint(arena, "{o:0>4}", .{value});
-    return arena.dupe(u8, "----");
+fn nameFacts(arena: std.mem.Allocator, row: model.Row, indent: u16) ![]scene.Fact {
+    const facts = try arena.alloc(scene.Fact, 5);
+    facts[3] = .{ .name = "compact-column", .value = try std.fmt.allocPrint(arena, "{d}", .{indent +| 2}) };
+    facts[4] = .{ .name = "compact-below", .value = "60" };
+    facts[0] = .{ .name = "tone", .value = if (row.pending != .observed or row.conflict != .none) toneName(row) else switch (row.draft.kind) {
+        .directory => "accent",
+        .symlink => "warning",
+        .regular => if ((row.draft.mode orelse 0) & 0o111 != 0) "positive" else "normal",
+        .other => "normal",
+    } };
+    facts[1] = .{ .name = "kind", .value = kindName(row.draft.kind) };
+    facts[2] = .{ .name = "suffix", .value = if (row.draft.kind == .directory) "/" else "" };
+    return facts;
+}
+
+fn modeFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
+    const facts = try arena.alloc(scene.Fact, 3);
+    facts[2] = .{ .name = "hide-below", .value = "60" };
+    facts[0] = .{ .name = "tone", .value = if (row.mode_dirty) toneName(row) else "muted" };
+    facts[1] = .{ .name = "display", .value = try permissionLabel(arena, row) };
+    return facts;
+}
+
+fn sizeLabel(arena: std.mem.Allocator, size: u64) ![]const u8 {
+    if (size < 10_000_000) return std.fmt.allocPrint(arena, "{d:>7}", .{size});
+    var whole = size;
+    var fraction: u64 = 0;
+    var unit: usize = 0;
+    while (whole >= 1024 and unit < 6) : (unit += 1) {
+        fraction = (whole % 1024) * 10 / 1024;
+        whole /= 1024;
+    }
+    const label = try std.fmt.allocPrint(arena, "{d}.{d}{c}", .{ whole, fraction, " KMGTPE"[unit] });
+    return std.fmt.allocPrint(arena, "{s:>7}", .{label});
+}
+
+fn permissionLabel(arena: std.mem.Allocator, row: model.Row) ![]const u8 {
+    const out = try arena.dupe(u8, "----------");
+    out[0] = switch (row.draft.kind) {
+        .directory => 'd',
+        .symlink => 'l',
+        else => '-',
+    };
+    const mode = row.draft.mode orelse return out;
+    for (0..9) |i| {
+        const bit: u5 = @intCast(8 - i);
+        if (mode & (@as(u32, 1) << bit) != 0) out[i + 1] = "rwx"[i % 3];
+    }
+    if (mode & 0o4000 != 0) out[3] = if (mode & 0o100 != 0) 's' else 'S';
+    if (mode & 0o2000 != 0) out[6] = if (mode & 0o010 != 0) 's' else 'S';
+    if (mode & 0o1000 != 0) out[9] = if (mode & 0o001 != 0) 't' else 'T';
+    return out;
 }
 
 fn prefixedEscapedLabel(arena: std.mem.Allocator, prefix: []const u8, value: []const u8) ![]const u8 {
@@ -365,7 +419,7 @@ fn kindName(kind: contract.Kind) []const u8 {
 
 fn kindGlyph(row: model.Row) []const u8 {
     return switch (row.draft.kind) {
-        .regular => "·",
+        .regular => " ",
         .directory => if (row.expanded) "▾" else "▸",
         .symlink => "↗",
         .other => "?",
@@ -479,9 +533,9 @@ test "projection keeps deleted rows visible and labels original renamed name" {
     defer output.deinit();
     const row = output.value.content.container.children[0];
     try std.testing.expectEqualStrings("delete", row.facts[0].value);
-    try std.testing.expectEqual(@as(usize, 4), row.content.container.children.len);
-    try std.testing.expectEqualStrings("original: old", row.content.container.children[3].content.label);
-    try std.testing.expectEqualStrings("deleted", row.content.container.children[3].facts[0].value);
+    try std.testing.expectEqual(@as(usize, 5), row.content.container.children.len);
+    try std.testing.expectEqualStrings("original: old", row.content.container.children[4].content.label);
+    try std.testing.expectEqualStrings("deleted", row.content.container.children[4].facts[0].value);
     try std.testing.expectEqualStrings(standard.edit, row.actions[1].id);
     try std.testing.expect(row.actions[1].enabled);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
@@ -499,7 +553,7 @@ test "projection reports add copy and stale facts with metadata" {
     try std.testing.expectEqualStrings("add", added_output.value.content.container.children[0].facts[0].value);
     const added_children = added_output.value.content.container.children[0].content.container.children;
     try std.testing.expectEqualStrings("▸", added_children[0].content.label);
-    try std.testing.expectEqualStrings("0000", added_children[1].content.label);
+    try std.testing.expectEqualStrings("d---------", added_children[1].content.label);
 
     try files.markDelete(added);
     var stale_output = try project(std.testing.allocator, files.rows.items, &refs);
@@ -547,7 +601,7 @@ test "projection fixes metadata field columns and styles mode-only modifications
     defer output.deinit();
     const row = output.value.content.container.children[0];
     const children = row.content.container.children;
-    try std.testing.expectEqual(@as(usize, 3), children.len);
+    try std.testing.expectEqual(@as(usize, 4), children.len);
     try std.testing.expectEqual(metadata_column, children[0].layout.column.?);
     try std.testing.expectEqual(mode_column, children[1].layout.column.?);
     try std.testing.expectEqual(name_column, children[2].layout.column.?);
@@ -644,4 +698,20 @@ test "projection leaves unusual raw names in model provider data" {
     var output = try project(std.testing.allocator, files.rows.items, &refs);
     defer output.deinit();
     try std.testing.expectEqualStrings(raw, files.rows.items[0].draft.name);
+}
+
+test "listing columns decorate objects with permissions size and directory suffix" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 7, .generation = 1 }, .name = "src", .revision = "1", .kind = .directory, .mode = 0o2755, .size = 4096 }} });
+    const bindings = [_]FieldBinding{.{ .row = files.rows.items[0].id, .field = .{ .authority = .here, .slot = 1, .generation = 1 } }};
+    var output = try project(std.testing.allocator, files.rows.items, &bindings);
+    defer output.deinit();
+    const columns = output.value.content.container.children[0].content.container.children;
+    try std.testing.expectEqualStrings("drwxr-sr-x", columns[1].content.label);
+    try std.testing.expectEqualStrings("accent", columns[2].facts[0].value);
+    try std.testing.expectEqualStrings("/", columns[2].facts[2].value);
+    try std.testing.expectEqualStrings("   4096", columns[3].content.label);
+    try std.testing.expectEqualStrings("src", files.rows.items[0].draft.name);
+    try std.testing.expectEqual(bindings[0].field, columns[2].content.field.ref);
 }

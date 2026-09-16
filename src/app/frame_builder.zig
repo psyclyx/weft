@@ -198,13 +198,18 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 }
 
 fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
-    const path = fx.head.semantic_focus.path() orelse return null;
+    return semanticDocumentFor(fx, fx.buffers.active(), &fx.head.semantic_focus, true);
+}
+
+fn semanticDocumentFor(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SemanticFocus, active: bool) ?view_mod.semantic_data.Document {
+    const path = focus.path() orelse return null;
     const instance = fx.semantic.views.get(path.view) orelse return null;
     return .{
         .view = path.view,
         .root = &instance.scene,
-        .title = fx.buffers.active().name,
-        .focused = focusedSemanticNode(fx.head, path.view, &instance.scene),
+        .title = buffer.name,
+        .focused = if (path.leaf()) |node| if (instance.node(node) != null) node else instance.reconcileFocus(null) else instance.reconcileFocus(null),
+        .active = active,
         .fields = &fx.semantic.fields,
     };
 }
@@ -618,6 +623,7 @@ pub const FrameBuilder = struct {
                 .mode = fx.head.currentMode(),
                 .statusline_segs = other_segs,
                 .gutter = other_gutter,
+                .semantic_view = semanticDocumentFor(fx, ob, &ob.semantic_focus, false),
                 .cursor_on = false, // the caret belongs to the focused pane
                 .pane_border = slot.border,
                 // A peeked pane keeps its syntax + markdown + tool colors + diagnostics.

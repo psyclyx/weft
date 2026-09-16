@@ -519,7 +519,7 @@ test "entries: a view carries no editor — text ops refuse politely, undo is a 
 
     // Typing, deleting, and moving the caret are echoed refusals, not errors —
     // the same door the grade gate and read-only flag report through.
-    for ([_][]const u8{ "delete-backward", "cursor-left", "undo-barrier" }) |cmd| {
+    for ([_][]const u8{ "delete-backward", "cursor-left" }) |cmd| {
         host.head.echo.clearRetainingCapacity();
         _ = try core.command.run(&host.commands, &host.ctx, cmd, &.{});
         try t.expectEqualStrings("no text in this view", host.head.echo.items);
@@ -527,6 +527,12 @@ test "entries: a view carries no editor — text ops refuse politely, undo is a 
     host.head.echo.clearRetainingCapacity();
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqualStrings("no text in this view", host.head.echo.items);
+
+    // A mode transition can seal text undo without inventing a document for
+    // an object entry or reporting an irrelevant refusal.
+    host.head.echo.clearRetainingCapacity();
+    _ = try core.command.run(&host.commands, &host.ctx, "undo-barrier", &.{});
+    try t.expectEqualStrings("", host.head.echo.items);
 
     // Undo reports "nothing undone" instead of reaching a stand-in history.
     host.head.echo.clearRetainingCapacity();

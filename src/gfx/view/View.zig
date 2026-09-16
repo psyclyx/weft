@@ -102,6 +102,8 @@ frame_layout: layout.Layout = .{ .lines = &.{} },
 /// Like `frame_layout`, these live in `layout_arena` until the next frame.
 semantic_hits: []const semantic.Hit = &.{},
 semantic_active: bool = false,
+semantic_last_view: ?@import("weft_semantic").view.Ref = null,
+semantic_last_node: ?@import("weft_semantic").scene.NodeId = null,
 /// The current build's content origin (its frame inset by `margin`) — a
 /// pane renders into its own region, so layout and HUD baselines derive
 /// from here rather than the whole framebuffer. Defaults to the
@@ -339,8 +341,11 @@ pub fn build(
         // geometry map prevents stale document hit-testing from leaking into
         // a pane whose visible identity/focus is node-based.
         self.frame_layout = .{ .lines = &.{} };
-        self.semantic_active = true;
-        self.semantic_hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, body_rect);
+        const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, body_rect, top_row);
+        if (document.active) {
+            self.semantic_active = true;
+            self.semantic_hits = hits;
+        }
     } else if (editor) |ed| {
         const rope = ed.text();
         const total_rows = rope.lineCount();

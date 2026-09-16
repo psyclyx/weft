@@ -106,6 +106,9 @@ pub const Buffer = struct {
     /// The buffer-local semantic cursor, restored when the buffer is selected
     /// again.
     semantic_focus: Head.SemanticFocus = .empty,
+    /// Navigation within one semantic entry retains a cursor per visited view.
+    view_cursors: std.ArrayList(struct { view: semantic.view.Ref, node: semantic.scene.NodeId }) = .empty,
+
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
     /// The posture this entry's presentation owner DECLARED (§10.4), or null
@@ -132,6 +135,23 @@ pub const Buffer = struct {
     /// restores. Meaningless unless `declared_posture == .capture`, which is
     /// why capture can never be a one-way door.
     pre_capture: ?Posture = null,
+
+    pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SemanticFocus) Allocator.Error!void {
+        const path = focus.path() orelse return;
+        const node = path.leaf() orelse return;
+        for (self.view_cursors.items) |*saved| {
+            if (saved.view.eql(path.view)) {
+                saved.node = node;
+                return;
+            }
+        }
+        try self.view_cursors.append(gpa, .{ .view = path.view, .node = node });
+    }
+
+    pub fn viewCursor(self: *const Buffer, view_ref: semantic.view.Ref) ?semantic.scene.NodeId {
+        for (self.view_cursors.items) |saved| if (saved.view.eql(view_ref)) return saved.node;
+        return null;
+    }
 
     /// WHAT the focused row is, when this entry is a projection: the `role`
     /// its producer gave the node under point. Empty otherwise.
@@ -304,6 +324,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         gpa.destroy(view);
     }
     b.semantic_focus.deinit(gpa);
+    b.view_cursors.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);
     gpa.free(b.mode);
@@ -559,8 +580,20 @@ pub fn attachFocusedSemanticView(
             break;
         };
     }
+    if (id == null) {
+        it = self.iterator();
+        while (it.next()) |buffer| if (buffer.editor == null and buffer.viewCursor(view) != null) {
+            id = buffer.id;
+            break;
+        };
+    }
     const target_id = id orelse try self.createView(gpa, name, tool);
     const target = self.get(target_id).?;
+    if (!std.mem.eql(u8, target.name, name)) {
+        const renamed = try gpa.dupe(u8, name);
+        gpa.free(target.name);
+        target.name = renamed;
+    }
     // Capture the just-opened path on its destination before switchTo saves
     // the outgoing buffer. Then clear the head so the outgoing buffer records
     // no foreign semantic cursor.

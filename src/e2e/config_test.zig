@@ -491,14 +491,14 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         "files",
         ed.session.system.semantic.views.get(configured_directory_view).?.scene.role,
     );
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files:"));
 
     // The alternate open binding is the same ordinary launcher contract. It
     // must reuse the retained semantic target/view rather than introducing a
     // second tool-specific surface for the same directory.
     ed.chord("SPC o d");
     try t.expectEqual(configured_directory_view, ed.toolView().?);
-    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "*files"));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files:"));
 
     // The config surface must cover the actions the REAL directory scene
     // advertises, not merely a hand-built generic fixture. This is deliberately
@@ -1113,10 +1113,10 @@ test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
 
     // UNDOCUMENTED IS NOT. A keystroke (`vim-append`), a motion
     // (`motion.doc-end`) and a trampoline one plugin runs on another's behalf
-    // (`files-show`) are not things anyone looks up by name, and a list that
+    // (`git-commit-settle`) are not things anyone looks up by name, and a list that
     // holds them is a list you scroll past. Silence is the DEFAULT, so a new
     // internal command stays out without anyone remembering to hide it.
-    for ([_][]const u8{ "vim-append", "motion.doc-end", "files-show", "git-commit-settle" }) |hidden| {
+    for ([_][]const u8{ "vim-append", "motion.doc-end", "git-commit-settle" }) |hidden| {
         if (pickRow(&ed, hidden) != null) {
             std.debug.print("\n[e2e/config] undocumented command listed: '{s}'\n", .{hidden});
             return error.UndocumentedCommandListed;
@@ -1522,8 +1522,8 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     // is trivial: `presentIn` runs `open` and puts the resulting buffer in the
     // pane, so a listing that IS a buffer needs no sidebar-specific path.
     const browser = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
-    try t.expect(std.mem.startsWith(u8, browser.name, "*files"));
-    try t.expect(browser.projection != null);
+    try t.expect(std.mem.startsWith(u8, browser.name, "files:"));
+    try t.expect(browser.editor == null);
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expect(primary.pane().buffer_id != panel.pane().buffer_id);
 }

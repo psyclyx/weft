@@ -130,20 +130,10 @@ test "app/window: a further split tiles three panes and still composites" {
 // focus feed marks this viewport's focus as companion focus, so nothing
 // follows it (D2).
 
-/// The name of the listing row point is on, or null when it is not on one.
-///
-/// A listing is a text projection: the row under point is `subjectAt`'s node,
-/// and its name is the part it published under `fs.name`. This used to walk the
-/// scene's third column and snapshot a field — the identity the text plane
-/// used to lack, and now has.
+/// The current name field in the focused semantic entry.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
-    const b = ed.buffers.active();
-    const view = b.projection orelse return null;
-    const editor = b.textEditor() orelse return null;
-    const subject = view.subjectAt(editor.cursorOffset()) orelse return null;
-    // The name is the stretch the PRODUCER published as one. Re-deriving it
-    // from the row.s format is a second copy of that format.
-    return try gpa.dupe(u8, Editor.partText(subject.node, "fs.name"));
+    if (ed.head.semantic_focus.field == null) return null;
+    return try ed.draftHere(gpa);
 }
 
 /// Press `j` until the row under point is `want`. Navigation is the std
@@ -265,6 +255,13 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
         }.never,
     };
     try t.expect(!follower.follows(last));
+    ed.run("window-focus-right");
+    ed.applyWindow();
+    try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
+    const pixels = try ed.renderComposite();
+    defer gpa.free(pixels);
+    try t.expect(!(try ed.ensureView()).semantic_active);
+    app.proj.shot(ed, "files-sidebar");
 }
 
 // ── GATE: following is a consumer of two primitives, not a DSL ──
@@ -355,14 +352,7 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
     try t.expectEqual(before_companion, outline.retargets);
 }
 
-// A LISTING IS A BUFFER, which is the whole of what makes a sidebar trivial.
-//
-// A sidebar is a VIEWPORT and presenting a resource in one is an ordinary
-// operation whose implementation (`window_cmds.presentIn`) runs `open` and puts
-// the resulting BUFFER in the pane. So a listing that is a buffer docks with no
-// second path, no sidebar-specific producer, and no plugin that knows what a
-// sidebar is — while the same buffer, undocked, is a listing you can search and
-// yank in like any other text.
+// A semantic entry occupies a viewport without allocating a text document.
 test "e2e/files: the listing is an ordinary buffer, navigable by key" {
     const gpa = t.allocator;
     var app: h.App = undefined;
@@ -376,11 +366,11 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
 
     try ed.grantRooted("files", "fs_read", "/");
     ed.runStr("open", ".");
-    try t.expect(std.mem.startsWith(u8, ed.bufferName(), "*files"));
+    try t.expect(std.mem.startsWith(u8, ed.bufferName(), "files:"));
 
-    // The entries are TEXT — which is the half the scene plane could not give.
+    // The scene renders the provider-owned entries.
     {
-        const text = try ed.textAlloc();
+        const text = try ed.semanticText(ed.toolView().?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "alpha.txt") != null);
         try t.expect(std.mem.indexOf(u8, text, "bravo.txt") != null);
@@ -390,31 +380,109 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
     // Descending is by the row's KEY, never by reading the rendered line back:
     // point lands on the first focusable row, and `nested` is reachable from it
     // with ordinary cursor motion.
-    var hops: usize = 0;
-    while (hops < 32) : (hops += 1) {
-        const b = ed.buffers.active();
-        const proj = b.projection orelse return error.ListingHasNoProjection;
-        const at = proj.subjectAt((b.textEditor() orelse return error.ListingHasNoEditor).cursorOffset());
-        // Matched on the row.s TEXT: the key is the model.s own id, which is
-        // the point — identity is not the name, so a rename does not change
-        // which row a verb is about.
-        if (at) |subject| if (std.mem.indexOf(u8, subject.node.text, "nested") != null) break;
-        ed.press("j", "");
-    } else return error.NestedRowNeverFocused;
+    const browser_id = ed.buffers.active_id;
+    try t.expect(ed.buffers.active().editor == null);
+    try ed.focusFilesName("nested");
     ed.press("Return", "");
+    try t.expectEqual(browser_id, ed.buffers.active_id);
     {
-        const text = try ed.textAlloc();
+        const text = try ed.semanticText(ed.toolView().?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "inner.txt") != null);
-        try t.expect(std.mem.startsWith(u8, ed.bufferName(), "*files"));
+        try t.expect(std.mem.startsWith(u8, ed.bufferName(), "files:"));
     }
 
     // And back up, through the grammar.s own `minus` → `std.hierarchy.step-out`,
     // which follows the CONTAINER relation the listing.s producer publishes.
     ed.press("minus", "");
     {
-        const text = try ed.textAlloc();
+        const text = try ed.semanticText(ed.toolView().?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "alpha.txt") != null);
     }
+}
+
+test "e2e/files: directory navigation retains drafts and cursors in one object entry" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "alpha.txt", "alpha\n");
+    try core.file.writeBytesMakingDirs(gpa, "child", "child/inner.txt", "inner\n");
+    ed.runStr("open", ".");
+    const browser = ed.buffers.active_id;
+    const count = ed.buffers.count();
+    const root_view = ed.toolView().?;
+    try t.expect(ed.buffers.active().editor == null);
+    try t.expect(ed.buffers.active().projection == null);
+    try ed.focusFilesName("alpha.txt");
+    ed.press("i", "");
+    ed.typeText("draft-");
+    ed.press("Escape", "");
+    try ed.focusFilesName("child");
+    const parent_cursor = ed.subjectHere().?;
+    ed.press("Return", "");
+    try t.expectEqual(browser, ed.buffers.active_id);
+    try t.expectEqual(count, ed.buffers.count());
+    const child_view = ed.toolView().?;
+    try t.expect(!root_view.eql(child_view));
+    try ed.focusFilesName("inner.txt");
+    ed.press("i", "");
+    ed.typeText("kept-");
+    ed.press("Escape", "");
+    ed.press("minus", "");
+    try t.expectEqual(browser, ed.buffers.active_id);
+    try t.expectEqual(root_view, ed.toolView().?);
+    try t.expectEqual(parent_cursor, ed.subjectHere().?);
+    {
+        const text = try ed.semanticText(root_view);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "draft-alpha.txt") != null);
+    }
+    ed.press("Return", "");
+    try t.expectEqual(child_view, ed.toolView().?);
+    const draft = try ed.draftHere(gpa);
+    defer gpa.free(draft);
+    try t.expectEqualStrings("kept-inner.txt", draft);
+    try t.expectEqual(browser, ed.buffers.active_id);
+    try t.expectEqual(count, ed.buffers.count());
+    // Navigation is not apply: the provider's files still have their old names.
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "alpha.txt"));
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "child/inner.txt"));
+    app.proj.shot(ed, "files-object-navigation");
+}
+
+test "e2e/files: semantic rows scroll beyond one screen without a text document" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for (0..80) |i| {
+        const name = try std.fmt.allocPrint(gpa, "entry-{d:0>3}.txt", .{i});
+        defer gpa.free(name);
+        try core.file.writeBytes(gpa, name, "contents\n");
+    }
+    ed.runStr("open", ".");
+    const view_ref = ed.toolView().?;
+    const instance = ed.session.system.semantic.views.get(view_ref).?;
+    try t.expectEqual(@as(usize, 80), instance.focus_order.len);
+    const first = instance.focus_order[0];
+    const last = instance.focus_order[79];
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, view_ref, first);
+    for (0..79) |_| ed.press("j", "");
+    try t.expectEqual(last, ed.subjectHere().?);
+    const pixels = try ed.renderComposite();
+    defer gpa.free(pixels);
+    const presenter = try ed.ensureView();
+    try t.expect(presenter.top_row > 0);
+    try t.expect(ed.buffers.active().editor == null);
+    app.proj.shot(ed, "files-scrolled");
+    for (0..79) |_| ed.press("k", "");
+    const back = try ed.renderComposite();
+    defer gpa.free(back);
+    try t.expectEqual(first, ed.subjectHere().?);
+    try t.expectEqual(@as(usize, 0), presenter.top_row);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "no text in this view") == null);
 }

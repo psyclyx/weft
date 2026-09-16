@@ -151,12 +151,10 @@ fn cSelectionPasteAfter(ctx: *Context, args: struct {}) anyerror!Value {
 fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const services = ctx.semantic orelse return ok;
-    // A scene may deliberately expose custom open behavior without linking a
-    // registered target. Preserve that generic action-provider escape hatch;
-    // a present typed link never falls through on stale/ambiguous resolution.
-    // The focused scene node.s target, or — when the entry is a text
-    // PROJECTION — the target of the row under point. Same question, asked of
-    // whichever plane is showing.
+    // The view gets first refusal: a target link describes the resource,
+    // while its row may navigate locally instead of opening another entry.
+    if (try action_here.invokeHere(ctx, semantic_model.action.standard.open, 0)) |effect|
+        if (effect != .declined) return ok;
     const located = (try services.focusedTarget(ctx.head)) orelse rowTargetHere(ctx) orelse
         return invokeSemanticAction(ctx, semantic_model.action.standard.open);
     const result = try target_open.openLocated(services, ctx.head, ctx.gpa, located, null);
@@ -396,6 +394,7 @@ fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .clear_selection)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.clearSelection();
     return ok;
@@ -403,6 +402,7 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (ctx.buffers.active().textEditor() == null) return ok;
     // Seal the open undo unit so the next edit starts a fresh one. Cursor
     // motions already barrier (Editor.moveTo); this exposes the same seam to a
     // modal plugin, which fires it on the boundaries a motion doesn't cover —

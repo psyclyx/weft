@@ -30,6 +30,9 @@ pub fn invokeHere(
     register: u8,
 ) semantic.Services.InvokeActionError!?Effect {
     const services = ctx.semantic orelse return null;
+    const source = ctx.buffers.active().ref();
+    if (ctx.buffers.active().editor == null)
+        try ctx.buffers.active().rememberViewCursor(ctx.gpa, &ctx.head.semantic_focus);
     // The FOCUSED SCENE first, when there is one. A `declined` provider has
     // answered "not me", which is the same standing as no focus at all.
     if (services.invokeFocusedActionInRegister(
@@ -40,7 +43,32 @@ pub fn invokeHere(
         register,
     )) |effect| {
         if (effect) |handled| {
-            if (handled != .declined) return handled;
+            if (handled != .declined) {
+                switch (handled) {
+                    .target_opened, .relation_opened => |ref| {
+                        // A provider's navigation outcome changes this entry's
+                        // location. Opening a target directly remains a separate
+                        // workspace operation. Never overwrite a text entry or
+                        // an entry the handler switched away from.
+                        const entry = ctx.buffers.active();
+                        if (entry.id == source.id and entry.generation == source.generation and entry.editor == null) {
+                            _ = try services.focusView(ctx.head, ctx.gpa, ref, entry.viewCursor(ref));
+                            try entry.semantic_focus.copyFrom(ctx.gpa, &ctx.head.semantic_focus);
+                            if (services.views.get(ref)) |instance| {
+                                if (instance.descriptor.target) |binding| {
+                                    if (services.targets.get(binding.ref)) |target| {
+                                        const name = try std.fmt.allocPrint(ctx.gpa, "{s}: {s}", .{ entry.tool, target.display_name });
+                                        ctx.gpa.free(entry.name);
+                                        entry.name = name;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    else => {},
+                }
+                return handled;
+            }
         }
     } else |err| switch (err) {
         error.ActionUnavailable, error.StaleView => {},
