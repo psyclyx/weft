@@ -2469,3 +2469,64 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
     ed.run("debug-continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
+
+test "files: vim motions selection insertion and search use the semantic view" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    authorFile(ed, "alpha.txt", "hello\n");
+    ed.runStr("open", ".");
+    const listing = ed.buffers.active_id;
+    try focusFilesRow(ed, gpa, "alpha.txt");
+    ed.press("dollar", "");
+    ed.press("b", "");
+    {
+        var snap = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
+        defer snap.deinit();
+        try t.expectEqual(@as(u64, 6), snap.value.selection.caret);
+    }
+    ed.press("v", "");
+    ed.press("l", "");
+    {
+        var snap = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
+        defer snap.deinit();
+        try t.expect(snap.value.selection.anchor != snap.value.selection.caret);
+    }
+    ed.press("y", "");
+    try t.expect(!ed.pick.active);
+    try t.expect(ed.session.system.semantic.transfer != null);
+    {
+        const item = ed.session.system.semantic.transfer.?.value;
+        try t.expectEqualStrings("text/plain", item.representations[0].media_type);
+        try t.expectEqualStrings("t", item.representations[0].payload);
+    }
+    ed.press("v", "");
+    ed.press("h", "");
+    ed.press("d", "");
+    {
+        var snap = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
+        defer snap.deinit();
+        try t.expectEqualStrings("alpha.xt", snap.value.bytes);
+        try t.expectEqual(snap.value.selection.anchor, snap.value.selection.caret);
+    }
+    ed.press("o", "");
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("below.txt");
+    ed.press("Escape", "");
+    ed.press("O", "");
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("above.txt");
+    ed.press("Escape", "");
+    try t.expectEqual(listing, ed.buffers.active_id);
+    try t.expect(ed.buffers.active().textEditor() == null);
+    ed.press("slash", "");
+    try t.expect(ed.pick.active);
+    ed.typeText("below.txt");
+    ed.press("Return", "");
+    try t.expect(!ed.pick.active);
+    var snap = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
+    defer snap.deinit();
+    try t.expectEqualStrings("below.txt", snap.value.bytes);
+}

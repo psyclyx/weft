@@ -341,7 +341,7 @@ pub fn build(
         // geometry map prevents stale document hit-testing from leaking into
         // a pane whose visible identity/focus is node-based.
         self.frame_layout = .{ .lines = &.{} };
-        const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, body_rect, top_row);
+        const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, hud, body_rect, top_row);
         if (document.active) {
             self.semantic_active = true;
             self.semantic_hits = hits;
@@ -444,7 +444,7 @@ pub fn build(
     // interaction stack, not through an editor mode or which-key.
     if (hud.semantic_overlay) |overlay| {
         self.semantic_active = true;
-        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, body_rect);
+        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect);
     }
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of

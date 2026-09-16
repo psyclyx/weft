@@ -507,10 +507,15 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             ctx.head.popPending(ctx.gpa) catch {};
             return;
         }
-        if (ctx.keymap.navCommand(spec)) |cmd| {
-            _ = core.command.run(ctx.commands, ctx, cmd, &.{}) catch |err|
-                std.log.warn("which-key nav {s} failed: {t}", .{ cmd, err });
-            return; // pending untouched — the hint just re-rendered
+    }
+    // Navigation belongs to the active overlay scope, whether it was opened
+    // by a chord, a menu mode, or a peek. It is not a menu leaf and therefore
+    // must not pop the menu after paging. Keep the full authored action chain.
+    const overlay_active = if (ctx.overlay_navigation_active) |active| active.* else false;
+    if (ctx.head.pending.len > 0 or ctx.keymap.modeHasTag(ctx.head.currentMode(), "menu") or overlay_active) {
+        if (ctx.keymap.navBindings(spec)) |arms| {
+            if (chooseArm(ctx, arms)) |arm| invokeArm(ctx, arm);
+            return;
         }
     }
     // Feed the key through the pending SEQUENCE. `SPC f f` is a chord; `SPC C-w`
@@ -562,18 +567,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
                 null;
             defer if (menu_before) |m| ctx.gpa.free(m);
 
-            switch (arm) {
-                // An intention runs through its endpoint token; the invoker
-                // reaches the same command door, and there is no return
-                // value to promote.
-                .decision => |d| invokeDecision(ctx, d),
-                // `command.invoke` — run AND report: a returned string
-                // becomes the echo line, a refusal becomes a legible one.
-                // This path used to keep that promotion itself; it is one
-                // door now, shared with the palette and every guest `wl_run*`
-                // (see `command.invoke`'s doc for what the drift cost).
-                .command => core.command.invoke(ctx.commands, ctx, cmd_name, &.{}),
-            }
+            invokeArm(ctx, arm);
             if (menu_before) |m| {
                 if (!ctx.keymap.modeHasTag(m, "sticky") and std.mem.eql(u8, ctx.head.currentMode(), m)) {
                     // Still the same menu after the leaf: time to auto-pop.
@@ -642,6 +636,14 @@ const Arm = union(enum) {
     command: []const u8,
     decision: core.catalog.Decision,
 };
+
+/// All binding scopes use the same intention endpoint and command reporting.
+fn invokeArm(ctx: *core.command.Context, arm: Arm) void {
+    switch (arm) {
+        .decision => |d| invokeDecision(ctx, d),
+        .command => |name| core.command.invoke(ctx.commands, ctx, name, &.{}),
+    }
+}
 
 /// Walk the authored list first-applicable (§10.2). An INTENTION arm asks
 /// the catalog: an offer exists and it wins; no offer at all is

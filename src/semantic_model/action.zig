@@ -59,6 +59,7 @@ pub const Outcome = union(enum) {
 /// Interoperable names are conveniences, not a closed enum. A plugin may
 /// define additional actions without changing core or coordinating globally.
 pub const standard = struct {
+    pub const search = "view.search";
     pub const copy = "selection.copy";
     pub const cut = "selection.cut";
     pub const delete = "selection.delete";
@@ -79,6 +80,8 @@ pub const standard = struct {
     /// the target-oriented analogue of `cd`: it applies equally to local,
     /// remote, archive, and synthetic hierarchies.
     pub const set_working_target = "workspace.set-working-target";
+    pub const insert_before = "item.insert-before";
+    pub const insert_after = "item.insert-after";
     pub const edit = "field.edit";
     /// Lifecycle intents for retained, structured views.  They are open
     /// protocol names: a provider advertises only the ones it supports, while

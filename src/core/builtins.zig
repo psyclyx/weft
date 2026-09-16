@@ -123,6 +123,14 @@ fn semanticActionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Valu
     return invokeSemanticAction(ctx, target.name);
 }
 
+fn cItemInsertBefore(ctx: *Context, _: struct {}) anyerror!Value {
+    return invokeSemanticAction(ctx, semantic_model.action.standard.insert_before);
+}
+
+fn cItemInsertAfter(ctx: *Context, _: struct {}) anyerror!Value {
+    return invokeSemanticAction(ctx, semantic_model.action.standard.insert_after);
+}
+
 fn cSelectionCopy(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     return invokeSemanticAction(ctx, semantic_model.action.standard.copy);
@@ -293,6 +301,16 @@ fn cSaveFile(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+const FieldMotionArgs = struct {};
+fn fieldMotion(comptime movement: @import("field_motion.zig").Movement) fn (*Context, FieldMotionArgs) anyerror!Value {
+    return struct {
+        fn run(ctx: *Context, _: FieldMotionArgs) anyerror!Value {
+            _ = try semanticFieldInput(ctx, .{ .motion = movement });
+            return ok;
+        }
+    }.run;
+}
+
 fn cCursorLeft(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .move_previous)) return ok;
@@ -380,13 +398,13 @@ fn cRowUp(ctx: *Context, args: struct {}) anyerror!Value {
     return moveRow(ctx, .prev);
 }
 
-// Word/WORD/line/doc motions and match-bracket moved to the `motions` plugin
-// (design §6.1 — they return a `range` an operator awaits). Core keeps only the
-// grapheme/line step primitive (`editor.step`, exposed via cursor-*) and the
-// selection write-half (set-mark/clear-selection) below.
+// Document motions return anchored ranges through the motions plugin.
+// Retained fields expose navigation through standard offers above; both
+// presentations share these selection commands.
 
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .set_mark)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     try ed.setMark(ctx.gpa);
     return ok;
@@ -694,6 +712,8 @@ const table = [_]command.Command{
     command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused),
     command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded),
     command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut),
+    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore),
+    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter),
     command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit),
     command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
@@ -705,6 +725,15 @@ const table = [_]command.Command{
     command.define("undo", "Undo the newest own edit unit.", cUndo),
     command.define("redo", "Redo the newest undone unit.", cRedo),
     command.define("save-file", "Write the buffer to its file backing (the default `save` provider).", cSaveFile),
+    command.define("field-word-previous", "Move the focused field to the word-previous boundary.", fieldMotion(.word_previous)),
+    command.define("field-word-next", "Move the focused field to the word-next boundary.", fieldMotion(.word_next)),
+    command.define("field-word-end", "Move the focused field to the word-end boundary.", fieldMotion(.word_end)),
+    command.define("field-big-word-previous", "Move the focused field to the WORD-previous boundary.", fieldMotion(.WORD_previous)),
+    command.define("field-big-word-next", "Move the focused field to the WORD-next boundary.", fieldMotion(.WORD_next)),
+    command.define("field-big-word-end", "Move the focused field to the WORD-end boundary.", fieldMotion(.WORD_end)),
+    command.define("field-line-start", "Move the focused field to the line-start boundary.", fieldMotion(.line_start)),
+    command.define("field-line-end", "Move the focused field to the line-end boundary.", fieldMotion(.line_end)),
+    command.define("field-first-non-blank", "Move the focused field to the first-non-blank boundary.", fieldMotion(.first_non_blank)),
     command.define("cursor-left", "Move the cursor one character left.", cCursorLeft),
     command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
     command.define("cursor-up", "Move the cursor up one line.", cCursorUp),

@@ -75,7 +75,18 @@ pub const bindings = [_]Binding{
     .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "row-down" },
     .{ .intent = .navigate_left, .intention = "std.navigation.left", .route = "cursor-left" },
     .{ .intent = .navigate_right, .intention = "std.navigation.right", .route = "cursor-right" },
+    .{ .intent = .word_previous, .intention = "std.navigation.word-previous", .route = "field-word-previous" },
+    .{ .intent = .word_next, .intention = "std.navigation.word-next", .route = "field-word-next" },
+    .{ .intent = .word_end, .intention = "std.navigation.word-end", .route = "field-word-end" },
+    .{ .intent = .WORD_previous, .intention = "std.navigation.big-word-previous", .route = "field-big-word-previous" },
+    .{ .intent = .WORD_next, .intention = "std.navigation.big-word-next", .route = "field-big-word-next" },
+    .{ .intent = .WORD_end, .intention = "std.navigation.big-word-end", .route = "field-big-word-end" },
+    .{ .intent = .line_start, .intention = "std.navigation.line-start", .route = "field-line-start" },
+    .{ .intent = .line_end, .intention = "std.navigation.line-end", .route = "field-line-end" },
+    .{ .intent = .first_non_blank, .intention = "std.navigation.first-non-blank", .route = "field-first-non-blank" },
     .{ .intent = .back, .intention = "std.navigation.back", .route = "navigate-back" },
+    .{ .intent = .insert_before, .intention = "std.editing.insert-before", .route = "item-insert-before" },
+    .{ .intent = .insert_after, .intention = "std.editing.insert-after", .route = "item-insert-after" },
 };
 
 comptime {

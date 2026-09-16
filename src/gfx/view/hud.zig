@@ -141,7 +141,9 @@ pub const Hud = struct {
 
     pub const max_pick_rows = 8;
     pub const max_hover_rows = 16;
-    pub const max_wk_rows = 10;
+    /// The fallback panel should use a useful portion of a tall display;
+    /// drawing code still clips it to the actual pane height.
+    pub const max_wk_rows = 24;
 
     /// Rows the bottom panel (the host which-key fallback) needs ABOVE the
     /// status line — the single source of truth both the body reservation

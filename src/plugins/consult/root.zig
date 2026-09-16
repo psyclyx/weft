@@ -99,6 +99,10 @@ fn onPickAccept(pick_id: u32) void {
 
 /// Fuzzy-pick a line in the current buffer and jump to the accepted match.
 fn consultLine() void {
+    switch (weft.semanticAction(weft.semantic.action.standard.search)) {
+        .unavailable => {},
+        else => return,
+    }
     beginTargets();
     weft.pickBegin("line", line_pick);
     const len = weft.byteLen();

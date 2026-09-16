@@ -369,6 +369,9 @@ pub const Session = struct {
             const target = self.rowTarget(row) orelse return .declined;
             return .{ .set_working_target = target };
         }
+        if (std.mem.eql(u8, request.action, semantic.action.standard.insert_before) or
+            std.mem.eql(u8, request.action, semantic.action.standard.insert_after))
+            return .{ .focus = try self.insertPending(request.subject, if (std.mem.eql(u8, request.action, semantic.action.standard.insert_before)) .before else .after) };
         if (std.mem.eql(u8, request.action, files.create_file_action))
             return .{ .focus = try self.addPending(.regular) };
         if (std.mem.eql(u8, request.action, files.create_directory_action))
@@ -484,6 +487,19 @@ pub const Session = struct {
         defer listing.deinit();
         try files.reconcileChildListing(self.plugin.gpa, directory, staged, row, listing.value);
         try staged.setExpanded(row, true);
+    }
+
+    fn insertPending(self: *Session, subject: semantic.scene.NodeId, placement: files.PastePlacement) !semantic.scene.NodeId {
+        var staged = try self.stage();
+        defer staged.deinit();
+        const anchor: ?files.PasteAnchor = if (subject == files.rootNodeId()) null else blk: {
+            const id = try files.modelRowId(subject);
+            const row = staged.row(id) orelse return error.UnknownSubject;
+            break :blk .{ .row = id, .parent = row.parent };
+        };
+        const row = try staged.insertFileAt(anchor, placement);
+        try self.publishDraft(&staged);
+        return files.nameNodeId(row);
     }
 
     fn addPending(self: *Session, kind: contract.Kind) !semantic.scene.NodeId {

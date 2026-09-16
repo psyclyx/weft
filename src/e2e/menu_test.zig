@@ -37,6 +37,84 @@ fn initMenuKeymap(gpa: std.mem.Allocator, ed: *Editor) !void {
     ed.setMode("normal");
 }
 
+fn countNavigation(_: *command.Context, data: ?*anyopaque, _: []const command.Value) anyerror!command.Value {
+    const count: *usize = @ptrCast(@alignCast(data.?));
+    count.* += 1;
+    return .nil;
+}
+
+test "menu: hint navigation preserves a non-sticky menu and resolves fallback arms" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try initMenuKeymap(gpa, &ed);
+    var count: usize = 0;
+    _ = try ed.commands.bind(gpa, "test-page", .{ .name = "test-page", .summary = "test", .args = &.{}, .handler = countNavigation, .data = &count });
+    // Unoffered intentions must advance to the next applicable arm, just as
+    // they do in ordinary bindings. Navigation cannot run only the first name.
+    try ed.keymap.bindArms(gpa, "menu-nav", "C-n", &.{ "std.test.unoffered-navigation", "test-page" }, core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "menu-nav", "C-p", "test-page", core.Keymap.prio_config, "test");
+    ed.press("m", "");
+    ed.press("C-n", "");
+    ed.press("C-p", "");
+    try t.expectEqual(@as(usize, 2), count);
+    try t.expectEqualStrings("test-menu", ed.mode());
+    try t.expect(ed.head.hasOpenTransients());
+    ed.press("x", "");
+    try t.expectEqualStrings("normal", ed.mode());
+}
+
+test "menu: F1 peek owns navigation in normal and insert until dismissed" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var pages: usize = 0;
+    var edits: usize = 0;
+    _ = try ed.commands.bind(gpa, "test-page", .{ .name = "test-page", .summary = "test", .args = &.{}, .handler = countNavigation, .data = &pages });
+    _ = try ed.commands.bind(gpa, "test-edit", .{ .name = "test-edit", .summary = "test", .args = &.{}, .handler = countNavigation, .data = &edits });
+    for ([_][]const u8{ "C-n", "C-p" }) |key| {
+        try ed.keymap.bind(gpa, "menu-nav", key, "test-page", core.Keymap.prio_config, "test");
+        for ([_][]const u8{ "normal", "insert" }) |mode| {
+            try ed.keymap.bind(gpa, mode, key, "test-edit", core.Keymap.prio_config, "test");
+            try ed.keymap.bind(gpa, mode, "F1", "which-key-now", core.Keymap.prio_config, "test");
+        }
+    }
+    for ([_][]const u8{ "normal", "insert" }) |mode| {
+        ed.setMode(mode);
+        ed.press("F1", "");
+        try t.expect(ed.session.menu_overlay.open);
+        ed.press("C-n", "");
+        ed.press("C-p", "");
+        try t.expectEqualStrings(mode, ed.mode());
+        try t.expectEqual(@as(usize, 0), edits);
+        ed.press("F1", "");
+        try t.expect(!ed.session.menu_overlay.open);
+    }
+    try t.expectEqual(@as(usize, 4), pages);
+    ed.press("C-n", "");
+    try t.expectEqual(@as(usize, 1), edits);
+}
+
+test "menu: hint navigation keeps the pending chord intact" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try initMenuKeymap(gpa, &ed);
+    var count: usize = 0;
+    _ = try ed.commands.bind(gpa, "test-page", .{ .name = "test-page", .summary = "test", .args = &.{}, .handler = countNavigation, .data = &count });
+    try ed.keymap.bind(gpa, "normal", "space x", "test-leaf", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "menu-nav", "C-n", "test-page", core.Keymap.prio_config, "test");
+    ed.press("space", "");
+    ed.press("C-n", "");
+    try t.expectEqual(@as(usize, 1), count);
+    try t.expectEqualStrings("space", ed.head.pending);
+    ed.press("x", "");
+    try t.expectEqual(@as(usize, 0), ed.head.pending.len);
+}
+
 test "menu: enter -> leaf -> auto-pop through REAL dispatch is a paired-transient push/pop" {
     const gpa = t.allocator;
     var ed: Editor = undefined;

@@ -21,7 +21,15 @@ const weft = @import("weft");
 
 /// Rows of bindings per page (before the position footer). A long menu — or a
 /// mode's whole resolved set on an F1 peek — paginates instead of overflowing.
-const PAGE: usize = 12;
+// Keep the guest's page generous and let the host viewport clamp the drawn
+// rows. A fixed dozen rows made a large display look artificially sparse;
+// pagination still applies on small windows because the renderer only has
+// room for the rows that fit in the body.
+const PAGE: usize = 32;
+// Keep paging usable when the popup is clipped by a short pane. The renderer
+// decides how many of PAGE rows fit, so advancing by a smaller stable step
+// never jumps past content that is currently off-screen.
+const PAGE_STEP: usize = 12;
 
 /// The current page's first-binding offset (into the non-noise bindings). Reset
 /// when a menu opens; advanced by the page commands.
@@ -37,11 +45,11 @@ comptime {
 
 /// Page down; `render` clamps to the last page.
 fn pageDown() void {
-    scroll_off += PAGE;
+    scroll_off += PAGE_STEP;
     render();
 }
 fn pageUp() void {
-    scroll_off = if (scroll_off >= PAGE) scroll_off - PAGE else 0;
+    scroll_off = if (scroll_off >= PAGE_STEP) scroll_off - PAGE_STEP else 0;
     render();
 }
 

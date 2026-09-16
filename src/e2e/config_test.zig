@@ -74,6 +74,8 @@ fn intentionFor(action: []const u8) ?[]const u8 {
         .{ .action = standard.copy, .intention = "std.transfer.yank" },
         .{ .action = standard.cut, .intention = "std.transfer.delete-to-register" },
         .{ .action = standard.paste_after, .intention = "std.transfer.paste" },
+        .{ .action = standard.insert_before, .intention = "std.editing.insert-before" },
+        .{ .action = standard.insert_after, .intention = "std.editing.insert-after" },
     };
     for (table) |row| {
         if (std.mem.eql(u8, row.action, action)) return row.intention;
@@ -507,13 +509,28 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // making it reachable from config is therefore an immediate test failure.
     const files_scene = ed.session.system.semantic.views.get(configured_directory_view).?.scene;
 
+    // These ordinary Vim commands compose a standard insertion intention
+    // with entering insert mode. Their action remains reachable through the
+    // compound command even though the key does not name the intention alone.
+    const compound_view_bindings = [_]struct { sequence: []const u8, command: []const u8, action: []const u8, intention: []const u8 }{
+        .{ .sequence = "o", .command = "vim-open-below", .action = semantic.action.standard.insert_after, .intention = "std.editing.insert-after" },
+        .{ .sequence = "O", .command = "vim-open-above", .action = semantic.action.standard.insert_before, .intention = "std.editing.insert-before" },
+    };
+
     // First walk the actual scene and reject any newly advertised action that
     // lacks a config binding. This catches additions as well as removals; the
     // shared table above also makes the required public contract readable.
     var advertised_actions: std.ArrayList([]const u8) = .empty;
     defer advertised_actions.deinit(gpa);
     try collectSceneActions(gpa, files_scene, &advertised_actions);
-    for (advertised_actions.items) |action| {
+    actions: for (advertised_actions.items) |action| {
+        for (compound_view_bindings) |binding| {
+            if (!std.mem.eql(u8, action, binding.action)) continue;
+            try t.expectEqualStrings(binding.intention, intentionFor(action).?);
+            try t.expect(ed.commands.resolve(binding.command) != null);
+            try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+            continue :actions;
+        }
         // Reachable EITHER as its own command name, or — where the view
         // adapter publishes the action under a standard intention — through
         // the key that binds that intention. Both are config surface; only
@@ -545,6 +562,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     // Required actions are checked independently so an accidental removal
     // from the scene cannot make the dynamic walk vacuously pass.
+    for (compound_view_bindings) |binding| {
+        var found = false;
+        for (advertised_actions.items) |action| {
+            if (std.mem.eql(u8, action, binding.action)) {
+                found = true;
+                break;
+            }
+        }
+        try t.expect(found);
+    }
     for (structured_view_bindings) |binding| {
         if (std.mem.eql(u8, binding.command, "cursor-down") or std.mem.eql(u8, binding.command, "cursor-up")) continue;
         var found = false;

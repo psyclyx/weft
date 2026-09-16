@@ -460,6 +460,24 @@ pub const Model = struct {
         }});
     }
 
+    /// Create a sibling draft at a stable visual anchor. Empty names are
+    /// allowed while editing; plan validation rejects them at apply time.
+    pub fn insertFileAt(self: *Model, anchor: ?PasteAnchor, placement: PastePlacement) !NodeId {
+        const parent = if (anchor) |a| a.parent else null;
+        try self.validateParent(parent);
+        const index = if (anchor) |a| try self.anchorIndex(a, placement) else try self.parentInsertionIndex(parent);
+        const id = self.next_id;
+        const pending_row: Row = .{
+            .id = id,
+            .parent = parent,
+            .base = null,
+            .current = null,
+            .draft = .{ .name = &.{}, .kind = .regular, .mode = null, .contents = &.{}, .link_target = &.{} },
+            .pending = .added,
+        };
+        return self.insertOwnedRows(index, &.{pending_row});
+    }
+
     fn appendPending(self: *Model, parent: ?NodeId, name: []const u8, kind: contract.Kind, mode: ?u32, contents: []const u8, link_target: []const u8, pending: Pending) !NodeId {
         if (name.len > max_transfer_name) return error.TransferTooLarge;
         try self.validateParent(parent);
@@ -2222,4 +2240,26 @@ test "two drafts over one directory fold independently" {
     try std.testing.expectEqual(@as(usize, 2), left.rows.items.len);
     try std.testing.expectEqual(@as(usize, 1), right.rows.items.len);
     try std.testing.expect(!right.rows.items[0].expanded);
+}
+
+test "insert draft siblings preserves subtree order and permits an unfinished name" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{
+        .{ .identity = ref(1, 1), .name = "dir", .revision = "r", .kind = .directory },
+        .{ .identity = ref(2, 1), .name = "tail", .revision = "r", .kind = .regular },
+    } });
+    const dir = model.rows.items[0].id;
+    const child = try model.addFile(dir, "child", &.{}, null);
+    const before = try model.insertFileAt(.{ .row = dir, .parent = null }, .before);
+    const after = try model.insertFileAt(.{ .row = dir, .parent = null }, .after);
+    try std.testing.expectEqual(before, model.rows.items[0].id);
+    try std.testing.expectEqual(dir, model.rows.items[1].id);
+    try std.testing.expectEqual(child, model.rows.items[2].id);
+    try std.testing.expectEqual(after, model.rows.items[3].id);
+    try std.testing.expectEqualStrings("", model.row(after).?.draft.name);
+    try model.rename(before, "before");
+    try model.rename(after, "after");
+    var plan = try model.buildPlan();
+    defer plan.deinit();
 }

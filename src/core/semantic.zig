@@ -520,7 +520,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, InvalidWorkingTarget, UnauthorizedWorkingTarget, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || FieldInputError || error{ InvalidRegister, InvalidWorkingTarget, UnauthorizedWorkingTarget, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -606,6 +606,10 @@ pub const Services = struct {
         delete_next,
         move_previous,
         move_next,
+        jump: usize,
+        motion: @import("field_motion.zig").Movement,
+        set_mark,
+        delete_selection,
         clear_selection,
     };
 
@@ -807,6 +811,13 @@ pub const Services = struct {
             head.semantic_focus.clear();
             return null;
         };
+        if (path.field != null and
+            (std.mem.eql(u8, action, semantic.action.standard.copy) or
+                std.mem.eql(u8, action, semantic.action.standard.cut) or
+                std.mem.eql(u8, action, semantic.action.standard.delete)))
+        {
+            if (try self.invokeFocusedFieldTransfer(stack, head, gpa, path, action, register)) |effect| return effect;
+        }
         var index = path.nodes.len;
         while (index > 0) {
             index -= 1;
@@ -824,6 +835,42 @@ pub const Services = struct {
             }
         }
         return error.ActionUnavailable;
+    }
+
+    /// Visual operations on a semantic field are text selections, even when
+    /// the field is backed by a structured provider such as the files view.
+    /// Keep this in the shared action layer so Vim does not learn how a field
+    /// stores text and the provider does not learn about Vim's visual mode.
+    fn invokeFocusedFieldTransfer(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        path: semantic.focus.Path,
+        action: []const u8,
+        register: u8,
+    ) (InvokeActionError!?ActionEffect) {
+        const field_ref = path.field orelse return null;
+        const provider = self.fields.get(field_ref) orelse return error.StaleField;
+        var snapshot = try provider.snapshot(gpa);
+        defer snapshot.deinit();
+        const anchor: usize = @intCast(snapshot.value.selection.anchor);
+        const caret: usize = @intCast(snapshot.value.selection.caret);
+        const start = @min(anchor, caret);
+        const end = @max(anchor, caret);
+        if (start == end) return null;
+
+        if (std.mem.eql(u8, action, semantic.action.standard.delete)) {
+            _ = try self.inputFocusedField(head, gpa, .delete_selection);
+            return .handled;
+        }
+
+        const intent: semantic.transfer.Intent = if (std.mem.eql(u8, action, semantic.action.standard.cut)) .cut else .copy;
+        const item = semantic.transfer.Item{
+            .intent = intent,
+            .representations = &.{.{ .media_type = "text/plain", .payload = snapshot.value.bytes[start..end] }},
+        };
+        return try self.absorbActionOutcome(stack, gpa, path.view, .{ .transfer = item }, register);
     }
 
     fn applyActionFocus(
@@ -975,17 +1022,32 @@ pub const Services = struct {
                 };
             },
             .move_previous => blk: {
-                const offset = if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, selection_start);
-                break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
+                const offset = if (head.semantic_focus.selection_mark) previousFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, caret);
+                break :blk fieldMovement(offset, value.selection, head.semantic_focus.selection_mark);
             },
             .move_next => blk: {
-                const offset = if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, selection_end);
-                break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
+                const offset = if (head.semantic_focus.selection_mark) nextFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, caret);
+                break :blk fieldMovement(offset, value.selection, head.semantic_focus.selection_mark);
             },
-            .clear_selection => .{ .start = caret, .end = caret, .replacement = &.{}, .selection_after = collapsed(caret) },
+            .motion => |movement| fieldMovement(@import("field_motion.zig").destination(value.bytes, caret, movement), value.selection, head.semantic_focus.selection_mark),
+            .jump => |position| fieldMovement(@min(position, value.bytes.len), value.selection, head.semantic_focus.selection_mark),
+            .set_mark, .clear_selection => .{ .start = caret, .end = caret, .replacement = &.{}, .selection_after = collapsed(caret) },
+            .delete_selection => .{ .start = selection_start, .end = selection_end, .replacement = &.{}, .selection_after = collapsed(selection_start) },
         };
         try provider.edit(value.revision, edit);
+        switch (field_input) {
+            .set_mark => head.semantic_focus.selection_mark = true,
+            .clear_selection, .delete_selection, .commit, .delete_previous, .delete_next => head.semantic_focus.selection_mark = false,
+            else => {},
+        }
         return true;
+    }
+
+    fn fieldMovement(offset: usize, selection: view_runtime.field.Selection, extend: bool) view_runtime.field.Edit {
+        return .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = .{
+            .anchor = if (extend) selection.anchor else @intCast(offset),
+            .caret = @intCast(offset),
+        } };
     }
 
     /// Resolve an ordinary "edit this field" request without choosing an
@@ -2057,7 +2119,21 @@ test "ordinary editor input targets semantic fields and focus order" {
 
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqualStrings("new", first.bytes.items);
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .jump = 0 }));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .set_mark));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .move_next));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .move_next));
+    try std.testing.expectEqual(@as(u64, 0), first.selection.anchor);
+    try std.testing.expectEqual(@as(u64, 2), first.selection.caret);
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .motion = .line_end }));
+    try std.testing.expectEqual(@as(u64, 0), first.selection.anchor);
+    try std.testing.expectEqual(@as(u64, 3), first.selection.caret);
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .clear_selection));
+    try std.testing.expect(!head.semantic_focus.selection_mark);
+    try std.testing.expectEqual(first.selection.anchor, first.selection.caret);
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .set_mark));
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
+    try std.testing.expect(!head.semantic_focus.selection_mark);
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
     try std.testing.expect(head.semantic_focus.path().?.field.?.eql(second_ref));
     try std.testing.expect(try services.requestFocusedFieldEdit(&head, std.testing.allocator));

@@ -77,15 +77,15 @@ const mtable = [_]MB{
     .{ .key = "l", .motion = "motion.right", .in_op = false, .intention = "std.navigation.right" },
     .{ .key = "j", .motion = "motion.down", .in_op = false, .intention = "std.navigation.down" },
     .{ .key = "k", .motion = "motion.up", .in_op = false, .intention = "std.navigation.up" },
-    .{ .key = "w", .motion = "motion.word-fwd", .in_op = true },
-    .{ .key = "b", .motion = "motion.word-back", .in_op = true },
-    .{ .key = "e", .motion = "motion.word-end", .in_op = true },
-    .{ .key = "W", .motion = "motion.WORD-fwd", .in_op = true },
-    .{ .key = "B", .motion = "motion.WORD-back", .in_op = true },
-    .{ .key = "E", .motion = "motion.WORD-end", .in_op = true },
-    .{ .key = "0", .motion = "motion.line-start", .in_op = true },
-    .{ .key = "dollar", .motion = "motion.line-end", .in_op = true },
-    .{ .key = "asciicircum", .motion = "motion.first-non-blank", .in_op = true },
+    .{ .key = "w", .motion = "motion.word-fwd", .in_op = true, .intention = "std.navigation.word-next" },
+    .{ .key = "b", .motion = "motion.word-back", .in_op = true, .intention = "std.navigation.word-previous" },
+    .{ .key = "e", .motion = "motion.word-end", .in_op = true, .intention = "std.navigation.word-end" },
+    .{ .key = "W", .motion = "motion.WORD-fwd", .in_op = true, .intention = "std.navigation.big-word-next" },
+    .{ .key = "B", .motion = "motion.WORD-back", .in_op = true, .intention = "std.navigation.big-word-previous" },
+    .{ .key = "E", .motion = "motion.WORD-end", .in_op = true, .intention = "std.navigation.big-word-end" },
+    .{ .key = "0", .motion = "motion.line-start", .in_op = true, .intention = "std.navigation.line-start" },
+    .{ .key = "dollar", .motion = "motion.line-end", .in_op = true, .intention = "std.navigation.line-end" },
+    .{ .key = "asciicircum", .motion = "motion.first-non-blank", .in_op = true, .intention = "std.navigation.first-non-blank" },
     .{ .key = "G", .motion = "motion.doc-end", .in_op = true },
     .{ .key = "percent", .motion = "motion.match-pair", .in_op = true },
 };
@@ -122,6 +122,7 @@ fn zeroKey() void {
         pending_count = pending_count *| 10;
         return;
     }
+    if (weft.invokeIntention("std.navigation.line-start") == .invoked) return;
     const cur = weft.cursor();
     const hnd = weft.runRange("motion.line-start") orelse return;
     const r = weft.rangeEnds(hnd) orelse return;
@@ -742,11 +743,19 @@ fn append() void {
     enterInsert();
 }
 fn openBelow() void {
+    if (weft.invokeIntention("std.editing.insert-after") == .invoked) {
+        enterInsert();
+        return;
+    }
     weft.jump(lineEndOff());
     weft.run("insert-newline");
     enterInsert();
 }
 fn openAbove() void {
+    if (weft.invokeIntention("std.editing.insert-before") == .invoked) {
+        enterInsert();
+        return;
+    }
     weft.jump(lineStartOff());
     weft.run("insert-newline");
     weft.run("cursor-up");
@@ -783,6 +792,18 @@ fn visualLine() void { // V — linewise
     weft.setMode("visual");
 }
 fn visualDelete() void {
+    if (weft.posture() == .field) {
+        const slot = consumeRegister();
+        if (semanticDid(semantic_action.copy, slot)) {
+            if (semanticDid(semantic_action.delete, 0)) {
+                weft.run("clear-selection");
+                visual_linewise = false;
+                weft.setMode("normal");
+                return;
+            }
+        }
+        selected_register = slot;
+    }
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
@@ -794,6 +815,16 @@ fn visualDelete() void {
     weft.setMode("normal");
 }
 fn visualYank() void {
+    if (weft.posture() == .field) {
+        const slot = consumeRegister();
+        if (semanticDid(semantic_action.copy, slot)) {
+            weft.run("clear-selection");
+            visual_linewise = false;
+            weft.setMode("normal");
+            return;
+        }
+        selected_register = slot;
+    }
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
@@ -808,6 +839,16 @@ fn visualYank() void {
 /// `d` but landing in insert). Was UNBOUND, so `c` fell through to normal's
 /// operator-pending — a vim user selecting then `c` got nothing useful.
 fn visualChange() void {
+    if (weft.posture() == .field) {
+        const slot = consumeRegister();
+        if (semanticDid(semantic_action.copy, slot) and semanticDid(semantic_action.delete, 0)) {
+            weft.run("clear-selection");
+            visual_linewise = false;
+            enterInsert();
+            return;
+        }
+        selected_register = slot;
+    }
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);

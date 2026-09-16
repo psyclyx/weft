@@ -152,6 +152,7 @@ pub const Session = struct {
         try self.head.setModeRaw(gpa, self.system.default_head.currentMode());
         self.menu_overlay = .{};
         self.cmd_ctx = self.system.contextFor(&self.head);
+        self.cmd_ctx.overlay_navigation_active = &self.menu_overlay.open;
         self.cmd_ctx.entries = .{ .context = self, .open = openWorkspaceEntryOpaque };
         // This session opened the roots, so it is the only party entitled to
         // say what they are called (`doc/place.md` §2.3).

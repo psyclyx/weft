@@ -36,7 +36,18 @@ pub const Intent = enum {
     navigate_down,
     navigate_left,
     navigate_right,
+    word_previous,
+    word_next,
+    word_end,
+    WORD_previous,
+    WORD_next,
+    WORD_end,
+    line_start,
+    line_end,
+    first_non_blank,
     back,
+    insert_before,
+    insert_after,
 
     pub const count = @typeInfo(Intent).@"enum".fields.len;
 };
@@ -93,6 +104,7 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     count += pushAdvertised(instance, focus.path, out, count, .transfer_yank, standard.copy);
     count += pushAdvertised(instance, focus.path, out, count, .transfer_paste, standard.paste_after);
     count += pushAdvertised(instance, focus.path, out, count, .transfer_delete, standard.cut);
+
     const axes = pathAxes(instance, focus.path);
     if (axes.vertical) {
         out[count] = .{ .intent = .navigate_up };
@@ -104,11 +116,29 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
         out[count + 1] = .{ .intent = .navigate_right };
         count += 2;
     }
+    if (focus.path.field != null) {
+        for ([_]Intent{
+            .word_previous,
+            .word_next,
+            .word_end,
+            .WORD_previous,
+            .WORD_next,
+            .WORD_end,
+            .line_start,
+            .line_end,
+            .first_non_blank,
+        }) |movement| {
+            out[count] = .{ .intent = movement };
+            count += 1;
+        }
+    }
     // Leaving a focused view always lands somewhere — the workspace keeps the
     // entry it came from, and the route falls back to another live one — so a
     // live focus is itself the back capability.
     out[count] = .{ .intent = .back };
     count += 1;
+    count += pushAdvertised(instance, focus.path, out, count, .insert_before, standard.insert_before);
+    count += pushAdvertised(instance, focus.path, out, count, .insert_after, standard.insert_after);
     return out[0..count];
 }
 

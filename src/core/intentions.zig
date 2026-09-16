@@ -33,6 +33,15 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.transfer.paste", .doc = "Place the transfer register's content at the target." },
     .{ .name = "std.transfer.delete-to-register", .doc = "Capture the target into the transfer register and remove it." },
     .{ .name = "std.editing.insert-line-break", .doc = "Commit a line break at the editing point." },
+    .{ .name = "std.navigation.word-previous", .doc = "Move the editing point to the word-previous boundary." },
+    .{ .name = "std.navigation.word-next", .doc = "Move the editing point to the word-next boundary." },
+    .{ .name = "std.navigation.word-end", .doc = "Move the editing point to the word-end boundary." },
+    .{ .name = "std.navigation.big-word-previous", .doc = "Move the editing point to the WORD-previous boundary." },
+    .{ .name = "std.navigation.big-word-next", .doc = "Move the editing point to the WORD-next boundary." },
+    .{ .name = "std.navigation.big-word-end", .doc = "Move the editing point to the WORD-end boundary." },
+    .{ .name = "std.navigation.line-start", .doc = "Move the editing point to the line-start boundary." },
+    .{ .name = "std.navigation.line-end", .doc = "Move the editing point to the line-end boundary." },
+    .{ .name = "std.navigation.first-non-blank", .doc = "Move the editing point to the first-non-blank boundary." },
     .{ .name = "std.navigation.back", .doc = "Return to the previous workspace location." },
     // Directional movement shares `navigation`'s package: one package per
     // concept, so `back` and the four moves cannot drift apart.
@@ -40,6 +49,8 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.navigation.down", .doc = "Move to the neighbour below on the vertical axis." },
     .{ .name = "std.navigation.left", .doc = "Move to the neighbour left on the horizontal axis." },
     .{ .name = "std.navigation.right", .doc = "Move to the neighbour right on the horizontal axis." },
+    .{ .name = "std.editing.insert-before", .doc = "Insert an editable item before the focused item." },
+    .{ .name = "std.editing.insert-after", .doc = "Insert an editable item after the focused item." },
     .{ .name = "std.history.undo", .doc = "Reverse the most recent reversible change." },
     .{ .name = "std.history.redo", .doc = "Reapply the most recently undone change." },
     .{ .name = "std.persistence.save", .doc = "Commit pending changes to durable storage." },
@@ -60,6 +71,7 @@ pub const std_intentions = [_]Intention{
 };
 
 comptime {
+    @setEvalBranchQuota(10000);
     for (std_intentions, 0..) |a, i| {
         for (std_intentions[i + 1 ..]) |b| {
             if (std.mem.eql(u8, a.name, b.name)) {

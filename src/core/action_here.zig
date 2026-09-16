@@ -74,6 +74,9 @@ pub fn invokeHere(
         error.ActionUnavailable, error.StaleView => {},
         else => return err,
     }
+    if (std.mem.eql(u8, action, semantic_model.action.standard.search)) {
+        if (@import("scene_search.zig").open(ctx) catch return error.Failed) return .handled;
+    }
     return invokeOnProjection(ctx, services, action, register);
 }
 

@@ -94,6 +94,9 @@ pub const Context = struct {
     /// one `Head` (a second RENDERED head is a bigger, later change); the
     /// per-head STATE this field names is what W2a-2 made ready for more.
     head: *Head,
+    /// Application-owned overlay input scope. Navigation bindings get first
+    /// refusal while a hint overlay is open, including peeks outside menus.
+    overlay_navigation_active: ?*const bool = null,
     /// Who is invoking right now (default: the interactive user). Plugins
     /// swap this in around their trampolines so their edits GRADE-gate as the
     /// plugin peer — see `plugin.zig`.

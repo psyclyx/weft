@@ -156,7 +156,7 @@ const Builder = struct {
 /// Render a semantic tool view in the pane body. Text editing, modal state,
 /// and filesystem meaning are absent here; fields and stable focus are the
 /// only behavior-facing inputs.
-pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), document: data.Document, body: region.Rect, top_row: *usize) ![]const Hit {
+pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), document: data.Document, hud: view.Hud, body: region.Rect, top_row: *usize) ![]const Hit {
     const rows = try rowsFor(scratch, document);
     var hits: std.ArrayList(Hit) = .empty;
     var content = body;
@@ -180,20 +180,23 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
         if (index >= top_row.* + visible) top_row.* = index + 1 - visible;
         break;
     };
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, true);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true);
     return hits.toOwnedSlice(hit_arena);
 }
 
 /// Render the active head-local interaction above its underlying view. The
 /// presentation string is an open hint consumed only by this presenter.
-pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, body: region.Rect) ![]const Hit {
+pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect) ![]const Hit {
     const rows = try rowsFor(scratch, overlay.document);
     if (rows.len == 0) return &.{};
     var widest: usize = 1;
     for (rows) |row| {
-        for (row.spans) |span| {
-            widest = @max(widest, @as(usize, span.column) + visualWidth(span.text));
+        var occupied: usize = 0;
+        for (row.spans, 0..) |span, index| {
+            const column = @max(occupied, @as(usize, span.column));
+            occupied = column + visualWidth(span.text) + @as(usize, @intFromBool(index + 1 < row.spans.len));
         }
+        widest = @max(widest, occupied);
     }
     const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)) -| 1));
     const pad_x = v.cell_w;
@@ -214,11 +217,11 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     try popup.outlinedBox(scratch, rects, x, y, box_w, box_h, v.theme.background, v.theme.accent);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, true);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true);
     return hits.toOwnedSlice(hit_arena);
 }
 
-fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, clip_width: bool) !void {
+fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool) !void {
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
@@ -230,12 +233,14 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
         const editing_metadata = for (row.spans) |span| {
             if (span.selection != null and span.hide_below != 0) break true;
         } else false;
+        var occupied: usize = 0;
         for (row.spans) |span| {
             const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
             // Secondary fields remain reachable even when their metadata is
             // hidden in a narrow pane; focusing one temporarily reveals it.
             if (cells < span.hide_below and span.selection == null) continue;
-            const column = if (!editing_metadata and cells < span.compact_below) span.compact_column orelse span.column else span.column;
+            const declared_column = if (!editing_metadata and cells < span.compact_below) span.compact_column orelse span.column else span.column;
+            const column = @max(occupied, @as(usize, declared_column));
             const x = body.x + @as(f32, @floatFromInt(column)) * v.cell_w;
             if (clip_width and x >= body.x + body.w) continue;
             const available_cells: usize = @intFromFloat(@max(0, body.x + body.w - x) / v.cell_w);
@@ -243,16 +248,36 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 const start = @min(@min(sel.anchor, sel.caret), available_cells);
                 const end = @min(@max(sel.anchor, sel.caret), available_cells);
                 if (end > start) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(start)) * v.cell_w, .y = y, .w = @as(f32, @floatFromInt(end - start)) * v.cell_w, .h = v.line_h, .color = v.theme.selection });
-                if (sel.caret < available_cells) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, .y = y, .w = 2, .h = v.line_h, .color = v.theme.cursor });
+                if (hud.cursor_on and sel.caret < available_cells) try rects.append(scratch, fieldCaretRect(x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y, v.cell_w, v.line_h, hud.cursor_style, v.theme.cursor));
             }
             const text = if (clip_width) firstCells(span.text, available_cells) else span.text;
             try popup.propLine(v, scratch, runs, text, x, y + v.ascent, colorFor(v, span.tone));
+            if (hud.cursor_on and hud.cursor_style == .block) if (span.selection) |sel| {
+                const prefix = firstCells(text, sel.caret);
+                if (prefix.len < text.len) try popup.propLine(v, scratch, runs, firstCells(text[prefix.len..], 1), x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y + v.ascent, v.theme.cursor_text);
+            };
+            occupied = column + visualWidth(span.text) + 1;
             if (!span.focusable) continue;
             const available = @max(0, body.x + body.w - x);
             const width = @min(available, @max(v.cell_w, @as(f32, @floatFromInt(visualWidth(span.text))) * v.cell_w));
             try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = .{ .x = x, .y = y, .w = width, .h = v.line_h } });
         }
     }
+}
+
+fn fieldCaretRect(x: f32, y: f32, cell_w: f32, line_h: f32, style: view.CursorStyle, color: [4]f32) Rect {
+    return .{ .x = x, .y = if (style == .underline) y + line_h - 2 else y, .w = if (style == .bar) 2 else cell_w, .h = if (style == .underline) 2 else line_h, .color = color };
+}
+
+test "semantic field caret follows shared cursor style" {
+    const color = [4]f32{ 1, 1, 1, 1 };
+    const block = fieldCaretRect(10, 20, 8, 16, .block, color);
+    try std.testing.expectEqual(@as(f32, 8), block.w);
+    try std.testing.expectEqual(@as(f32, 16), block.h);
+    try std.testing.expectEqual(@as(f32, 2), fieldCaretRect(10, 20, 8, 16, .bar, color).w);
+    const underline = fieldCaretRect(10, 20, 8, 16, .underline, color);
+    try std.testing.expectEqual(@as(f32, 34), underline.y);
+    try std.testing.expectEqual(@as(f32, 2), underline.h);
 }
 
 fn colorFor(v: *const View, tone: Tone) [4]f32 {

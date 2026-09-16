@@ -372,25 +372,24 @@ pub const Binding = struct {
 /// META keys that act on the which-key overlay WITHOUT being part of the chord
 /// you're typing. STRUCTURE only — the actual key BINDINGS are config data
 /// (`defaults.js` binds `menu-nav`), so nav is uniform + rebindable and no
-/// plugin/config re-wires it. Mid-chord, dispatch consults this via `navCommand`
+/// plugin/config re-wires it. Mid-chord, dispatch consults this via `navBindings`
 /// before feeding the key into the sequence: a nav key pages the hint and leaves
 /// `pending` intact; anything else extends (or ends) the chord as usual. (It's
 /// also the fallback base a legacy menu MODE inherits — same keys, both worlds.)
 pub const menu_nav_mode = "menu-nav";
 
-/// The command bound to `key` in the which-key NAV layer (`menu-nav`'s own
-/// table), or null. Dispatch runs this while a chord is `pending` so a nav key
-/// (page down/up) acts on the hint instead of dead-ending the sequence.
-pub fn navCommand(self: *const Keymap, key: []const u8) ?[]const u8 {
+/// The complete binding arms for `key` in the hint navigation layer.
+/// Dispatch resolves these through the same action chain as ordinary keys.
+pub fn navBindings(self: *const Keymap, key: []const u8) ?[]const []const u8 {
     const b = self.modes.getPtr(menu_nav_mode) orelse return null;
-    return if (b.get(key)) |e| e.commands[0] else null;
+    return if (b.get(key)) |e| e.commands else null;
 }
 
 /// The layer every menu inherits for keys it answers ORDINARILY — the ones
 /// that end a chord rather than acting on the hint mid-flight.
 ///
 /// Split from `menu_nav_mode` because those are two jobs, and one layer doing
-/// both is a trap: `navCommand` deliberately PRESERVES `pending`, so a key that
+/// both is a trap: `navBindings` deliberately PRESERVES `pending`, so a key that
 /// is supposed to abandon the chord (Escape) silently becomes a key that pages
 /// the hint and leaves you mid-chord. Core owns the chain — a menu falls back
 /// to `menu`, and `menu` falls back to `menu-nav` — and owns nothing about

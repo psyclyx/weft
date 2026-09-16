@@ -105,7 +105,7 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
     // Keep refresh/apply/revert discoverable; the provider decides whether
     // the current draft has work when invoked.
     _ = rows;
-    const result = try arena.alloc(scene.Action, 8 + @as(usize, @intFromBool(options.has_container)));
+    const result = try arena.alloc(scene.Action, 10 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
     if (options.has_container) {
         result[index] = .{ .id = standard.open_container, .label = "Open container" };
@@ -119,6 +119,8 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
     result[index + 5] = .{ .id = standard.apply, .label = "Apply draft" };
     result[index + 6] = .{ .id = standard.revert, .label = "Revert draft" };
     result[index + 7] = .{ .id = standard.set_working_target, .label = "Use as working target" };
+    result[index + 8] = .{ .id = standard.insert_before, .label = "Insert before" };
+    result[index + 9] = .{ .id = standard.insert_after, .label = "Insert after" };
     return result;
 }
 
@@ -255,7 +257,7 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     // place and adopt as a working locus; a file, a draft, and a stale row
     // are none of those things and say so by advertising neither.
     const is_container = row.draft.kind == .directory and has_target and !unavailable;
-    const actions = try arena.alloc(scene.Action, 9 +
+    const actions = try arena.alloc(scene.Action, 11 +
         @as(usize, @intFromBool(mode_editable)) +
         @as(usize, @intFromBool(is_container)) * 2);
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
@@ -270,7 +272,9 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = row.conflict != .stale };
     actions[7] = .{ .id = create_file_action, .label = "New file" };
     actions[8] = .{ .id = create_directory_action, .label = "New directory" };
-    var index: usize = 9;
+    actions[9] = .{ .id = standard.insert_before, .label = "Insert before", .enabled = row.conflict != .stale };
+    actions[10] = .{ .id = standard.insert_after, .label = "Insert after", .enabled = row.conflict != .stale };
+    var index: usize = 11;
     if (mode_editable) {
         actions[index] = .{
             .id = permissions_edit_action,
@@ -615,9 +619,9 @@ test "projection fixes metadata field columns and styles mode-only modifications
     try std.testing.expectEqualStrings("changed", children[2].facts[0].value);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);
-    try std.testing.expectEqual(@as(usize, 10), row.actions.len);
-    try std.testing.expectEqualStrings(permissions_edit_action, row.actions[9].id);
-    try std.testing.expect(row.actions[9].enabled);
+    try std.testing.expectEqual(@as(usize, 12), row.actions.len);
+    try std.testing.expectEqualStrings(permissions_edit_action, row.actions[11].id);
+    try std.testing.expect(row.actions[11].enabled);
 }
 
 test "projection rejects duplicate missing and generation-zero bindings" {
@@ -666,8 +670,8 @@ test "an expanded row splices its children in indented, a collapsed one hides th
     const closed_rows = closed.value.content.container.children;
     try std.testing.expectEqual(@as(usize, 2), closed_rows.len);
     try std.testing.expectEqualStrings("▸", closed_rows[0].content.container.children[0].content.label);
-    try std.testing.expectEqualStrings(standard.toggle_expanded, closed_rows[0].actions[9].id);
-    try std.testing.expectEqualStrings("Expand", closed_rows[0].actions[9].label);
+    try std.testing.expectEqualStrings(standard.toggle_expanded, closed_rows[0].actions[11].id);
+    try std.testing.expectEqualStrings("Expand", closed_rows[0].actions[11].label);
     for (closed_rows[1].actions) |action|
         try std.testing.expect(!std.mem.eql(u8, action.id, standard.toggle_expanded));
 
@@ -678,7 +682,7 @@ test "an expanded row splices its children in indented, a collapsed one hides th
     try std.testing.expectEqual(@as(usize, 3), open_rows.len);
     try std.testing.expectEqual(try rowNodeId(inner), open_rows[1].id);
     try std.testing.expectEqualStrings("▾", open_rows[0].content.container.children[0].content.label);
-    try std.testing.expectEqualStrings("Collapse", open_rows[0].actions[9].label);
+    try std.testing.expectEqualStrings("Collapse", open_rows[0].actions[11].label);
     // Depth is one whole-row shift, so every column of a nested row moves
     // together and the tree reads as one indentation.
     const columns = open_rows[1].content.container.children;

@@ -174,6 +174,8 @@ pub const SemanticFocus = struct {
     /// secondary, non-focusable node in this same view. It is head-local so
     /// another head can navigate the same view independently.
     navigation_anchor: ?semantic.scene.NodeId = null,
+    /// Extend focused-field movements from the selection anchor.
+    selection_mark: bool = false,
 
     pub const empty: SemanticFocus = .{};
 
@@ -189,6 +191,7 @@ pub const SemanticFocus = struct {
         self.view = next.view;
         self.field = next.field;
         self.navigation_anchor = null;
+        self.selection_mark = false;
     }
 
     pub fn clear(self: *SemanticFocus) void {
@@ -196,6 +199,7 @@ pub const SemanticFocus = struct {
         self.nodes.clearRetainingCapacity();
         self.field = null;
         self.navigation_anchor = null;
+        self.selection_mark = false;
     }
 
     /// Replace this focus with an owned copy of another head/buffer focus.
@@ -209,6 +213,7 @@ pub const SemanticFocus = struct {
         self.view = other.view;
         self.field = other.field;
         self.navigation_anchor = other.navigation_anchor;
+        self.selection_mark = other.selection_mark;
     }
 
     pub fn setNavigationAnchor(self: *SemanticFocus, anchor: ?semantic.scene.NodeId) void {

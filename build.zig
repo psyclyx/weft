@@ -1129,7 +1129,8 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "e2e/latency", "e2e/popup-layout" },
     });
     const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
-    latency_step.dependOn(&runInstrument(b, instrument_tests, "latency").step);
+    const run_latency = runInstrument(b, instrument_tests, "latency");
+    latency_step.dependOn(&run_latency.step);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&runInstrument(b, instrument_tests, "popup-layout").step);
 
@@ -1172,7 +1173,7 @@ pub fn build(b: *std.Build) void {
     // already gives `run_tests`. Adding this BEFORE `runAlone` would instead
     // make `run_tests` wait on it, which is the wrong order and, once
     // `latency_step` also depends on `run_tests`, a cycle.
-    latency_step.dependOn(&run_tests.step);
+    run_latency.step.dependOn(&run_tests.step);
     test_step.dependOn(latency_step);
 }
 
