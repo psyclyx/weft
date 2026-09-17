@@ -204,12 +204,12 @@ pub const Buffer = struct {
         return null;
     }
 
-    /// Whether closing this entry would drop edits its file backing never
-    /// received. A projection has no file to write (`save`/`save-as` say so
-    /// too), so its text cannot be "unsaved" in that sense — what its content
-    /// is worth is the authoring tool's question, asked its own way.
+    /// Whether closing this entry would drop user edits its file backing never
+    /// received. Read-only text entries are generated sinks (process output,
+    /// listings, and similar), so their editor dirtiness is producer output,
+    /// not user work that needs a save/close refusal.
     pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
-        if (self.tool.len > 0) return false;
+        if (self.read_only or self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
         return ed.isDirty(gpa);
     }
@@ -757,6 +757,22 @@ test "buffers: Ref rejects a closed generation when its slot is reused" {
     try t.expect(first_ref.generation != replacement_ref.generation);
     try t.expect(bufs.resolve(first_ref) == null);
     try t.expect(bufs.resolve(replacement_ref) == bufs.get(replacement_id).?);
+}
+
+test "buffers: generated read-only output is discardable even when editor-dirty" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+
+    const output = try bufs.create(gpa, "*run*");
+    const b = bufs.get(output).?;
+    try b.textEditor().?.doc.insert(gpa, 0, "generated output");
+    try t.expect(try b.textEditor().?.isDirty(gpa));
+    b.read_only = true;
+    try t.expect(!(try b.hasUnsavedFile(gpa)));
 }
 
 test {
