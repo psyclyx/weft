@@ -203,6 +203,7 @@ const config_handlers = .{
     .{ .name = "qjs_use", .handler = cUse },
     .{ .name = "qjs_set", .handler = cSet },
     .{ .name = "qjs_menu", .handler = cMenu },
+    .{ .name = "qjs_group", .handler = cGroup },
     .{ .name = "qjs_action", .handler = cAction },
     .{ .name = "qjs_semantic_action", .handler = cSemanticAction },
     .{ .name = "qjs_provide", .handler = cProvide },
@@ -1601,6 +1602,26 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     // Declaring a menu marks the mode; the keys a menu answers are declared in
     // config on the `menu-nav` layer every menu inherits — see `applyMenu`.
     br.activeCtx().keymap.tagMode(gpa, name, "menu") catch {};
+}
+
+/// weft.group(scope, prefix, name) — label an implicit chord group. The
+/// declaration is staged with the manifest so imported/config tiers and reload
+/// teardown follow the same ownership rules as bindings.
+fn cGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const mode = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(mode);
+    const prefix = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(prefix);
+    const name = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(name);
+    if (br.manifest) |m| {
+        m.addGroup(mode, prefix, name) catch {};
+        return;
+    }
+    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_config, "config") catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind

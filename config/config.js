@@ -22,6 +22,7 @@
 //   weft.grant(who, cap[, {root}]) — delegate an effect; without one, closed
 //   weft.bind(mode, keys, cmd)     — bind a key or a key SEQUENCE ("SPC f f");
 //                                    a LIST is an authored fallback, tried in order
+//   weft.group(mode, prefix, name) — name an implicit chord group in which-key
 //   weft.action(name)              — declare an abstract intent a key can bind to
 //   weft.provide(name, when, cmd[, prio]) — a provider for one, chosen by
 //                                    {mode, lang} at fire time
@@ -187,6 +188,26 @@ weft.set("palette", "signature", "on");     // show each row's <parameters>
 // persistence, and going back.
 
 weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
+
+// The keymap derives groups from longer chords. Give those prefixes names for
+// which-key; an unnamed prefix intentionally falls back to "+prefix".
+weft.group("normal", "SPC", "leader");
+weft.group("normal", "SPC f", "files");
+weft.group("normal", "SPC b", "buffers");
+weft.group("normal", "SPC g", "git");
+weft.group("normal", "SPC s", "search");
+weft.group("normal", "SPC p", "project");
+weft.group("normal", "SPC c", "code");
+weft.group("normal", "SPC o", "tools");
+weft.group("normal", "SPC a", "agents");
+weft.group("normal", "SPC d", "debug");
+weft.group("normal", "SPC n", "notes");
+weft.group("normal", "SPC C", "collaboration");
+weft.group("normal", "SPC w", "windows");
+weft.group("normal", "SPC q", "quit");
+weft.group("normal", "SPC h", "help");
+weft.group("normal", "SPC t", "toggles");
+weft.group("normal", "SPC v", "views");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).

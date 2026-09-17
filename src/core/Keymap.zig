@@ -43,6 +43,7 @@ const Keymap = @This();
 /// shape for the single case.
 const BindEntry = struct { commands: [][]const u8, priority: i32, owner: []u8 };
 const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
+const GroupEntry = struct { name: []u8, priority: i32, owner: []u8 };
 
 pub const prio_core = -100;
 pub const prio_plugin = 0;
@@ -91,6 +92,10 @@ commit_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 ///               instead of overshooting to `default` and stranding a revisited
 ///               file in a mode with no editing keys.
 mode_tags: std.StringArrayHashMapUnmanaged(void) = .empty,
+/// `(mode, prefix)` → the display name for an implicit chord group. This is
+/// presentation metadata, but it follows the same tier/owner rules as a bind
+/// so imported defaults cannot overwrite a config author's label.
+group_names: std.StringArrayHashMapUnmanaged(GroupEntry) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -117,6 +122,12 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.commit_commands.deinit(gpa);
     for (self.mode_tags.keys()) |k| gpa.free(k);
     self.mode_tags.deinit(gpa);
+    for (self.group_names.keys(), self.group_names.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v.name);
+        gpa.free(v.owner);
+    }
+    self.group_names.deinit(gpa);
     self.* = .{};
 }
 
@@ -195,6 +206,69 @@ pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u
         freeArms(gpa, removed.value.commands);
         gpa.free(removed.value.owner);
     }
+}
+
+/// Name an implicit chord group. `prefix` is the complete key sequence that
+/// opens it (`SPC f`, not just `f`). The name is display-only; dispatch still
+/// follows the actual chord table. A lower tier cannot replace a higher one.
+pub fn setGroupName(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8, name: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
+    var keybuf: [512]u8 = undefined;
+    const group_key = groupKey(&keybuf, mode, prefix) orelse return;
+    if (self.group_names.get(group_key)) |current| if (priority < current.priority) return;
+    const gop = try self.group_names.getOrPut(gpa, group_key);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.name);
+        gpa.free(gop.value_ptr.owner);
+    } else {
+        gop.key_ptr.* = try gpa.dupe(u8, group_key);
+    }
+    gop.value_ptr.* = .{
+        .name = try gpa.dupe(u8, name),
+        .priority = priority,
+        .owner = try gpa.dupe(u8, owner),
+    };
+}
+
+/// Remove a group label only when its owner still holds it. Used by manifest
+/// reconciliation, just like `unbind` for the actual key binding.
+pub fn unsetGroupName(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8, owner: []const u8) void {
+    var keybuf: [512]u8 = undefined;
+    const group_key = groupKey(&keybuf, mode, prefix) orelse return;
+    const entry = self.group_names.get(group_key) orelse return;
+    if (!std.mem.eql(u8, entry.owner, owner)) return;
+    if (self.group_names.fetchSwapRemove(group_key)) |removed| {
+        gpa.free(removed.key);
+        gpa.free(removed.value.name);
+        gpa.free(removed.value.owner);
+    }
+}
+
+/// The nearest label in the mode's fallback chain, then the universal layer.
+/// The returned name is keymap-owned and remains valid until the next group
+/// metadata mutation.
+pub fn groupName(self: *const Keymap, mode: []const u8, prefix: []const u8) ?[]const u8 {
+    var m: []const u8 = mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        var local_buf: [512]u8 = undefined;
+        if (groupKey(&local_buf, m, prefix)) |local_key|
+            if (self.group_names.get(local_key)) |entry| return entry.name;
+        m = self.parents.get(m) orelse break;
+    }
+    var global_buf: [512]u8 = undefined;
+    if (groupKey(&global_buf, global_mode, prefix)) |global_key|
+        if (self.group_names.get(global_key)) |entry| return entry.name;
+    return null;
+}
+
+fn groupKey(buf: []u8, mode: []const u8, prefix: []const u8) ?[]const u8 {
+    var normalized_buf: [256]u8 = undefined;
+    const normalized = normalizeKey(&normalized_buf, prefix);
+    if (mode.len + 1 + normalized.len > buf.len) return null;
+    @memcpy(buf[0..mode.len], mode);
+    buf[mode.len] = 0;
+    @memcpy(buf[mode.len + 1 ..][0..normalized.len], normalized);
+    return buf[0 .. mode.len + 1 + normalized.len];
 }
 
 /// The reserved layer consulted under EVERY mode, after its own fallback
@@ -569,9 +643,15 @@ fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, pre
         } else {
             // Only a LEAF carries arms: a group's label is a placeholder, and
             // the chord it opens resolves nothing yet.
+            var full_prefix_buf: [256]u8 = undefined;
+            const full_prefix = if (prefix.len == 0)
+                seg
+            else
+                std.fmt.bufPrint(&full_prefix_buf, "{s} {s}", .{ prefix, seg }) catch "";
+            const group_label = if (is_leaf) null else self.groupName(mode, full_prefix);
             try out.append(gpa, .{
                 .key = seg,
-                .command = if (is_leaf) v.commands[0] else "+prefix",
+                .command = if (is_leaf) v.commands[0] else group_label orelse "+prefix",
                 .arms = if (is_leaf) v.commands else &.{},
             });
             try out_group.append(gpa, !is_leaf);

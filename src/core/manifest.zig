@@ -131,6 +131,9 @@ pub const PluginDecl = struct { name: []u8, path_form: bool };
 /// §5.2) — `commands` is the authored first-applicable fallback list; the
 /// string form is a one-entry list, so there is a single representation.
 pub const BindDecl = struct { mode: []u8, key: []u8, commands: []const []const u8 };
+/// `weft.group(scope, prefix, name)` labels an implicit chord group without
+/// changing the binding table or what the prefix dispatches.
+pub const GroupDecl = struct { mode: []u8, prefix: []u8, name: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
@@ -355,6 +358,7 @@ pub const Manifest = struct {
     plugins: std.ArrayList(PluginDecl) = .empty,
     imports: std.ArrayList(*Manifest) = .empty,
     binds: std.ArrayList(BindDecl) = .empty,
+    groups: std.ArrayList(GroupDecl) = .empty,
     menus: std.ArrayList(MenuDecl) = .empty,
     actions: std.ArrayList(ActionDecl) = .empty,
     semantic_actions: std.ArrayList(SemanticActionDecl) = .empty,
@@ -390,6 +394,12 @@ pub const Manifest = struct {
             gpa.free(d.commands);
         }
         self.binds.deinit(gpa);
+        for (self.groups.items) |d| {
+            gpa.free(d.mode);
+            gpa.free(d.prefix);
+            gpa.free(d.name);
+        }
+        self.groups.deinit(gpa);
         for (self.menus.items) |d| gpa.free(d.name);
         self.menus.deinit(gpa);
         for (self.actions.items) |d| gpa.free(d.name);
@@ -468,6 +478,13 @@ pub const Manifest = struct {
             copied += 1;
         }
         try self.binds.append(self.gpa, .{ .mode = mode_owned, .key = key_owned, .commands = cmds_owned });
+    }
+    pub fn addGroup(self: *Manifest, mode: []const u8, prefix: []const u8, name: []const u8) !void {
+        try self.groups.append(self.gpa, .{
+            .mode = try self.gpa.dupe(u8, mode),
+            .prefix = try self.gpa.dupe(u8, prefix),
+            .name = try self.gpa.dupe(u8, name),
+        });
     }
     pub fn addMenu(self: *Manifest, name: []const u8) !void {
         try self.menus.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
@@ -596,6 +613,12 @@ pub const Manifest = struct {
             hStr(h, d.key);
             hLen(h, d.commands.len);
             for (d.commands) |c| hStr(h, c);
+        }
+        hLen(h, self.groups.items.len);
+        for (self.groups.items) |d| {
+            hStr(h, d.mode);
+            hStr(h, d.prefix);
+            hStr(h, d.name);
         }
         hLen(h, self.menus.items.len);
         for (self.menus.items) |d| hStr(h, d.name);
@@ -794,6 +817,8 @@ pub const Manifest = struct {
                 _ = plane.catalog.intention(name) catch {};
             };
         }
+        for (self.groups.items) |d|
+            actx.ctx.keymap.setGroupName(gpa, d.mode, d.prefix, d.name, prio, self.owner) catch {};
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
         for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
@@ -1296,6 +1321,7 @@ pub const Manifest = struct {
     fn teardownOwned(self: *const Manifest, gpa: Allocator, actx: *ApplyCtx) !void {
         for (self.imports.items) |imp| try imp.teardownOwned(gpa, actx);
         for (self.binds.items) |d| actx.ctx.keymap.unbind(gpa, d.mode, d.key, self.owner);
+        for (self.groups.items) |d| actx.ctx.keymap.unsetGroupName(gpa, d.mode, d.prefix, self.owner);
         // EXACT match, not prefix: two imports named e.g. "def" and
         // "defaults" own "import:def" and "import:defaults" — a
         // literal string-prefix pair a `startsWith` teardown would

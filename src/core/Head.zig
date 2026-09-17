@@ -665,6 +665,8 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     try km.bind(gpa, "normal", "space g g", "git-status", Keymap.prio_config, "cfg");
     try km.bind(gpa, "normal", "i", "vim-insert", Keymap.prio_config, "vim");
     try km.bind(gpa, "global", "C-w", "window-thing", Keymap.prio_config, "cfg");
+    try km.setGroupName(gpa, "normal", "SPC", "leader", Keymap.prio_config, "cfg");
+    try km.setGroupName(gpa, "normal", "SPC f", "files", Keymap.prio_config, "cfg");
 
     var h: Head = .empty;
     defer h.deinit(gpa);
@@ -694,6 +696,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     _ = try h.completions(gpa, &km, "");
     try t.expect(Found.get(&h, "space") != null);
     try t.expect(Found.group(&h, "space")); // continues a chord → group
+    try t.expectEqualStrings("leader", Found.get(&h, "space").?.command);
     try t.expectEqualStrings("vim-insert", Found.get(&h, "i").?.command);
     try t.expect(!Found.group(&h, "i")); // runnable leaf
     try t.expectEqualStrings("window-thing", Found.get(&h, "C-w").?.command); // global at top
@@ -710,6 +713,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
         _ = try h.completions(gpa, &km, "space");
         try t.expect(Found.get(&h, "f") != null);
         try t.expect(Found.group(&h, "f")); // space f {f,r} → still a group
+        try t.expectEqualStrings("files", Found.get(&h, "f").?.command);
         try t.expect(Found.get(&h, "g") != null);
         try t.expectEqual(@as(?Keymap.Binding, null), Found.get(&h, "C-w")); // no global mid-chord
     }

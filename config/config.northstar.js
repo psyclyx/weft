@@ -122,6 +122,26 @@ weft.set("palette", "signature", "on");
 // the catalog at fire time and a concrete command runs as itself.
 weft.bind("global", "F1", "which-key-now"); // "global" = the workspace-scope key layer
 
+// Names for the implicit chord groups shown by which-key. Unnamed prefixes
+// still use the kernel's honest "+prefix" fallback.
+weft.group("normal", "SPC", "leader");
+weft.group("normal", "SPC f", "files");
+weft.group("normal", "SPC b", "buffers");
+weft.group("normal", "SPC g", "git");
+weft.group("normal", "SPC s", "search");
+weft.group("normal", "SPC p", "project");
+weft.group("normal", "SPC c", "code");
+weft.group("normal", "SPC o", "tools");
+weft.group("normal", "SPC a", "agents");
+weft.group("normal", "SPC d", "debug");
+weft.group("normal", "SPC n", "notes");
+weft.group("normal", "SPC C", "collaboration");
+weft.group("normal", "SPC w", "windows");
+weft.group("normal", "SPC q", "quit");
+weft.group("normal", "SPC h", "help");
+weft.group("normal", "SPC t", "toggles");
+weft.group("normal", "SPC v", "views");
+
 // Doom-style leader (SPC): chords, prefixes as which-key menus.
 weft.bind("normal", "SPC SPC", "find-file");
 weft.bind("normal", "SPC :", "pick-commands");

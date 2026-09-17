@@ -118,6 +118,7 @@ pub const imports = [_]Entry{
     e("qjs_use", 2, 0, .config, "weft.use(name): evaluate `<config_dir>/<name>.js` into its own imported sub-manifest"),
     e("qjs_set", 6, 0, .config, "weft.set(plugin, key, blob): stage config data for a plugin, read at its init"),
     e("qjs_menu", 2, 0, .config, "weft.menu(name): declare a which-key style submenu mode"),
+    e("qjs_group", 6, 0, .config, "weft.group(scope, prefix, name): label an implicit chord group"),
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
     e("qjs_semantic_action", 2, 0, .config, "weft.semanticAction(name): declare a focused-view action command"),
     e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
@@ -240,7 +241,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 42;
+const expected_count = 43;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -310,7 +311,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 15), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 16), config_count); // defineConfigFns' surface
     try t.expectEqual(@as(usize, 27), plugin_count); // the resident-plugin-only surface
 }
 
@@ -357,7 +358,7 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     // arguments. Both doors are `wasm_host/declare.zig`'s bodies reached
     // through this plane's trampoline, so there is one definition of what a
     // command declaration is.
-    try t.expectEqual(@as(usize, 42), imports.len);
+    try t.expectEqual(@as(usize, 43), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

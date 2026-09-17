@@ -57,6 +57,10 @@ extern void host_set(const char *plugin, int plugin_len,
                      const char *blob, int blob_len);
 __attribute__((import_module("weft"), import_name("qjs_menu")))
 extern void host_menu(const char *name, int name_len);
+__attribute__((import_module("weft"), import_name("qjs_group")))
+extern void host_group(const char *mode, int mode_len,
+                       const char *prefix, int prefix_len,
+                       const char *name, int name_len);
 // Plugin plane (persistent runtime): register a command, get a host-assigned id
 // (the value the host passes back to weft_on_command). Config satisfies this
 // import with a stub (it never registers commands).
@@ -433,6 +437,22 @@ static JSValue js_menu(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.group(scope, prefix, name) — label an implicit chord group. The label
+// is presentation metadata; the prefix remains an ordinary key sequence.
+static JSValue js_group(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_ThrowTypeError(ctx, "group(scope, prefix, name)");
+    size_t ml, pl, nl;
+    const char *mode = JS_ToCStringLen(ctx, &ml, argv[0]);
+    const char *prefix = JS_ToCStringLen(ctx, &pl, argv[1]);
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[2]);
+    if (mode && prefix && name) host_group(mode, (int)ml, prefix, (int)pl, name, (int)nl);
+    JS_FreeCString(ctx, mode);
+    JS_FreeCString(ctx, prefix);
+    JS_FreeCString(ctx, name);
+    return JS_UNDEFINED;
+}
+
 // weft.action(name) — declare an abstract intent a key can bind to; providers
 // registered with weft.provide resolve it by context at fire time. Policy is
 // `pick` (the config plane drives synchronous, command-shaped actions).
@@ -659,6 +679,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));
     JS_SetPropertyStr(ctx, weft, "set", JS_NewCFunction(ctx, js_set, "set", 3));
     JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
+    JS_SetPropertyStr(ctx, weft, "group", JS_NewCFunction(ctx, js_group, "group", 3));
     JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
     JS_SetPropertyStr(ctx, weft, "semanticAction", JS_NewCFunction(ctx, js_semantic_action, "semanticAction", 1));
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
