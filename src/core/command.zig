@@ -195,6 +195,15 @@ pub const Context = struct {
         return self.entry() orelse self.buffers.active();
     }
 
+    /// Lookup-only mode for the active presentation. A semantic scene owns
+    /// its structural keys even when hosted by an editable text entry.
+    pub fn bindingMode(self: *Context) []const u8 {
+        const mode = self.head.currentMode();
+        if (std.mem.eql(u8, mode, "normal") and self.head.semantic_focus.path() != null)
+            return "normal-structural";
+        return self.buffers.active().bindingMode(mode);
+    }
+
     /// WHERE this dispatch's effects run (`doc/place.md`).
     ///
     /// Read through `entry()`, which is the whole point: a background fill

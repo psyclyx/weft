@@ -475,6 +475,10 @@ fn onPickAccept(pick_id: u32) void {
 
 fn initExtra() void {
     weft.setFallback("normal", "default");
+    // Source bindings layer over normal editing without changing the head's
+    // actual mode or its insert/visual transitions.
+    weft.setFallback("normal-source", "normal");
+    weft.setFallback("normal-structural", "normal");
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
     // Only insert commits typed text. `normal`/`visual` need no opt-out:
@@ -639,9 +643,9 @@ fn initExtra() void {
         .{ "C-b", "scroll-page-up" },
         .{ "C-e", "scroll-line-down" },
         .{ "C-y", "scroll-line-up" },
-        .{ "C-bracketright", "goto-definition" },
     };
     for (np) |b| weft.bindKey("normal", b[0], b[1]);
+    weft.bindKey("normal-source", "C-bracketright", "goto-definition");
     weft.bindKey("default", "C-g", "cancel");
     weft.bindKey("insert", "C-n", "complete");
 
@@ -651,8 +655,6 @@ fn initExtra() void {
     // this minimal default at prio_config.
     weft.bindKey("normal", "space space", "pick-commands"); // SPC SPC — M-x
     weft.bindKey("normal", "space f f", "vim-find-file"); // SPC f f — find file
-    weft.bindKey("normal", "space c s", "vim-share"); // SPC c s — collab share
-    weft.bindKey("normal", "space c h", "vim-palette"); // SPC c h — palette
     // gg / zz as two-key sequences (goto-top / center).
     weft.bindKey("normal", "g g", "vim-goto-top");
     weft.bindKey("normal", "z z", "vim-center");

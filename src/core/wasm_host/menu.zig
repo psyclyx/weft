@@ -22,12 +22,13 @@ pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const km = p.activeCtx().keymap;
     const head = p.activeCtx().head;
+    const binding_mode = p.activeCtx().bindingMode();
     const n = if (head.pending.len > 0)
-        head.completions(p.gpa, km, head.pending) catch 0
+        head.completionsInMode(p.gpa, km, binding_mode, head.pending) catch 0
     else if (km.modeHasTag(head.currentMode(), "menu"))
         head.resolveBindings(p.gpa, km, head.currentMode()) catch 0
     else
-        head.completions(p.gpa, km, "") catch 0;
+        head.completionsInMode(p.gpa, km, binding_mode, "") catch 0;
     results[0] = @intCast(n);
 }
 pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

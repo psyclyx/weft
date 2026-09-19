@@ -197,7 +197,7 @@ weft.group("normal", "SPC b", "Switch & close buffers");
 weft.group("normal", "SPC g", "Version control");
 weft.group("normal", "SPC s", "Search & jump");
 weft.group("normal", "SPC p", "Project navigation");
-weft.group("normal", "SPC c", "Edit & inspect code");
+weft.group("normal-source", "SPC c", "Edit & inspect code");
 weft.group("normal", "SPC o", "External tools");
 weft.group("normal", "SPC a", "Coding agents");
 weft.group("normal", "SPC d", "Debug session");
@@ -207,7 +207,7 @@ weft.group("normal", "SPC w", "Split & focus windows");
 weft.group("normal", "SPC q", "Quit editor");
 weft.group("normal", "SPC h", "Help & permissions");
 weft.group("normal", "SPC t", "Text toggles");
-weft.group("normal", "SPC v", "Structured actions");
+weft.group("normal-structural", "SPC v", "Structured actions");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
@@ -218,7 +218,7 @@ weft.bind("normal", "SPC ,", "buf-pick");      // SPC ,   — switch buffer
 
 // SPC f — files. `f s` asks for the persistence INTENTION and falls back to
 // the plain command: in a *git-commit* buffer that commits, in a note it
-// saves. `SPC b s` below is the same key without the question.
+// saves.
 weft.bind("normal", "SPC f f", "find-file");
 weft.bind("normal", "SPC f s", ["std.persistence.save", "save"]);
 weft.bind("normal", "SPC f S", "save-as");
@@ -229,9 +229,7 @@ weft.bind("normal", "SPC f d", "files");
 weft.bind("normal", "SPC b b", "buf-pick");
 weft.bind("normal", "SPC b d", "close");
 weft.bind("normal", "SPC b D", "buffer-close-force"); // explicitly discard unsaved edits
-weft.bind("normal", "SPC b k", "close");
 weft.bind("normal", "SPC b n", "buffer-next");
-weft.bind("normal", "SPC b s", "save");
 weft.bind("normal", "SPC b N", "buf-scratch");
 
 // SPC g — git. `git-status` opens the *git* model buffer, which runs its own
@@ -253,7 +251,7 @@ weft.bind("normal", "SPC g i", "git-init"); // start version control from the ed
 weft.bind("normal", "SPC g l", "git-log");
 weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");
-weft.bind("normal", "SPC g b", "git-blame");
+weft.bind("normal-source", "SPC g b", "git-blame");
 
 // `.` — repeat the last change (vim dot-repeat). The recorder is core (it
 // records keystrokes through the one dispatch path), so it repeats a change made
@@ -271,39 +269,38 @@ weft.bind("normal", "C-o", ["std.navigation.back", "navigate-back"]);
 
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");
-weft.bind("normal", "SPC s i", "consult-imenu");
+weft.bind("normal-source", "SPC s i", "consult-imenu");
 weft.bind("normal", "SPC s p", "grep");
 weft.bind("normal", "SPC s w", "grep-word");
 
 // SPC p — project
 weft.bind("normal", "SPC p p", "project-recent");
 weft.bind("normal", "SPC p f", "find-file");
-weft.bind("normal", "SPC p r", "project-recent");
 weft.bind("normal", "SPC p R", "project-root"); // echo the VCS root (projectile-style)
 weft.bind("normal", "SPC p /", "grep");
 
 // SPC c — code
-weft.bind("normal", "SPC c c", "comment-line");
-weft.bind("normal", "SPC c f", "format"); // the format action (below)
-weft.bind("normal", "SPC c d", "goto-definition");
-weft.bind("normal", "SPC c h", "hover");
-weft.bind("normal", "SPC c s", "symbols");
-weft.bind("normal", "SPC c F", "lsp-format"); // format via the language server
-weft.bind("normal", "SPC c R", "references");
-weft.bind("normal", "g r", "references"); // vim-style
-weft.bind("normal", "g R", "rename");     // rename the symbol under the cursor
-weft.bind("normal", "SPC c k", "signature-help");
-weft.bind("normal", "SPC c i", "inlay-hints");
-weft.bind("normal", "SPC c a", "code-actions");
-weft.bind("normal", "] d", "next-diagnostic"); // vim-style diagnostic navigation
-weft.bind("normal", "[ d", "prev-diagnostic");
-weft.bind("normal", "K", "hover");        // vim-style: K shows hover
-weft.bind("normal", "SPC c e", "ts-expand-selection");
-weft.bind("normal", "SPC c n", "ts-select-node");
-weft.bind("normal", "SPC c b", "make-build");
-weft.bind("normal", "SPC c t", "make-test");
-weft.bind("normal", "SPC c r", "lang-run");
-weft.bind("normal", "SPC c x", "run-line");
+weft.bind("normal-source", "SPC c c", "comment-line");
+weft.bind("normal-source", "SPC c f", "format"); // the format action (below)
+weft.bind("normal-source", "SPC c d", "goto-definition");
+weft.bind("normal-source", "SPC c h", "hover");
+weft.bind("normal-source", "SPC c s", "symbols");
+weft.bind("normal-source", "SPC c F", "lsp-format"); // format via the language server
+weft.bind("normal-source", "SPC c R", "references");
+weft.bind("normal-source", "g r", "references"); // vim-style
+weft.bind("normal-source", "g R", "rename");     // rename the symbol under the cursor
+weft.bind("normal-source", "SPC c k", "signature-help");
+weft.bind("normal-source", "SPC c i", "inlay-hints");
+weft.bind("normal-source", "SPC c a", "code-actions");
+weft.bind("normal-source", "] d", "next-diagnostic"); // vim-style diagnostic navigation
+weft.bind("normal-source", "[ d", "prev-diagnostic");
+weft.bind("normal-source", "K", "hover");        // vim-style: K shows hover
+weft.bind("normal-source", "SPC c e", "ts-expand-selection");
+weft.bind("normal-source", "SPC c n", "ts-select-node");
+weft.bind("normal-source", "SPC c b", "make-build");
+weft.bind("normal-source", "SPC c t", "make-test");
+weft.bind("normal-source", "SPC c r", "lang-run");
+weft.bind("normal-source", "SPC c x", "run-line");
 
 // Completion — trigger the at-caret popup (buffer-word + LSP race + merge-rank).
 // C-SPC from insert (where you're typing) and normal (browse from rest).
@@ -323,7 +320,7 @@ weft.action("eval");
 weft.provide("eval", {}, "run-line");                 // default: run the current line
 weft.provide("eval", { lang: "zig" }, "make-build");  // a .zig buffer builds the project
 weft.provide("eval", { lang: "py" }, "lang-run");     // python: the language runner
-weft.bind("normal", "SPC e", "eval");                 // SPC e — eval/run, by language
+weft.bind("normal-source", "SPC e", "eval");          // SPC e — eval/run, by language
 
 // format is likewise an action: fmt handles most languages by extension, but a
 // language plugin can weft.provide("format", {lang:"…"}, "…") to override.
@@ -357,7 +354,7 @@ weft.bind("normal", "SPC a f", "agent-focus"); // choose which conversation that
 // SPC d — debug. Breakpoints are gutter markers the debug plugin owns;
 // run/step/inspect are the DAP session (dap.js) over the adapter you named.
 // F5/F9/F10/F11 are the IDE conventions; the SPC d leaves mirror them.
-weft.bind("normal", "SPC d b", "debug-toggle-breakpoint");
+weft.bind("normal-source", "SPC d b", "debug-toggle-breakpoint");
 weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
 weft.bind("normal", "SPC d l", "debug-list-breakpoints");
 weft.bind("normal", "SPC d d", "debug-start");
@@ -367,7 +364,7 @@ weft.bind("normal", "SPC d i", "debug-step-into");
 weft.bind("normal", "SPC d o", "debug-step-out");
 weft.bind("normal", "SPC d q", "debug-stop");
 weft.bind("normal", "F5", "debug-continue");
-weft.bind("normal", "F9", "debug-toggle-breakpoint");
+weft.bind("normal-source", "F9", "debug-toggle-breakpoint");
 weft.bind("normal", "F10", "debug-step-over");
 weft.bind("normal", "F11", "debug-step-into");
 
@@ -434,7 +431,6 @@ weft.bind("normal", "SPC C x", "disconnect");
 weft.bind("normal", "SPC w v", "win-vsplit");
 weft.bind("normal", "SPC w s", "win-split");
 weft.bind("normal", "SPC w w", "win-focus");
-weft.bind("normal", "SPC w d", "win-close");
 weft.bind("normal", "SPC w c", "win-center");
 weft.bind("normal", "SPC w o", "win-close");
 weft.bind("normal", "SPC w q", "window-close");
@@ -454,20 +450,18 @@ weft.bind("normal", "SPC q q", "quit");
 // entry publishes, each attributed to its provider, so it doubles as "what
 // can I do here". `grants-show` lists every authority row this session ever
 // minted, alive or revoked.
-weft.bind("normal", "SPC h c", "pick-commands");
 weft.bind("normal", "SPC h h", "pick-commands");
 weft.bind("normal", "SPC h g", "grants-show");
 
 // SPC t — toggle
 weft.bind("normal", "SPC t w", "trim-trailing-buffer");
-weft.bind("normal", "SPC t c", "comment-line");
+weft.bind("normal-source", "SPC t c", "comment-line");
 
 // ── SPC v — structured views ─────────────────────────────────────────
-// One group that works in ANY plugin-owned scene — a directory, a picker, a
-// git model — because every operation below names either a standard intention
-// or the exact open action the scene advertises. Movement stays an ordinary
-// input command. Dialog inputs deliberately do NOT belong here: an active
-// interaction owns those locally and consumes them before global keymaps.
+// Only generic structural scenes get this group. Dedicated tool modes (git,
+// output, picker) keep their own smaller maps, so these actions do not appear
+// in source files or generated listings. A scene may still decline a relevant
+// intention it does not offer. Dialog inputs belong to the active interaction.
 //
 // Both groups are eval-time code building manifest data: adding another view
 // action is one row, and a plugin never needs to know which tool or config
@@ -491,9 +485,9 @@ function bindIntentionGroup(mode, prefix, bindings) {
   }
 }
 
-weft.bind("normal", "SPC v j", "cursor-down");
-weft.bind("normal", "SPC v k", "cursor-up");
-bindIntentionGroup("normal", "SPC v", [
+weft.bind("normal-structural", "SPC v j", "cursor-down");
+weft.bind("normal-structural", "SPC v k", "cursor-up");
+bindIntentionGroup("normal-structural", "SPC v", [
   ["o", "std.target.activate"],
   ["-", "std.hierarchy.step-out"],
   ["TAB", "std.hierarchy.toggle-expanded"],
@@ -503,7 +497,7 @@ bindIntentionGroup("normal", "SPC v", [
 ]);
 // The residue: operations no standard intention names yet, still reached by
 // their open action name. This list shrinks as the vocabulary grows.
-bindActionGroup("normal", "SPC v", [
+bindActionGroup("normal-structural", "SPC v", [
   ["c", "workspace.set-working-target"],
   ["e", "field.edit"],
   ["d", "selection.delete"],

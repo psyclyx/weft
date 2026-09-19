@@ -385,6 +385,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     for (structured_view_actions) |action_name| {
         try t.expect(ed.commands.resolve(action_name) != null);
     }
+    // Scope, not a misleading disabled offer: code chords are absent from
+    // scratch and present in the file-backed lookup layer.
+    try t.expectEqualStrings("normal", ed.ctx.bindingMode());
+    try t.expect(ed.keymap.resolveExact("normal", "space c d") == null);
+    try t.expect(!ed.keymap.isPrefix("normal", "space c"));
+    try t.expectEqualStrings("goto-definition", ed.keymap.resolveExact("normal-source", "space c d").?);
 
     // A user who forgets the git keys reaches for the leader and READS the
     // which-key overlay — so we assert on what the which_key plugin actually
@@ -406,35 +412,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.head.pending);
 
-    // Structured views use the same generic semantic action commands from
-    // config: no files-specific keymap or dispatch branch is needed. The
-    // non-baseline names are visible through which-key. (The plugin
-    // intentionally filters ordinary cursor movement from its hints.)
-    ed.press("SPC", "");
-    ed.press("v", "");
-    try t.expectEqualStrings("space v", ed.head.pending);
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.edit));
-    try t.expect(whichKeyShows(&ed, "transfer.yank"));
-    try t.expect(whichKeyShows(&ed, "transfer.delete-to-register"));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.delete));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_before));
-    // The intention-bound half of the group reads as its intention: the hint
-    // names what is meant, and the focused view says who answers it.
-    try t.expect(whichKeyShows(&ed, "transfer.paste"));
-    try t.expect(whichKeyShows(&ed, "target.activate"));
-    try t.expect(whichKeyShows(&ed, "hierarchy.step-out"));
-    try t.expect(whichKeyShows(&ed, "hierarchy.toggle-expanded"));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.set_working_target));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
-    try t.expect(whichKeyShows(&ed, "fs.permissions.edit"));
-    try t.expect(whichKeyShows(&ed, "fs.entry.create-file"));
-    try t.expect(whichKeyShows(&ed, "fs.entry.create-directory"));
-    // The fixture action is appended after the sample config's generic view
-    // actions, so this assertion necessarily traverses which-key page 2.
-    try t.expect(whichKeyShows(&ed, "fixture.plugin-action"));
-    ed.press("Escape", "");
+    // A plain scratch entry does not advertise structured-view actions.
+    try t.expect(!ed.keymap.isPrefix("normal", "SPC v"));
 
     // Assert the complete config surface directly, including the cursor
     // commands which which-key classifies as noise. This is the public
@@ -455,7 +434,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v a", .command = semantic.action.standard.apply },
     };
     for (structured_view_bindings) |binding| {
-        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal-structural", binding.sequence).?);
     }
 
     // The migrated half of the group: the key IS the intention. No command by
@@ -470,7 +449,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v p", .intention = "std.transfer.paste" },
     };
     for (intention_bindings) |binding| {
-        const arms = ed.keymap.resolveExactArms("normal", binding.sequence).?;
+        const arms = ed.keymap.resolveExactArms("normal-structural", binding.sequence).?;
         try t.expectEqual(@as(usize, 1), arms.len);
         try t.expectEqualStrings(binding.intention, arms[0]);
     }
@@ -528,7 +507,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
             if (!std.mem.eql(u8, action, binding.action)) continue;
             try t.expectEqualStrings(binding.intention, intentionFor(action).?);
             try t.expect(ed.commands.resolve(binding.command) != null);
-            try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+            try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal-structural", binding.sequence).?);
             continue :actions;
         }
         // Reachable EITHER as its own command name, or — where the view
@@ -545,7 +524,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
             }
             try t.expect(sequence != null);
             try t.expect(ed.commands.resolve(action) == null); // no trampoline left
-            try t.expectEqualStrings(intention, ed.keymap.resolveExact("normal", sequence.?).?);
+            try t.expectEqualStrings(intention, ed.keymap.resolveExact("normal-structural", sequence.?).?);
             continue;
         }
         var sequence: ?[]const u8 = null;
@@ -557,7 +536,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         }
         try t.expect(sequence != null);
         try t.expect(ed.commands.resolve(action) != null);
-        try t.expectEqualStrings(action, ed.keymap.resolveExact("normal", sequence.?).?);
+        try t.expectEqualStrings(action, ed.keymap.resolveExact("normal-structural", sequence.?).?);
     }
 
     // Required actions are checked independently so an accidental removal
@@ -583,7 +562,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         }
         try t.expect(found);
         try t.expect(ed.commands.resolve(binding.command) != null);
-        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal-structural", binding.sequence).?);
     }
     // Same check for the intention half: each bound intention must still be
     // one the real scene advertises an action for, or the key means nothing.
@@ -600,8 +579,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     }
     try t.expect(sceneNodeWithFact(files_scene, "files.row", "kind", "regular") != null);
     const directory_row = sceneNodeWithFact(files_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
-    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal", "space v j").?);
-    try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal", "space v k").?);
+    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal-structural", "space v j").?);
+    try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal-structural", "space v k").?);
     // Return/minus are generic Vim input policy, not files bindings. Keep the
     // two gates adjacent so config coverage includes the ordinary navigation
     // path into and out of a focused semantic target. Return leads with the
@@ -715,6 +694,15 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     };
     try semantic_services.registerActionProvider(gpa, owner, .init(&actions));
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
+
+    // The same hints appear once a structured scene actually has focus.
+    ed.press("SPC", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("space v", ed.head.pending);
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.edit));
+    try t.expect(whichKeyShows(&ed, "transfer.yank"));
+    try t.expect(whichKeyShows(&ed, "fixture.plugin-action"));
+    ed.press("Escape", "");
 
     ed.chord("SPC v j");
     try t.expectEqual(second_row.id, ed.subjectHere().?);
@@ -1647,7 +1635,8 @@ test "e2e/config: every showcased binding names a command that exists" {
         .{ .sequence = "space colon", .command = "pick-commands" }, // config writes `SPC :`
     };
     for (showcased) |row| {
-        try t.expectEqualStrings(row.command, ed.keymap.resolveExact("normal", row.sequence).?);
+        const mode: []const u8 = if (std.mem.eql(u8, row.command, "debug-toggle-breakpoint")) "normal-source" else "normal";
+        try t.expectEqualStrings(row.command, ed.keymap.resolveExact(mode, row.sequence).?);
         if (ed.commands.resolve(row.command) == null) {
             std.debug.print("[e2e/config] bound but unregistered: {s} -> {s}\n", .{ row.sequence, row.command });
             return error.BoundCommandMissing;

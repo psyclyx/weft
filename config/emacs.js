@@ -46,6 +46,7 @@ weft.bind("emacs", "C-x C-r", "project-recent"); // recentf
 weft.bind("emacs", "C-x b", "buf-pick"); //      switch-to-buffer
 weft.bind("emacs", "C-x C-b", "buf-pick"); //    list-buffers
 weft.bind("emacs", "C-x k", "close"); //  kill-buffer
+weft.bind("emacs", "C-x K", "buffer-close-force"); // discard unsaved edits
 weft.bind("emacs", "C-x 2", "window-split"); //  split-window-below
 weft.bind("emacs", "C-x 3", "window-vsplit"); // split-window-right
 weft.bind("emacs", "C-x 0", "window-close"); //  delete-window
@@ -66,14 +67,14 @@ weft.provide("eval", { lang: "py" }, "lang-run");
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
-weft.bind("emacs", "C-c c", "comment-line"); // comment-dwim
-weft.bind("emacs", "C-c f", "format"); //       the format action
-weft.bind("emacs", "C-c e", "eval"); //         eval/run by language
+weft.bind("emacs-source", "C-c c", "comment-line"); // comment-dwim
+weft.bind("emacs-source", "C-c f", "format"); //       the format action
+weft.bind("emacs-source", "C-c e", "eval"); //         eval/run by language
 weft.bind("emacs", "C-c g", "grep"); //         grep the project
 weft.bind("emacs", "C-c s", "consult-line"); // search this buffer
-weft.bind("emacs", "C-c i", "consult-imenu"); // imenu
-weft.bind("emacs", "C-c b", "make-build"); //   compile
-weft.bind("emacs", "C-c t", "make-test"); //    test
+weft.bind("emacs-source", "C-c i", "consult-imenu"); // imenu
+weft.bind("emacs-source", "C-c b", "make-build"); //   compile
+weft.bind("emacs-source", "C-c t", "make-test"); //    test
 weft.bind("emacs", "C-c r", "repl-start"); //   run a REPL
 weft.bind("emacs", "C-c o", "console-open"); // a command console
 weft.bind("emacs", "C-c d", "direnv-status"); // direnv
@@ -83,12 +84,12 @@ weft.bind("emacs", "C-c N", "notes-capture"); // capture a note
 
 // M-g g — goto (consult jump), M-g i — imenu (the emacs goto-map).
 weft.bind("emacs", "M-g g", "consult-line");
-weft.bind("emacs", "M-g i", "consult-imenu");
+weft.bind("emacs-source", "M-g i", "consult-imenu");
 
 // Structural / code motion on the M- and C-c layers.
-weft.bind("emacs", "C-c .", "goto-definition"); // xref-find-definitions
-weft.bind("emacs", "C-c h", "hover"); //          display help at point
-weft.bind("emacs", "M-e", "ts-expand-selection"); // expand-region
+weft.bind("emacs-source", "C-c .", "goto-definition"); // xref-find-definitions
+weft.bind("emacs-source", "C-c h", "hover"); //          display help at point
+weft.bind("emacs-source", "M-e", "ts-expand-selection"); // expand-region
 
 // Numbers (emacs-ish increment/decrement kept off the reserved chords).
 weft.bind("emacs", "C-c +", "increment-number");

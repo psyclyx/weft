@@ -40,16 +40,17 @@ weft.bind("normal", "SPC ,", "buf-pick"); //      SPC , — switch buffer
 weft.bind("normal", "SPC /", "grep"); //          SPC / — search project
 weft.bind("normal", "SPC f", "find-file"); //         SPC f — find file
 weft.bind("normal", "SPC b", "buf-pick"); //          SPC b — switch buffer
+weft.bind("normal", "SPC D", "buffer-close-force"); // explicit discard
 weft.bind("normal", "SPC s", "save"); //              SPC s — save
 weft.bind("normal", "SPC g", "git-status"); //        SPC g — git
 weft.bind("normal", "SPC e", "consult-line"); //      SPC e — jump to a line
 weft.bind("normal", "SPC d", "files"); //             SPC d — files
-weft.bind("normal", "SPC c", "comment-line"); //      SPC c — toggle comment
-weft.bind("normal", "SPC =", "format"); //        SPC = — format (the action)
-weft.bind("normal", "SPC r", "eval"); //              SPC r — eval/run by language
+weft.bind("normal-source", "SPC c", "comment-line"); // SPC c — toggle comment
+weft.bind("normal-source", "SPC =", "format"); //       SPC = — format (the action)
+weft.bind("normal-source", "SPC r", "eval"); //         SPC r — eval/run by language
 weft.bind("normal", "SPC p", "project-recent"); //    SPC p — recent files
-weft.bind("normal", "SPC m", "make-build"); //        SPC m — build
-weft.bind("normal", "SPC M", "make-test"); //         SPC M — test
+weft.bind("normal-source", "SPC m", "make-build"); //   SPC m — build
+weft.bind("normal-source", "SPC M", "make-test"); //    SPC M — test
 weft.bind("normal", "SPC q", "quit"); //              SPC q — quit
 
 // Splits: use vim's own C-w chord (C-w s / v / w / o), plus vim goggles-style

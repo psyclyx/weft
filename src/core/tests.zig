@@ -1162,6 +1162,7 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
+    try t.expectEqualStrings("normal-source", host.buffers.active().bindingMode("normal"));
 }
 
 test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks" {

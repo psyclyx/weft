@@ -533,15 +533,19 @@ pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
 /// `Keymap.Feed`/the module doc on chords. Mutates `self.pending`; a `.run`
 /// arm list borrows `km` — use it before any rebind.
 pub fn feed(self: *Head, gpa: Allocator, km: *const Keymap, key: []const u8) Allocator.Error!Keymap.Feed {
+    return self.feedInMode(gpa, km, self.mode, key);
+}
+
+pub fn feedInMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8, key: []const u8) Allocator.Error!Keymap.Feed {
     const at_top = self.pending.len == 0;
     const cand = if (at_top) key else try std.fmt.allocPrint(gpa, "{s} {s}", .{ self.pending, key });
     defer if (!at_top) gpa.free(cand);
 
-    if (km.resolveExactArms(self.mode, cand)) |arms| {
+    if (km.resolveExactArms(mode, cand)) |arms| {
         try self.setPending(gpa, "");
         return .{ .run = arms };
     }
-    if (km.isPrefix(self.mode, cand)) {
+    if (km.isPrefix(mode, cand)) {
         try self.setPending(gpa, cand);
         return .pending;
     }
@@ -559,7 +563,11 @@ pub fn resolveBindings(self: *Head, gpa: Allocator, km: *const Keymap, mode: []c
 /// choices after `prefix` in this head's CURRENT mode — see
 /// `Keymap.completionsInto`.
 pub fn completions(self: *Head, gpa: Allocator, km: *const Keymap, prefix: []const u8) Allocator.Error!usize {
-    return km.completionsInto(gpa, self.mode, prefix, &self.resolved, &self.resolved_group);
+    return self.completionsInMode(gpa, km, self.mode, prefix);
+}
+
+pub fn completionsInMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8, prefix: []const u8) Allocator.Error!usize {
+    return km.completionsInto(gpa, mode, prefix, &self.resolved, &self.resolved_group);
 }
 
 /// The `i`-th resolved binding from the last `resolveBindings`/`completions`.

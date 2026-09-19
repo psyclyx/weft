@@ -43,7 +43,7 @@ weft.provide("format", {}, "format-buffer");
 // menu (`space f`) is just a prefix of longer sequences; which-key completes it.
 // Same tree, bound in `normal` (vim) and `helix-normal` (helix) — the editor is
 // data, the leader is data, and they compose with no menu modes at all.
-function leaderMap(m) {
+function leaderMap(m, sourceMode) {
   weft.bind(m, "SPC :", "pick-commands"); // SPC : — M-x
   weft.bind(m, "SPC SPC", "find-file"); //     SPC SPC — find file
   weft.bind(m, "SPC ,", "buf-pick"); //      SPC , — switch buffer
@@ -53,28 +53,29 @@ function leaderMap(m) {
   weft.bind(m, "SPC f d", "files");
   weft.bind(m, "SPC b b", "buf-pick");
   weft.bind(m, "SPC b d", "close");
+  weft.bind(m, "SPC b D", "buffer-close-force");
   weft.bind(m, "SPC b n", "buffer-next");
   weft.bind(m, "SPC g g", "git-status");
   weft.bind(m, "SPC g i", "git-init"); // start version control (git init)
   weft.bind(m, "SPC g l", "git-log");
-  weft.bind(m, "SPC g b", "git-blame");
+  weft.bind(sourceMode, "SPC g b", "git-blame");
   weft.bind(m, ".", "repeat-change"); // vim dot-repeat (composes w/ all plugins)
   weft.bind(m, "/", "consult-line"); // vim `/` — search in this buffer
   weft.bind(m, "SPC s s", "consult-line");
   weft.bind(m, "SPC s p", "grep");
   weft.bind(m, "SPC s w", "grep-word");
-  weft.bind(m, "SPC c c", "comment-line");
-  weft.bind(m, "SPC c f", "format"); // the format action
-  weft.bind(m, "SPC c e", "eval"); //  SPC c e — eval/run by language
-  weft.bind(m, "SPC c b", "make-build");
-  weft.bind(m, "SPC c t", "make-test");
+  weft.bind(sourceMode, "SPC c c", "comment-line");
+  weft.bind(sourceMode, "SPC c f", "format"); // the format action
+  weft.bind(sourceMode, "SPC c e", "eval"); //  SPC c e — eval/run by language
+  weft.bind(sourceMode, "SPC c b", "make-build");
+  weft.bind(sourceMode, "SPC c t", "make-test");
   weft.bind(m, "SPC w v", "win-vsplit");
   weft.bind(m, "SPC w s", "win-split");
   weft.bind(m, "SPC w w", "win-focus");
   weft.bind(m, "SPC q q", "quit");
   weft.bind(m, "C-SPC", "complete"); // the at-caret completion popup
 }
-leaderMap("normal"); //        vim's SPC
-leaderMap("helix-normal"); //  helix's SPC
+leaderMap("normal", "normal-source"); //       vim's SPC
+leaderMap("helix-normal", "helix-source"); // helix's SPC
 
 weft.echo("weft: dual config — `\\` toggles vim/helix; SPC c e eval, SPC f r recents");

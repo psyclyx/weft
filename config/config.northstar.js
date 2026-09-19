@@ -130,7 +130,7 @@ weft.group("normal", "SPC b", "Switch & close buffers");
 weft.group("normal", "SPC g", "Version control");
 weft.group("normal", "SPC s", "Search & jump");
 weft.group("normal", "SPC p", "Project navigation");
-weft.group("normal", "SPC c", "Edit & inspect code");
+weft.group("normal-source", "SPC c", "Edit & inspect code");
 weft.group("normal", "SPC o", "External tools");
 weft.group("normal", "SPC a", "Coding agents");
 weft.group("normal", "SPC d", "Debug session");
@@ -140,7 +140,7 @@ weft.group("normal", "SPC w", "Split & focus windows");
 weft.group("normal", "SPC q", "Quit editor");
 weft.group("normal", "SPC h", "Help & permissions");
 weft.group("normal", "SPC t", "Text toggles");
-weft.group("normal", "SPC v", "Structured actions");
+weft.group("normal-structural", "SPC v", "Structured actions");
 
 // Doom-style leader (SPC): chords, prefixes as which-key menus.
 weft.bind("normal", "SPC SPC", "find-file");
@@ -159,9 +159,7 @@ weft.bind("normal", "SPC f d", "files");
 weft.bind("normal", "SPC b b", "buf-pick");
 weft.bind("normal", "SPC b d", "close");
 weft.bind("normal", "SPC b D", "buffer-close-force"); // explicitly discard unsaved edits
-weft.bind("normal", "SPC b k", "close");
 weft.bind("normal", "SPC b n", "buffer-next");
-weft.bind("normal", "SPC b s", "save");
 weft.bind("normal", "SPC b N", "buf-scratch");
 
 // SPC g — git (the git buffer runs its own keymap mode; when its MODEL
@@ -171,7 +169,7 @@ weft.bind("normal", "SPC g i", "git-init");
 weft.bind("normal", "SPC g l", "git-log");
 weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");
-weft.bind("normal", "SPC g b", "git-blame");
+weft.bind("normal-source", "SPC g b", "git-blame");
 
 weft.bind("normal", ".", "repeat-change");
 weft.bind("normal", "/", "consult-line");
@@ -179,39 +177,38 @@ weft.bind("normal", "C-o", ["std.navigation.back", "navigate-back"]);
 
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");
-weft.bind("normal", "SPC s i", "consult-imenu");
+weft.bind("normal-source", "SPC s i", "consult-imenu");
 weft.bind("normal", "SPC s p", "grep");
 weft.bind("normal", "SPC s w", "grep-word");
 
 // SPC p — project
 weft.bind("normal", "SPC p p", "project-recent");
 weft.bind("normal", "SPC p f", "find-file");
-weft.bind("normal", "SPC p r", "project-recent");
 weft.bind("normal", "SPC p R", "project-root");
 weft.bind("normal", "SPC p /", "grep");
 
 // SPC c — code
-weft.bind("normal", "SPC c c", "comment-line");
-weft.bind("normal", "SPC c f", "format");
-weft.bind("normal", "SPC c d", "goto-definition");
-weft.bind("normal", "SPC c h", "hover");
-weft.bind("normal", "SPC c s", "symbols");
-weft.bind("normal", "SPC c F", "lsp-format");
-weft.bind("normal", "SPC c R", "references");
-weft.bind("normal", "g r", "references");
-weft.bind("normal", "g R", "rename");
-weft.bind("normal", "SPC c k", "signature-help");
-weft.bind("normal", "SPC c i", "inlay-hints");
-weft.bind("normal", "SPC c a", "code-actions");
-weft.bind("normal", "] d", "next-diagnostic");
-weft.bind("normal", "[ d", "prev-diagnostic");
-weft.bind("normal", "K", "hover");
-weft.bind("normal", "SPC c e", "ts-expand-selection");
-weft.bind("normal", "SPC c n", "ts-select-node");
-weft.bind("normal", "SPC c b", "make-build");
-weft.bind("normal", "SPC c t", "make-test");
-weft.bind("normal", "SPC c r", "lang-run");
-weft.bind("normal", "SPC c x", "run-line");
+weft.bind("normal-source", "SPC c c", "comment-line");
+weft.bind("normal-source", "SPC c f", "format");
+weft.bind("normal-source", "SPC c d", "goto-definition");
+weft.bind("normal-source", "SPC c h", "hover");
+weft.bind("normal-source", "SPC c s", "symbols");
+weft.bind("normal-source", "SPC c F", "lsp-format");
+weft.bind("normal-source", "SPC c R", "references");
+weft.bind("normal-source", "g r", "references");
+weft.bind("normal-source", "g R", "rename");
+weft.bind("normal-source", "SPC c k", "signature-help");
+weft.bind("normal-source", "SPC c i", "inlay-hints");
+weft.bind("normal-source", "SPC c a", "code-actions");
+weft.bind("normal-source", "] d", "next-diagnostic");
+weft.bind("normal-source", "[ d", "prev-diagnostic");
+weft.bind("normal-source", "K", "hover");
+weft.bind("normal-source", "SPC c e", "ts-expand-selection");
+weft.bind("normal-source", "SPC c n", "ts-select-node");
+weft.bind("normal-source", "SPC c b", "make-build");
+weft.bind("normal-source", "SPC c t", "make-test");
+weft.bind("normal-source", "SPC c r", "lang-run");
+weft.bind("normal-source", "SPC c x", "run-line");
 
 weft.bind("insert", "C-SPC", "complete");
 weft.bind("normal", "C-SPC", "complete");
@@ -223,7 +220,7 @@ weft.action("eval");
 weft.provide("eval", {}, "run-line");
 weft.provide("eval", { lang: "zig" }, "make-build");
 weft.provide("eval", { lang: "py" }, "lang-run");
-weft.bind("normal", "SPC e", "eval");
+weft.bind("normal-source", "SPC e", "eval");
 
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
@@ -256,7 +253,7 @@ weft.bind("normal", "SPC a s", "agent-send");
 weft.bind("normal", "SPC a f", "agent-focus");
 
 // SPC d — debug
-weft.bind("normal", "SPC d b", "debug-toggle-breakpoint");
+weft.bind("normal-source", "SPC d b", "debug-toggle-breakpoint");
 weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
 weft.bind("normal", "SPC d l", "debug-list-breakpoints");
 weft.bind("normal", "SPC d d", "debug-start");
@@ -266,7 +263,7 @@ weft.bind("normal", "SPC d i", "debug-step-into");
 weft.bind("normal", "SPC d o", "debug-step-out");
 weft.bind("normal", "SPC d q", "debug-stop");
 weft.bind("normal", "F5", "debug-continue");
-weft.bind("normal", "F9", "debug-toggle-breakpoint");
+weft.bind("normal-source", "F9", "debug-toggle-breakpoint");
 weft.bind("normal", "F10", "debug-step-over");
 weft.bind("normal", "F11", "debug-step-into");
 
@@ -298,7 +295,6 @@ weft.bind("normal", "SPC C x", "disconnect");
 weft.bind("normal", "SPC w v", "win-vsplit");
 weft.bind("normal", "SPC w s", "win-split");
 weft.bind("normal", "SPC w w", "win-focus");
-weft.bind("normal", "SPC w d", "win-close");
 weft.bind("normal", "SPC w c", "win-center");
 weft.bind("normal", "SPC w o", "win-close");
 weft.bind("normal", "SPC w q", "window-close");
@@ -317,18 +313,16 @@ weft.bind("normal", "SPC q q", "quit");
 // SPC h — help. The palette lists commands and live offers alike; grants-show
 // lists every authority row ever minted, alive or revoked — the inspection
 // half of approval-as-manifest-diff.
-weft.bind("normal", "SPC h c", "pick-commands");
 weft.bind("normal", "SPC h h", "pick-commands");
 weft.bind("normal", "SPC h g", "grants-show");
 
 // SPC t — toggle
 weft.bind("normal", "SPC t w", "trim-trailing-buffer");
-weft.bind("normal", "SPC t c", "comment-line");
+weft.bind("normal-source", "SPC t c", "comment-line");
 
-// SPC v — generic structured-view controls. These address the semantic
-// focus/action protocol, so the same bindings work for a directory view, a
-// picker, or any other plugin-owned scene that advertises them. Dialog inputs
-// remain interaction-local and are intentionally not global bindings.
+// SPC v — generic structural-scene controls. Dedicated tool modes keep their
+// own small maps; a plain text buffer does not inherit these view actions.
+// Dialog inputs remain interaction-local, never global bindings.
 //
 // Eval-time code building manifest data is idiomatic, not a smell: what must
 // end up as DATA is what resolution, explain(), and the approval hash read —
@@ -349,9 +343,9 @@ function bindIntentionGroup(mode, prefix, bindings) {
   }
 }
 
-weft.bind("normal", "SPC v j", "cursor-down");
-weft.bind("normal", "SPC v k", "cursor-up");
-bindIntentionGroup("normal", "SPC v", [
+weft.bind("normal-structural", "SPC v j", "cursor-down");
+weft.bind("normal-structural", "SPC v k", "cursor-up");
+bindIntentionGroup("normal-structural", "SPC v", [
   ["o", "std.target.activate"],
   ["-", "std.hierarchy.step-out"],
   ["TAB", "std.hierarchy.toggle-expanded"],
@@ -360,7 +354,7 @@ bindIntentionGroup("normal", "SPC v", [
   ["p", "std.transfer.paste"],
 ]);
 // The residue: operations no standard intention names yet.
-bindActionGroup("normal", "SPC v", [
+bindActionGroup("normal-structural", "SPC v", [
   ["c", "workspace.set-working-target"],
   ["e", "field.edit"],
   ["d", "selection.delete"],

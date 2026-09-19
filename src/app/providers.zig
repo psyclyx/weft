@@ -153,6 +153,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
     const lang_path = editor.backingPath() orelse buf.name;
 
     if (deps.grammars.forPath(lang_path)) |spec| {
+        buf.source_keys = true;
         // `createAsync`, not `create`: the initial full parse costs the
         // whole file (an incremental reparse after only costs the edit —
         // tree-sitter does that part for free), so it runs on the

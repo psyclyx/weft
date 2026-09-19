@@ -111,6 +111,10 @@ pub const Buffer = struct {
 
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
+    /// Source-only key layer for named, grammar-backed documents without a
+    /// local file backing (e.g. a remote shared source). File-backed entries
+    /// use the same layer regardless of whether highlighting is installed.
+    source_keys: bool = false,
     /// The posture this entry's presentation owner DECLARED (§10.4), or null
     /// to take the derivation. Set through `declarePosture`.
     declared_posture: ?Posture = null,
@@ -225,6 +229,17 @@ pub const Buffer = struct {
         const derived: Posture = if (self.editor != null and !self.read_only) .text else .structural;
         const declared = self.declared_posture orelse derived;
         return if (declared == .structural and field_focused) .field else declared;
+    }
+
+    pub fn bindingMode(self: *Buffer, mode: []const u8) []const u8 {
+        const document = self.source_keys or if (self.textEditor()) |ed| ed.backingPath() != null else false;
+        if (std.mem.eql(u8, mode, "normal")) {
+            if (document) return "normal-source";
+            if (self.posture(false) == .structural) return "normal-structural";
+        }
+        if (document and std.mem.eql(u8, mode, "helix-normal")) return "helix-source";
+        if (document and std.mem.eql(u8, mode, "emacs")) return "emacs-source";
+        return mode;
     }
 
     /// DECLARE this entry's posture, overriding the derivation. Declaring

@@ -137,6 +137,7 @@ fn initExtra() void {
     // Nothing is inherited about committing (see `weft.textInput`), which is
     // why this needs no opt-out.
     weft.setFallback("emacs-structural", "emacs");
+    weft.setFallback("emacs-source", "emacs");
     weft.restingPosture(.text, "emacs");
     weft.restingPosture(.structural, "emacs-structural");
     // The break-out capture can never take away — retained in both resting

@@ -179,6 +179,7 @@ fn initExtra() void {
     // (`enterInsert`), rather than resting somewhere its keys are dead.
     weft.restingPosture(.text, "helix-normal");
     weft.restingPosture(.structural, "helix-normal");
+    weft.setFallback("helix-source", "helix-normal");
     for ([_][]const u8{ "helix-normal", "helix-insert" }) |m|
         weft.bindKeys(m, "C-backslash", &.{"std.input.break-out"});
     weft.setMode("helix-normal");

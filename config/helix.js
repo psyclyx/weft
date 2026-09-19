@@ -57,21 +57,22 @@ weft.bind("helix-normal", "SPC f r", "project-recent"); // recent files
 weft.bind("helix-normal", "SPC f d", "files");
 weft.bind("helix-normal", "SPC b b", "buf-pick");
 weft.bind("helix-normal", "SPC b d", "close");
+weft.bind("helix-normal", "SPC b D", "buffer-close-force");
 weft.bind("helix-normal", "SPC b n", "buffer-next");
 weft.bind("helix-normal", "SPC g g", "git-status");
 weft.bind("helix-normal", "SPC g i", "git-init"); // start version control (git init)
 weft.bind("helix-normal", "SPC g l", "git-log");
-weft.bind("helix-normal", "SPC g b", "git-blame");
+weft.bind("helix-source", "SPC g b", "git-blame");
 weft.bind("helix-normal", ".", "repeat-change"); // dot-repeat
 weft.bind("helix-normal", "/", "consult-line"); // vim/helix `/` — search in buffer
 weft.bind("helix-normal", "SPC s s", "consult-line");
 weft.bind("helix-normal", "SPC s p", "grep");
 weft.bind("helix-normal", "SPC s w", "grep-word");
-weft.bind("helix-normal", "SPC c c", "comment-line");
-weft.bind("helix-normal", "SPC c f", "format"); // the format action
-weft.bind("helix-normal", "SPC c e", "eval"); //   SPC c e — eval/run by language
-weft.bind("helix-normal", "SPC c b", "make-build");
-weft.bind("helix-normal", "SPC c t", "make-test");
+weft.bind("helix-source", "SPC c c", "comment-line");
+weft.bind("helix-source", "SPC c f", "format"); // the format action
+weft.bind("helix-source", "SPC c e", "eval"); //   SPC c e — eval/run by language
+weft.bind("helix-source", "SPC c b", "make-build");
+weft.bind("helix-source", "SPC c t", "make-test");
 weft.bind("helix-normal", "SPC o d", "files");
 weft.bind("helix-normal", "SPC o c", "console-open");
 weft.bind("helix-normal", "SPC w v", "win-vsplit");

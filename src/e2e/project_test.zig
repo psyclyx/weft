@@ -1558,9 +1558,8 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "output\x00Return\x00output-visit\n") != null);
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
     try t.expect(ed.keymap.modeHasTag("build", "resting"));
-    try t.expect(ed.keymap.resolveExactArms("normal", "SPC c d") != null);
     for ([_][]const u8{ "output", "build", "grep" }) |mode| {
-        try t.expect(ed.keymap.resolveExactArms(mode, "SPC c d") == null);
+        try t.expect(ed.keymap.resolveExactArms(mode, "space c d") == null);
         try t.expect(ed.keymap.resolveExactArms(mode, "i") == null);
     }
 }

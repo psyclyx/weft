@@ -520,7 +520,8 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     }
     // Feed the key through the pending SEQUENCE. `SPC f f` is a chord; `SPC C-w`
     // never fires global `C-w` — a menu is a sequence, not a mode.
-    switch (ctx.head.feed(ctx.gpa, ctx.keymap, spec) catch core.Keymap.Feed.none) {
+    const binding_mode = ctx.bindingMode();
+    switch (ctx.head.feedInMode(ctx.gpa, ctx.keymap, binding_mode, spec) catch core.Keymap.Feed.none) {
         .pending, .none => return,
         .unbound => {}, // nothing bound it — fall through to the commit path
         .run => |arms| {
