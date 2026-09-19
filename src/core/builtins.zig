@@ -529,8 +529,7 @@ fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
     return ok;
 }
 
-/// Close the active buffer; a dirty buffer refuses (save or use a
-/// force-close from config).
+/// Close the active buffer; a dirty buffer refuses (save or explicitly discard).
 ///
 /// The ACTIVE entry, deliberately — not `ctx.buffer()`. Retiring an entry is a
 /// focus-scoped workspace verb, and a background delivery's bound entry names
@@ -540,6 +539,15 @@ fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     const b = ctx.buffers.active();
     if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
+    return ok;
+}
+
+/// Explicitly discard edits in the active buffer. Kept separate from
+/// `buffer-close` so neither a generic close intention nor a tool's `q` can
+/// silently throw away a draft.
+fn cBufferCloseForce(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.buffers.close(ctx.gpa, ctx.buffers.active().id, ctx.head, ctx.keymap);
     return ok;
 }
 
@@ -700,6 +708,7 @@ const table = [_]command.Command{
     command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
     command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),
     command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),
+    command.define("buffer-close-force", "Close the active buffer, discarding unsaved edits.", cBufferCloseForce),
     command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),

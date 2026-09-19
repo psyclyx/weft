@@ -124,23 +124,23 @@ weft.bind("global", "F1", "which-key-now"); // "global" = the workspace-scope ke
 
 // Names for the implicit chord groups shown by which-key. Unnamed prefixes
 // still use the kernel's honest "+prefix" fallback.
-weft.group("normal", "SPC", "leader");
-weft.group("normal", "SPC f", "files");
-weft.group("normal", "SPC b", "buffers");
-weft.group("normal", "SPC g", "git");
-weft.group("normal", "SPC s", "search");
-weft.group("normal", "SPC p", "project");
-weft.group("normal", "SPC c", "code");
-weft.group("normal", "SPC o", "tools");
-weft.group("normal", "SPC a", "agents");
-weft.group("normal", "SPC d", "debug");
-weft.group("normal", "SPC n", "notes");
-weft.group("normal", "SPC C", "collaboration");
-weft.group("normal", "SPC w", "windows");
-weft.group("normal", "SPC q", "quit");
-weft.group("normal", "SPC h", "help");
-weft.group("normal", "SPC t", "toggles");
-weft.group("normal", "SPC v", "views");
+weft.group("normal", "SPC", "Workspace");
+weft.group("normal", "SPC f", "Find & save");
+weft.group("normal", "SPC b", "Switch & close buffers");
+weft.group("normal", "SPC g", "Version control");
+weft.group("normal", "SPC s", "Search & jump");
+weft.group("normal", "SPC p", "Project navigation");
+weft.group("normal", "SPC c", "Edit & inspect code");
+weft.group("normal", "SPC o", "External tools");
+weft.group("normal", "SPC a", "Coding agents");
+weft.group("normal", "SPC d", "Debug session");
+weft.group("normal", "SPC n", "Notes & embeds");
+weft.group("normal", "SPC C", "Share & connect");
+weft.group("normal", "SPC w", "Split & focus windows");
+weft.group("normal", "SPC q", "Quit editor");
+weft.group("normal", "SPC h", "Help & permissions");
+weft.group("normal", "SPC t", "Text toggles");
+weft.group("normal", "SPC v", "Structured actions");
 
 // Doom-style leader (SPC): chords, prefixes as which-key menus.
 weft.bind("normal", "SPC SPC", "find-file");
@@ -158,6 +158,7 @@ weft.bind("normal", "SPC f d", "files");
 // SPC b — buffers
 weft.bind("normal", "SPC b b", "buf-pick");
 weft.bind("normal", "SPC b d", "close");
+weft.bind("normal", "SPC b D", "buffer-close-force"); // explicitly discard unsaved edits
 weft.bind("normal", "SPC b k", "close");
 weft.bind("normal", "SPC b n", "buffer-next");
 weft.bind("normal", "SPC b s", "save");

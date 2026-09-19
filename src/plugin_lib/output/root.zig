@@ -39,11 +39,10 @@ var slots: [4]Slot = undefined;
 var slot_count: usize = 0;
 
 /// Install the navigation shape every output buffer shares: Return visits the
-/// focused row through `visit_cmd`, j/k walk, q goes back. The mode falls back
-/// to `normal` (not LOCKED) so a visit leaves cleanly into the file's own mode,
-/// and rests in itself so the shell never forces normal on a tool buffer.
+/// focused row through `visit_cmd`, j/k walk, q goes back. This mode is its
+/// own key context: inheriting `normal` exposed editing and code commands on
+/// generated output. Visiting a file switches to that file's resting mode.
 pub fn installMode(mode: []const u8, visit_cmd: []const u8) void {
-    weft.setFallback(mode, "normal");
     weft.restingMode(mode);
     weft.bindKey(mode, "Return", visit_cmd);
     weft.bindKey(mode, "j", "cursor-down");

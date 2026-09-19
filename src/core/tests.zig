@@ -1142,9 +1142,13 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     // Dirty close refuses; a clean one proceeds and refocuses.
     const res = try run(&host.commands, &host.ctx, "buffer-close", &.{});
     try t.expect(res == .string); // "dirty"
-    try host.editor().doc.delete(gpa, .{ .start = 0, .end = 3 });
-    // Deleting back to empty is still a diverged version — dirty by
-    // design. Fresh scratch buffers close cleanly instead.
+    // The explicit discard path closes even a dirty tool draft.
+    _ = try run(&host.commands, &host.ctx, "buffer-close-force", &.{});
+    try t.expectEqual(@as(usize, 1), host.buffers.count());
+    try t.expectEqual(scratch_id, host.buffers.active().id);
+    // A fresh scratch can still close normally. Closing the last buffer
+    // replaces it with another scratch rather than leaving no focus.
+    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
     _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
     _ = try run(&host.commands, &host.ctx, "buffer-close", &.{});
     try t.expectEqual(@as(usize, 1), host.buffers.count());
