@@ -11,11 +11,18 @@ let
   overlay = final: _prev: mkPackages final;
 in
 {
-  nixpkgs ? npins.nixpkgs,
+  sources ? npins,
+  nixpkgs ? sources.nixpkgs,
+  # External dep — stemma is consumed as a Zig *source* via
+  # `zig build --system` (the goop pattern); default to weft's own pin.
+  stemma ? npins.stemma,
   pkgs ? import nixpkgs { },
+  ...
 }:
 let
-  finalPkgs = pkgs.extend overlay;
+  # Surface stemma by name so build.zig.zon.nix's `stemma` callPackage arg
+  # resolves it (the shoal pattern).
+  finalPkgs = (pkgs.extend (_: _: { inherit stemma; })).extend overlay;
 in
 {
   packages = mkPackages finalPkgs;
