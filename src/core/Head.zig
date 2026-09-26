@@ -373,6 +373,10 @@ pub const Macros = struct {
     /// (vim's closing `q`, or a whole `SPC m q` chord) is not part of the
     /// macro it closes.
     rest_mark: usize = 0,
+    /// How many key dispatches are on the stack. `stop` cuts back to
+    /// `rest_mark` only inside one — a stop run from outside any keystroke
+    /// (a script, a test) has no key of its own to drop.
+    key_depth: u32 = 0,
     regs: [register_count]std.ArrayList(KeyPress) = @splat(.empty),
     /// Registers being replayed right now. Replay re-enters dispatch, so a
     /// macro can reach its own `@a` again; a register already in this set

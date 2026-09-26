@@ -385,7 +385,7 @@ fn macroStop(ctx: *core.command.Context) void {
     const reg = m.recording orelse return;
     m.recording = null;
     // The key sequence that stopped the recording is not part of it.
-    m.rec.shrinkRetainingCapacity(@min(m.rest_mark, m.rec.items.len));
+    if (m.key_depth > 0) m.rec.shrinkRetainingCapacity(@min(m.rest_mark, m.rec.items.len));
     const slot = m.register(reg) orelse return;
     slot.clearRetainingCapacity();
     slot.appendSlice(ctx.gpa, m.rec.items) catch {
@@ -557,6 +557,9 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;
 
+    const macros = &ctx.head.macros;
+    macros.key_depth += 1;
+    defer macros.key_depth -= 1;
     // A macro records every key the user dispatches — before anything else
     // sees it, so a dialog answered mid-recording replays too.
     macroRecord(ctx, spec, commit);

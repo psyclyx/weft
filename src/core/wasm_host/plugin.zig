@@ -213,6 +213,12 @@ pub fn limitFor(id: anytype, comptime perm: Perm) grants_mod.Limit {
 /// requested" (§6 W4 gate) — a plugin with no table wired keeps the exact
 /// pre-W4 wording, since there is no revocation state to distinguish.
 pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) void {
+    // A config-only capability is never "not requested": asking confers
+    // nothing, so the fix to name is the grant.
+    const never: []const u8 = if (comptime perm.configOnly())
+        "config-only: grant it with weft.grant"
+    else
+        "not requested in describe()";
     const reason: []const u8 = if (p.grant_table) |table| switch (table.reasonFor(p.grant_handles[@intFromEnum(perm)])) {
         .revoked => "revoked",
         .scope_expired => "scope expired",
@@ -225,8 +231,8 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
         // which this plugin gate never consults — but the switch must stay
         // exhaustive over the shared enum, so all four are bucketed with the
         // same wording, defensively.
-        .never_granted, .ok, .out_of_limit, .collapsed, .out_of_ops, .dead_epoch => "not requested in describe()",
-    } else "not requested in describe()";
+        .never_granted, .ok, .out_of_limit, .collapsed, .out_of_ops, .dead_epoch => never,
+    } else never;
     caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
 }
 
