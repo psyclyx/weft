@@ -30,4 +30,5 @@ test {
     _ = @import("grammar_test.zig");
     _ = @import("demolition_test.zig");
     _ = @import("notes_test.zig");
+    _ = @import("ide_test.zig");
 }

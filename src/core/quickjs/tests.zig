@@ -1310,7 +1310,7 @@ test "quickjs: every shipped example config evals without a JS error" {
     // config/ (the test runs with cwd at the project root).
     const file = @import("../file.zig");
     const paths = [_][]const u8{
-        "config/config.js", "config/helix.js", "config/defaults.js", "config/sidebar.js",
+        "config/config.js", "config/helix.js", "config/ide.js", "config/defaults.js", "config/sidebar.js",
     };
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
