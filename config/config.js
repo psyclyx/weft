@@ -219,7 +219,6 @@ weft.group("normal", "SPC w", "Split & focus windows");
 weft.group("normal", "SPC q", "Quit editor");
 weft.group("normal", "SPC h", "Help & permissions");
 weft.group("normal", "SPC t", "Text toggles");
-weft.group("normal-structural", "SPC v", "Structured actions");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
@@ -470,57 +469,12 @@ weft.bind("normal", "SPC t w", "trim-trailing-buffer");
 weft.bind("normal-source", "SPC t c", "comment-line");
 
 // ── SPC v — structured views ─────────────────────────────────────────
-// Only generic structural scenes get this group. Dedicated tool modes (git,
-// output, picker) keep their own smaller maps, so these actions do not appear
-// in source files or generated listings. A scene may still decline a relevant
-// intention it does not offer. Dialog inputs belong to the active interaction.
-//
-// Both groups are eval-time code building manifest data: adding another view
-// action is one row, and a plugin never needs to know which tool or config
-// supplied the binding.
-function bindActionGroup(mode, prefix, bindings) {
-  for (var i = 0; i < bindings.length; i++) {
-    var binding = bindings[i];
-    // Semantic action names are an open plugin/view protocol; declaring the
-    // command here keeps the table data-shaped.
-    weft.semanticAction(binding[1]);
-    weft.bind(mode, prefix + " " + binding[0], binding[1]);
-  }
-}
-
-// Where a standard intention already covers the operation, the key binds the
-// INTENTION: the focused view's own vocabulary publishes the offer, so no
-// trampoline command has to exist for the name at all.
-function bindIntentionGroup(mode, prefix, bindings) {
-  for (var i = 0; i < bindings.length; i++) {
-    weft.bind(mode, prefix + " " + bindings[i][0], [bindings[i][1]]);
-  }
-}
-
-weft.bind("normal-structural", "SPC v j", "cursor-down");
-weft.bind("normal-structural", "SPC v k", "cursor-up");
-bindIntentionGroup("normal-structural", "SPC v", [
-  ["o", "std.target.activate"],
-  ["-", "std.hierarchy.step-out"],
-  ["TAB", "std.hierarchy.toggle-expanded"],
-  ["y", "std.transfer.yank"],
-  ["x", "std.transfer.delete-to-register"],
-  ["p", "std.transfer.paste"],
-]);
-// The residue: operations no standard intention names yet, still reached by
-// their open action name. This list shrinks as the vocabulary grows.
-bindActionGroup("normal-structural", "SPC v", [
-  ["c", "workspace.set-working-target"],
-  ["e", "field.edit"],
-  ["d", "selection.delete"],
-  ["m", "fs.permissions.edit"],
-  ["n", "fs.entry.create-file"],
-  ["N", "fs.entry.create-directory"],
-  ["P", "selection.paste-before"],
-  ["r", "view.refresh"],
-  ["R", "view.revert"],
-  ["a", "view.apply"],
-]);
+// The structured-view group lives in a fragment, config/semantic.js, because
+// helix.js binds the same group: one table, every grammar's structural layer
+// (the mode vim declares `normal` binds through in a listing). Its keys are
+// intentions where a standard word names the operation and open action names
+// for the residue — read the fragment for both tables.
+weft.use("semantic");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");
