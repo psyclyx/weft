@@ -84,6 +84,17 @@ working_target: ?WorkingTarget = null,
 /// two heads pressing keys concurrently must not interleave into one
 /// register.
 dot: DotRepeat = .empty,
+/// This head's jumplist (`jumplist.zig`): where it has been, anchored so the
+/// positions survive edits. Per-head like `dot` — another head's search must
+/// never become this head's C-o.
+jumps: @import("jumplist.zig").JumpList = .empty,
+/// This head's macro registers and recorder (`Macros` below). Per-head for
+/// the same reason `dot` is: a macro is a recording of one head's keys.
+macros: Macros = .empty,
+/// This head's view of the system clipboard (`clipboard.zig`). Per-head
+/// because a head is a platform attachment, and the clipboard is the
+/// platform's: two heads on two machines copy into two desktops.
+clipboard: @import("clipboard.zig") = .empty,
 /// This head's window-layout FOCUS — a generation-checked HANDLE into a
 /// shared `window_layout.Layout`'s pane slot table, NOT a raw pointer.
 /// `pane` indexes the layout's slot table; `gen` is that slot's generation
@@ -342,6 +353,53 @@ pub const DotRepeat = struct {
     pub const empty: DotRepeat = .{};
 };
 
+/// This head's keyboard macros: named registers of recorded keystrokes, the
+/// recorder filling one, and the guard against a macro replaying itself.
+/// Storage only, like `DotRepeat` — recording and replay go through the one
+/// dispatch path (`app/dispatch.zig`'s macro section), which needs the
+/// `command.Context` this struct must not depend on.
+///
+/// A register is named by one printable ASCII byte. Which names a grammar
+/// offers (vim's `a`–`z`, helix's `@`) is the grammar's business.
+pub const Macros = struct {
+    pub const register_count = 128;
+
+    /// The register being recorded into, or null.
+    recording: ?u8 = null,
+    /// The keys recorded so far; `stop` moves them into `regs[recording]`.
+    rec: std.ArrayList(KeyPress) = .empty,
+    /// `rec`'s length when the last dispatch began at rest (no pending chord).
+    /// `stop` cuts back to it, so the key sequence that STOPPED the recording
+    /// (vim's closing `q`, or a whole `SPC m q` chord) is not part of the
+    /// macro it closes.
+    rest_mark: usize = 0,
+    regs: [register_count]std.ArrayList(KeyPress) = @splat(.empty),
+    /// Registers being replayed right now. Replay re-enters dispatch, so a
+    /// macro can reach its own `@a` again; a register already in this set
+    /// refuses to play, which bounds even mutual recursion (`a` plays `b`
+    /// plays `a`) by the register count.
+    playing: std.StaticBitSet(register_count) = .initEmpty(),
+    /// Nonzero while any replay is running — replayed keys are not recorded
+    /// into a macro being recorded (vim records the `@a`, not what it did).
+    depth: u8 = 0,
+    /// What `macro-play` with no register replays (vim's `@@`).
+    last_played: ?u8 = null,
+    last_recorded: ?u8 = null,
+
+    pub const empty: Macros = .{};
+
+    pub fn register(self: *Macros, name: u8) ?*std.ArrayList(KeyPress) {
+        if (name < 0x21 or name >= register_count) return null; // printable, no space
+        return &self.regs[name];
+    }
+
+    pub fn deinit(self: *Macros, gpa: Allocator) void {
+        self.rec.deinit(gpa);
+        for (&self.regs) |*r| r.deinit(gpa);
+        self.* = .{};
+    }
+};
+
 pub fn deinit(self: *Head, gpa: Allocator) void {
     gpa.free(self.mode);
     gpa.free(self.pending);
@@ -361,6 +419,9 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
         gpa.free(frame.return_to);
     }
     self.transient_stack.deinit(gpa);
+    self.jumps.deinit(gpa);
+    self.macros.deinit(gpa);
+    self.clipboard.deinit(gpa);
     self.* = .{};
 }
 

@@ -28,6 +28,7 @@ const Posture = @import("weft_input").Posture;
 const BindingFacet = @import("weft_input").BindingFacet;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
+const jumplist = @import("jumplist.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
@@ -518,6 +519,10 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
     const old = self.active();
+    // Moving between entries is a jump, and only here does core see every
+    // one: remember where this head was (`jumplist.zig`). Travel along the
+    // list itself is suppressed there.
+    try jumplist.push(&head.jumps, gpa, self, jumplist.here(self));
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
     // guarantees a text buffer never inherits a tool's editable field.

@@ -77,6 +77,12 @@ pub const gutter = @import("gutter.zig");
 /// The transient highlight over what an operation just touched: a set of
 /// ranges anchored on its document.
 pub const flash = @import("flash.zig");
+/// A head's position history and its travel (C-o/C-i), anchored so entries
+/// survive edits.
+pub const jumplist = @import("jumplist.zig");
+/// A head's system clipboard: an in-memory store, or the platform's once the
+/// shell installs a backend.
+pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
 pub const intent = @import("intent.zig");

@@ -212,8 +212,9 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 // app-side because it needs `command.Context` (buffers/editor/keymap), which
 // `Head` must not depend on.
 
-fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, commit: core.TextCommit) void {
-    if (dot.pending_n >= core.Head.dot_cap) return;
+/// One keystroke as the recorders store it — shared by dot-repeat and macros,
+/// which are two registers over the same stream.
+fn keyPress(spec: []const u8, commit: core.TextCommit) core.Head.KeyPress {
     var kp: core.Head.KeyPress = .{};
     const s = @min(spec.len, kp.spec.len);
     @memcpy(kp.spec[0..s], spec[0..s]);
@@ -221,8 +222,30 @@ fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, commit: core.TextCommi
     const tx = @min(commit.bytes.len, kp.text.len);
     @memcpy(kp.text[0..tx], commit.bytes[0..tx]);
     kp.tlen = @intCast(tx);
-    dot.pending[dot.pending_n] = kp;
+    return kp;
+}
+
+fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, commit: core.TextCommit) void {
+    if (dot.pending_n >= core.Head.dot_cap) return;
+    dot.pending[dot.pending_n] = keyPress(spec, commit);
     dot.pending_n += 1;
+}
+
+/// Forget the in-progress dot sequence and take the current buffer state as
+/// the new rest point — what a macro replay does before it re-feeds keys, so
+/// the `@a` that started it does not ride along into the next change `.`
+/// repeats (vim: `.` after `@a` repeats the macro's last change).
+fn dotResync(ctx: *core.command.Context) void {
+    const dot = &ctx.head.dot;
+    dot.pending_n = 0;
+    const ed = ctx.buffers.active().textEditor() orelse {
+        dot.synced = false;
+        return;
+    };
+    dot.synced = true;
+    dot.buf = ctx.buffers.active_id;
+    dot.commits = ed.doc.commitCount();
+    dot.cursor = ed.cursorOffset();
 }
 
 /// At rest for change-recording: a mode that commits no text, with no
@@ -303,6 +326,148 @@ pub fn repeatChangeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
     _ = data;
     _ = args;
     replayDot(ctx);
+    return .nil;
+}
+
+// ── Macros: the keystroke stream into a named register, and back ──────────
+//
+// The same shape as dot-repeat, one level up: a macro is every key between
+// `macro-record-start` and `macro-record-stop`, and playing it re-feeds them
+// through `dispatchSpec` — so it composes exactly as the typing did, whatever
+// grammar or plugin the keys reached. The storage is `ctx.head.macros`
+// (per-head); which keys start, stop and play is the grammar's (vim `q`/`@`,
+// helix `Q`/`q`).
+//
+// Undo follows vim: every change a replay makes is its own unit, as it was
+// when typed. Pointer gestures are not recorded, for the reason dot-repeat
+// gives. A replay does not record into a macro being recorded — the `@a` key
+// was recorded, which is what replays it.
+
+fn macroRecord(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) void {
+    const m = &ctx.head.macros;
+    if (m.recording == null or m.depth > 0) return;
+    if (core.pointer.isPointerSpec(spec)) return;
+    if (ctx.head.pending.len == 0) m.rest_mark = m.rec.items.len;
+    m.rec.append(ctx.gpa, keyPress(spec, commit)) catch {};
+}
+
+fn say(ctx: *core.command.Context, comptime fmt: []const u8, args: anytype) void {
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.print(ctx.gpa, fmt, args) catch {};
+}
+
+/// A register argument: one printable byte. `null` when the argument is
+/// absent or empty — the caller picks its default.
+fn registerArg(args: []const core.command.Value, i: usize) error{TypeMismatch}!?u8 {
+    if (args.len <= i) return null;
+    return switch (args[i]) {
+        .nil => null,
+        .string => |s| if (s.len == 0) null else if (s.len == 1) s[0] else error.TypeMismatch,
+        else => error.TypeMismatch,
+    };
+}
+
+/// The register a toggle records into when none is named (helix's `@`).
+pub const default_macro_register: u8 = '@';
+
+fn macroStart(ctx: *core.command.Context, reg: u8) !void {
+    const m = &ctx.head.macros;
+    if (m.register(reg) == null) return error.InvalidRegister;
+    if (m.recording != null) macroStop(ctx);
+    m.rec.clearRetainingCapacity();
+    m.rest_mark = 0;
+    m.recording = reg;
+    say(ctx, "recording @{c}", .{reg});
+}
+
+fn macroStop(ctx: *core.command.Context) void {
+    const m = &ctx.head.macros;
+    const reg = m.recording orelse return;
+    m.recording = null;
+    // The key sequence that stopped the recording is not part of it.
+    m.rec.shrinkRetainingCapacity(@min(m.rest_mark, m.rec.items.len));
+    const slot = m.register(reg) orelse return;
+    slot.clearRetainingCapacity();
+    slot.appendSlice(ctx.gpa, m.rec.items) catch {
+        say(ctx, "macro @{c}: out of memory", .{reg});
+        return;
+    };
+    m.last_recorded = reg;
+    say(ctx, "recorded @{c} ({d} keys)", .{ reg, slot.items.len });
+}
+
+/// Replay register `reg` `count` times. A register already mid-replay refuses
+/// (a macro reaching its own `@a`), which is the whole recursion guard: the
+/// set of playing registers is finite, so mutual recursion stops too.
+fn macroPlay(ctx: *core.command.Context, reg: u8, count: usize) !void {
+    const m = &ctx.head.macros;
+    const slot = m.register(reg) orelse return error.InvalidRegister;
+    if (m.playing.isSet(reg)) {
+        say(ctx, "macro @{c} would replay itself; stopped", .{reg});
+        return;
+    }
+    if (slot.items.len == 0) {
+        say(ctx, "macro @{c} is empty", .{reg});
+        return;
+    }
+    // A copy: a key in the macro may re-record this very register.
+    const keys = try ctx.gpa.dupe(core.Head.KeyPress, slot.items);
+    defer ctx.gpa.free(keys);
+    m.last_played = reg;
+    m.playing.set(reg);
+    m.depth += 1;
+    defer {
+        m.depth -= 1;
+        m.playing.unset(reg);
+    }
+    dotResync(ctx);
+    const user_initiated = ctx.user_initiated;
+    defer ctx.user_initiated = user_initiated;
+    for (0..count) |_| for (keys) |kp| {
+        dispatchSpec(ctx, kp.spec[0..kp.slen], .from(kp.text[0..kp.tlen])) catch |err| {
+            say(ctx, "macro @{c} stopped: {t}", .{ reg, err });
+            return;
+        };
+    };
+}
+
+/// `macro-record-start <reg>`.
+pub fn macroRecordStartHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    try macroStart(ctx, (try registerArg(args, 0)) orelse return error.ArityMismatch);
+    return .nil;
+}
+
+/// `macro-record-stop`: file the recording under its register.
+pub fn macroRecordStopHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    _ = args;
+    macroStop(ctx);
+    return .nil;
+}
+
+/// `macro-record-toggle [reg]`: stop if recording, else start into `reg`
+/// (default `@`) — helix's `Q`, which needs no register prompt.
+pub fn macroRecordToggleHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    if (ctx.head.macros.recording != null) {
+        macroStop(ctx);
+        return .nil;
+    }
+    try macroStart(ctx, (try registerArg(args, 0)) orelse default_macro_register);
+    return .nil;
+}
+
+/// `macro-play [reg] [count]`: with no register, the last one played, else the
+/// last one recorded (vim's `@@`, helix's `q`).
+pub fn macroPlayHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    const m = &ctx.head.macros;
+    const reg = (try registerArg(args, 0)) orelse m.last_played orelse m.last_recorded orelse {
+        say(ctx, "no macro to play", .{});
+        return .nil;
+    };
+    try macroPlay(ctx, reg, try core.jumplist.countArg(args, 1));
     return .nil;
 }
 
@@ -391,6 +556,10 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // uppercase continuation — `g R`, `SPC C`, …) The compositor emits these as
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;
+
+    // A macro records every key the user dispatches — before anything else
+    // sees it, so a dialog answered mid-recording replays too.
+    macroRecord(ctx, spec, commit);
 
     // Active interactions get first refusal through their own local binding
     // table. This is a semantic action dispatch, not a temporary editor mode:

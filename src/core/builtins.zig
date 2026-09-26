@@ -806,6 +806,9 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // The generic pointer commands: the modeless floor for a click, a drag,
     // and a wheel step. Which gesture runs which is config (defaults.js).
     try @import("pointer.zig").install(gpa, commands);
+    // The jumplist's travel (C-o/C-i and a picker). Which keys, and which
+    // motions count as jumps, is the grammar's.
+    try @import("jumplist.zig").install(gpa, commands);
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
     // (files/git) provides its own `save` scoped to its tool identity, which
@@ -831,6 +834,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // Input models express leaving a transient/tool locus as an intent. Vim's
     // `q` is one such mapping; another editor can choose another key, and a
     // more specific provider can override this buffer-history implementation.
+    // It is deliberately NOT the jumplist's back: leaving a tool must leave
+    // it, while the last jump is often inside the same entry (`jumplist.zig`).
     try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
     try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
 

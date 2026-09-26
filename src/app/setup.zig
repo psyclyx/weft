@@ -29,6 +29,15 @@ pub fn registerCapabilityConsumers(
     _ = try commands.bind(gpa, "grammar-add", providers.grammarAddCommand(grammars));
 }
 
+const reg_arg: core.command.ArgSpec = .{ .name = "register", .type = .string, .optional = true };
+const count_arg: core.command.ArgSpec = .{ .name = "count", .type = .nil, .optional = true };
+const macro_cmds = [_]core.command.Command{
+    .{ .name = "macro-record-start", .summary = "Record keystrokes into a macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler },
+    .{ .name = "macro-record-stop", .summary = "Stop recording; the macro is filed under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler },
+    .{ .name = "macro-record-toggle", .summary = "Start recording into a register (default @), or stop.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler },
+    .{ .name = "macro-play", .summary = "Replay a macro register [count] times (default: the last played).", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler },
+};
+
 /// Bind the caret/which-key/menu commands, registered before the config runs
 /// so it can set per-mode styles at load time. `cursor_cfg` and the
 /// `which_key_now` flag are caller-owned; `which-key-now` and `menu-escape`
@@ -57,6 +66,10 @@ pub fn registerCursorCommands(
         .handler = dispatch.repeatChangeHandler,
         .data = null,
     });
+    // Macros: record the keystroke stream into a named register and replay
+    // it, through the same dispatch (`dispatch.zig`'s macro section). Which
+    // keys start, stop and play them is the grammar's.
+    for (macro_cmds) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
     // which-key: show the hint popup immediately (bypass the idle delay). If not
     // already in a menu, open the leader menu — so a help key (F1) surfaces it
     // from anywhere.
