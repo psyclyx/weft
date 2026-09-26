@@ -15,41 +15,13 @@ let
     "javascript"
     "html"
   ];
-  # Upstream grammar packages carry the queries their authors wrote, which is
-  # not the same set an editor needs: none ship an `outline.scm` (that shape is
-  # Zed's, and every editor curates its own — see doc), and tree-sitter-fennel
-  # ships no highlight query at all. So each entry is the upstream package with
-  # weft's queries laid over it. This is the NORM, not a workaround for one bad
-  # package: curating queries beside the parser, pinned to the same nixpkgs
-  # revision, is exactly what nvim-treesitter's `parser.json` machinery exists
-  # to achieve.
-  overlayFor =
-    name:
-    let
-      overrides = builtins.filter (o: builtins.pathExists o.src) [
-        {
-          src = ./assets + "/${name}-highlights.scm";
-          dst = "highlights.scm";
-        }
-        {
-          src = ./assets + "/${name}-outline.scm";
-          dst = "outline.scm";
-        }
-      ];
-    in
-    if overrides == [ ] then
-      pkgs.tree-sitter-grammars."tree-sitter-${name}"
-    else
-      pkgs.runCommand "weft-grammar-${name}" { } ''
-        mkdir -p $out/queries
-        cp -r ${pkgs.tree-sitter-grammars."tree-sitter-${name}"}/* $out/
-        chmod -R u+w $out
-        ${builtins.concatStringsSep "\n" (map (o: "cp ${o.src} $out/queries/${o.dst}") overrides)}
-      '';
+  # The shell names upstream parser packages for the sample config. Query
+  # selection stays in config/defaults.js, which passes its own files to
+  # grammar-add where an upstream package does not supply the desired query.
   grammarDir = pkgs.linkFarm "weft-grammars" (
     map (n: {
       name = n;
-      path = overlayFor n;
+      path = pkgs.tree-sitter-grammars."tree-sitter-${n}";
     }) grammarNames
   );
 in

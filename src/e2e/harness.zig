@@ -2064,6 +2064,13 @@ pub const ConfigLoader = struct {
         const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
         const gpa = self.ed.gpa;
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
+        // The harness registers these same grammars before boot, and the
+        // language parity test checks that list against this shipped plugin.
+        // Re-running its grammar-add calls here would register duplicates.
+        if (std.mem.eql(u8, name, "languages.js")) {
+            _ = weft.languages_js;
+            return;
+        }
         // The shipped `.js` plugins (build.zig's `js_plugins`, installed
         // beside the .wasm plugins): embedded here the same way, so a config
         // that names one loads it as a resident quickjs plugin.

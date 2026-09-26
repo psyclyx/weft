@@ -32,6 +32,7 @@ pub const window_cmds = app.window_cmds;
 
 pub const dap_js = @embedFile("dap_js");
 pub const acp_js = @embedFile("acp_js");
+pub const languages_js = @embedFile("languages_js");
 
 // core, gfx, scene, text, platform and app each run their own tests in their
 // own binary now (build.zig): a module's tests do not ride along in a

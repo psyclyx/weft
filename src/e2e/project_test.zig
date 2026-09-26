@@ -74,7 +74,7 @@ const shipped_config_plugins = [_][]const u8{
     "whitespace", "numbers",     "autopair",  "consult",    "git",     "grep",      "run",
     "make",       "notes",       "fmt",       "buffers",    "windows", "modes",     "snippets",
     "direnv",     "llm",         "console",   "repl",       "net",     "which_key", "files",
-    "lsp",        "debug",       "dap.js",
+    "lsp",        "debug",       "dap.js",    "languages.js",
 };
 
 fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {

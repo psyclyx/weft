@@ -48,6 +48,8 @@ weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
 weft.plugin("vim");         // modal editing — owns the normal/insert/visual modes
 weft.plugin("ts");          // tree-sitter navigation
+weft.set("languages", "query-root", "assets");
+weft.plugin("languages.js");
 weft.plugin("comment");     // toggle line comments (gc operator)
 weft.plugin("indent");      // indent/dedent operators (> / <)
 weft.plugin("whitespace");  // trim trailing whitespace

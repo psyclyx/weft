@@ -307,16 +307,16 @@ test "e2e/places: two projects, ONE language — two servers, each rooted in and
     }
 }
 
-test "e2e/languages: the harness registers exactly what config/defaults.js does" {
+test "e2e/languages: the harness registers exactly what languages.js does" {
     // The harness stands in for config, because most e2e tests boot none — so
-    // its grammar list is a copy of the one in `config/defaults.js`. A copy
+    // its grammar list is a copy of the one in `config/plugins/languages.js`. A copy
     // that drifts is a language the suite silently stops covering, which a
     // comment asking someone to keep two lists in step does not prevent. Check
     // it against the real file instead.
     const gpa = t.allocator;
     // Read BEFORE the app boots: the harness moves into a temp project, so a
     // repo-relative path stops resolving once it has.
-    const src = try h.core.file.readAlloc(gpa, "config/defaults.js");
+    const src = try h.core.file.readAlloc(gpa, "config/plugins/languages.js");
     defer gpa.free(src);
 
     var app: h.App = undefined;
@@ -342,7 +342,7 @@ test "e2e/languages: the harness registers exactly what config/defaults.js does"
             defer gpa.free(path);
             const spec = app.ed.prov.grammars.forPath(path) orelse {
                 std.debug.print(
-                    "\nconfig/defaults.js registers '{s}' for '{s}', which src/e2e/harness.zig's" ++
+                    "\nconfig/plugins/languages.js registers '{s}' for '{s}', which src/e2e/harness.zig's" ++
                         " registerGrammars does not — the e2e suite is not covering it.\n",
                     .{ grammar, ext },
                 );

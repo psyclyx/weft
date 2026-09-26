@@ -712,6 +712,9 @@ pub fn build(b: *std.Build) void {
     weft_mod.addAnonymousImport("acp_js", .{
         .root_source_file = b.path("config/plugins/acp.js"),
     });
+    weft_mod.addAnonymousImport("languages_js", .{
+        .root_source_file = b.path("config/plugins/languages.js"),
+    });
     embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the guests
 
     // `test_mod` (the `test` step) and `instrument_mod` (the `e2e-latency` /
@@ -1490,7 +1493,7 @@ fn installPlugins(b: *std.Build) void {
 }
 
 /// JS plugins shipped in the reference set (config/plugins/*.js).
-const js_plugins = [_][]const u8{ "acp.js", "dap.js" };
+const js_plugins = [_][]const u8{ "acp.js", "dap.js", "languages.js" };
 
 /// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the
 /// runtime behind user `config.js`. We invoke the same `zig cc` that builds
