@@ -270,8 +270,7 @@ const contract_data = @import("weft_membrane");
 /// command with no arguments" and "never calls `command.run` at all" —
 /// either way it can pass none, which is all this gate asks.
 ///
-/// Derived by grepping `command.run(` across `src/core/wasm_host/`:
-/// `commands.zig`'s four and `edit.zig`'s two are the whole set.
+/// Derived by grepping `command.run(` across `src/core/wasm_host/`.
 ///
 /// `wl_intent_invoke` is deliberately absent: it resolves a dotted
 /// INTENTION name through the catalog and calls a registered endpoint, so
@@ -279,6 +278,7 @@ const contract_data = @import("weft_membrane");
 const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     // The runners.
     .{ .name = "wl_run", .args = 0 },
+    .{ .name = "wl_call_string", .args = 0 },
     .{ .name = "wl_run_int", .args = 1 },
     .{ .name = "wl_run_str", .args = 1 },
     .{ .name = "wl_run_str2", .args = 2 },

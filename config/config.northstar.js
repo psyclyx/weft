@@ -39,6 +39,7 @@
 weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
+weft.plugin("dashboard");   // structured welcome view
 weft.plugin("structural");  // tree-sitter node ops
 weft.plugin("region");      // subbuffer regions
 weft.plugin("shell");       // insert shell-command output
@@ -110,6 +111,15 @@ weft.set("which_key", "delay-ms", "200");     // was: weft.set("editor", "which-
 weft.set("which_key", "placement", "corner");
 weft.set("editor", "flash-ms", "150");
 weft.set("editor", "font-size", "16");
+weft.set("dashboard", "sections", [
+  "start\tStart\t\t\t0",
+  "files\tRecent files\tproject-recent\topen\t5",
+  "projects\tProjects\tproject-recent-roots\topen\t4",
+]);
+weft.set("dashboard", "items", [
+  "start\tOpen file\tdashboard-open-file",
+  "start\tNew buffer\tdashboard-new",
+]);
 weft.set("collab", "share-presence", "on");
 // The palette's argument behaviour — a value owned by the plugin that reads
 // it, like every other. Typed arguments (`listen 7777 edit`) and asked-for

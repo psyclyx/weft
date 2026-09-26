@@ -69,12 +69,12 @@ fn pairBodyChanged(before: []const u8, after: []const u8, right: bool) bool {
 // entry and that every entry loaded successfully, including the resident
 // `dap.js` plugin through the same QuickJS reactor used by the desktop app.
 const shipped_config_plugins = [_][]const u8{
-    "edit",       "complete",    "project",   "structural", "region",  "shell",     "palette",
-    "motions",    "textobjects", "operators", "vim",        "ts",      "comment",   "indent",
-    "whitespace", "numbers",     "autopair",  "consult",    "git",     "grep",      "run",
-    "make",       "notes",       "fmt",       "buffers",    "windows", "modes",     "snippets",
-    "direnv",     "llm",         "console",   "repl",       "net",     "which_key", "files",
-    "lsp",        "debug",       "dap.js",    "languages.js",
+    "edit",       "complete",    "project",   "structural",   "region",    "shell",     "palette",
+    "motions",    "textobjects", "operators", "vim",          "ts",        "comment",   "indent",
+    "whitespace", "numbers",     "autopair",  "consult",      "git",       "grep",      "run",
+    "make",       "notes",       "fmt",       "buffers",      "windows",   "modes",     "snippets",
+    "direnv",     "llm",         "console",   "repl",         "net",       "which_key", "files",
+    "lsp",        "debug",       "dap.js",    "languages.js", "dashboard",
 };
 
 fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
@@ -216,6 +216,57 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     const after = try ed.semanticText(ed.buffers.get(listing_id).?.semantic_focus.view.?);
     defer gpa.free(after);
     try t.expectEqualStrings(before, after);
+}
+
+test "e2e/dashboard: configured candidate section is a semantic view, not document text" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    try ed.setConfig("dashboard", "sections", "recent\tLatest\tproject-recent\topen\t1");
+    try ed.load("project", @embedFile("guest_project_wasm"));
+    try ed.load("dashboard", @embedFile("guest_dashboard_wasm"));
+
+    ed.runStr("open", "README.md");
+    const base_origin = ed.render.fb.view.origin_x;
+    ed.run("dashboard");
+
+    try t.expectEqualStrings("*dashboard*", ed.bufferName());
+    // Dashboard has a local mode so it can own j/k/Return/o/n/q, but it is
+    // not an input island: unclaimed workspace chords inherit from normal.
+    try t.expectEqualStrings("vim-find-file", ed.keymap.lookup("dashboard", "space f f").?);
+    try t.expectEqualStrings("dashboard-open-file", ed.keymap.lookup("dashboard", "o").?);
+    ed.chord("SPC f f");
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("pick", ed.head.currentMode());
+    ed.run("pick-cancel");
+    try t.expectEqualStrings("dashboard", ed.head.currentMode());
+    // Vim's old leader/window wrappers and capture exits must not smuggle
+    // their historical `normal` return target into a tool that inherits them.
+    ed.chord("C-w h");
+    try t.expectEqualStrings("dashboard", ed.head.currentMode());
+    ed.press("f", "f");
+    try t.expectEqualStrings("find-f", ed.head.currentMode());
+    ed.press("Escape", "");
+    try t.expectEqualStrings("dashboard", ed.head.currentMode());
+    const backing = try ed.textAlloc();
+    defer gpa.free(backing);
+    try t.expectEqualStrings("", backing);
+    const view_ref = ed.toolView() orelse return error.MissingDashboardView;
+    const surface = try ed.semanticText(view_ref);
+    defer gpa.free(surface);
+    try t.expect(std.mem.indexOf(u8, surface, "Latest") != null);
+    try t.expect(std.mem.indexOf(u8, surface, "README.md") != null);
+    try t.expect(std.mem.indexOf(u8, surface, "Start") == null);
+    try t.expectEqual(base_origin, ed.render.fb.view.origin_x);
+    var mark_paths: usize = 0;
+    for (ed.render.fb.built_panes.items) |pane| for (pane.items) |item| {
+        if (item == .path) mark_paths += 1;
+    };
+    try t.expectEqual(@as(usize, 2), mark_paths);
+    ed.press("Return", "");
+    try t.expect(std.mem.endsWith(u8, ed.bufferName(), "README.md"));
 }
 
 test "e2e/project: git push/pull/fetch transients are sticky menus" {

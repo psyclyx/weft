@@ -525,6 +525,7 @@ pub const FrameBuilder = struct {
             .dirty = doc_status.dirty,
             .save_failed = doc_status.save_failed,
             .backing = backing_chip,
+            .brand_mark = std.mem.eql(u8, abuf.tool, "dashboard"),
             .save_note = doc_status.save_note,
             .unfetched_pct = doc_status.unfetched_pct,
             .peers = doc_status.peers,
@@ -621,6 +622,7 @@ pub const FrameBuilder = struct {
             };
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),
+                .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                 .statusline_segs = other_segs,
                 .gutter = other_gutter,
                 .semantic_view = semanticDocumentFor(fx, ob, &ob.semantic_focus, false),

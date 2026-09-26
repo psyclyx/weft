@@ -104,6 +104,7 @@ pub extern "weft:abi/1" fn wl_declare_posture(posture: u32) void;
 pub extern "weft:abi/1" fn wl_provide(a: u32, al: u32, pred: u32, pred_len: u32, c: u32, cl: u32, prio: i32) void;
 pub extern "weft:abi/1" fn wl_sticky_menu(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_run(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_call_string(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
 pub extern "weft:abi/1" fn wl_run_str(ptr: u32, len: u32, s: u32, sl: u32) void;
 pub extern "weft:abi/1" fn wl_run_str2(ptr: u32, len: u32, a: u32, al: u32, b: u32, bl: u32) void;

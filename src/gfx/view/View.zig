@@ -351,7 +351,21 @@ pub fn build(
         // geometry map prevents stale document hit-testing from leaking into
         // a pane whose visible identity/focus is node-based.
         self.frame_layout = .{ .lines = &.{} };
-        const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, hud, body_rect, top_row);
+        var document_body = body_rect;
+        if (hud.brand_mark) {
+            if (dashboardMarkSize(self, body_rect)) |size| {
+                const reserved = size + self.line_h;
+                document_body.y += reserved;
+                document_body.h = @max(0, document_body.h - reserved);
+            }
+            // Keep the dashboard at a readable measure in characters. A
+            // fixed pixel cap made the viewport progressively narrower as
+            // the user increased the font size, truncating ordinary paths.
+            const width = @min(document_body.w, self.cell_w * 72);
+            document_body.x += (document_body.w - width) / 2;
+            document_body.w = width;
+        }
+        const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, hud, document_body, top_row);
         if (document.active) {
             self.semantic_active = true;
             self.semantic_hits = hits;
@@ -472,8 +486,68 @@ pub fn build(
     }
 
     var built = try render.render(self, world_to_pixel, runs.items, rects.items);
+    if (hud.brand_mark) if (dashboardMarkSize(self, body_rect)) |size| {
+        const first = built.items.len;
+        built.items = try self.gpa.realloc(built.items, first + 2);
+        const x = body_rect.x + (body_rect.w - size) / 2;
+        const y = body_rect.y + 12;
+        const scale = size / 256;
+        built.items[first] = .{ .path = .{
+            .commands = &dashboard_line,
+            .x = x,
+            .y = y,
+            .scale = scale,
+            .stroke_width = 13,
+            .color = self.theme.foreground,
+            .cap = .square,
+            .join = .round,
+        } };
+        built.items[first + 1] = .{ .path = .{
+            .commands = &dashboard_caret,
+            .x = body_rect.x + (body_rect.w - size) / 2,
+            .y = body_rect.y + 12,
+            .scale = scale,
+            .stroke_width = 8,
+            .color = self.theme.diag_error,
+            .cap = .square,
+        } };
+    };
     built.body = body_rect;
     return built;
+}
+
+fn dashboardMarkSize(self: *const View, body: region.Rect) ?f32 {
+    if (body.w < 260 or body.h < 220) return null;
+    return @min(210, @min(body.w * 0.42, @min(body.h * 0.45, self.line_h * 11)));
+}
+
+const dashboard_line = [_]scene.PathCommand{
+    pathMove(46, 68),
+    pathLine(175, 68),
+    pathCubic(198, 68, 209, 79, 209, 101),
+    pathCubic(209, 123, 198, 134, 175, 134),
+    pathLine(80, 134),
+    pathCubic(57, 134, 46, 145, 46, 166),
+    pathCubic(46, 187, 57, 198, 80, 198),
+    pathLine(152, 198),
+};
+
+const dashboard_caret = [_]scene.PathCommand{
+    pathMove(176, 163), pathLine(176, 223),
+    pathMove(164, 163), pathLine(188, 163),
+    pathMove(164, 223), pathLine(188, 223),
+};
+
+fn pathMove(x: f32, y: f32) scene.PathCommand {
+    return .{ .verb = .move, .points = .{ x, y, 0, 0, 0, 0 } };
+}
+
+fn pathLine(x: f32, y: f32) scene.PathCommand {
+    return .{ .verb = .line, .points = .{ x, y, 0, 0, 0, 0 } };
+}
+
+fn pathCubic(x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) scene.PathCommand {
+    return .{ .verb = .cubic, .points = .{ x1, y1, x2, y2, x3, y3 } };
 }
 
 // ── HUD (status line + picker; always mono) ──────────────────────

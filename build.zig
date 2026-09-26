@@ -425,6 +425,7 @@ const guests = [_]Guest{
     .{ .name = "notes", .import = "guest_notes_wasm", .install = true },
     .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
     .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
+    .{ .name = "dashboard", .import = "guest_dashboard_wasm", .install = true },
     .{ .name = "windows", .import = "guest_windows_wasm", .install = true },
     .{ .name = "modes", .import = "guest_modes_wasm", .install = true },
     .{ .name = "snippets", .import = "guest_snippets_wasm", .install = true },
@@ -824,7 +825,7 @@ pub fn build(b: *std.Build) void {
     // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
-    const explorer_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "files:", "authoring/files:", "e2e/files:", "e2e/sidebar:", "e2e/grammar:", "semantic view edits", "sidebar fragment", "e2e/spine:" } });
+    const explorer_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "files:", "authoring/files:", "e2e/files:", "e2e/sidebar:", "e2e/grammar:", "e2e/dashboard:", "semantic view edits", "sidebar fragment", "e2e/spine:" } });
     b.step("test-explorer", "Run explorer object, navigation, grammar, and pane integration tests").dependOn(&b.addRunArtifact(explorer_tests).step);
 
     const test_step = b.step("test", "Run unit tests");

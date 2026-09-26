@@ -13,6 +13,7 @@ const std = @import("std");
 const weft = @import("weft");
 
 const recent_key = "recent";
+const recent_roots_key = "recent-roots";
 
 /// How many files "recently visited" means. This one IS policy, and it is the
 /// only bound here: a recents list is a UI affordance — the handful of files a
@@ -37,6 +38,7 @@ var list_buf: std.ArrayList(u8) = .empty;
 const cmds = [_]weft.CommandEntry{
     .{ .name = "project-remember", .call = remember, .summary = "remember this project so it shows up in recents" },
     .{ .name = "project-recent", .call = recent, .summary = "open a project you were in recently" },
+    .{ .name = "project-recent-roots", .call = recentRoots, .summary = "list recently visited project roots" },
     .{ .name = "project-root", .call = projectRoot, .summary = "say where this project's root is" },
 };
 comptime {
@@ -62,6 +64,13 @@ fn recordActive() i32 {
     // than a recents list that is short.
     const path = alloc.dupe(u8, weft.path() orelse return -1) catch return -1;
     defer alloc.free(path);
+    const root = alloc.dupe(u8, weft.placeRoot()) catch return -1;
+    defer alloc.free(root);
+    if (root.len > 0) {
+        const old_roots = alloc.dupe(u8, weft.kvGet(recent_roots_key) orelse "") catch return -1;
+        defer alloc.free(old_roots);
+        if (prepend(old_roots, root)) |roots| weft.kvPut(recent_roots_key, roots);
+    }
     const existing = alloc.dupe(u8, weft.kvGet(recent_key) orelse "") catch return -1;
     defer alloc.free(existing);
 
@@ -78,6 +87,10 @@ fn remember() void {
 /// The recent list as a newline-joined blob (a picker splits it).
 fn recent() void {
     weft.setResultStr(weft.kvGet(recent_key) orelse "");
+}
+
+fn recentRoots() void {
+    weft.setResultStr(weft.kvGet(recent_roots_key) orelse "");
 }
 
 /// `project-root` command: the project this command is in, absolute — which is

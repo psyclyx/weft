@@ -1993,6 +1993,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "edit", @embedFile("guest_edit_wasm") },
     .{ "complete", @embedFile("guest_complete_wasm") },
     .{ "project", @embedFile("guest_project_wasm") },
+    .{ "dashboard", @embedFile("guest_dashboard_wasm") },
     .{ "palette", @embedFile("guest_palette_wasm") },
     .{ "structural", @embedFile("guest_structural_wasm") },
     .{ "ts", @embedFile("guest_ts_wasm") },

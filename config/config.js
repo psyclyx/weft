@@ -42,6 +42,7 @@
 weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
+weft.plugin("dashboard");   // structured welcome view
 weft.plugin("structural");  // tree-sitter node ops
 weft.plugin("region");      // subbuffer regions
 weft.plugin("shell");       // insert shell-command output
@@ -152,6 +153,17 @@ weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the 
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
 weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust, C-0 resets
+// Each section gives an id, title, candidate-source command, activation
+// command, and maximum count. Source commands return newline-delimited lists.
+weft.set("dashboard", "sections", [
+  "start\tStart\t\t\t0",
+  "files\tRecent files\tproject-recent\topen\t5",
+  "projects\tProjects\tproject-recent-roots\topen\t4",
+]);
+weft.set("dashboard", "items", [
+  "start\tOpen file\tdashboard-open-file",
+  "start\tNew buffer\tdashboard-new",
+]);
 weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
 // The palette's argument behaviour. A command with parameters can be run two
 // ways: type them next to the name (`listen 7777 edit` — the palette accepts

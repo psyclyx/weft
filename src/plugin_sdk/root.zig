@@ -736,6 +736,16 @@ pub fn provide(action: []const u8, when: Predicate, cmd: []const u8, prio: i32) 
 pub fn run(cmd: []const u8) void {
     e.wl_run(p(cmd.ptr), @intCast(cmd.len));
 }
+
+var call_string_scratch: [1 << 16]u8 = undefined;
+
+/// A zero-argument command used as a data source. Returns its complete string
+/// result without showing the candidate list in the echo line. The returned
+/// slice is borrowed until the next `callString`.
+pub fn callString(cmd: []const u8) ?[]const u8 {
+    const n = e.wl_call_string(p(cmd.ptr), @intCast(cmd.len), p(&call_string_scratch), call_string_scratch.len);
+    return if (n < 0) null else call_string_scratch[0..@intCast(n)];
+}
 /// Invoke `cmd` with a single integer arg (e.g. buffer-switch).
 pub fn runInt(cmd: []const u8, n: i32) void {
     e.wl_run_int(p(cmd.ptr), @intCast(cmd.len), n);

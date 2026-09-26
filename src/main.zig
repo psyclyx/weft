@@ -207,8 +207,9 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // ── Plugins: external .wasm, sandboxed under wasmtime (no in-process
-    //    trust). weft ships MODELESS — nothing here unless the user asks with
-    //    --plugin. The reference plugins (vim, palette, edit, …) live as
+    //    trust). Editing stays modeless unless a config or --plugin selects
+    //    a mode; a no-file launch also loads the welcome dashboard. The
+    //    reference plugins (vim, palette, edit, …) live as
     //    `.wasm` under lib/weft/plugins/; each runs behind the perm handshake,
     //    reaching the editor only through the `weft.*` membrane and authoring
     //    every edit as its own peer. The effect services the ABI's Group D/E
@@ -278,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
     // and actions, reaching the editor only through the `weft.*` grants — the
     // same door a plugin uses. It can also load plugins itself (`weft.plugin`),
     // so the sample config brings up its own vim/palette without --plugin. A
-    // bare weft with no plugins is modeless. Absent or broken config is a
+    // bare editor remains modeless. Absent or broken config is a
     // warning, never fatal.
     //
     // `config_session` outlives this block (held for the whole run) so
@@ -311,6 +312,13 @@ pub fn main(init: std.process.Init) !void {
     // now; capture it as the mode fresh buffers open in, so a tool buffer's
     // mode (files/git) can never leak into a file opened from it.
     session.system.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
+    // A no-file launch opens the welcome tool after config has chosen the
+    // normal editing mode. File and collaboration launches keep their target.
+    if (args.file == null and args.connect == null) {
+        if (session.system.commands.resolve("dashboard") == null) plugin_host.load("dashboard");
+        _ = core.command.run(&session.system.commands, &session.cmd_ctx, "dashboard", &.{}) catch |e|
+            std.log.warn("dashboard: {t}", .{e});
+    }
 
     // ── A second hosted system: agent-ux (doc/cwa-prior-docs-audit.md §5)
     // ── A minimal SECOND system, hosted alongside "editor" on the SAME

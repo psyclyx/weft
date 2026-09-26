@@ -129,6 +129,24 @@ pub fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     invoke(p, cmd, &.{});
 }
 
+/// Call a zero-argument data source and copy its string result into the
+/// caller's buffer. Unlike `wl_run`, this does not echo the returned list into
+/// the status line. A short buffer fails rather than returning a partial row.
+pub fn hCallString(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    const value = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch return;
+    const bytes = switch (value) {
+        .string => |s| s,
+        else => return,
+    };
+    const cap: usize = @intCast(args[3]);
+    if (bytes.len > cap) return;
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), cap, bytes) catch return);
+}
+
 pub fn hRunInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

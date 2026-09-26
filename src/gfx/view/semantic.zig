@@ -160,7 +160,7 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
     const rows = try rowsFor(scratch, document);
     var hits: std.ArrayList(Hit) = .empty;
     var content = body;
-    if (document.title.len != 0 and body.h >= 2 * v.line_h) {
+    if (!hud.brand_mark and document.title.len != 0 and body.h >= 2 * v.line_h) {
         try popup.propLine(v, scratch, runs, firstCells(document.title, @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w)), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
         content.y += v.line_h;
         content.h -= v.line_h;

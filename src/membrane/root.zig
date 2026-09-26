@@ -247,6 +247,7 @@ pub const imports = [_]Entry{
     // ── commands.zig — register/run/introspect ──────────────────────────
     .{ .name = "wl_register", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .commands, .doc = "register-phase: intern a name into this plugin's local command id table" },
     .{ .name = "wl_run", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name, no args" },
+    .{ .name = "wl_call_string", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "run a zero-argument command and copy its string result into guest memory" },
     .{ .name = "wl_run_int", .params = &.{ .u32, .u32, .i32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with one int arg" },
     .{ .name = "wl_run_str", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with one string arg" },
     .{ .name = "wl_run_str2", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with two string args" },
@@ -552,9 +553,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 231;
+const max_import_count: usize = 232;
 const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 249;
+const max_semantic_operation_count: usize = 250;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

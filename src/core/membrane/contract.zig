@@ -170,6 +170,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── commands.zig — register/run/introspect ──────────────────────────
     .{ .name = "wl_register", .handler = commands.hRegister },
     .{ .name = "wl_run", .handler = commands.hRun },
+    .{ .name = "wl_call_string", .handler = commands.hCallString },
     .{ .name = "wl_run_int", .handler = commands.hRunInt },
     .{ .name = "wl_run_str", .handler = commands.hRunStr },
     .{ .name = "wl_run_str2", .handler = commands.hRunStr2 },

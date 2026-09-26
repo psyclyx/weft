@@ -41,6 +41,8 @@ pub const Hud = struct {
     save_failed: bool = false,
     /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.
     backing: ?[]const u8 = null,
+    /// Paint the shipped mark above a dashboard tool's projection.
+    brand_mark: bool = false,
     /// Save progress chip: "saving…" | "save stale" | null.
     save_note: ?[]const u8 = null,
     /// Partial checkout: percent NOT yet fetched (0 = complete).
