@@ -1678,7 +1678,7 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 /// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`
 /// and the options arrive as JSON and are parsed by `quickjs/provide.zig`
 /// into the same `facts.Predicate` `wl_provide` decodes: every fact a config
-/// can name (mode, lang, tool, role, locality), and a presentation (label,
+/// can name (mode, lang, tool, role, posture, locality), and a presentation (label,
 /// group, order) for the offer the provider wins. A `when` naming no fact is
 /// refused out loud rather than widened to everywhere. Auto-declares the
 /// action if `weft.action` hasn't run yet (load order is free), but does NOT

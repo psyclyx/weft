@@ -703,14 +703,10 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
 /// `explain-binding eval` answers exactly the question
 /// `Actions.resolve("eval", ...)` would have asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
-    const entry = ctx.buffer();
-    const f: facts.Facts = .{
-        .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
-        .name = entry.name,
-        .mode = ctx.head.currentMode(),
-        .lang = Actions.langOfName(entry.name),
-        .tool = entry.tool,
-    };
+    // The one fact builder resolution itself uses (`intent.factsFor`), so the
+    // explanation cannot disagree with what a key or a toolbar would run — a
+    // provider keyed on `role`, `locality` or `posture` is explained too.
+    const f: facts.Facts = @import("intent.zig").factsFor(ctx);
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();
 

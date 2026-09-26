@@ -66,6 +66,7 @@ pub const Publisher = struct {
         tool: u64,
         mode: u64,
         lang: u64,
+        posture: u64,
         locality: facts_mod.Locality,
     };
 
@@ -80,6 +81,7 @@ pub const Publisher = struct {
             .tool = hash(f.tool),
             .mode = hash(f.mode),
             .lang = hash(f.lang),
+            .posture = hash(f.posture),
             .locality = f.locality,
         };
     }

@@ -566,6 +566,7 @@ pub fn factsIn(scope: Scope) catalog_mod.Facts {
         .tool = entry.tool,
         .role = entry.focusedRole(),
         .locality = localityOf(entry),
+        .posture = @tagName(entry.posture(scope.focus.field != null)),
         .pane = scope.pane,
     };
 }

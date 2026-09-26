@@ -89,6 +89,8 @@ fn parseWhen(gpa: Allocator, text: []const u8) Error!facts.Predicate {
             .{ .tool = s }
         else if (std.mem.eql(u8, key, "role"))
             .{ .role = s }
+        else if (std.mem.eql(u8, key, "posture"))
+            .{ .posture = s }
         else
             return error.UnknownFact;
         try leaves.append(gpa, leaf);
@@ -144,8 +146,8 @@ fn strOf(v: std.json.Value) ?[]const u8 {
 /// What a refused provide says, for the echo line.
 pub fn describe(err: Error) []const u8 {
     return switch (err) {
-        error.BadWhen => "`when` must be an object of facts {mode, lang, tool, role, locality}",
-        error.UnknownFact => "`when` names a fact config cannot match (use mode, lang, tool, role, locality)",
+        error.BadWhen => "`when` must be an object of facts {mode, lang, tool, role, posture, locality}",
+        error.UnknownFact => "`when` names a fact config cannot match (use mode, lang, tool, role, posture, locality)",
         error.BadLocality => "`locality` is one of local, remote, tool, none",
         error.BadOptions => "the fourth argument is a priority or {priority, label, group, order}",
         error.OutOfMemory => "out of memory",
@@ -190,9 +192,24 @@ test "provide: an options object carries priority and presentation" {
     try t.expectEqual(@as(?i32, 2), p.affordance.order);
 }
 
+test "provide: posture narrows by how the entry rests, as the wasm door's leaf does" {
+    const gpa = t.allocator;
+    var p = try parse(gpa, "{\"posture\":\"structural\",\"tool\":\"files\"}", "");
+    defer p.deinit(gpa);
+    try t.expect(p.predicate.matches(.{ .posture = "structural", .tool = "files" }));
+    try t.expect(!p.predicate.matches(.{ .posture = "text", .tool = "files" }));
+    // Round-trips through the wire leaf `wl_provide` decodes (tag 12).
+    const ours = try facts.encode(gpa, p.predicate);
+    defer gpa.free(ours);
+    const decoded = try facts.decode(gpa, ours);
+    defer facts.free(gpa, decoded);
+    try t.expect(decoded.matches(.{ .posture = "structural", .tool = "files" }));
+    try t.expect(!decoded.matches(.{ .posture = "text", .tool = "files" }));
+}
+
 test "provide: a fact config cannot name is refused, never widened" {
     const gpa = t.allocator;
-    try t.expectError(error.UnknownFact, parse(gpa, "{\"posture\":\"text\"}", ""));
+    try t.expectError(error.UnknownFact, parse(gpa, "{\"colour\":\"blue\"}", ""));
     try t.expectError(error.BadLocality, parse(gpa, "{\"locality\":\"moon\"}", ""));
     try t.expectError(error.BadWhen, parse(gpa, "[1]", ""));
     try t.expectError(error.BadOptions, parse(gpa, "{}", "{\"colour\":1}"));
