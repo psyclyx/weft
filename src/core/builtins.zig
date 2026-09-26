@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const command = @import("command.zig");
+const Editor = @import("Editor.zig");
 const Context = command.Context;
 const Value = command.Value;
 const facts = @import("weft_facts");
@@ -243,29 +244,35 @@ fn editErr(e: anyerror) anyerror!Value {
     return ok;
 }
 
+/// The text edits act at EVERY selection: `target`'s range at each (the
+/// selection, or the caret / the scalar beside it), through the one gated
+/// door as one commit. With a single selection this is exactly
+/// `ctx.edit(ed.insertRange()/backspaceRange()/forwardRange(), bytes)`.
+fn editAtSelections(ctx: *Context, ed: *Editor, target: Editor.EditTarget, bytes: []const u8) anyerror!Value {
+    const ranges = try ed.editRanges(ctx.gpa, target);
+    defer ctx.gpa.free(ranges);
+    ctx.editEach(ranges, bytes) catch |e| return editErr(e);
+    return ok;
+}
+
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .from(args.text) })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), args.text) catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, args.text);
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_previous)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    const r = ed.backspaceRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .backward, "");
 }
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_next)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    const r = ed.forwardRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .forward, "");
 }
 
 /// A refused unwind reports "nothing happened" — the door already announced
@@ -468,8 +475,7 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, "\n");
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
@@ -477,8 +483,7 @@ fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), "\t") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, "\t");
 }
 
 /// Is point inside a PROJECTION's editable span — a field made of text?

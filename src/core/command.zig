@@ -453,6 +453,34 @@ pub const Context = struct {
         return self.applyEdit(r, bytes, self.user_initiated);
     }
 
+    /// INTERACTIVE edit at several places at once — one per selection. The
+    /// same door as `edit` (read-only and doc-region gates, then the grade
+    /// gate), asked of EVERY range before any lands: a refusal anywhere
+    /// refuses the whole edit, so N carets never half-type. The ranges must be
+    /// ascending and disjoint (`Editor.editRanges`), and land as ONE commit —
+    /// one undo unit. One range is exactly `edit`.
+    pub fn editEach(self: *Context, ranges: []const Document.Range, bytes: []const u8) EditError!void {
+        if (ranges.len == 1) return self.edit(ranges[0], bytes);
+        if (ranges.len == 0) return;
+        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        for (ranges) |r| {
+            if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
+            switch (self.checkDocRegion(r.start, r.end)) {
+                .ok => {},
+                .out_of_limit => return error.OutOfLimit,
+                .collapsed => return error.Collapsed,
+            }
+        }
+        const items = try self.gpa.alloc(Document.Replacement, ranges.len);
+        defer self.gpa.free(items);
+        for (ranges, items) |r, *it| it.* = .{ .range = r, .bytes = bytes };
+        const ed = try self.textEditor();
+        const doc = &ed.doc;
+        if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
+        if (self.joinsUserUndo(self.user_initiated)) return ed.applyUserEdits(self.gpa, items);
+        try doc.peerReplaceAll(self.gpa, try self.principal.peerOn(doc), items);
+    }
+
     /// The UNDO door: this principal's authority over an inverse edit, as the
     /// gate `undo.UndoLog` must clear at its apply site. Undo re-applies text,
     /// so it asks exactly what `edit` asks — the grade gate, then
@@ -539,9 +567,7 @@ pub const Context = struct {
         const ed = try self.textEditor();
         const doc = &ed.doc;
         if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
-        const joins_user_undo = self.principal.role == .user or
-            (join_user and self.principal.role == .plugin);
-        if (joins_user_undo) {
+        if (self.joinsUserUndo(join_user)) {
             try ed.applyUserEdit(self.gpa, r, bytes);
             return;
         }
@@ -551,6 +577,14 @@ pub const Context = struct {
         if (!r.isEmpty()) try doc.peerDelete(self.gpa, pid, r);
         if (bytes.len > 0) try doc.peerInsert(self.gpa, pid, r.start, bytes);
         _ = try doc.peerCommit(self.gpa, pid);
+    }
+
+    /// Whether an edit by this principal lands in the user's single undo
+    /// history (the user, or a helper plugin acting on the user's keystroke)
+    /// rather than the principal's own selective-undo peer.
+    fn joinsUserUndo(self: *const Context, join_user: bool) bool {
+        return self.principal.role == .user or
+            (join_user and self.principal.role == .plugin);
     }
 };
 

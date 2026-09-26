@@ -1,6 +1,7 @@
-//! Editor — the interactive shell around one Document: cursor and
-//! selection (anchors in the Document's auto-shifted AnchorSet, never
-//! bare offsets), movement over the rope's line/scalar queries, undo
+//! Editor — the interactive shell around one Document: its selections
+//! (one or many; each a head and an optional anchor in the Document's
+//! auto-shifted AnchorSet, never bare offsets — the cursor/mark API is a view
+//! onto the primary one), movement over the rope's line/scalar queries, undo
 //! delegation with vim-flavored unit barriers, dirty tracking by
 //! version comparison, and saving as a *fallible request* on the task
 //! pool — never an op, never a wait.
@@ -27,11 +28,21 @@ const Editor = @This();
 
 doc: Document,
 history: undo_mod.UndoLog = .empty,
-/// Insertion point; bias .right so text typed at the cursor pushes it
-/// forward, and other peers' inserts at the cursor do the same.
-cursor: stemma.AnchorSet.Handle,
-/// Selection = mark..cursor (either order), when a mark is set.
-mark: ?stemma.AnchorSet.Handle = null,
+/// Every selection this editor holds, in document order (`normalize` keeps
+/// them sorted and disjoint). NEVER empty: one selection is the degenerate
+/// case every single-cursor grammar lives in, and there is no second
+/// representation beside it — the cursor/mark API below (`cursorOffset`,
+/// `moveTo`, `selectedRange`, …) is a VIEW onto `selections[primary]`, so a
+/// grammar that knows nothing about multiple selections cannot drift from
+/// one that does (doc/configs.md §0.1).
+///
+/// Local view state: the handles live in the Document's AnchorSet (so every
+/// edit, local or merged, shifts them), but nothing here is serialized or
+/// broadcast. Presence publishes the primary caret only (app/collab.zig).
+selections: std.ArrayList(Selection) = .empty,
+/// Index into `selections` of the selection the cursor/mark view reads —
+/// the one motions, the view's scroll-follow, and presence track.
+primary: usize = 0,
 /// Byte column the *headless/fallback* vertical motion aims for (sticky
 /// across short lines). Used when there is no view to consult — see
 /// `moveVertical`. The interactive path uses `goal_x` instead.
@@ -81,11 +92,34 @@ pub const PollState = union(enum) {
     polling: task.Handle(PollError!?file.Fetched),
 };
 
+/// One selection: a `head` (the caret — where typing lands and motion acts)
+/// and, when one has been dropped, an `anchor` (the end that stays put).
+///
+/// The anchor is OPTIONAL, not merely allowed to equal the head, because the
+/// two states behave differently under motion: with no anchor, moving the head
+/// moves a caret; with one, it grows a selection (emacs's active mark, vim's
+/// visual mode). `anchor == head` is an empty selection — a caret — too; core
+/// never demands a selection cover a character (that is helix's grammar rule,
+/// not an editor rule).
+///
+/// Biases are fixed by role: the head is `.right` (text typed at it pushes it
+/// forward, as do other peers' inserts there), the anchor `.left`.
+pub const Selection = struct {
+    head: stemma.AnchorSet.Handle,
+    anchor: ?stemma.AnchorSet.Handle = null,
+};
+
+/// A selection's endpoints as offsets — what crosses the ABI and what
+/// `setSelections` takes. `anchor == head` asks for a caret (no anchor).
+pub const Ends = struct { anchor: usize, head: usize };
+
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.Error!Editor {
     var doc = try Document.init(gpa, user_agent);
     errdefer doc.deinit(gpa);
     const cursor = try doc.addAnchor(gpa, 0, .right);
-    return .{ .doc = doc, .cursor = cursor, .pool = pool };
+    var selections: std.ArrayList(Selection) = .empty;
+    try selections.append(gpa, .{ .head = cursor });
+    return .{ .doc = doc, .selections = selections, .pool = pool };
 }
 
 pub fn deinit(self: *Editor, gpa: Allocator) void {
@@ -135,6 +169,9 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
         },
     }
     self.history.deinit(gpa);
+    // The selection handles die with the Document's AnchorSet; only the
+    // list itself is ours.
+    self.selections.deinit(gpa);
     self.doc.deinit(gpa);
     if (self.saved_version) |v| gpa.free(v);
     self.* = undefined;
@@ -144,8 +181,14 @@ pub fn text(self: *const Editor) *const stemma.Rope {
     return self.doc.text();
 }
 
+/// The primary selection's head — "the cursor" of every single-cursor API.
 pub fn cursorOffset(self: *const Editor) usize {
-    return self.doc.anchorOffset(self.cursor);
+    return self.doc.anchorOffset(self.primarySelection().head);
+}
+
+fn primarySelection(self: *const Editor) Selection {
+    assert(self.selections.items.len > 0 and self.primary < self.selections.items.len);
+    return self.selections.items[self.primary];
 }
 
 // ── Files & backings ────────────────────────────────────────────────
@@ -167,7 +210,7 @@ fn setBackingLoaded(self: *Editor, gpa: Allocator) Allocator.Error!void {
     // to the end).
     try self.history.ingest(gpa, &self.doc);
     self.history.barrier();
-    self.doc.anchors.set(self.cursor, .{ .offset = 0, .bias = .right });
+    self.doc.anchors.set(self.primarySelection().head, .{ .offset = 0, .bias = .right });
 }
 
 /// Open a local file as this buffer's backing: the content BECOMES the
@@ -436,10 +479,23 @@ pub fn isDirty(self: *const Editor, gpa: Allocator) Allocator.Error!bool {
 /// (plugins/agents) do NOT come here — they are that peer's own undo unit,
 /// applied through the Document's peer API.
 pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8) Allocator.Error!void {
-    try self.doc.replaceAll(gpa, &.{.{ .range = r, .bytes = bytes }});
+    try self.applyUserEdits(gpa, &.{.{ .range = r, .bytes = bytes }});
+}
+
+/// The same seam for an edit at SEVERAL places — typing with N selections.
+/// `items` must be ascending and non-overlapping (what `editRanges` returns);
+/// `Document.replaceAll` applies them in reverse offset order as ONE commit,
+/// so the whole multi-selection edit is one undo unit by construction rather
+/// than by grouping several commits. One item is exactly the single-cursor
+/// edit, byte for byte.
+pub fn applyUserEdits(self: *Editor, gpa: Allocator, items: []const Document.Replacement) Allocator.Error!void {
+    try self.doc.replaceAll(gpa, items);
     self.clearSelection();
     self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
+    // Two carets can land on one offset (backspace from both sides of a
+    // character): fold them, as `setSelections` would have.
+    self.normalize();
 }
 
 // ── Edit ranges (pure: compute where an edit lands, mutate nothing) ──
@@ -448,46 +504,103 @@ pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8)
 // whether the edit is routed as the user (here) or a plugin peer (via
 // command.Context.edit).
 
+/// Which range an edit takes from each selection: typing replaces the
+/// selection (or lands at the caret), backspace/delete remove it (or the
+/// scalar before/after the caret).
+pub const EditTarget = enum { insert, backward, forward };
+
+/// `target`'s range for one selection, or null when it has nothing to act on
+/// (backspace at the document start, delete at its end).
+pub fn editRangeOf(self: *const Editor, sel: Selection, target: EditTarget) ?Range {
+    if (self.rangeOf(sel)) |r| return r;
+    const off = self.doc.anchorOffset(sel.head);
+    return switch (target) {
+        .insert => .{ .start = off, .end = off },
+        .backward => if (off == 0) null else .{ .start = self.prevBoundary(off), .end = off },
+        .forward => if (off == self.text().byteLen()) null else .{ .start = off, .end = self.nextBoundary(off) },
+    };
+}
+
+/// `target`'s range for EVERY selection, ascending and disjoint — the shape
+/// `applyUserEdits`/`Document.replaceAll` require. Ranges that would overlap
+/// (two carets backspacing into one character) are unioned so a character is
+/// removed once; coincident empty ranges collapse to one insertion point.
+/// With one selection this is `[editRangeOf(primary)]` (or empty). Caller
+/// frees.
+pub fn editRanges(self: *const Editor, gpa: Allocator, target: EditTarget) Allocator.Error![]Range {
+    var out: std.ArrayList(Range) = .empty;
+    errdefer out.deinit(gpa);
+    for (self.selections.items) |sel| {
+        if (self.editRangeOf(sel, target)) |r| try out.append(gpa, r);
+    }
+    sortRanges(out.items);
+    var n: usize = 0;
+    for (out.items) |r| {
+        if (n > 0) {
+            const prev = &out.items[n - 1];
+            const touching_empty = r.start == prev.start and (r.isEmpty() or prev.isEmpty());
+            if (r.start < prev.end or touching_empty) {
+                prev.end = @max(prev.end, r.end);
+                continue;
+            }
+        }
+        out.items[n] = r;
+        n += 1;
+    }
+    out.shrinkRetainingCapacity(n);
+    return out.toOwnedSlice(gpa);
+}
+
+fn sortRanges(rs: []Range) void {
+    std.mem.sort(Range, rs, {}, struct {
+        fn lt(_: void, a: Range, b: Range) bool {
+            return a.start < b.start or (a.start == b.start and a.end < b.end);
+        }
+    }.lt);
+}
+
 /// Where typed text lands: the selection it replaces, or an empty range
 /// at the cursor.
 pub fn insertRange(self: *const Editor) Range {
-    const off = self.cursorOffset();
-    return self.selectedRange() orelse .{ .start = off, .end = off };
+    return self.editRangeOf(self.primarySelection(), .insert).?;
 }
 
 /// What a backspace removes: the selection, or the scalar before the
 /// cursor. Null when there is nothing to delete (cursor at start).
 pub fn backspaceRange(self: *const Editor) ?Range {
-    if (self.selectedRange()) |r| return r;
-    const off = self.cursorOffset();
-    if (off == 0) return null;
-    return .{ .start = self.prevBoundary(off), .end = off };
+    return self.editRangeOf(self.primarySelection(), .backward);
 }
 
 /// What a forward-delete removes: the selection, or the scalar after the
 /// cursor. Null when the cursor is at the document end.
 pub fn forwardRange(self: *const Editor) ?Range {
-    if (self.selectedRange()) |r| return r;
-    const off = self.cursorOffset();
-    if (off == self.text().byteLen()) return null;
-    return .{ .start = off, .end = self.nextBoundary(off) };
+    return self.editRangeOf(self.primarySelection(), .forward);
 }
 
-/// Type at the cursor (replacing the selection if one is active).
+/// Apply `bytes` over `target`'s range at every selection as one edit.
+fn editAtSelections(self: *Editor, gpa: Allocator, target: EditTarget, bytes: []const u8) Allocator.Error!void {
+    const ranges = try self.editRanges(gpa, target);
+    defer gpa.free(ranges);
+    if (ranges.len == 0) return;
+    const items = try gpa.alloc(Document.Replacement, ranges.len);
+    defer gpa.free(items);
+    for (ranges, items) |r, *it| it.* = .{ .range = r, .bytes = bytes };
+    try self.applyUserEdits(gpa, items);
+}
+
+/// Type at every selection (replacing each selection that is non-empty).
 pub fn insertText(self: *Editor, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
-    try self.applyUserEdit(gpa, self.insertRange(), bytes);
+    try self.editAtSelections(gpa, .insert, bytes);
 }
 
-/// Backspace: delete the selection, or the scalar before the cursor.
+/// Backspace at every selection: its text, or the scalar before its caret.
 pub fn deleteBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
-    const r = self.backspaceRange() orelse return;
-    try self.applyUserEdit(gpa, r, "");
+    try self.editAtSelections(gpa, .backward, "");
 }
 
-/// Delete: the selection, or the scalar after the cursor.
+/// Delete at every selection: its text, or the scalar after its caret.
 pub fn deleteForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
-    const r = self.forwardRange() orelse return;
-    try self.applyUserEdit(gpa, r, "");
+    try self.editAtSelections(gpa, .forward, "");
 }
 
 /// Delete an arbitrary range as one undoable unit (motions, operators).
@@ -513,32 +626,225 @@ pub fn redo(self: *Editor, gpa: Allocator, gate: undo_mod.Gate) undo_mod.Error!b
 
 // ── Selection ───────────────────────────────────────────────────────
 
+// The mark verbs act on EVERY selection — dropping or lifting the anchor is
+// one gesture whatever the selection count (a grammar's `v` with three carets
+// starts three selections). Everything that reads "the" selection reads the
+// primary.
+
+/// Drop an anchor at every selection's head (replacing any it had).
 pub fn setMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.clearSelection();
-    self.mark = try self.doc.addAnchor(gpa, self.cursorOffset(), .left);
-}
-
-pub fn clearSelection(self: *Editor) void {
-    if (self.mark) |m| {
-        self.doc.removeAnchor(m);
-        self.mark = null;
+    for (self.selections.items) |*sel| {
+        sel.anchor = try self.doc.addAnchor(gpa, self.doc.anchorOffset(sel.head), .left);
     }
 }
 
+/// Lift every selection's anchor, leaving its caret where the head is.
+pub fn clearSelection(self: *Editor) void {
+    for (self.selections.items) |*sel| {
+        if (sel.anchor) |m| {
+            self.doc.removeAnchor(m);
+            sel.anchor = null;
+        }
+    }
+}
+
+/// The primary selection's text range, or null when it is a caret.
 pub fn selectedRange(self: *const Editor) ?Range {
-    const m = self.mark orelse return null;
+    return self.rangeOf(self.primarySelection());
+}
+
+/// One selection's text range, or null when it is a caret (no anchor, or
+/// an anchor at the head).
+pub fn rangeOf(self: *const Editor, sel: Selection) ?Range {
+    const m = sel.anchor orelse return null;
     const a = self.doc.anchorOffset(m);
-    const b = self.cursorOffset();
+    const b = self.doc.anchorOffset(sel.head);
     if (a == b) return null;
     return .{ .start = @min(a, b), .end = @max(a, b) };
 }
 
+// ── Multiple selections ─────────────────────────────────────────────
+// The general case. A single-cursor grammar never calls these; one that does
+// (helix, ide's add-next-match) replaces the set wholesale with
+// `setSelections` and reads it back with `selectionEnds`.
+
+pub fn selectionCount(self: *const Editor) usize {
+    return self.selections.items.len;
+}
+
+/// Selection `i`'s endpoints (document order). A caret with no anchor reports
+/// `anchor == head`.
+pub fn selectionEnds(self: *const Editor, i: usize) Ends {
+    return self.selectionEndsOf(self.selections.items[i]);
+}
+
+/// Replace every selection with `ends` (at least one), `primary` indexing
+/// into it. Offsets are clamped to the document; `anchor == head` becomes a
+/// caret. The result is normalized — sorted, overlaps merged — so the primary
+/// index afterwards names wherever the requested primary landed. Allocates
+/// the new handles before releasing the old ones: on failure the old set is
+/// untouched.
+pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary: usize) Allocator.Error!void {
+    assert(ends.len > 0);
+    const len = self.text().byteLen();
+    var next: std.ArrayList(Selection) = .empty;
+    errdefer {
+        for (next.items) |sel| self.releaseSelection(sel);
+        next.deinit(gpa);
+    }
+    try next.ensureTotalCapacity(gpa, ends.len);
+    for (ends) |e| {
+        const head_off = @min(e.head, len);
+        const anchor_off = @min(e.anchor, len);
+        const head = try self.doc.addAnchor(gpa, head_off, .right);
+        errdefer self.doc.removeAnchor(head);
+        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        next.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+    }
+    for (self.selections.items) |sel| self.releaseSelection(sel);
+    self.selections.deinit(gpa);
+    self.selections = next;
+    self.primary = @min(primary, ends.len - 1);
+    self.normalize();
+    self.clearGoal();
+    self.history.barrier(); // a selection change is a motion
+}
+
+/// Add one selection and make it primary (helix `C`, ide's add-next-match).
+pub fn addSelection(self: *Editor, gpa: Allocator, e: Ends) Allocator.Error!void {
+    const len = self.text().byteLen();
+    try self.selections.ensureUnusedCapacity(gpa, 1);
+    const head = try self.doc.addAnchor(gpa, @min(e.head, len), .right);
+    errdefer self.doc.removeAnchor(head);
+    const anchor = if (@min(e.anchor, len) == @min(e.head, len)) null else try self.doc.addAnchor(gpa, @min(e.anchor, len), .left);
+    self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+    self.primary = self.selections.items.len - 1;
+    self.normalize();
+    self.history.barrier();
+}
+
+/// Drop selection `i`. The last selection cannot be removed — an editor
+/// always has a caret — so this is a no-op then. The primary stays on the
+/// same selection, or moves to the one before a removed primary.
+pub fn removeSelection(self: *Editor, i: usize) void {
+    if (self.selections.items.len <= 1 or i >= self.selections.items.len) return;
+    self.releaseSelection(self.selections.orderedRemove(i));
+    if (self.primary > i or (self.primary == i and i > 0)) self.primary -= 1;
+    self.history.barrier();
+}
+
+/// Keep only the primary selection (helix `,`, ide's Escape).
+pub fn collapseToPrimary(self: *Editor) void {
+    const keep = self.primarySelection();
+    for (self.selections.items, 0..) |sel, i| {
+        if (i != self.primary) self.releaseSelection(sel);
+    }
+    self.selections.items[0] = keep;
+    self.selections.shrinkRetainingCapacity(1);
+    self.primary = 0;
+    self.history.barrier();
+}
+
+fn releaseSelection(self: *Editor, sel: Selection) void {
+    self.doc.removeAnchor(sel.head);
+    if (sel.anchor) |a| self.doc.removeAnchor(a);
+}
+
+/// Restore the selection invariant: document order by start, and no two
+/// selections overlapping or sharing a caret. Merging is a union; the merged
+/// selection keeps the earlier one's direction, and is primary if either half
+/// was. A no-op for one selection, so the single-cursor case never pays for
+/// it or observes it.
+pub fn normalize(self: *Editor) void {
+    const items = self.selections.items;
+    if (items.len < 2) return;
+    const primary_head = items[self.primary].head;
+    std.mem.sort(Selection, items, @as(*const Editor, self), struct {
+        fn lt(ed: *const Editor, a: Selection, b: Selection) bool {
+            const ra = ed.spanOf(a);
+            const rb = ed.spanOf(b);
+            return ra.start < rb.start or (ra.start == rb.start and ra.end < rb.end);
+        }
+    }.lt);
+    var primary: usize = 0;
+    var n: usize = 0;
+    for (items) |sel| {
+        const is_primary = sel.head == primary_head;
+        if (n > 0) {
+            const prev = &items[n - 1];
+            const pr = self.spanOf(prev.*);
+            const r = self.spanOf(sel);
+            const touching_empty = r.start == pr.start and (r.isEmpty() or pr.isEmpty());
+            if (r.start < pr.end or touching_empty) {
+                self.mergeInto(prev, sel, .{ .start = pr.start, .end = @max(pr.end, r.end) });
+                if (is_primary) primary = n - 1;
+                continue;
+            }
+        }
+        items[n] = sel;
+        if (is_primary) primary = n;
+        n += 1;
+    }
+    self.selections.shrinkRetainingCapacity(n);
+    self.primary = primary;
+}
+
+/// A selection's span, caret or not (`rangeOf` answers null for a caret).
+fn spanOf(self: *const Editor, sel: Selection) Range {
+    const e = self.selectionEndsOf(sel);
+    return .{ .start = @min(e.anchor, e.head), .end = @max(e.anchor, e.head) };
+}
+
+fn selectionEndsOf(self: *const Editor, sel: Selection) Ends {
+    const head = self.doc.anchorOffset(sel.head);
+    return .{ .anchor = if (sel.anchor) |a| self.doc.anchorOffset(a) else head, .head = head };
+}
+
+/// Fold `other` into `into`, spanning `span`. Reuses handles rather than
+/// allocating (a merge cannot fail): the union needs at most the two handles
+/// `into` may already own plus `other`'s, re-pointed by `AnchorSet.set` with
+/// the bias of the role each now plays.
+fn mergeInto(self: *Editor, into: *Selection, other: Selection, span: Range) void {
+    const e = self.selectionEndsOf(into.*);
+    const forward = e.head >= e.anchor;
+    const head_off = if (forward) span.end else span.start;
+    const anchor_off = if (forward) span.start else span.end;
+    self.doc.anchors.set(into.head, .{ .offset = head_off, .bias = .right });
+    if (span.isEmpty()) {
+        if (into.anchor) |a| self.doc.removeAnchor(a);
+        into.anchor = null;
+        self.releaseSelection(other);
+        return;
+    }
+    // Need an anchor: keep ours, else adopt one of `other`'s handles.
+    var spare_head: ?stemma.AnchorSet.Handle = other.head;
+    var spare_anchor = other.anchor;
+    const anchor = into.anchor orelse blk: {
+        if (spare_anchor) |a| {
+            spare_anchor = null;
+            break :blk a;
+        }
+        spare_head = null;
+        break :blk other.head;
+    };
+    self.doc.anchors.set(anchor, .{ .offset = anchor_off, .bias = .left });
+    into.anchor = anchor;
+    if (spare_head) |h| self.doc.removeAnchor(h);
+    if (spare_anchor) |a| self.doc.removeAnchor(a);
+}
+
 // ── Movement ────────────────────────────────────────────────────────
 // Every motion is an undo barrier: typing after moving starts a new
-// undo unit (the vim-flavored grouping).
+// undo unit (the vim-flavored grouping). Motions move the PRIMARY head: a
+// grammar that moves every selection computes the targets itself and hands
+// them to `setSelections`.
 
 pub fn moveTo(self: *Editor, offset: usize) void {
-    self.doc.anchors.set(self.cursor, .{ .offset = offset, .bias = .right });
+    self.doc.anchors.set(self.primarySelection().head, .{ .offset = offset, .bias = .right });
+    // Moving one head can carry it onto or past another selection; keep the
+    // set sorted and disjoint (free for a single selection).
+    self.normalize();
     self.history.barrier();
 }
 

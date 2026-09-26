@@ -86,6 +86,11 @@ pub const UndoLog = struct {
     redoable: std.ArrayList(Group) = .empty,
     /// The top of `undoable` still accepts newly ingested commits.
     open: bool = false,
+    /// Depth of `beginUnit`/`endUnit` brackets. While held, `barrier()` does
+    /// not close the open unit, so a composite edit whose steps move the
+    /// cursor between commits (an operator run once per selection) still
+    /// undoes as one.
+    held: u32 = 0,
     /// (commit, its inverse) log-index pairs this log created. When an
     /// inverse is transformed through history, a pair that lies wholly
     /// inside the transform window composes to identity — skipping both
@@ -134,7 +139,24 @@ pub const UndoLog = struct {
 
     /// Close the open undo unit; the next own commit starts a new one.
     pub fn barrier(self: *UndoLog) void {
+        if (self.held > 0) return;
         self.open = false;
+    }
+
+    /// Open a composite unit: everything ingested until the matching
+    /// `endUnit` is one undo unit, whatever barriers fire in between. Starts
+    /// fresh (never extends the unit before it) and nests.
+    pub fn beginUnit(self: *UndoLog) void {
+        if (self.held == 0) self.open = false;
+        self.held += 1;
+    }
+
+    /// Close the composite unit `beginUnit` opened; the next own commit
+    /// starts a new unit.
+    pub fn endUnit(self: *UndoLog) void {
+        assert(self.held > 0);
+        self.held -= 1;
+        if (self.held == 0) self.open = false;
     }
 
     fn clearRedo(self: *UndoLog, gpa: Allocator) void {
@@ -154,7 +176,9 @@ pub const UndoLog = struct {
     /// refuses (leaving the unit undoable) when `gate` denies the inverse.
     pub fn undo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
         try self.ingest(gpa, doc);
-        self.barrier();
+        // Unconditionally, not `barrier()`: the unit is about to leave the
+        // stack, so nothing may keep extending it even inside a held unit.
+        self.open = false;
         var group = self.undoable.pop() orelse return false;
         const inverse = self.invertGroup(gpa, doc, group.indices.items, gate) catch |e| {
             self.undoable.appendAssumeCapacity(group); // the pop left this slot free
