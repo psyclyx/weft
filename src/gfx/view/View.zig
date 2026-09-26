@@ -554,7 +554,11 @@ pub fn build(
     // interaction stack, not through an editor mode or which-key.
     if (hud.semantic_overlay) |overlay| {
         self.semantic_active = true;
-        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect);
+        const caret_at: ?[2]f32 = if (self.frame_layout.lineForOffset(cursor_off)) |li| blk: {
+            const c = self.frame_layout.lines[li].caretAt(cursor_off);
+            break :blk .{ c.x, c.y_top + c.height };
+        } else null;
+        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect, caret_at);
         // The dialog is on top: it is what a click on this pane reaches.
         self.build_hits = self.semantic_hits;
     }

@@ -130,6 +130,8 @@ fn focusPane(raw: *anyopaque, ctx: *core.command.Context, pane: Pointer.PaneRef)
     const node = driver.layout.resolvePane(pane.id, pane.gen) orelse return false;
     const focused = window_layout.headFocus(driver.layout, ctx.head);
     if (node == focused) return true;
+    // A strip of buttons acts through; the keys stay where they were.
+    if (!node.pane().attrs.takes_focus) return false;
     focused.pane().top_row = driver.view.top_row;
     window_layout.setHeadFocus(ctx.head, node, driver.layout);
     window_cmds.applyWindowFocus(driver.layout, driver.view, ctx.buffers, ctx.gpa, ctx.head, ctx.keymap);

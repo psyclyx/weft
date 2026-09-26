@@ -312,6 +312,7 @@ fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
             .fields = &fx.semantic.fields,
         },
         .presentation = descriptor.presentation,
+        .pointer = if (fx.head.pointer.origin.pane != null) .{ fx.head.pointer.origin.x, fx.head.pointer.origin.y } else null,
     };
 }
 

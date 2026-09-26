@@ -31,6 +31,9 @@ pub const Span = struct {
     column: u16,
     tone: Tone,
     focusable: bool,
+    /// An `action` node: a click reaches it whether or not it is in the
+    /// keyboard's focus order — it IS its action reference.
+    activatable: bool = false,
     compact_column: ?u16 = null,
     compact_below: u16 = 0,
     hide_below: u16 = 0,
@@ -145,6 +148,7 @@ const Builder = struct {
             .column = node.layout.column orelse @intCast(@min(natural_column, std.math.maxInt(u16))),
             .tone = toneFor(node),
             .focusable = node.focusable,
+            .activatable = node.content == .action,
             .compact_column = numberFact(node, "compact-column"),
             .compact_below = numberFact(node, "compact-below") orelse 0,
             .hide_below = numberFact(node, "hide-below") orelse 0,
@@ -185,8 +189,12 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
 }
 
 /// Render the active head-local interaction above its underlying view. The
-/// presentation string is an open hint consumed only by this presenter.
-pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect) ![]const Hit {
+/// presentation string is an open hint consumed only by this presenter:
+/// `bottom`, `corner`, and — for a menu — `pointer` and `caret`, which hang
+/// the box below that point (flipped above it when it would not fit),
+/// clamped into the body. `caret_at` is the focused pane's caret, bottom-
+/// left, when the body shows text.
+pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, caret_at: ?[2]f32) ![]const Hit {
     const rows = try rowsFor(scratch, overlay.document);
     if (rows.len == 0) return &.{};
     var widest: usize = 1;
@@ -203,11 +211,20 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     const pad_y = v.line_h * 0.5;
     const box_w = @min(body.w, @as(f32, @floatFromInt(widest + 2)) * v.cell_w);
     const box_h = @min(body.h, @as(f32, @floatFromInt(visible_rows)) * v.line_h + 2 * pad_y);
-    const x = std.math.clamp(body.x + (body.w - box_w) / 2, body.x, @max(body.x, body.x + body.w - box_w));
+    const anchor: ?[2]f32 = if (std.mem.eql(u8, overlay.presentation, "pointer"))
+        overlay.pointer orelse caret_at
+    else if (std.mem.eql(u8, overlay.presentation, "caret"))
+        caret_at orelse overlay.pointer
+    else
+        null;
+    const raw_x = if (anchor) |at| at[0] else body.x + (body.w - box_w) / 2;
+    const x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
     const bottom = std.mem.eql(u8, overlay.presentation, "bottom") or
         std.mem.eql(u8, overlay.presentation, "which-key-like");
     const corner = std.mem.eql(u8, overlay.presentation, "corner");
-    const raw_y = if (bottom)
+    const raw_y = if (anchor) |at|
+        (if (at[1] + box_h <= body.y + body.h) at[1] else at[1] - box_h - v.line_h)
+    else if (bottom)
         body.y + body.h - box_h
     else if (corner)
         body.y
@@ -257,7 +274,7 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 if (prefix.len < text.len) try popup.propLine(v, scratch, runs, firstCells(text[prefix.len..], 1), x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y + v.ascent, v.theme.cursor_text);
             };
             occupied = column + visualWidth(span.text) + 1;
-            if (!span.focusable) continue;
+            if (!span.focusable and !span.activatable) continue;
             const available = @max(0, body.x + body.w - x);
             const width = @min(available, @max(v.cell_w, @as(f32, @floatFromInt(visualWidth(span.text))) * v.cell_w));
             try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = .{ .x = x, .y = y, .w = width, .h = v.line_h } });

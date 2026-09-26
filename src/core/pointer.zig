@@ -114,7 +114,8 @@ pub const Gesture = struct {
 pub const Panes = struct {
     context: *anyopaque,
     /// Focus `pane` for the dispatching head: its entry becomes active, its
-    /// scroll the live one. False when the pane is gone.
+    /// scroll the live one. False when the pane is gone, or declares that it
+    /// takes no focus (the viewport's `takes_focus`).
     focus: *const fn (*anyopaque, *Context, PaneRef) bool,
     /// Scroll `pane` by `rows` (negative is up), keeping what the pane
     /// focuses — the caret, a scene's focused row — inside the new view.
@@ -166,12 +167,31 @@ pub fn isPointerSpec(spec: []const u8) bool {
 /// Every acting command starts here, which is what makes a click in an
 /// unfocused pane act THERE: click-through is a property of the bound
 /// command, not of the shell.
-fn focusHitPane(ctx: *Context) void {
+///
+/// Returns whether the click may act on the ACTIVE entry: the pointer is
+/// over the focused pane now, or over no pane at all. False over a pane that
+/// takes no focus — a strip of buttons — where only its action nodes act
+/// (`activateInPlace`), and never on the entry that keeps the keys.
+fn focusHitPane(ctx: *Context) bool {
     const g = &ctx.head.pointer;
-    const pane = g.hit.pane orelse return;
-    if (g.hit.focused) return;
-    const panes = ctx.panes orelse return;
-    if (panes.focus(panes.context, ctx, pane)) g.hit.focused = true;
+    if (g.hit.pane == null) return true;
+    if (g.hit.focused) return true;
+    // No pane door (an embedding without panes): nothing to focus, as before.
+    const panes = ctx.panes orelse return true;
+    if (panes.focus(panes.context, ctx, g.hit.pane.?)) g.hit.focused = true;
+    return g.hit.focused;
+}
+
+/// A click through a pane that took no focus: run the action node under the
+/// pointer by reference, leaving the head's focus where it was.
+fn activateInPlace(ctx: *Context) anyerror!Value {
+    const node = ctx.head.pointer.hit.node orelse return ok;
+    const services = ctx.semantic orelse return ok;
+    _ = services.invokeActionNode(&ctx.head.interactions, ctx.head, ctx.gpa, node.view, node.node) catch |err| switch (err) {
+        error.ActionUnavailable, error.StaleView => return ok,
+        else => return err,
+    };
+    return ok;
 }
 
 fn hitEditor(ctx: *Context) ?*@import("Editor.zig") {
@@ -189,16 +209,38 @@ fn focusNode(ctx: *Context, node: NodeRef) !void {
 
 fn cPointerFocusPane(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    focusHitPane(ctx);
+    _ = focusHitPane(ctx);
+    return ok;
+}
+
+/// Focus what is under the pointer without acting on it: the pane, then the
+/// node there in a scene, or the caret in text — unless the point is inside
+/// the selection, which a secondary click keeps (it is what a menu of
+/// operations would act on). What a command that describes "the context
+/// under the pointer" runs first, so the active context IS that context.
+fn cPointerFocusPoint(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!focusHitPane(ctx)) return ok;
+    const hit = ctx.head.pointer.hit;
+    if (hit.node) |node| {
+        try focusNode(ctx, node);
+        return ok;
+    }
+    const off = hit.offset orelse return ok;
+    const ed = hitEditor(ctx) orelse return ok;
+    if (ed.selectedRange()) |r| if (off >= r.start and off <= r.end) return ok;
+    ed.clearSelection();
+    ed.placeCursor(off);
     return ok;
 }
 
 /// A click: focus the pane under the pointer, then act at the point — put
 /// the caret there in text, focus the node there in a scene, and activate
-/// it when the node is an action.
+/// it when the node is an action. Over a pane that takes no focus only an
+/// action node acts, and in place.
 fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    focusHitPane(ctx);
+    if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
         try focusNode(ctx, node);
@@ -235,7 +277,7 @@ fn cPointerDragSelect(ctx: *Context, args: struct {}) anyerror!Value {
 /// Extend the selection from the caret to the pointer (a shift-click).
 fn cPointerExtendSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    focusHitPane(ctx);
+    if (!focusHitPane(ctx)) return ok;
     const off = ctx.head.pointer.hit.offset orelse return ok;
     const ed = hitEditor(ctx) orelse return ok;
     if (ed.selectedRange() == null) try ed.setMark(ctx.gpa);
@@ -248,7 +290,7 @@ fn cPointerExtendSelection(ctx: *Context, args: struct {}) anyerror!Value {
 /// its action, anything else opens what it links to.
 fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    focusHitPane(ctx);
+    if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const node = ctx.head.pointer.hit.node orelse return ok;
     try focusNode(ctx, node);
     if (isActionNode(ctx, node)) return activateFocusedAction(ctx);
@@ -308,6 +350,7 @@ fn cActivateFocusedAction(ctx: *Context, args: struct {}) anyerror!Value {
 
 pub const table = [_]command.Command{
     command.define("pointer-focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
+    command.define("pointer-focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
     command.define("pointer-click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
     command.define("pointer-drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
     command.define("pointer-extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
