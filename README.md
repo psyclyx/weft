@@ -1,340 +1,158 @@
 # weft
 
-> **weft** |wɛft| *n.*
-> 1. the crosswise threads on a loom, woven over and under the warp to
->    make cloth.
-> 2. a thing woven together from many threads.
+> **weft** /wɛft/ *n.* — the crosswise threads woven over and under the warp
+> on a loom to make cloth.
 
-An editor built over [stemma](https://github.com/psyclyx/stemma) (CRDT rope),
-presented on Wayland + Vulkan. stemma is the warp; weft weaves it into an
-editor.
+weft is a programmable editor for code and prose, written in Zig. It uses
+[stemma](https://github.com/psyclyx/stemma) for collaborative document state
+and runs on Linux with Wayland, Vulkan, and Skia.
 
-## Model
+Text editing, file browsing, Git, command output, and agent
+conversations share a workspace. Plugins supply the editing modes and tools;
+JavaScript config chooses how they fit together.
 
-A buffer is a CRDT replica and every mutator is a peer: the user, plugins,
-host agents, remote collaborators. Solo local editing is the degenerate
-case — one replica, no sync. This is structural, not a convention:
+## What it does
 
-- The input → commit-op → render path never blocks or awaits; there is no
-  buffer lock.
-- A plugin reads an immutable versioned snapshot and submits ops against
-  the version it read; the CRDT merges them like a concurrent
-  collaborator. "Buffer changed during operation" is not expressible.
-- Undo emits inverse ops for a peer's *own* commits (per-peer selective
-  undo), not state restoration.
-- Positions are anchors — stable CRDT identities. No bare offset crosses a
-  public API boundary without the version it is valid at.
+- **Code and prose.** Tree-sitter highlighting, structural navigation, LSP
+  completion, diagnostics, and refactoring. Markdown renders with proportional
+  text, styled headings, and inline formatting while remaining editable source.
+- **Editing modes.** Vim, Helix, and Emacs-style plugins. The sample config uses
+  Vim with Space-prefixed bindings, a command palette, and key hints.
+- **Project tools.** An editable file browser, Git status and staging, project
+  search, formatting, build commands, REPLs, and notes. Tool views support
+  structured rows, folding, and actions on the item under the cursor.
+- **Agents and debugging.** ACP agent conversations and DAP debug sessions run
+  through plugins. Agent and debug adapter commands are configured explicitly.
+- **Collaboration.** Edit a shared document with other peers, see their cursors,
+  or serve it from a headless host using the same executable.
 
-## Authority
+## How it fits together
 
-Every commit carries an author `Principal` (role: user, plugin, agent, or
-remote) and lands through one grade-gated door, `Context.edit`. A document
-grant is `view < edit < own`. A `view` peer's ops are never admitted to
-shared state by any path — direct edit, peer commit, or replicated layer.
-Attribution is load-bearing: a plugin's edits author as *its* peer, so the
-user's selective undo spares them, and a view-grade document refuses them
-without a ghost commit.
+Documents are stemma object graphs. A plain file is a document containing one
+text object; a transcript has structured entries with text bodies. Views present
+that data as editable text or structured rows. Filesystem and Git views talk to
+their respective owners, with pending edits kept as drafts.
 
-## Layout
+Document state uses a CRDT: concurrent edits merge, positions stay attached to
+the text they refer to, and each peer can undo its own changes without undoing
+someone else's. Edits carry an author, including edits from plugins and agents.
 
-Text placement is one primitive, not two code paths. Every visible line is
-laid out into runs and caret *stops* by a single function; the same stops
-feed both the rendered picture and the offset ↔ geometry map used for
-motion, hit-testing, caret, and selection.
+A **locus** identifies where a resource lives: here, on a connected weft peer,
+or through a remote shell. A **place** pairs a locus with a working container,
+such as a project directory. Buffers carry their place, and tool buffers inherit
+it, so commands use the relevant project's directory and environment. An
+operation that requires a local directory refuses a remote place it cannot
+serve.
 
-- Plain buffers place each line on the monospace cell grid — the
-  uniform-advance case, where `stop.x == margin + col*cell_w` (a parity
-  test asserts it).
-- Markdown buffers place proportional runs at varying faces and sizes:
-  headings scale; bold/italic/code/links style inline;
-  lists/quotes/fenced-code/rules render as blocks — live, while the rope
-  stays plain markdown.
+Permissions describe who may do what. Document grants are `view` (read), `edit`
+(read and write), or `own` (currently edit, reserved for administrative authority).
+Filesystem, process, and network capabilities are granted separately and checked by the
+host. Filesystem permissions default to the current place; config can set an
+explicit root. Sharing a document does not grant access to the rest of its
+project or permission to run commands there.
 
-Motion reads pixel-x from that map (a sticky goal-x, not a scalar column),
-so vertical motion, click-to-place, drag-select, and selection rectangles
-behave identically over monospace code and proportional prose. Caret and
-selection paint as solid rectangles through one resident unit-square
-record (affine transform + color); the caret style is per-mode
-(block/bar/underline) and blinks.
+Plugins run in WebAssembly under Wasmtime. JavaScript plugins and config run
+in QuickJS inside that sandbox. The reference plugins are installed as separate
+files. Starting without a file opens the dashboard plugin; editing remains
+modeless until a config or explicit plugin selects an editing mode.
 
-## Extensibility
+Config selects plugins, grants permissions, binds keys, and arranges views.
+Bindings can express an action such as save or open, with the focused view
+providing the appropriate behavior.
 
-Everything user-visible is built through the plugin ABI (guest shim
-`src/guest/weft.zig`, host membrane `src/core/wasm*.zig`) — a single door
-grouped by permission: read (cursor/slice/tree/introspection), write
-(`edit`, grade-gated), effects (async/proc/net, gated by declared perms),
-admin (kv). A plugin declares its commands, capabilities, and perms in a
-manifest; `describe()` runs with no authority, the host approves, then
-`init()` runs and every runtime registration is cross-checked against the
-manifest. An undeclared registration fails the load.
+## Run it
 
-Dispatch is three tiers over one idea — resolve the best entry by context
-and priority: a layered **keymap** (key → name; priority tiers, a fallback
-chain, and a `global` layer that applies under every mode) → **actions** (an
-abstract intent like `eval`/`format` that many plugins *provide* for, each
-with a `when` predicate, resolved to a concrete command in the current
-buffer) → the **command** registry (name → handler). Binding a key to an
-action gives context-sensitive dispatch for free; the async capability
-system (completion/hover/definition) is the same idea at a different
-latency. The intended replacement is specified in
-`doc/contextual-workspace-architecture.md`.
-
-Every plugin runs as **wasm**, sandboxed under wasmtime — nothing is linked
-or trusted in-process. A guest reaches the editor only through host imports
-granted after the manifest handshake (`src/core/wasm*.zig`; guest shim
-`src/guest/weft.zig`); its edits land on the same grade gate, authored as
-the plugin's peer. weft's binary carries **no catalog**: it ships modeless,
-and knows nothing of vim.
-
-The reference catalog (`src/guest/`, ~40 plugins) is authored in Zig against
-the ABI with no core privilege — modal editing (`vim`, `helix`) with `:` ex
-commands, motions/text-objects/operators, buffer-word completion, a
-command/buffer palette and status line, a git-style `git` and an editable
-`files` (both foldable model buffers), `grep`/`make`/`run`/`repl`/`console`,
-tree-sitter (`structural`, `ts`) edits, autopair/comment/format, a
-`which-key` overlay, notes, and project history — built to `.wasm` artifacts
-installed under `lib/weft/plugins/`, external files a user loads by name.
-Nothing is baked in; delete them and weft is a bare modeless editor.
-
-Plugins load two ways, both behind the same handshake:
-
-- `--plugin <name|path.wasm>` on the command line (repeatable).
-- `weft.plugin(name)` from `config.js` — so a config brings up its own
-  catalog with no flags.
-
-User config is JavaScript. `config.js` runs in QuickJS-ng (compiled to
-wasm32-wasi under wasmtime) and drives the editor through the `weft.*`
-globals the embedding installs — including `weft.plugin` to load plugins —
-the config plane crossing the same membrane, one tier down.
-
-## Render (`src/gfx/`)
-
-Skia is the sole renderer. `FrameBuilder` and `View` lower editor state into
-Weft-owned scene data: explicit filled rectangles and positioned HarfBuzz
-glyphs. The renderer does not know whether its Vulkan target is a desktop
-swapchain or a standard offscreen image used by E2E capture.
-
-- **skia** — a C++ shim (`src/skia/shim.cpp`, built with g++, linked
-  against libskia) draws those items onto an `SkCanvas`
-  (`SkFont`/glyph ids + `SkPaint` rects, reusing the same font bytes so
-  metrics match). GPU path: Skia's Ganesh Vulkan backend
-  (`GrDirectContexts::MakeVulkan`) sharing weft's `VkInstance`/device/queue;
-  the result is copied into the swapchain image. When there is no dedicated
-  GPU — or `WEFT_SKIA_CPU=1` is set — it falls back to Skia's CPU raster
-  (`SkSurfaces::WrapPixels`), still presented through Vulkan. `WEFT_SKIA_DUMP=<path>`
-  writes the first frame to a PPM for debugging.
-
-`view.zig` owns the layout model above; `layout.zig` is the offset ↔
-geometry map. `pickDevice` prefers a dedicated GPU and treats
-llvmpipe/lavapipe/CPU as a last resort. The pinned build environment supplies
-a deterministic DejaVu Sans Mono face to embed; `--font` may replace it. Proportional
-prose faces resolve at runtime through fontconfig. Keeping both choices
-outside `weft_text` lets another platform provide fonts without changing the
-HarfBuzz shaping interface or the view. Rebuilds are damage-driven; frame and
-input-latency percentiles log continuously.
-
-## Syntax and LSP
-
-Tree-sitter grammars are pinned nixpkgs packages: the parser `.so` is
-dlopened at runtime, the highlight query embedded at build. The commit log
-drives incremental reparse through a shared mirror; the view receives
-class-per-byte paint over the visible range.
-
-A language server runs as a child process behind lock-free reader/writer
-threads; all protocol work happens in a per-frame tick on the main thread,
-so the editor never waits on the server. Diagnostics tint the text and
-surface in the status line; completion opens the pick; goto-definition
-moves the cursor.
-
-## Tests
-
-Display-free (`zig build test`): 2-peer convergence under stale-snapshot
-batches, identity anchors under adversarial concurrency, subscription
-patch-replay, the patch-composition oracle, selective-undo round trips,
-the authority invariants, the plugin ABI and wasm membrane (each catalog
-plugin as `.wasm`, the perm handshake, `config.js` eval), keymap
-modality, save/load round trips, the monospace-parity gate, the
-offset↔geometry map, and the markdown analyzer.
-
-## Build
-
-The internal [stemma](https://github.com/psyclyx/stemma) library resolves to a
-GitHub release pin by default, and `npins/sources.json` carries the same pin for
-the nix layer. To iterate against a local checkout, set the override variable:
+The Nix shell supplies Zig 0.16 and the native build dependencies. Opening a
+window requires a Wayland session and Vulkan support.
 
 ```sh
-NPINS_OVERRIDE_STEMMA=../../lib/stemma zig build test
-```
-
-(The zon path twin is static, so the override must name the monorepo
-location `../../lib/<name>` — anything else is a loud refusal, not a
-silently ignored setting. Keep `build.zig.zon`'s pins and
-`npins/sources.json` on the same tags.) System libraries — wayland, libxkbcommon,
-vulkan-loader, harfbuzz, fontconfig, tree-sitter, wasmtime, and skia — resolve
-through `pkg-config`; Skia's C++ shim is built with the shell's g++. The
-QuickJS-ng source and the build-time wayland-scanner/pkg-config tools
-— come from npins-pinned nixpkgs via `shell.nix`, not the ambient PATH.
-
-Proportional fonts are the deliberate exception: runtime fontconfig resolves
-them from the system, so prose rendering depends on configured fonts. The
-default mono face is pinned with the build for deterministic editor geometry;
-`--font` overrides it.
-
-```sh
-nix-shell          # or direnv allow
-zig build run      # open the window (skia renderer)
-zig build test     # display-free tests
-```
-
-### Iterating
-
-Run the narrowest step that covers what you are changing. Edit-to-verdict on
-this box: `test-fs-runtime` 0.6s, `test-files-model` 0.8s, `test-contract`
-1.7s, `e2e-popup-layout` 3.3s — the last is the cheapest whole-app rebuild.
-`zig build --watch <step>` re-runs one on every save and is worth it for the
-ergonomics, not the clock: measured here it lands within a few percent of
-typing the command again (0.65s and 3.3s for those two steps), because
-without incremental compilation a watch rebuild is the same full compilation.
-
-Do NOT add `-fincremental` on Zig 0.16. It swaps in the self-hosted linker,
-which cannot parse the linker scripts nixpkgs ships as `libpthread.so` and
-`libtree-sitter.so` (`error: bad ident`), so no app-sized step links at all;
-the portable steps that do link produce binaries that SEGV on the first test.
-
-Keep the full `zig build test` as a gate, not a loop: it is around 75s, of
-which under 10s is compilation. Roughly 50s of the rest is one test —
-`src/e2e/latency_test.zig` drives ~11k real keystrokes through the whole
-application wake path, and runs with the box to itself so its wall-clock
-samples mean something.
-
-## Config
-
-`config.js` (JavaScript, evaluated in QuickJS) loads plugins and wires keys
-and commands through the `weft.*` globals. A bare `zig build run` is
-modeless; the in-repo sample config loads the reference catalog itself
-(vim, the palette, …) via `weft.plugin`, so it is the development entry
-point — no `--plugin` flags needed:
-
-```sh
+nix-shell
 zig build run -- --config config/config.js README.md
 ```
 
-Plugins resolve by name against the install dir (`lib/weft/plugins/`,
-overridable with `$WEFT_PLUGIN_DIR`); a path ending in `.wasm` loads
-literally. `--plugin vim` (repeatable) loads without a config at all.
+Omit `README.md` to start on the dashboard. The `--config` flag matters:
+`zig build run -- config/config.js` opens that JavaScript file for editing.
+The sample dashboard config defines ordered sections as
+`id<TAB>title<TAB>source-command<TAB>open-command<TAB>limit` records. A
+source command returns newline-separated candidates; the dashboard shows at
+most `limit` rows and passes the selected candidate to the open command.
+Static actions use `id<TAB>label<TAB>command<TAB>optional-argument` records
+in `dashboard.items`.
 
-Open a `.md` file for live markdown; a `.zig` file for tree-sitter
-highlighting over the monospace grid.
+With the sample config, `SPC SPC` finds a file, `SPC :` opens the command
+palette, and `SPC f s` saves. See [config/config.js](config/config.js) for
+bindings, plugin choices, language servers, and agent/debug adapter settings.
 
-## Headless testing
-
-The render path is verified without a display server. The production Skia
-renderer targets an ordinary offscreen Vulkan `VkImage`; the harness injects
-platform-neutral key specifications through normal dispatch and reads the
-completed image back through Vulkan. Captures are full editor frames, not a
-test-side reconstruction. Two collaborating editors are submitted together
-and read together so their side-by-side captures describe the same test step.
-
-### Recording a demo video
-
-The existing whole-app spine test can optionally stream its live, synchronized
-two-screen capture into an H.264 MP4. This is opt-in, so ordinary test runs
-remain unchanged:
+To start without the sample config, or load a plugin directly:
 
 ```sh
-WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
-  zig build e2e-demo --summary all
+zig build run -- README.md
+zig build run -- --plugin vim README.md
 ```
 
-The output is 1920×600 at 30 fps by default, with two complete 960×600 editors
-composed side-by-side in one synchronized capture operation. The collaboration
-segment uses an authenticated localhost TCP connection, fresh in-memory keys
-for both peers, and deterministic 25–120 ms one-way transport latency. The demo
-types at 110 ms per character, holds command keys for 500 ms, holds ordinary
-milestones for 1500 ms, and rests for 2500 ms at important collaboration beats.
-Each key in a chord gets its own complete application wake and recorded hold,
-so delayed prefix UI such as which-key is visible before the leaf action runs.
-Ordinary tests use the same scenario with no injected pacing or network latency.
+Plugins can also be loaded with `weft.plugin(name)` in config. Named plugins
+resolve under `lib/weft/plugins/` beside the installation; `WEFT_PLUGIN_DIR`
+overrides that directory.
 
-Tune the recording without changing the scenario:
+The Nix package is available as `packages.weft` from `default.nix`. Arch and
+Debian package recipes use the same build; see [packaging/README.md](packaging/README.md).
+
+Set the startup text size with `weft.set("editor", "font-size", "16")` in your
+config, or use `--em 16` without a config. `Ctrl++` (or `Ctrl+=`) and `Ctrl+-`
+adjust it while editing; `Ctrl+0` restores the configured size. The command
+palette also offers `font-size-set <size>`, `font-size-increase`,
+`font-size-decrease`, and `font-size-reset`.
+
+## Share a session
+
+With the sample config, use `:` to run these commands, or open the command
+palette with `SPC :` and enter them without the leading colon.
+
+In the host editor, focus the document to share and start listening:
+
+```text
+:listen 7777 edit
+```
+
+In the other editor, replace `HOST` with the host's address:
+
+```text
+:connect HOST:7777
+```
+
+The host's document opens as a new buffer. To share another document, focus it
+and run `:share pair`. Use `:peers` to see connected peers and their identity
+fingerprints and verification words. `:share-presence off` hides your cursor;
+`:disconnect` leaves the host while keeping the shared buffers locally.
+
+Connections are encrypted and use the token supplied at startup with `--token`;
+both editors must use the same value. `listen` takes an explicit access grade:
+use `view` instead of `edit` for read-only access. Filesystem sharing is a
+separate grant. See [the wire protocol](doc/wire.md) for details.
+
+For a headless host, the same executable also accepts startup flags:
 
 ```sh
-WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
-WEFT_E2E_VIDEO_FPS=30 WEFT_E2E_TYPING_MS=140 \
-WEFT_E2E_COMMAND_MS=700 \
-WEFT_E2E_LINGER_MS=1800 WEFT_E2E_REST_MS=3000 \
-WEFT_E2E_TRANSPORT_BASE_MS=30 WEFT_E2E_TRANSPORT_JITTER_MS=140 \
-  zig build e2e-demo --summary all
+zig-out/bin/weft --headless --listen 7777 --token YOUR_TOKEN --access edit file.zig
 ```
 
-`WEFT_E2E_TRANSPORT_SEED` selects a repeatable jitter sequence. The latency is
-applied by the session byte-stream links around the real TCP sockets, including
-authentication; it is not simulated by delaying the rendered frames.
-
-Frames are streamed directly to `ffmpeg` through a bounded one-frame PPM
-buffer; no raw frame sequence is retained. If `ffmpeg` is unavailable, the
-test still runs with ordinary timing and reports that recording was disabled.
-The focused `e2e-demo` step selects the existing spine test; it does not add a
-separate demo scenario.
-
-## Remote
-
-Every weft is a peer; there is no separate agent binary. Host a document
-from a headless machine with the same executable (the window/Vulkan half
-is simply never initialized):
+## Development
 
 ```sh
-weft --headless --listen 7777 --token SECRET --access edit --lsp zls file.zig
+zig build test          # unit, integration, and offscreen editor tests
+zig build test-contract # focused schema, semantic, and filesystem contract tests
 ```
 
-Open it from anywhere — `file.zig` is a name hint; nothing is read
-locally. Content, ops, and the host's LSP diagnostics arrive over the
-encrypted wire; tree-sitter runs on your replica:
+The render tests use the production renderer with offscreen Vulkan images and
+need no display server. To record the two-editor demo, with `ffmpeg` available:
 
 ```sh
-weft --connect host:7777 --token SECRET file.zig
+WEFT_E2E_VIDEO=/tmp/weft-demo.mp4 zig build e2e-demo
 ```
 
-Everything the flags do is also a command, so a session can begin from
-inside a running editor. Say the whole call at once on the `:` line, or
-name the command and be asked for the rest:
+stemma is pinned to a release. When working in the monorepo, use
+`NPINS_OVERRIDE_STEMMA=../../lib/stemma` to build against its local checkout.
 
-```
-:listen 7000 edit          # host: accept peers, let them write
-:connect host:7000         # peer: join
-:peers                     # fingerprints + SAS words, to compare aloud
-:share pair                # announce another buffer, with a grant preset
-```
-
-The palette (`SPC SPC`) takes the same two forms: type `listen 7000 edit`
-next to the name, or pick `listen` and answer `<port>`, then `<access>`.
-A command's shape is shown beside it in the palette and trails the `:`
-line as you type, so what a command wants is visible before you run it.
-
-Two editors can also pair directly (`--listen` in one, `--connect` in the
-other); partitions heal as one frontier exchange. Pairing interactively also
-shares your cursor, and says so when it starts; `--no-share-presence`,
-`weft.set("collab", "share-presence", "off")`, or `share-presence off` hides it
-and retracts the caret your peer is already seeing. A headless host publishes
-no cursor of its own.
-
-Authentication and authorization are separate. The token proves you *may
-connect* (it derives the link encryption); the access grade proves what
-you *may do*. A host grants an endpoint `view` (read-only — the peer
-receives every edit but its own ops are never admitted, enforced at the
-wire), `edit`, or `own` (edit plus reserved administrative authority). The
-default is `view`, so write access is only ever handed out by an explicit
-`--access edit`. Reaching *out* to an ssh file is the opposite direction:
-there you are the principal with full authority, and remoteness is just
-where the bytes and toolchain live. Protocol spec: `doc/wire.md`.
-
-## Not yet
-
-Coding-agent support (ACP) is designed and in progress — as plugins, not
-core: an agent is a peer, a conversation is a foldable model buffer, and
-agents are declared as config data (`weft.agent`), so weft makes no
-assumptions about how the adapters are launched. Design and build plan in
-`doc/agents.md`.
-
-Markdown tables and images need 2D block layout (column measuring, image
-decode) beyond the per-byte inline model.
+The [plugin API](doc/plugin-api.md) and
+[workspace architecture](doc/contextual-workspace-architecture.md) cover the
+design in more detail. Architecture documents also describe planned work.
