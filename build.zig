@@ -46,7 +46,9 @@ const Guest = struct {
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
 /// adapter, `rowkey` is the round trip between a projection row's key and the
 /// structured identity it names, `gutter` is the guest half of the
-/// `ui/gutter-segment` round.
+/// `ui/gutter-segment` round, `regex` is the Pike-VM pattern engine
+/// (doc/configs.md §0.2) helix's `s S K A-K / ? n N *` and ide's find/replace
+/// bar link — core never parses a pattern.
 const Library = enum {
     prompt,
     invoke,
@@ -58,6 +60,7 @@ const Library = enum {
     annotate,
     gutter,
     rowkey,
+    regex,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -73,12 +76,17 @@ const Library = enum {
             .annotate => "weft_annotate",
             .gutter => "weft_gutter",
             .rowkey => "weft_rowkey",
+            .regex => "weft_regex",
         };
     }
 
     fn tier(self: Library) plugin_lib_tiers.Tier {
         return switch (self) {
-            .rowkey, .jsonrpc, .sessions => .protocol_data,
+            // `regex` sits alongside `rowkey`/`jsonrpc`/`sessions`: a pure,
+            // dependency-free data algorithm, not a presentation surface —
+            // and the lowest tier is what lets `ex` (editor_composition)
+            // depend on it once helix's `s`/`/` land on it.
+            .rowkey, .jsonrpc, .sessions, .regex => .protocol_data,
             .annotate, .gutter, .output, .files, .prompt => .service_presentation,
             .invoke => .interaction_orchestration,
             .ex => .editor_composition,
@@ -1090,6 +1098,18 @@ pub fn build(b: *std.Build) void {
     });
     const guest_pure_tests = b.addTest(.{ .root_module = guest_pure });
     test_step.dependOn(&b.addRunArtifact(guest_pure_tests).step);
+
+    // The `regex` plugin library (doc/configs.md §0.2) is the same posture:
+    // a Pike VM with no `weft` import at all, so its parser/compiler/VM and
+    // its property test against a naive backtracking reference run natively
+    // rather than only inside whichever guest eventually links it.
+    const regex_lib = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/regex/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
+    test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
 
     // ── The recordable instruments ──
     // The dispatch-latency baseline and the popup-layout goldens share ONE
