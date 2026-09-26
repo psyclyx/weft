@@ -2149,6 +2149,8 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "linenumbers", @embedFile("guest_linenumbers_wasm") },
     .{ "snipe", @embedFile("guest_snipe_wasm") },
     .{ "find", @embedFile("guest_find_wasm") },
+    .{ "toolbar", @embedFile("guest_toolbar_wasm") },
+    .{ "contextmenu", @embedFile("guest_contextmenu_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
     // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.

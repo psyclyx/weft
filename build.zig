@@ -65,6 +65,7 @@ const Library = enum {
     regex,
     search,
     labels,
+    affordances,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -83,6 +84,7 @@ const Library = enum {
             .regex => "weft_regex",
             .search => "weft_search",
             .labels => "weft_labels",
+            .affordances => "weft_affordances",
         };
     }
 
@@ -92,7 +94,9 @@ const Library = enum {
             // dependency-free data algorithm, not a presentation surface —
             // and the lowest tier is what lets `ex` (editor_composition)
             // depend on it once helix's `s`/`/` land on it.
-            .rowkey, .jsonrpc, .sessions, .regex => .protocol_data,
+            // `affordances` is the one arrangement of offers (group, order)
+            // every piece of chrome shares — data in, data out.
+            .rowkey, .jsonrpc, .sessions, .regex, .affordances => .protocol_data,
             // `search` is pure data too, but it sits on `regex`, so it
             // takes the tier above.
             .annotate, .gutter, .output, .files, .prompt, .search, .labels => .service_presentation,
@@ -478,6 +482,11 @@ const guests = [_]Guest{
     .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
+    // The adaptive toolbar and the context menu (doc/configs.md §3.6): the
+    // primary context's offers as a docked strip of action nodes, and the
+    // offers under the pointer as a menu — both arranged by one library.
+    .{ .name = "toolbar", .import = "guest_toolbar_wasm", .install = true, .libraries = &.{.affordances} },
+    .{ .name = "contextmenu", .import = "guest_contextmenu_wasm", .install = true, .libraries = &.{.affordances} },
 };
 
 pub fn build(b: *std.Build) void {
@@ -1125,6 +1134,14 @@ pub fn build(b: *std.Build) void {
     });
     const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
     test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
+
+    // The offer arrangement chrome shares (group, order) is plain data too.
+    const affordances_lib = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/affordances/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = affordances_lib })).step);
 
     // The `search` library (query → regex, the prefilter, the match
     // planning — the find bar and helix both link it) imports nothing but
