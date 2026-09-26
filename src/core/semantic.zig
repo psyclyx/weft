@@ -811,7 +811,11 @@ pub const Services = struct {
             head.semantic_focus.clear();
             return null;
         };
-        if (path.field != null and
+        // Only a selection this head is making (`set-mark`, i.e. visual mode
+        // or C-space) turns a transfer into a text transfer. A provider's
+        // resting field selection must not capture node-level actions such
+        // as `SPC v y` on the focused row.
+        if (path.field != null and head.semantic_focus.selection_mark and
             (std.mem.eql(u8, action, semantic.action.standard.copy) or
                 std.mem.eql(u8, action, semantic.action.standard.cut) or
                 std.mem.eql(u8, action, semantic.action.standard.delete)))
