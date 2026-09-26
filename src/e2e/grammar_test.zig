@@ -578,6 +578,9 @@ const posture_cases = [_]PostureCase{
     // The synthetic std-only grammar: one state, committing nothing, and it
     // DECLARES that as its answer for both postures rather than defaulting.
     .{ .grammar = "gramtest", .text_resting = "gramtest", .structural_resting = "gramtest", .structural_layer = "gramtest", .break_out = "C-backslash" },
+    // ide: modeless like emacs — it rests in a declared structural state
+    // that commits nothing.
+    .{ .grammar = "ide", .committing = "ide", .text_resting = "ide", .structural_resting = "ide-structural", .structural_layer = "ide-structural", .break_out = "C-backslash" },
     // Helix: modal like vim, one resting mode for both postures, and its own
     // declared structural LAYER over it — where the SPC v group binds.
     .{ .grammar = "helix", .enter_text = "i", .committing = "helix-insert", .text_resting = "helix-normal", .structural_resting = "helix-normal", .structural_layer = "helix-structural", .break_out = "C-backslash" },

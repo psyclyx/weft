@@ -466,6 +466,10 @@ fn initExtra() void {
     // every ide key by fallback and declares no commit, so the letters in a
     // listing can never leak into it.
     weft.setFallback("ide-structural", "ide");
+    weft.setFallback("ide-source", "ide");
+    // A document's code chords layer over `ide` by declaration. The
+    // structural layer needs none: ide RESTS in `ide-structural` there.
+    weft.bindingVariant(.source, "ide", "ide-source");
     weft.restingPosture(.text, "ide");
     weft.restingPosture(.structural, "ide-structural");
     // The break-out capture can never take away, retained in both resting
