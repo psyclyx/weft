@@ -292,6 +292,12 @@ dispatch_depth: usize = 0,
 /// dispatch returns, so a guest that forgets to close one (or traps) never
 /// leaves an editor's barriers held shut.
 undo_units: std.ArrayList(UndoUnit) = .empty,
+/// Nonzero while this guest is ANSWERING a provider round (`on_slot_fire`:
+/// a gutter or status segment asked mid-layout, an annotation round asked
+/// from the frame loop). Answering conveys no authority: every door not
+/// declared safe to call then (`contract.render_safe`) refuses, enforced
+/// once where the doors are bound (`wasm_host.defineImports`).
+answering: u32 = 0,
 
 // The three guest-handle tables. Monotonic issuance, never-recycled numbers
 // and fail-closed exhaustion are `handles.Handles`'s, stated once there

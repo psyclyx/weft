@@ -143,8 +143,13 @@ pub const initSemanticRelationBridge = semantic_relation.initBridge;
 /// `defineFn` per entry, tagged with the plugin so the callback recovers its
 /// state. The contract table is the only place an import's name/arity/
 /// handler are declared; nothing here hand-lists them anymore.
+///
+/// This is also where the render-phase door policy lives: every door but the
+/// ones `contract.render_safe` names is bound through `plugin.answerGate`, so
+/// a guest answering a provider round cannot act through any of them.
 pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
-    for (contract.imports) |entry| {
-        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, entry.handler, p);
+    inline for (contract.imports) |entry| {
+        const handler = comptime if (contract.renderSafe(entry.name)) entry.handler else plugin.answerGate(entry.handler, entry.name);
+        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, handler, p);
     }
 }

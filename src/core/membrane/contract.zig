@@ -436,6 +436,66 @@ fn zip() [contract_data.imports.len]Entry {
 /// that file).
 pub const imports: [contract_data.imports.len]Entry = zip();
 
+/// The doors a guest may call while ANSWERING a provider round
+/// (`WasmPlugin.answering` — a gutter or status segment asked during layout,
+/// an annotation round asked from the frame loop). Reads of the document,
+/// the editor, the workspace and configuration; the guest's own range and
+/// witness handles; and the answer doors themselves. Everything else — every
+/// edit, run, selection, flash, layer, mode, pick, process, write — is
+/// bound through `wasm_host/plugin.zig`'s `answerGate` and traps. An ALLOW
+/// list on purpose: a door added later is refused mid-round until someone
+/// decides it is a read, rather than admitted until someone notices it acts.
+pub const render_safe = [_][]const u8{
+    // Diagnostics and arguments; the document and editor; the tree;
+    // configuration and registers; the workspace; the answer itself.
+    "wl_log",                      "wl_arg_count",                  "wl_arg_int",
+    "wl_arg_str",                  "wl_cursor",                     "wl_byte_len",
+    "wl_slice",                    "wl_line_at",                    "wl_selection",
+    "wl_path",                     "wl_editor_step",                "wl_selections_get",
+    "wl_view_range",               "wl_pointer",                    "wl_breakpoint_offsets",
+    "wl_doc_snapshot",             "wl_doc_snapshot_is_current",    "wl_doc_snapshot_release",
+    "wl_anchor_range",             "wl_range_ends",                 "wl_range_release",
+    "wl_node_at",                  "wl_node_enclosing",             "wl_query",
+    "wl_query_capture",            "wl_outline",                    "wl_node_children",
+    "wl_kv_get",                   "wl_config_get",                 "wl_register_text",
+    "wl_register_linewise",        "wl_register_paste_value",       "wl_macro_recording",
+    "wl_buffer_count",             "wl_buffer_id",                  "wl_buffer_name",
+    "wl_buffer_active",            "wl_buffer_readonly",            "wl_buffer_path",
+    "wl_buffer_dirty",             "wl_buffer_lang",                "wl_buffer_byte_len",
+    "wl_buffer_tool",              "wl_place_root",                 "wl_place_id",
+    "wl_place_has",                "wl_posture",                    "wl_mode_names",
+    "wl_binding_table",            "wl_command_count",              "wl_command_name",
+    "wl_command_summary",          "wl_command_owner",              "wl_command_arity",
+    "wl_command_arity_required",   "wl_command_arg",                "wl_offer_count",
+    "wl_offer_name",               "wl_offer_provider",             "wl_offer_reason",
+    "wl_menu_binding_count",       "wl_menu_binding_key",           "wl_menu_binding_cmd",
+    "wl_menu_binding_is_group",    "wl_menu_binding_intent_status", "wl_menu_binding_intent",
+    "wl_menu_binding_intent_note", "wl_annotate_len",               "wl_annotate_read",
+    "wl_payload_read",             "wl_payload_push",
+};
+
+/// Whether `name` is callable while answering a provider round.
+pub fn renderSafe(comptime name: []const u8) bool {
+    @setEvalBranchQuota(100_000);
+    inline for (render_safe) |safe| {
+        if (comptime std.mem.eql(u8, safe, name)) return true;
+    }
+    return false;
+}
+
+comptime {
+    // Every name the list admits is a real door: a rename cannot leave a
+    // stale row admitting nothing (or, worse, a future door of that name).
+    @setEvalBranchQuota(100_000);
+    for (render_safe) |safe| {
+        var found = false;
+        for (contract_data.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, safe)) found = true;
+        }
+        if (!found) @compileError("contract.render_safe names '" ++ safe ++ "', which is no wl_* import");
+    }
+}
+
 fn wasmType(comptime params: []const contract_data.ValType, comptime results: []const contract_data.ValType) wasm.ExternType {
     return .{
         .kind = .function,

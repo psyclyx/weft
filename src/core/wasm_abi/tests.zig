@@ -4073,6 +4073,36 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     try t.expectEqual(primary_at, ed.cursorOffset());
 }
 
+test "wasm plugin: a provider answering a round cannot act — every door but the reads traps mid-answer" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "badge", @embedFile("guest_badge_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "abc");
+    const flashes = env.caps.flash.gen;
+    // A gutter or status round fires during layout. The provider tries to
+    // edit, to flash, to run a command: each traps before it lands, and the
+    // answer it would have pushed after never arrives.
+    for ([_][]const u8{ "act-edit", "act-flash", "act-run" }) |req| {
+        const id = try env.slot_host.fire("ui/badge", .{}, "v", .{ .request = req });
+        if (id) |s| try t.expectEqual(@as(usize, 0), env.slot_host.session(s).?.all().len);
+    }
+    try expectDoc(gpa, ed, "abc");
+    try t.expectEqual(flashes, env.caps.flash.gen);
+    try t.expectEqual(@as(u32, 0), plugin.answering);
+    // A provider that only reads and answers is untouched by the policy.
+    const ok_id = (try env.slot_host.fire("ui/badge", .{}, "v", .{})).?;
+    try t.expectEqual(@as(usize, 1), env.slot_host.session(ok_id).?.all().len);
+}
+
 test "wasm plugin: an undo unit a guest leaves open ends with its dispatch, and a close reaches only its own" {
     const gpa = t.allocator;
     var env: Env = undefined;

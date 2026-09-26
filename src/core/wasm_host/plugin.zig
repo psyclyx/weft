@@ -336,6 +336,28 @@ pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn
     }.f;
 }
 
+/// The RENDER-PHASE door policy, applied once, where the doors are bound
+/// (`wasm_host.defineImports`): wrap `inner` so that while its guest is
+/// answering a provider round (`WasmPlugin.answering`) the call traps instead
+/// of running. A round fires during layout (a gutter, a status segment) or
+/// from the frame loop, and an answer is a read: a provider that edits, runs
+/// a command, sets selections or flashes mid-layout would change what the
+/// frame is in the middle of drawing. Only the doors `contract.render_safe`
+/// names — reads, and the answer doors themselves — go unwrapped, so a door
+/// added later is refused there until someone decides it is a read.
+pub fn answerGate(comptime inner: wasm.Linker.HostFn, comptime name: []const u8) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+            if (p.answering > 0) {
+                caller.trap("plugin '{s}' called {s} while answering a provider round: an answer may read, never act", .{ p.name, name });
+                return;
+            }
+            inner(data, caller, args, results);
+        }
+    }.f;
+}
+
 /// The membrane's SECOND deny path (task #19 item 4, alongside `requirePerm`
 /// above): every import that MUTATES per-head interaction state (mode/
 /// pending/pick/echo — `Head.zig`'s module doc; NOT mode/menu/action TABLE

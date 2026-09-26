@@ -151,18 +151,24 @@ pub fn hSlotBind(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 ///     and a provider's `wl_payload_push` reaches `p.activeCtx()`: without
 ///     the save/restore it would push through whichever head this plugin
 ///     last ran under. Same three lines `wpPickAccept` uses.
-///   - Leaving `in_dispatch` FALSE is the protection, not an oversight. Every
-///     head-gated door (`requireDispatch`) refuses, so a provider physically
-///     cannot set a mode, open a pick, or echo from inside a fire. Answering
-///     a question conveys no authority — the guarantee
-///     `wasm_host/annotate.zig` makes for decorators, obtained here by never
-///     granting it rather than by checking for it afterwards.
+///   - Leaving `in_dispatch` FALSE keeps the head-gated doors
+///     (`requireDispatch`) shut: no mode, pick or echo from inside a fire.
+///     But those are a handful of doors, and a gutter or status round fires
+///     DURING LAYOUT — an edit, a run, a selection or a flash from there
+///     changes what the frame is drawing. So the fire also marks the guest
+///     as ANSWERING (`WasmPlugin.answering`), and every door but the reads
+///     `contract.render_safe` names traps while it is (`plugin.answerGate`,
+///     applied once where the doors are bound). Answering a question conveys
+///     no authority — the guarantee `wasm_host/annotate.zig` makes for
+///     decorators, now held for every door rather than the head-gated few.
 fn wpSlotProvider(data: ?*anyopaque, host: *slot_mod.SlotHost, req: *const slot_mod.Request) anyerror!void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const handle: i32 = @bitCast(@as(u32, @truncate(req.session)));
     const saved_ctx = p.active_ctx;
     if (req.ctx) |c| p.active_ctx = @ptrCast(@alignCast(c));
     defer p.active_ctx = saved_ctx;
+    p.answering += 1;
+    defer p.answering -= 1;
     contract.callOptionalExport("on_slot_fire", &p.instance, .{handle}) catch {
         host.decline(req.session);
     };
