@@ -84,6 +84,7 @@ test "e2e/visual-aids: config.js numbers text entries relative to the caret, and
     try t.expect(lines.len > 3);
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[0].stops[0].x, 0.01);
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[5].stops[0].x, 0.01);
+    app.proj.shot(ed, "visual-linenumbers");
 
     // A git status is a projection, not a file: the provider's predicate
     // (text posture, no tool) is evaluated by the host, so it is never asked
@@ -145,6 +146,7 @@ test "e2e/visual-aids: every vim edit flashes what it touched, undo included" {
             std.debug.print("an empty flash after {s}\n", .{step.what});
             return error.EmptyFlash;
         }
+        if (std.mem.eql(u8, step.what, "p after yy")) app.proj.shot(ed, "visual-flash");
         try t.expectEqualStrings("normal", ed.mode());
     }
     // The undo/redo flash is core's (only core saw the span) and shows
@@ -178,6 +180,7 @@ test "e2e/visual-aids: snipe — one hit jumps, several are labelled, and d comp
     ed.press("f", "");
     ed.typeText("a");
     try t.expectEqualStrings("snipe-label", ed.mode());
+    app.proj.shot(ed, "visual-snipe-labels");
     {
         const doc = &ed.buffers.active().textEditor().?.doc;
         const layer = ed.caps.layers.find(doc, "snipe") orelse return error.NoLabels;

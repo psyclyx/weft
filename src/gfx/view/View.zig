@@ -485,7 +485,10 @@ pub fn build(
         scrollToCursor(ed, top_row, rows_visible);
         if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
         const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
-        const flip_off: ?usize = if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
+        // Every block caret flips the glyph it covers, not only the primary's.
+        var flips: std.ArrayList(usize) = .empty;
+        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selections.items.len) |i|
+            try flips.append(scratch, caretDrawOffset(ed, i, hud.caret_place));
 
         // Lay out the body's visible rows into the frame arena (the geometry
         // map outlives the frame for hit-testing). The caller resets the
@@ -499,7 +502,7 @@ pub fn build(
         while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
             if (ed.rowHidden(row)) continue;
             const runs_mark = runs.items.len;
-            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
+            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flips.items);
             if (shown != 0 and y_top + vl.height > body_limit_y) {
                 runs.items.len = runs_mark;
                 break;

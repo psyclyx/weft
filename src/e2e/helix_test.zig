@@ -485,6 +485,7 @@ test "e2e/helix: gw labels the words in view, and two keys select one" {
 
     keys(ed, "gw");
     try t.expectEqualStrings("helix-goto-word", ed.mode());
+    app.proj.shot(ed, "helix-gw-labels");
     const doc = &textEd(ed).doc;
     {
         const layer = ed.caps.layers.find(doc, "helix-goto-word") orelse return error.NoLabels;
@@ -571,6 +572,7 @@ test "e2e/helix: an operation flashes every selection, not just the primary" {
     const before = ed.caps.flash.gen;
     keys(ed, "y");
     try t.expect(ed.caps.flash.gen != before);
+    app.proj.shot(ed, "helix-flash");
     var out: [8]core.flash.Range = undefined;
     const set = flashed(ed, &out);
     try t.expectEqual(@as(usize, 2), set.len);
@@ -596,6 +598,7 @@ test "e2e/helix: the caret draws on a forward selection's last character" {
 
     keys(ed, "w"); // "hello ", head at 6
     try expectSelections(ed, &.{.{ 0, 6 }});
+    app.proj.shot(ed, "helix-caret");
     const te = textEd(ed);
     try t.expectEqual(@as(usize, 5), h.view.View.caretDrawOffset(te, te.primary, .inside));
     try t.expectEqual(@as(usize, 6), h.view.View.caretDrawOffset(te, te.primary, .head));

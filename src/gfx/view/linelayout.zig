@@ -179,6 +179,18 @@ pub fn resolveStyleInputs(
 
 // ── Line layout (the shared primitive) ───────────────────────────
 
+/// Whether a block caret covers `off`: its glyph (a label's included) then
+/// draws in `cursor_text`, legible on the caret. `flips` holds every
+/// caret's draw offset in document order — each selection has one, not
+/// only the primary.
+fn flipped(flips: []const usize, off: usize) bool {
+    return std.sort.binarySearch(usize, flips, off, struct {
+        fn order(target: usize, item: usize) std.math.Order {
+            return std.math.order(target, item);
+        }
+    }.order) != null;
+}
+
 pub fn layoutLine(
     v: *View,
     scratch: Allocator,
@@ -190,12 +202,12 @@ pub fn layoutLine(
     cols_visible: usize,
     md: ?MdInline,
     styles: StyleInputs,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     return if (md) |m|
-        layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flip_off)
+        layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flips)
     else
-        layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flip_off);
+        layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flips);
 }
 
 /// Plain buffers: one mono cell per scalar on the pixel grid (uniform
@@ -211,7 +223,7 @@ fn layoutMonoLine(
     y_top: f32,
     cols_visible: usize,
     styles: StyleInputs,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     const line = rope.lineRange(row);
     const baseline_y = y_top + v.ascent;
@@ -254,10 +266,10 @@ fn layoutMonoLine(
             try cells.append(scratch, .{
                 .source = .{ .start = @intCast(b0), .end = @intCast(pfx_bytes.items.len) },
                 .column = @intCast(col),
-                .color = ov.color(v),
+                .color = if (flipped(flips, abs)) v.theme.cursor_text else ov.color(v),
             });
         } else {
-            const color = if (flip_off != null and flip_off.? == abs)
+            const color = if (flipped(flips, abs))
                 v.theme.cursor_text
             else if (styles.diag) |d| (if (abs >= styles.diag_base and abs - styles.diag_base < d.len and d[abs - styles.diag_base] != 0)
                 (if (d[abs - styles.diag_base] == 1) v.theme.diag_error else v.theme.diag_warn)
@@ -589,7 +601,7 @@ fn layoutMarkdownLine(
     row: usize,
     y_top: f32,
     md: MdInline,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     const line = rope.lineRange(row);
     const text = try readLine(scratch, rope, line, 4096);
@@ -597,13 +609,15 @@ fn layoutMarkdownLine(
         if (b.* == '\t') b.* = ' ';
     }
 
-    // The caret cluster [lo, hi) whose glyph flips to cursor_text.
+    // The caret cluster [lo, hi) whose glyph flips to cursor_text: the first
+    // caret on the line (a styled run carries one flip range).
     var caret_lo: usize = std.math.maxInt(usize);
     var caret_hi: usize = 0;
-    if (flip_off) |co| {
+    for (flips) |co| {
         if (co >= line.start and co < line.start + text.len) {
             caret_lo = co;
             caret_hi = nextScalar(text, line.start, co);
+            break;
         }
     }
 
@@ -799,7 +813,7 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
     try testing.expect(si.deco == layer);
 
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
     // The caret at the line start (offset 0) sits AFTER the 5-column prefix —
     // the decoration displaced the text without becoming part of it.
@@ -842,7 +856,7 @@ test "gutter: a bound line-numbers provider draws leading cells through the real
 
     const si: StyleInputs = .{ .gutter = .{ .bindings = bindings } };
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
     // Row 0 → "1 " = 2 leading gutter cells; diag/breakpoint providers opt
     // out (no layer, no bp lines), contributing nothing. The caret at
@@ -883,12 +897,12 @@ test "gutter placement: a breakpoint mark draws in a sign column every row share
     // The marked row draws the dot at column 0; BOTH rows start their text at
     // column 2, so a mark never pushes one line out of alignment.
     var runs: std.ArrayList(Run) = .empty;
-    const marked = try layoutLine(&v, a, a, &runs, doc.text(), 1, 0, 40, null, si, null);
+    const marked = try layoutLine(&v, a, a, &runs, doc.text(), 1, 0, 40, null, si, &.{});
     try testing.expectApproxEqAbs(v.origin_x + 2 * v.cell_w, marked.stops[0].x, 0.01);
     try testing.expectEqual(@as(u32, 0), runs.items[0].place.cell[0].column);
     try testing.expectEqual(v.theme.styleColor(.removed), runs.items[0].place.cell[0].color);
     var plain_runs: std.ArrayList(Run) = .empty;
-    const plain = try layoutLine(&v, a, a, &plain_runs, doc.text(), 0, 0, 40, null, si, null);
+    const plain = try layoutLine(&v, a, a, &plain_runs, doc.text(), 0, 0, 40, null, si, &.{});
     try testing.expectApproxEqAbs(v.origin_x + 2 * v.cell_w, plain.stops[0].x, 0.01);
     // …and a row without a mark draws nothing in the column: "one" only.
     try testing.expectEqual(@as(usize, 3), plain_runs.items[0].place.cell.len);
@@ -918,7 +932,7 @@ test "overlay placement: a label covers its cell without moving any text" {
     const hud: Hud = .{ .mode = "normal", .annotations = feeds };
     const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
     // No prefix, and every stop where it was: the caret maps exactly.
     try testing.expectApproxEqAbs(v.origin_x, vl.stops[0].x, 0.01);
@@ -933,6 +947,17 @@ test "overlay placement: a label covers its cell without moving any text" {
     try testing.expectEqual(v.theme.foreground, cells[3].color);
     // The glyph sources are the labels' bytes, not the text's.
     try testing.expectEqual(@as(usize, 11), runs.items[0].shaped.glyphs.len);
+
+    // Under a block caret — any selection's, not only the primary's — a
+    // glyph draws in `cursor_text`, a label's included, so it stays legible.
+    var flipped_runs: std.ArrayList(Run) = .empty;
+    _ = try layoutLine(&v, a, a, &flipped_runs, doc.text(), 0, 0, 40, null, si, &.{ 0, 4, 6 });
+    const flipped_cells = flipped_runs.items[0].place.cell;
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[0].color);
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[4].color);
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[6].color);
+    try testing.expectEqual(v.theme.foreground, flipped_cells[5].color);
+    try testing.expectEqual(v.theme.styleColor(.removed), flipped_cells[9].color);
 }
 
 test "annotations: the presentation composites third-party feeds it was never told about" {
@@ -970,7 +995,7 @@ test "annotations: the presentation composites third-party feeds it was never to
     // The placed feed draws leading cells, exactly like a projection's own
     // decorations, and displaces the caret without entering the document.
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
     try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
     try testing.expectApproxEqAbs(v.origin_x + 7 * v.cell_w, vl.stops[0].x, 0.01);
 
@@ -980,6 +1005,6 @@ test "annotations: the presentation composites third-party feeds it was never to
     const stale = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 2);
     try testing.expect(stale.anno == null);
     var stale_runs: std.ArrayList(Run) = .empty;
-    const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, null);
+    const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, &.{});
     try testing.expectApproxEqAbs(v.origin_x, stale_line.stops[0].x, 0.01);
 }
