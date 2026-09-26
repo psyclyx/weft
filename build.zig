@@ -49,7 +49,8 @@ const Guest = struct {
 /// `ui/gutter-segment` round, `regex` is the Pike-VM pattern engine
 /// (doc/configs.md §0.2) and `search` the query → matches planning over it
 /// that helix's `s S K A-K / ? n N *` and the find bar share — core never
-/// parses a pattern.
+/// parses a pattern — and `labels` the jump labels snipe and helix's `gw`
+/// draw over the visible text.
 const Library = enum {
     prompt,
     invoke,
@@ -63,6 +64,7 @@ const Library = enum {
     rowkey,
     regex,
     search,
+    labels,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -80,6 +82,7 @@ const Library = enum {
             .rowkey => "weft_rowkey",
             .regex => "weft_regex",
             .search => "weft_search",
+            .labels => "weft_labels",
         };
     }
 
@@ -92,7 +95,7 @@ const Library = enum {
             .rowkey, .jsonrpc, .sessions, .regex => .protocol_data,
             // `search` is pure data too, but it sits on `regex`, so it
             // takes the tier above.
-            .annotate, .gutter, .output, .files, .prompt, .search => .service_presentation,
+            .annotate, .gutter, .output, .files, .prompt, .search, .labels => .service_presentation,
             .invoke => .interaction_orchestration,
             .ex => .editor_composition,
         };
@@ -463,7 +466,7 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .search, .labels } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
     .{ .name = "ide", .import = "guest_ide_wasm", .install = true },
@@ -472,7 +475,7 @@ const guests = [_]Guest{
     // window of cells per round (absolute or caret-relative). No commands.
     .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
     // Jump labels on f/F/t/T over the visible range; composes with operators.
-    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
+    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
 };

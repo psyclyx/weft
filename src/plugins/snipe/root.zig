@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const labels_mod = @import("weft_labels");
 
 const Dir = enum {
     f,
@@ -72,8 +73,8 @@ var labels: []const u8 = default_labels;
 /// The typed target, copied out of the arg scratch.
 var char_buf: [8]u8 = undefined;
 var char_len: usize = 0;
-/// The overlay the labels are drawn on, while they are up.
-var overlay: ?weft.Annotations = null;
+/// The labels on screen, one character each (the `labels` library).
+var shown: labels_mod.Set = .{};
 
 /// `;`/`,` state: the last completed search.
 var last_dir: ?Dir = null;
@@ -136,13 +137,14 @@ fn readChar() void {
 
 fn readLabel() void {
     const typed = weft.argStr(0) orelse return cancel();
-    clearLabels();
-    if (typed.len != 1) return cancel();
-    const i = std.mem.indexOfScalar(u8, labels[0..n_hits], typed[0]) orelse {
-        weft.echo("snipe: no such label");
-        return done();
-    };
-    finish(hits[i]);
+    switch (shown.press(typed)) {
+        .chosen => |i| finish(hits[i]),
+        .pending => {},
+        .none => {
+            weft.echo("snipe: no such label");
+            done();
+        },
+    }
 }
 
 fn cancel() void {
@@ -210,31 +212,12 @@ fn loadLabels() []const u8 {
 
 /// Draw one label over each hit's own cell and wait for the label key.
 fn showLabels() void {
-    const entry = activeEntry() orelse return finish(hits[0]);
-    const anno = weft.Annotations.open(entry, layer_name) orelse return finish(hits[0]);
-    if (!anno.begin()) {
-        anno.close();
-        return finish(hits[0]);
-    }
-    for (hits[0..n_hits], 0..) |off, i| anno.span(off, off, .removed, .overlay, labels[i .. i + 1]);
-    overlay = anno;
+    if (!shown.show(layer_name, hits[0..n_hits], labels, 1)) return finish(hits[0]);
     weft.setMode(label_mode);
 }
 
 fn clearLabels() void {
-    if (overlay) |anno| anno.close();
-    overlay = null;
-}
-
-/// The focused entry's id, the handle an annotation layer is opened on.
-fn activeEntry() ?u32 {
-    var i: usize = 0;
-    while (i < weft.bufferCount()) : (i += 1) {
-        if (!weft.bufferActive(i)) continue;
-        const id = weft.bufferId(i) orelse return null;
-        return @intCast(id);
-    }
-    return null;
+    shown.clear();
 }
 
 // ── Landing ──────────────────────────────────────────────────────────
