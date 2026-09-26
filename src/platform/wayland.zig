@@ -275,7 +275,7 @@ pub const Window = struct {
         const fds = platform.clipboard.pipe() orelse return;
         c.wl_data_offer_receive(o.offer, mime, fds[1]);
         _ = std.c.close(fds[1]);
-        self.xfers.?.receive(std.heap.c_allocator, fds[0]);
+        self.xfers.?.receive(std.heap.c_allocator, &self.clip, fds[0]);
         _ = c.wl_display_flush(self.display);
     }
 

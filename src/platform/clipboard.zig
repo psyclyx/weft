@@ -27,6 +27,11 @@ const Allocator = std.mem.Allocator;
 /// received from another. The whole clipboard for a platform with no desktop.
 pub const Store = struct {
     bytes: std.ArrayList(u8) = .empty,
+    /// Bumped by every `set`. A receive remembers the value it started at
+    /// and lands only if nothing set the store since: a copy made here while
+    /// an older foreign offer was still being read is newer than that offer,
+    /// whichever finishes first (`Transfers.receive`).
+    gen: u64 = 0,
 
     pub fn deinit(self: *Store, gpa: Allocator) void {
         self.bytes.deinit(gpa);
@@ -38,6 +43,7 @@ pub const Store = struct {
     }
 
     pub fn set(self: *Store, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
+        self.gen += 1;
         self.bytes.clearRetainingCapacity();
         try self.bytes.appendSlice(gpa, bytes);
     }
@@ -49,8 +55,13 @@ pub const Transfers = struct {
     /// client pasting from us; past this, the oldest is dropped (its reader
     /// sees EOF early) rather than letting a stuck reader pin memory forever.
     pub const max_outgoing = 8;
+    /// The most an incoming offer may hold. Another client decides how much
+    /// it writes; past this the offer is dropped (with a warning) rather than
+    /// growing the buffer without bound.
+    pub const max_incoming = 16 * 1024 * 1024;
 
-    const Incoming = struct { fd: i32, buf: std.ArrayList(u8) = .empty };
+    /// `since` is the store generation the receive started at.
+    const Incoming = struct { fd: i32, since: u64, buf: std.ArrayList(u8) = .empty };
     const Outgoing = struct { fd: i32, bytes: []u8, off: usize = 0 };
 
     epfd: i32,
@@ -80,16 +91,17 @@ pub const Transfers = struct {
         return self.incoming != null;
     }
 
-    /// Start reading the selection from `read_fd` (owned from here on). A
-    /// receive already in flight is abandoned: the desktop has moved on to a
-    /// newer selection, and only the newest one is the clipboard.
-    pub fn receive(self: *Transfers, gpa: Allocator, read_fd: i32) void {
+    /// Start reading the selection from `read_fd` (owned from here on) into
+    /// `store`. A receive already in flight is abandoned: the desktop has
+    /// moved on to a newer selection, and only the newest one is the
+    /// clipboard. So is this one if `store` is set before it finishes.
+    pub fn receive(self: *Transfers, gpa: Allocator, store: *const Store, read_fd: i32) void {
         self.abortIncoming(gpa);
         if (!setNonblocking(read_fd) or !self.watch(read_fd, linux.EPOLL.IN)) {
             _ = linux.close(read_fd);
             return;
         }
-        self.incoming = .{ .fd = read_fd };
+        self.incoming = .{ .fd = read_fd, .since = store.gen };
     }
 
     /// Start writing `bytes` (copied) to `write_fd` (owned from here on).
@@ -129,6 +141,11 @@ pub const Transfers = struct {
 
     fn pumpIncoming(self: *Transfers, gpa: Allocator, store: *Store) bool {
         if (self.incoming == null) return false;
+        // Superseded: we took the selection ourselves after this began.
+        if (self.incoming.?.since != store.gen) {
+            self.abortIncoming(gpa);
+            return false;
+        }
         var chunk: [16 * 1024]u8 = undefined;
         while (true) {
             const inc = &self.incoming.?;
@@ -147,6 +164,11 @@ pub const Transfers = struct {
                 store.set(gpa, inc.buf.items) catch {};
                 self.abortIncoming(gpa);
                 return true;
+            }
+            if (inc.buf.items.len + rc > max_incoming) {
+                std.log.warn("clipboard: dropped an offer over {d} bytes", .{max_incoming});
+                self.abortIncoming(gpa);
+                return false;
             }
             inc.buf.appendSlice(gpa, chunk[0..rc]) catch {
                 self.abortIncoming(gpa);
@@ -233,7 +255,7 @@ test "clipboard: a send and a receive meet through pipes without blocking" {
     const out = pipe().?;
     xfers.send(gpa, out[1], "from weft");
     // …and one of ours reads the other client's copy.
-    xfers.receive(gpa, out[0]);
+    xfers.receive(gpa, &store, out[0]);
     try t.expect(xfers.receiving());
     // The write fit the pipe and closed, so the read sees the bytes and EOF.
     try t.expect(xfers.service(gpa, &store));
@@ -250,7 +272,7 @@ test "clipboard: a receive with no writer yet waits instead of blocking" {
     try store.set(gpa, "old");
 
     const p = pipe().?;
-    xfers.receive(gpa, p[0]);
+    xfers.receive(gpa, &store, p[0]);
     try t.expect(!xfers.service(gpa, &store)); // nothing written: AGAIN, not a hang
     try t.expectEqualStrings("old", store.text());
     _ = linux.write(p[1], "new", 3);
@@ -268,13 +290,57 @@ test "clipboard: a newer selection abandons the read in flight" {
     defer store.deinit(gpa);
 
     const first = pipe().?;
-    xfers.receive(gpa, first[0]);
+    xfers.receive(gpa, &store, first[0]);
     _ = linux.write(first[1], "stale", 5);
     const second = pipe().?;
-    xfers.receive(gpa, second[0]); // closes first[0]
+    xfers.receive(gpa, &store, second[0]); // closes first[0]
     _ = linux.close(first[1]);
     _ = linux.write(second[1], "fresh", 5);
     _ = linux.close(second[1]);
     try t.expect(xfers.service(gpa, &store));
     try t.expectEqualStrings("fresh", store.text());
+}
+
+test "clipboard: a copy made here while a foreign offer is still being read wins, whichever finishes first" {
+    const gpa = t.allocator;
+    var xfers = try Transfers.init();
+    defer xfers.deinit(gpa);
+    var store: Store = .{};
+    defer store.deinit(gpa);
+
+    const p = pipe().?;
+    xfers.receive(gpa, &store, p[0]);
+    _ = linux.write(p[1], "foreign", 7);
+    // We take the selection (a C-c) before the other client's pipe ends…
+    try store.set(gpa, "ours");
+    // …so its EOF must not put the older offer back over it.
+    _ = linux.close(p[1]);
+    try t.expect(!xfers.service(gpa, &store));
+    try t.expectEqualStrings("ours", store.text());
+    try t.expect(!xfers.receiving());
+}
+
+test "clipboard: an offer past the size cap is dropped, and the clipboard keeps what it had" {
+    const gpa = t.allocator;
+    var xfers = try Transfers.init();
+    defer xfers.deinit(gpa);
+    var store: Store = .{};
+    defer store.deinit(gpa);
+    try store.set(gpa, "kept");
+
+    const p = pipe().?;
+    xfers.receive(gpa, &store, p[0]);
+    try t.expect(setNonblocking(p[1])); // a full pipe answers AGAIN, never blocks the test
+    // Feed more than the cap, a pipe-full at a time, servicing between.
+    const block: [64 * 1024]u8 = @splat('x');
+    var sent: usize = 0;
+    while (xfers.receiving() and sent <= Transfers.max_incoming + block.len) {
+        const rc = linux.write(p[1], &block, block.len);
+        if (linux.errno(rc) == .SUCCESS) sent += rc;
+        _ = xfers.service(gpa, &store);
+    }
+    _ = linux.close(p[1]);
+    try t.expect(!xfers.receiving());
+    try t.expect(!xfers.service(gpa, &store));
+    try t.expectEqualStrings("kept", store.text());
 }
