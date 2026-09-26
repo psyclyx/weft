@@ -34,4 +34,5 @@ test {
     _ = @import("visual_aids_test.zig");
     _ = @import("pointer_test.zig");
     _ = @import("find_test.zig");
+    _ = @import("helix_test.zig");
 }
