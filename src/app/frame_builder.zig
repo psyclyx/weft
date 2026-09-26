@@ -234,35 +234,27 @@ const StatuslineRound = struct {
 };
 
 /// The facts a pane's chrome providers (status line, gutter) are asked
-/// with: the mode, the entry's path, tool and posture.
-fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, file_name: []const u8) core.facts.Facts {
-    return .{
-        .mode = fx.head.currentMode(),
-        .path = file_name,
-        .tool = buffer.tool,
-        .posture = @tagName(buffer.posture(false)),
-    };
+/// with: the one fact builder's (`intent.entryFacts`), in the pane's own
+/// mode — the head's for the entry the head is on, the entry's resting mode
+/// for any other pane, never the focused pane's mode stamped on every pane.
+pub fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, pane: u32) core.facts.Facts {
+    const head = fx.head;
+    if (buffer == fx.buffers.active()) return core.intent.entryFacts(buffer, head.currentMode(), &head.semantic_focus, pane);
+    return core.intent.entryFacts(buffer, core.intent.restingModeOf(fx.buffers, buffer), &buffer.semantic_focus, pane);
 }
 
 /// Resolve one pane's gutter for this frame: the eligible providers (one
 /// Container scan) and, when a PLUGIN is among them, the round its cells
-/// come from. `buffer`'s tool and posture ride the facts, so a provider bound
-/// to text entries never answers for a git status or a file listing.
+/// come from. The pane's `facts` carry its tool and posture, so a provider
+/// bound to text entries never answers for a git status or a file listing.
 pub fn gutterFrame(
     arena: std.mem.Allocator,
     fx: *const FrameCtx,
-    buffer: *core.Buffers.Buffer,
+    facts: core.facts.Facts,
     editor: ?*core.Editor,
-    file_name: []const u8,
     diag_layer: ?*const core.layers.Layer,
     bp_lines: []const u8,
 ) !view_mod.ui_mesh.GutterFrame {
-    const facts: core.facts.Facts = .{
-        .mode = fx.head.currentMode(),
-        .path = file_name,
-        .tool = buffer.tool,
-        .posture = @tagName(buffer.posture(false)),
-    };
     var gf: view_mod.ui_mesh.GutterFrame = .{
         .bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, arena, facts),
         .diag_layer = diag_layer,
@@ -632,17 +624,18 @@ pub const FrameBuilder = struct {
         // list once too (`gutterFrame`): empty unless a plugin bound it for
         // an entry like this one, whose cells then arrive through one slot
         // round per visible window, never one per row.
+        const pane_facts = paneFacts(fx, abuf, fx.head.focused_pane);
         var statusline_args: view_mod.ui_mesh.StatuslineArgs = .{
-            .facts = paneFacts(fx, abuf, file_name),
+            .facts = pane_facts,
             .file = file_name,
-            .round = try StatuslineRound.make(mesh_gpa, fx, paneFacts(fx, abuf, file_name), editor, true),
+            .round = try StatuslineRound.make(mesh_gpa, fx, pane_facts, editor, true),
             .buffer_pos = buffer_pos,
             .diag_layer = diag_layer,
             .link = link_note,
             .theme = &self.view.theme,
         };
         const statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, mesh_gpa, &statusline_args);
-        const gutter_frame = try gutterFrame(mesh_gpa, fx, abuf, editor, file_name, diag_layer, bpLines(mesh_gpa, fx.caps, editor));
+        const gutter_frame = try gutterFrame(mesh_gpa, fx, pane_facts, editor, diag_layer, bpLines(mesh_gpa, fx.caps, editor));
 
         const hud: view_mod.Hud = .{
             .mode = fx.head.currentMode(),
@@ -759,17 +752,18 @@ pub const FrameBuilder = struct {
             // (no buffer position/link — matches today's peeked-pane
             // rendering, which never showed those either) plus its own
             // diagnostics count and gutter context.
+            const other_facts = paneFacts(fx, ob, slot.pane.id);
             var other_args: view_mod.ui_mesh.StatuslineArgs = .{
-                .facts = paneFacts(fx, ob, other_name),
+                .facts = other_facts,
                 .file = other_name,
-                .round = try StatuslineRound.make(arena_state.allocator(), fx, paneFacts(fx, ob, other_name), oed, false),
+                .round = try StatuslineRound.make(arena_state.allocator(), fx, other_facts, oed, false),
                 .diag_layer = other_diag,
                 .theme = &self.view.theme,
             };
             const other_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena_state.allocator(), &other_args);
-            const other_gutter = try gutterFrame(arena_state.allocator(), fx, ob, oed, other_name, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
+            const other_gutter = try gutterFrame(arena_state.allocator(), fx, other_facts, oed, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
             const other_hud: view_mod.Hud = .{
-                .mode = fx.head.currentMode(),
+                .mode = other_facts.mode,
                 .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
                 .status_line = slot.pane.attrs.status_line,
                 .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),

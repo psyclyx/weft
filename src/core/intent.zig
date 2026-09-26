@@ -557,18 +557,31 @@ pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
 /// The facts of a chosen scope — `factsFor` is this for the active one, so
 /// the primary context is described by the same builder, never a copy.
 pub fn factsIn(scope: Scope) catalog_mod.Facts {
-    const entry = scope.entry;
+    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane);
+}
+
+/// The facts of `entry` in `mode`, as pane `pane` shows it — `factsIn` for
+/// a scope, and what the frame asks a pane's chrome (status line, gutter)
+/// with, so every pane is described by this one builder too.
+pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
         .name = entry.name,
-        .mode = scope.mode,
+        .mode = mode,
         .lang = Actions.langOfName(entry.name),
         .tool = entry.tool,
         .role = entry.focusedRole(),
         .locality = localityOf(entry),
-        .posture = @tagName(entry.posture(scope.focus.field != null)),
-        .pane = scope.pane,
+        .posture = @tagName(entry.posture(focus.field != null)),
+        .pane = pane,
     };
+}
+
+/// The mode an entry the head is NOT on is in: the one it saved when the
+/// head left it, else where its posture rests (an entry never visited).
+pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
+    if (entry.mode.len > 0) return entry.mode;
+    return buffers.restingModeFor(entry.posture(entry.semantic_focus.field != null));
 }
 
 // ── Chosen contexts ──────────────────────────────────────────────────

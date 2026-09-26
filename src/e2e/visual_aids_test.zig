@@ -25,8 +25,8 @@ fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     const a = arena.allocator();
     const buf = ed.buffers.active();
     const text_ed = buf.textEditor();
-    const name = if (text_ed) |e| e.backingPath() orelse buf.name else buf.name;
-    const gf = try h.app.frame_builder.gutterFrame(a, &ed.application.driver.ctx, buf, text_ed, name, null, "");
+    const fx = &ed.application.driver.ctx;
+    const gf = try h.app.frame_builder.gutterFrame(a, fx, h.app.frame_builder.paneFacts(fx, buf, ed.head.focused_pane), text_ed, null, "");
     var args: ui_mesh.GutterLineArgs = .{
         .line = line,
         .row = if (text_ed) |e| e.text().lineRange(line) else .{ .start = 0, .end = 0 },

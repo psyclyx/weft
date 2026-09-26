@@ -422,3 +422,55 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
     try t.expect(ed.head.interactions.active() == null);
     try t.expectEqualStrings("ide", ed.mode());
 }
+
+// ── Per-pane chrome ──────────────────────────────────────────────────
+
+/// What pane `node`'s status line and gutter are asked with — the facts the
+/// frame builds each pane's chrome from (`frame_builder.paneFacts`).
+fn chromeFacts(ed: *Editor, node: *window_layout.Node) !core.facts.Facts {
+    const entry = ed.buffers.get(node.pane().buffer_id) orelse return error.NoEntry;
+    return h.app.frame_builder.paneFacts(&ed.application.driver.ctx, entry, node.pane().id);
+}
+
+/// Whether pane `node` gets a gutter this frame (ide.js's `linenumbers`).
+fn hasGutter(ed: *Editor, node: *window_layout.Node) !bool {
+    var arena = std.heap.ArenaAllocator.init(ed.gpa);
+    defer arena.deinit();
+    const entry = ed.buffers.get(node.pane().buffer_id) orelse return error.NoEntry;
+    const gf = try h.app.frame_builder.gutterFrame(arena.allocator(), &ed.application.driver.ctx, try chromeFacts(ed, node), entry.textEditor(), null, "");
+    return gf.bindings.len > 0;
+}
+
+test "e2e/chrome: side by side, a text pane and a listing each show their own mode and gutter" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "e.zig", "const e = 1;\n");
+    ed.applyWindow();
+    const editor = try primaryPane(ed);
+    const sidebar = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
+
+    // The editor has the keys: it says `ide`, the listing beside it says
+    // where a listing rests, not the focused pane's mode.
+    try t.expectEqualStrings("ide", (try chromeFacts(ed, editor)).mode);
+    try t.expectEqualStrings("ide-structural", (try chromeFacts(ed, sidebar)).mode);
+    // Line numbers on the text, none on the listing.
+    try t.expect(try hasGutter(ed, editor));
+    try t.expect(!try hasGutter(ed, sidebar));
+
+    // Move the keys to the listing: each pane still says its own.
+    const view = try ed.ensureView();
+    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
+        if (m.pane == sidebar.pane().id and m.hits.len > 0) break m.hits[0];
+    } else return error.SidebarNotDrawn;
+    ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    ed.applyWindow();
+    try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
+    try t.expectEqualStrings("ide-structural", (try chromeFacts(ed, sidebar)).mode);
+    try t.expectEqualStrings("ide", (try chromeFacts(ed, editor)).mode);
+    try t.expect(try hasGutter(ed, editor));
+    try t.expect(!try hasGutter(ed, sidebar));
+    app.proj.shot(ed, "chrome-per-pane-mode");
+}
