@@ -12,9 +12,33 @@ const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
 const task = @import("task.zig");
 
-/// The terminal-control filter's state between chunks. `cr`: a carriage
-/// return was the last byte, and what follows decides what it meant.
-pub const Controls = enum { text, cr, escape, csi, osc, osc_escape };
+/// The terminal-control filter's state between chunks: where it is, and how
+/// long the escape sequence in progress has run.
+pub const Controls = struct {
+    mode: Mode = .text,
+    /// Bytes of the escape sequence in progress (0 outside one).
+    len: u16 = 0,
+
+    pub const text: Controls = .{};
+
+    /// `cr`: a carriage return was the last byte, and what follows decides
+    /// what it meant.
+    pub const Mode = enum { text, cr, escape, csi, osc, osc_escape };
+
+    fn inSequence(self: Controls) bool {
+        return switch (self.mode) {
+            .escape, .csi, .osc, .osc_escape => true,
+            .text, .cr => false,
+        };
+    }
+};
+
+/// The longest escape sequence the filter swallows. Real ones are a few
+/// bytes (a window title, a hyperlink: tens); one still open past this is a
+/// stray ESC or a program that died mid-sequence, and swallowing on would
+/// eat every later byte of output. Past it the filter gives up on the
+/// sequence and shows text again.
+pub const max_sequence = 256;
 
 /// Append `in` to `out` without its terminal controls. The buffer a session
 /// streams into is plain text with no terminal behind it, so an interactive
@@ -28,40 +52,58 @@ pub const Controls = enum { text, cr, escape, csi, osc, osc_escape };
 /// prompt. Only the part of the line still in `out` can be replaced: what
 /// was delivered already stays. Returns the state to resume from, since a
 /// sequence may straddle two reads.
+///
+/// A sequence is BOUNDED, so a malformed one cannot hide the output after
+/// it: a newline ends any sequence in progress (no control sequence spans
+/// lines, and the newline itself is kept), and one still open past
+/// `max_sequence` bytes is abandoned there.
 pub fn stripControls(gpa: Allocator, from: Controls, in: []const u8, out: *std.ArrayList(u8)) !Controls {
     var state = from;
     for (in) |b| {
-        if (state == .cr) {
+        if (state.mode == .cr) {
             if (b == '\n' or b == '\r') {
                 if (b == '\n') try out.append(gpa, b);
-                state = if (b == '\n') .text else .cr;
+                state.mode = if (b == '\n') .text else .cr;
                 continue;
             }
             out.items.len = if (std.mem.lastIndexOfScalar(u8, out.items, '\n')) |nl| nl + 1 else 0;
-            state = .text;
+            state.mode = .text;
         }
-        switch (state) {
+        if (state.inSequence()) {
+            if (b == '\n') {
+                state = .text;
+                try out.append(gpa, b);
+                continue;
+            }
+            state.len += 1;
+            if (state.len > max_sequence) state = .text; // runaway: this byte is text again
+        }
+        switch (state.mode) {
             .text => switch (b) {
-                0x1b => state = .escape,
-                '\r' => state = .cr,
+                0x1b => state = .{ .mode = .escape },
+                '\r' => state.mode = .cr,
                 0x07, 0x08 => {},
                 else => try out.append(gpa, b),
             },
             .cr => unreachable,
-            .escape => state = switch (b) {
-                '[' => .csi,
-                ']' => .osc,
-                else => .text, // a two-byte escape: drop both
+            .escape => switch (b) {
+                '[' => state.mode = .csi,
+                ']' => state.mode = .osc,
+                else => state = .text, // a two-byte escape: drop both
             },
             .csi => if (b >= 0x40 and b <= 0x7e) {
                 state = .text;
             },
             .osc => switch (b) {
                 0x07 => state = .text,
-                0x1b => state = .osc_escape,
+                0x1b => state.mode = .osc_escape,
                 else => {},
             },
-            .osc_escape => state = if (b == '\\') .text else .osc,
+            .osc_escape => if (b == '\\') {
+                state = .text;
+            } else {
+                state.mode = .osc;
+            },
         }
     }
     return state;
@@ -76,7 +118,7 @@ test "repl_session: terminal controls are stripped, even split across reads" {
     try std.testing.expectEqual(Controls.text, st);
     out.clearRetainingCapacity();
     st = try stripControls(gpa, st, "a\x1b[3", &out);
-    try std.testing.expectEqual(Controls.csi, st);
+    try std.testing.expectEqual(Controls.Mode.csi, st.mode);
     st = try stripControls(gpa, st, "1mb\x1b]2;t\x1b", &out);
     st = try stripControls(gpa, st, "\\c\x1b=d", &out);
     try std.testing.expectEqualStrings("abcd", out.items);
@@ -90,7 +132,7 @@ test "repl_session: a lone carriage return starts the line over" {
     // zsh's PROMPT_SP: the mark, blanks to the margin, then `\r \r` — split
     // across two reads — and the prompt.
     var st = try stripControls(gpa, .text, "done\n\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m     \r \r", &out);
-    try std.testing.expectEqual(Controls.cr, st);
+    try std.testing.expectEqual(Controls.Mode.cr, st.mode);
     st = try stripControls(gpa, st, "\x1b]2;t\x07zsh> ", &out);
     try std.testing.expectEqualStrings("done\nzsh> ", out.items);
     // A CRLF is a newline, and a progress line keeps only its last state.
@@ -98,6 +140,30 @@ test "repl_session: a lone carriage return starts the line over" {
     st = try stripControls(gpa, st, "a\r\nb 10%\rb 99%\r", &out);
     st = try stripControls(gpa, st, "\nc", &out);
     try std.testing.expectEqualStrings("a\nb 99%\nc", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+}
+
+test "repl_session: a malformed sequence cannot swallow the output after it" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // An OSC that never terminates (a program killed mid-title): the next
+    // line still shows, across reads.
+    var st = try stripControls(gpa, .text, "one\n\x1b]0;half a tit", &out);
+    st = try stripControls(gpa, st, "le\ntwo\n", &out);
+    try std.testing.expectEqualStrings("one\n\ntwo\n", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+    // A CSI with no final byte does not eat the newline that follows it.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\x1b[12;\nb\n", &out);
+    try std.testing.expectEqualStrings("a\nb\n", out.items);
+    // And one with no newline in sight is abandoned past `max_sequence`.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "\x1b]", &out);
+    const junk: [max_sequence]u8 = @splat('x');
+    st = try stripControls(gpa, st, &junk, &out);
+    st = try stripControls(gpa, st, "visible", &out);
+    try std.testing.expect(std.mem.endsWith(u8, out.items, "visible"));
     try std.testing.expectEqual(Controls.text, st);
 }
 
