@@ -99,6 +99,7 @@ pub extern "weft:abi/1" fn wl_menu_mode(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_resting_mode(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_exit_to_resting() void;
 pub extern "weft:abi/1" fn wl_resting_posture(posture: u32, ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_binding_variant(facet: u32, mode_ptr: u32, mode_len: u32, variant_ptr: u32, variant_len: u32) void;
 pub extern "weft:abi/1" fn wl_posture() u32;
 pub extern "weft:abi/1" fn wl_declare_posture(posture: u32) void;
 pub extern "weft:abi/1" fn wl_provide(a: u32, al: u32, pred: u32, pred_len: u32, c: u32, cl: u32, prio: i32) void;

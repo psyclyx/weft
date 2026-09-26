@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const BindingFacet = @import("weft_input").BindingFacet;
 
 const Keymap = @This();
 
@@ -96,6 +97,12 @@ mode_tags: std.StringArrayHashMapUnmanaged(void) = .empty,
 /// presentation metadata, but it follows the same tier/owner rules as a bind
 /// so imported defaults cannot overwrite a config author's label.
 group_names: std.StringArrayHashMapUnmanaged(GroupEntry) = .empty,
+/// `mode\x00facet` → the mode a key is looked up in while the head is in
+/// `mode` and the entry has that facet (`BindingFacet`). A grammar's
+/// declaration, like `parents`: vim says its `normal` binds through
+/// `normal-source` in a document, helix says `helix-normal` binds through
+/// `helix-source`. Core pairs the facet with the mode and names neither.
+variants: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -128,6 +135,11 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v.owner);
     }
     self.group_names.deinit(gpa);
+    for (self.variants.keys(), self.variants.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    self.variants.deinit(gpa);
     self.* = .{};
 }
 
@@ -374,6 +386,29 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
         gop.key_ptr.* = try gpa.dupe(u8, mode);
     }
     gop.value_ptr.* = try gpa.dupe(u8, parent);
+}
+
+/// DECLARE that while the head is in `mode`, an entry with `facet` looks its
+/// keys up in `variant`. The variant is an ordinary mode: what it falls back
+/// to is the declarer's own `setFallback`. Re-declaring replaces.
+pub fn declareVariant(self: *Keymap, gpa: Allocator, mode: []const u8, facet: BindingFacet, variant: []const u8) Allocator.Error!void {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, @tagName(facet)) orelse return;
+    const gop = try self.variants.getOrPut(gpa, key);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = try gpa.dupe(u8, key);
+    }
+    gop.value_ptr.* = try gpa.dupe(u8, variant);
+}
+
+/// The mode `mode` binds through for `facet`, or null where nobody declared
+/// one — the caller then binds `mode` itself.
+pub fn variantFor(self: *const Keymap, mode: []const u8, facet: BindingFacet) ?[]const u8 {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, @tagName(facet)) orelse return null;
+    return self.variants.get(key);
 }
 
 /// The RESTING mode a buffer in `mode` should be remembered as: the root of the

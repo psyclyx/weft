@@ -254,6 +254,21 @@ pub fn hRestingPosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     ctx.keymap.tagMode(p.gpa, mode, "resting") catch {};
 }
 
+/// `binding_variant(facet, mode, variant)`: the grammar names the mode its
+/// `mode` binds through for an entry with `facet` — a document's code layer,
+/// a listing's structured-view layer. System-scoped like `set_fallback`, so
+/// legal from `init`; core stores the pairing and never names either side.
+pub fn hBindingVariant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const facet = input.BindingFacet.fromWire(@bitCast(args[0])) orelse return;
+    const mode = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(mode);
+    const variant = caller.readMemory(p.gpa, @intCast(args[3]), @intCast(args[4])) catch return;
+    defer p.gpa.free(variant);
+    p.activeCtx().keymap.declareVariant(p.gpa, mode, facet, variant) catch {};
+}
+
 /// `posture()`: read how the addressed entry rests (§10.4). The ONE read a
 /// grammar needs — it asks the DECLARATION, never what tool it is looking at.
 pub fn hPosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

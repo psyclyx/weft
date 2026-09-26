@@ -44,6 +44,7 @@ pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 /// `contract_data` is: a guest-side copy of a wire enum is exactly the drift
 /// this membrane exists to prevent.
 pub const Posture = @import("weft_input").Posture;
+pub const BindingFacet = @import("weft_input").BindingFacet;
 
 /// D2's schema language + marshaller (schema/root.zig), imported under the
 /// SAME name a guest's own code uses to reach it directly for a build-time-
@@ -689,6 +690,14 @@ pub fn exitToResting() void {
 /// a projection. Implies `restingMode`.
 pub fn restingPosture(rests_in: Posture, mode: []const u8) void {
     e.wl_resting_posture(@intFromEnum(rests_in), p(mode.ptr), @intCast(mode.len));
+}
+/// DECLARE that while the head is in `mode`, an entry with `facet` looks its
+/// keys up in `variant` — a layer over `mode` (give it a `setFallback` to
+/// `mode`) that never changes the head's actual mode. How a grammar gets
+/// code chords in documents only, or a structured-view group in listings
+/// only, without core knowing any of its mode names.
+pub fn bindingVariant(facet: BindingFacet, mode: []const u8, variant: []const u8) void {
+    e.wl_binding_variant(@intFromEnum(facet), p(mode.ptr), @intCast(mode.len), p(variant.ptr), @intCast(variant.len));
 }
 /// How the addressed entry RESTS under input (§10.4) — the one read a
 /// grammar needs. It asks the DECLARATION; no tool identity, mode name, or

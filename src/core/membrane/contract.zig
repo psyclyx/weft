@@ -160,6 +160,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_resting_mode", .handler = keymap.hRestingMode },
     .{ .name = "wl_exit_to_resting", .handler = keymap.hExitToResting },
     .{ .name = "wl_resting_posture", .handler = keymap.hRestingPosture },
+    .{ .name = "wl_binding_variant", .handler = keymap.hBindingVariant },
     .{ .name = "wl_posture", .handler = keymap.hPosture },
     .{ .name = "wl_declare_posture", .handler = keymap.hDeclarePosture },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },

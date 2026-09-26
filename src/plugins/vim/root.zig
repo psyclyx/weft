@@ -479,6 +479,10 @@ fn initExtra() void {
     // actual mode or its insert/visual transitions.
     weft.setFallback("normal-source", "normal");
     weft.setFallback("normal-structural", "normal");
+    // Which layer is which is vim's to say: core pairs the entry's facet
+    // with this declaration and knows neither mode name.
+    weft.bindingVariant(.source, "normal", "normal-source");
+    weft.bindingVariant(.structural, "normal", "normal-structural");
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
     // Only insert commits typed text. `normal`/`visual` need no opt-out:

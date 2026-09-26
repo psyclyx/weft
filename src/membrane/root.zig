@@ -237,6 +237,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_resting_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a buffer can rest in (`baseMode` stops there)" },
     .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "leave a transient mode back to the active buffer's resting mode" },
     .{ .name = "wl_resting_posture", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare the mode this grammar rests in for an input posture (§10.4)" },
+    .{ .name = "wl_binding_variant", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare the mode a grammar mode binds through for an entry facet (source document / structural)" },
     .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
     .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
@@ -553,9 +554,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 232;
+const max_import_count: usize = 233;
 const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 250;
+const max_semantic_operation_count: usize = 251;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -710,7 +711,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 231), census.imports);
+    try t.expectEqual(@as(usize, 233), census.imports);
     try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 249), census.semantic_operations);
+    try t.expectEqual(@as(usize, 251), census.semantic_operations);
 }

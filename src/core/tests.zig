@@ -1169,7 +1169,12 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
-    try t.expectEqualStrings("normal-source", host.buffers.active().bindingMode("normal"));
+    // A document binds through the source layer its grammar DECLARED; with no
+    // declaration the mode binds as itself. Core names neither mode.
+    try t.expectEqualStrings("normal", host.buffers.active().bindingMode(&host.keymap, "normal"));
+    try host.keymap.declareVariant(gpa, "normal", .source, "normal-source");
+    try t.expectEqualStrings("normal-source", host.buffers.active().bindingMode(&host.keymap, "normal"));
+    try t.expectEqualStrings("other", host.buffers.active().bindingMode(&host.keymap, "other"));
 }
 
 test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks" {

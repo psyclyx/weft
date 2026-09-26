@@ -25,6 +25,7 @@ const assert = std.debug.assert;
 const semantic = @import("weft_semantic");
 const Editor = @import("Editor.zig");
 const Posture = @import("weft_input").Posture;
+const BindingFacet = @import("weft_input").BindingFacet;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const task = @import("task.zig");
@@ -231,15 +232,22 @@ pub const Buffer = struct {
         return if (declared == .structural and field_focused) .field else declared;
     }
 
-    pub fn bindingMode(self: *Buffer, mode: []const u8) []const u8 {
+    /// The facet this entry's keys layer by, if any: a document binds its
+    /// `source` layer, an entry that takes no text its `structural` one.
+    /// Which MODE answers a facet is the grammar's declaration
+    /// (`Keymap.variantFor`), never this entry's business.
+    pub fn bindingFacet(self: *Buffer) ?BindingFacet {
         const document = self.source_keys or if (self.textEditor()) |ed| ed.backingPath() != null else false;
-        if (std.mem.eql(u8, mode, "normal")) {
-            if (document) return "normal-source";
-            if (self.posture(false) == .structural) return "normal-structural";
-        }
-        if (document and std.mem.eql(u8, mode, "helix-normal")) return "helix-source";
-        if (document and std.mem.eql(u8, mode, "emacs")) return "emacs-source";
-        return mode;
+        if (document) return .source;
+        if (self.posture(false) == .structural) return .structural;
+        return null;
+    }
+
+    /// The mode `mode`'s keys are looked up in for this entry: the declared
+    /// variant for its facet, else `mode` itself.
+    pub fn bindingMode(self: *Buffer, keymap: *const Keymap, mode: []const u8) []const u8 {
+        const facet = self.bindingFacet() orelse return mode;
+        return keymap.variantFor(mode, facet) orelse mode;
     }
 
     /// DECLARE this entry's posture, overriding the derivation. Declaring

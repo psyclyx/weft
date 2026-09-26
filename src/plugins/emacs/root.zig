@@ -138,6 +138,9 @@ fn initExtra() void {
     // why this needs no opt-out.
     weft.setFallback("emacs-structural", "emacs");
     weft.setFallback("emacs-source", "emacs");
+    // A document's code chords layer over `emacs` by declaration. The
+    // structural layer needs none: emacs RESTS in `emacs-structural` there.
+    weft.bindingVariant(.source, "emacs", "emacs-source");
     weft.restingPosture(.text, "emacs");
     weft.restingPosture(.structural, "emacs-structural");
     // The break-out capture can never take away — retained in both resting

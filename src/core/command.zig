@@ -199,9 +199,10 @@ pub const Context = struct {
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
         const mode = self.head.currentMode();
-        if (std.mem.eql(u8, mode, "normal") and self.head.semantic_focus.path() != null)
-            return "normal-structural";
-        return self.buffers.active().bindingMode(mode);
+        if (self.head.semantic_focus.path() != null) {
+            if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
+        }
+        return self.buffers.active().bindingMode(self.keymap, mode);
     }
 
     /// WHERE this dispatch's effects run (`doc/place.md`).
