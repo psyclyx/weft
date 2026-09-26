@@ -1,7 +1,7 @@
 //! ide — the CONVENTIONAL keymap (doc/configs.md §3.2) as a `.wasm` plugin,
-//! perms `{}` grant_max edit. Built in emacs's mold: ONE resting mode, `ide`,
-//! that falls back to the core `default` floor and commits typed text, plus
-//! `ide-structural` for entries that take no text. What it adds over the
+//! perms `{clipboard}` grant_max edit. Built in emacs's mold: ONE resting
+//! mode, `ide`, that falls back to the core `default` floor and commits typed
+//! text, plus `ide-structural` for entries that take no text. What it adds over the
 //! floor is the keyboard grammar every desktop editor shares: shift extends
 //! the selection and a plain move collapses it, Home is smart, Tab indents
 //! what is selected, C-c/C-x/C-v transfer.
@@ -13,6 +13,15 @@
 //! sidebar- or git-specific code here. Selection is core's mark model
 //! (mark..cursor); motions are composed from the `motions` plugin by name.
 //! Delete this plugin and weft is still modeless — `default` is the floor.
+//!
+//! The pointer is part of the grammar too: a double click selects a word, a
+//! triple click the line, and C-click adds a caret — each reading WHERE from
+//! the pointer facts of the gesture, never working a position out itself.
+//! Copy and cut put the unnamed register on the system clipboard as well,
+//! when the config grants `clipboard` and says the unnamed register mirrors
+//! it; paste then takes the clipboard when something else put different
+//! text there. Long moves (the ends of the buffer, a line
+//! by number, a definition) leave a jump behind for M-Left to return to.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -90,6 +99,22 @@ const home = Move(homeTarget);
 const end_of_line = Move(lineEnd);
 const doc_start = Move(docStart);
 const doc_end = Move(docEnd);
+
+/// C-Home / C-End: a long move, so where it started is a jump to come back to.
+fn docStartJump() void {
+    weft.jumpPush();
+    doc_start.plain();
+}
+fn docEndJump() void {
+    weft.jumpPush();
+    doc_end.plain();
+}
+
+/// F12: leave a jump here, then ask the language server where to go.
+fn gotoDefinition() void {
+    weft.jumpPush();
+    weft.run("goto-definition");
+}
 
 /// Left/Right with a selection collapse to its near edge instead of moving
 /// one further — the convention every desktop editor shares.
@@ -280,6 +305,39 @@ fn selectAllMatches() void {
     for (all_items[0..count]) |s| weft.flash(s.anchor, s.head);
 }
 
+// ── The pointer ──────────────────────────────────────────────────────
+// Where a gesture happened is a FACT of its dispatch (`weft.pointer()`): the
+// byte offset under the pointer in text, or none over a scene. The single
+// click before a double click already focused the pane and placed the caret
+// (`pointer-click`, the floor's `mouse-1`); these only widen what it did.
+
+fn pointerOffset() ?usize {
+    const p = weft.pointer() orelse return null;
+    return p.offset;
+}
+
+/// double-mouse-1: select the word under the pointer. Over a scene (a
+/// listing row) there is no word: a double click opens the row instead.
+fn selectWordAtPointer() void {
+    const off = pointerOffset() orelse return weft.run("pointer-activate");
+    const w = wordAround(off) orelse return;
+    weft.setSelection(w);
+}
+
+/// triple-mouse-1: select the line under the pointer, with its line break.
+fn selectLineAtPointer() void {
+    const off = pointerOffset() orelse return;
+    const l = weft.lineAt(off);
+    weft.setSelection(.{ .start = l.start, .end = if (l.end < weft.byteLen()) l.end + 1 else l.end });
+}
+
+/// C-mouse-1: add a caret at the pointer, keeping the ones already there.
+fn addCaretAtPointer() void {
+    weft.run("pointer-focus-pane");
+    const off = pointerOffset() orelse return;
+    _ = weft.addSelection(.{ .anchor = off, .head = off });
+}
+
 // ── Line blocks ──────────────────────────────────────────────────────
 
 /// The whole lines the selection covers, or the cursor's line. A selection
@@ -436,6 +494,21 @@ fn wholeLine() weft.Range {
     return .{ .start = l.start, .end = if (l.end < weft.byteLen()) l.end + 1 else l.end };
 }
 
+/// Whether the unnamed register mirrors the system clipboard: the config
+/// says so (`weft.set("ide", "clipboard", "unnamed")`) beside the grant that
+/// makes it possible. Asked rather than assumed, because the clipboard doors
+/// TRAP without the grant — and C-c, C-x and C-v must work either way.
+fn mirrorsClipboard() bool {
+    return std.mem.eql(u8, weft.config("clipboard"), "unnamed");
+}
+
+/// The unnamed register onto the system clipboard — ide's register IS the
+/// clipboard's twin (vim keeps `"+` apart instead).
+fn mirrorToClipboard() void {
+    if (!mirrorsClipboard()) return;
+    _ = weft.clipboardSet(weft.registerTextIn(0));
+}
+
 fn copy() void {
     if (weft.selection()) |s| {
         weft.yankRange(s.start, s.end, false);
@@ -445,15 +518,18 @@ fn copy() void {
         weft.yankRange(l.start, l.end, true);
         weft.flash(l.start, l.end);
     }
+    mirrorToClipboard();
 }
 
 fn cut() void {
     if (weft.selection()) |s| {
         weft.yankRange(s.start, s.end, false);
+        mirrorToClipboard();
         weft.edit(s, "");
     } else {
         const l = wholeLine();
         weft.yankRange(l.start, l.end, true);
+        mirrorToClipboard();
         weft.edit(l, "");
     }
 }
@@ -462,7 +538,17 @@ var paste_buf: [(1 << 16) + 1]u8 = undefined;
 
 /// C-v: replace the selection with the register, or insert it at the cursor.
 /// A linewise register lands above the cursor's line, whole.
+///
+/// When the clipboard holds something else — text another program copied —
+/// that is what the user means: it goes in at every selection, replacing
+/// each, as typing would. When it still holds what the register holds, the
+/// register pastes, which keeps a cut-and-paste a MOVE (its ferried ids)
+/// and a linewise yank linewise.
 fn paste() void {
+    if (mirrorsClipboard()) if (weft.clipboardGet()) |clip| if (clip.len > 0 and !std.mem.eql(u8, clip, weft.registerTextIn(0))) {
+        weft.runStr("insert-text", clip);
+        return;
+    };
     const txt = weft.registerText();
     if (txt.len == 0) return;
     if (weft.selection()) |s| {
@@ -511,8 +597,10 @@ fn gotoLine() void {
     weft.pickEnd();
 }
 
-/// Put the cursor at the start of 1-based line `n`, clamped to the last.
+/// Put the cursor at the start of 1-based line `n`, clamped to the last,
+/// leaving a jump where it was.
 fn jumpToLine(n: usize) void {
+    weft.jumpPush();
     var off: usize = 0;
     var line: usize = 1;
     const len = weft.byteLen();
@@ -562,8 +650,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-word-right", .call = word_right.plain, .summary = "move to the next word" },
     .{ .name = "ide-home", .call = home.plain, .summary = "move to the first non-blank, then to column 0" },
     .{ .name = "ide-end", .call = end_of_line.plain, .summary = "move to the end of the line" },
-    .{ .name = "ide-doc-start", .call = doc_start.plain, .summary = "move to the start of the buffer" },
-    .{ .name = "ide-doc-end", .call = doc_end.plain, .summary = "move to the end of the buffer" },
+    .{ .name = "ide-doc-start", .call = docStartJump, .summary = "move to the start of the buffer (a jump)" },
+    .{ .name = "ide-doc-end", .call = docEndJump, .summary = "move to the end of the buffer (a jump)" },
     .{ .name = "ide-select-left", .call = selectLeft, .summary = "extend the selection left" },
     .{ .name = "ide-select-right", .call = selectRight, .summary = "extend the selection right" },
     .{ .name = "ide-select-up", .call = selectUp, .summary = "extend the selection up" },
@@ -592,6 +680,10 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-toggle-sidebar", .call = toggleSidebar, .summary = "show or hide the docked sidebar" },
     .{ .name = "ide-add-next-match", .call = addNextMatch, .summary = "select the word, then add the next occurrence of the selection" },
     .{ .name = "ide-select-all-matches", .call = selectAllMatches, .summary = "select every occurrence of the selection" },
+    .{ .name = "ide-select-word-at-pointer", .call = selectWordAtPointer, .summary = "select the word under the pointer (a scene row: open it)" },
+    .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .summary = "select the line under the pointer" },
+    .{ .name = "ide-add-caret-at-pointer", .call = addCaretAtPointer, .summary = "add a caret at the pointer" },
+    .{ .name = "ide-goto-definition", .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
 };
 
 fn initExtra() void {
@@ -646,18 +738,22 @@ fn initExtra() void {
     // Text-only keys: no standard word names these yet, so they bind the
     // text command outright. S-Tab arrives as ISO_Left_Tab on most layouts.
     const binds = [_][2][]const u8{
-        .{ "S-Left", "ide-select-left" },        .{ "S-Right", "ide-select-right" },
-        .{ "S-Up", "ide-select-up" },            .{ "S-Down", "ide-select-down" },
-        .{ "C-S-Left", "ide-select-word-left" }, .{ "C-S-Right", "ide-select-word-right" },
-        .{ "S-Home", "ide-select-home" },        .{ "S-End", "ide-select-end" },
-        .{ "C-Home", "ide-doc-start" },          .{ "C-End", "ide-doc-end" },
-        .{ "C-S-Home", "ide-select-doc-start" }, .{ "C-S-End", "ide-select-doc-end" },
-        .{ "C-a", "ide-select-all" },            .{ "Escape", "ide-escape" },
-        .{ "S-Tab", "ide-dedent" },              .{ "ISO_Left_Tab", "ide-dedent" },
-        .{ "C-slash", "comment-selection" },     .{ "M-Up", "ide-move-line-up" },
-        .{ "M-Down", "ide-move-line-down" },     .{ "C-S-k", "ide-delete-line" },
-        .{ "C-Return", "ide-open-below" },       .{ "C-S-Return", "ide-open-above" },
-        .{ "C-d", "ide-add-next-match" },        .{ "C-S-l", "ide-select-all-matches" },
+        .{ "S-Left", "ide-select-left" },                    .{ "S-Right", "ide-select-right" },
+        .{ "S-Up", "ide-select-up" },                        .{ "S-Down", "ide-select-down" },
+        .{ "C-S-Left", "ide-select-word-left" },             .{ "C-S-Right", "ide-select-word-right" },
+        .{ "S-Home", "ide-select-home" },                    .{ "S-End", "ide-select-end" },
+        .{ "C-Home", "ide-doc-start" },                      .{ "C-End", "ide-doc-end" },
+        .{ "C-S-Home", "ide-select-doc-start" },             .{ "C-S-End", "ide-select-doc-end" },
+        .{ "C-a", "ide-select-all" },                        .{ "Escape", "ide-escape" },
+        .{ "S-Tab", "ide-dedent" },                          .{ "ISO_Left_Tab", "ide-dedent" },
+        .{ "C-slash", "comment-selection" },                 .{ "M-Up", "ide-move-line-up" },
+        .{ "M-Down", "ide-move-line-down" },                 .{ "C-S-k", "ide-delete-line" },
+        .{ "C-Return", "ide-open-below" },                   .{ "C-S-Return", "ide-open-above" },
+        .{ "C-d", "ide-add-next-match" },                    .{ "C-S-l", "ide-select-all-matches" },
+        // The pointer's share of the grammar: what a second and third quick
+        // click mean, and C-click's extra caret.
+        .{ "double-mouse-1", "ide-select-word-at-pointer" }, .{ "triple-mouse-1", "ide-select-line-at-pointer" },
+        .{ "C-mouse-1", "ide-add-caret-at-pointer" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
 
@@ -671,5 +767,7 @@ fn initExtra() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
+    // `.clipboard` is declared for the approval surface; only the config's
+    // `weft.grant("ide", "clipboard")` confers it.
+    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
 }

@@ -64,6 +64,7 @@ weft.plugin("lsp");         // language server client (F2, F12, S-F12, C-.)
 weft.plugin("debug");       // breakpoints (F9)
 weft.plugin("marginalia");  // pick-row annotations
 weft.plugin("linenumbers"); // a line-number gutter on text entries
+weft.plugin("contextmenu"); // mouse-3: what the context under the pointer offers
 
 // The same breadth config.js writes down, for the same reasons: the browser
 // goes where you point it, and the two `.js` plugins hold exactly what these
@@ -71,8 +72,10 @@ weft.plugin("linenumbers"); // a line-number gutter on text entries
 weft.grant("files", "fs_read",  { root: "/" });
 weft.grant("files", "fs_write", { root: "/" });
 // C-c / C-x / C-v mirror the unnamed register into the system clipboard,
-// which only config can grant.
+// which only config can grant — and which register mirrors it is the
+// grammar's setting (vim keeps `"+` apart instead).
 weft.grant("ide", "clipboard");
+weft.set("ide", "clipboard", "unnamed");
 weft.grant("dap", "proc");
 weft.plugin("dap.js");         // DAP client: F5/F10/F11
 weft.grant("acp", "proc");
@@ -86,6 +89,11 @@ weft.use("defaults"); // picker and which-key keys
 // an IDE looks like, and it is the second context every key below must make
 // sense in. C-b hides and shows it.
 weft.use("sidebar");
+// The adaptive toolbar: one row along the top of the primary context's
+// offers — a source file's build and format, a files listing's "New file",
+// git's stage and commit — plus the pinned entries below. It takes no
+// focus, so clicking it acts on the editor and leaves the keys there.
+weft.use("toolbar");
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
@@ -96,26 +104,53 @@ weft.set("linenumbers", "style", "absolute"); // the conventional gutter
 weft.set("palette", "arguments", "ask");
 // Which declared viewport C-b toggles — the fragment above calls it this.
 weft.set("ide", "sidebar", "sidebar");
+// Always on the toolbar, first: an intention shows its live availability
+// (greyed, with the reason, when it cannot run); a command is `name\tLabel`.
+weft.set("toolbar", "pinned", [
+  "std.persistence.save\tSave",
+  "std.history.undo\tUndo",
+  "std.history.redo\tRedo",
+  "pick-commands\tPalette",
+]);
 
 // ── Actions: one key, a provider per context ─────────────────────────
-// `eval` and `format` as config.js declares them.
-weft.action("eval");
-weft.provide("eval", {}, "run-line");
-weft.provide("eval", { lang: "zig" }, "make-build");
-weft.provide("eval", { lang: "py" }, "lang-run");
-weft.action("format");
-weft.provide("format", {}, "format-buffer");
+// Spelled as intentions (`plugin.ide.*`), not flat names like config.js's
+// `eval`: an intention is an OFFER, so the same word a key binds is what the
+// toolbar and the context menu list, labelled and grouped by the options
+// object of whichever provider wins here. A flat action name is a command
+// alias and no chrome ever sees it.
+//
+// "In source" is a fact, said twice: a text entry whose bytes are FILES,
+// here or on a remote host — never a tool's projection (a git status buffer
+// is text too, but its locality is `tool`), and never a listing.
+function provideInSource(action, when, cmd, opts) {
+  for (const locality of ["local", "remote"])
+    weft.provide(action, Object.assign({ posture: "text", locality: locality }, when), cmd, opts);
+}
+
+// Build/run by language: the language's provider says more than the
+// fallback (one fact more), so it wins where it applies.
+weft.action("plugin.ide.build");
+provideInSource("plugin.ide.build", {}, "run-line", { label: "Run line", group: "run", order: 1 });
+provideInSource("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Build", group: "build", order: 1 });
+provideInSource("plugin.ide.build", { lang: "py" }, "lang-run", { label: "Run", group: "run", order: 1 });
+weft.action("plugin.ide.test");
+provideInSource("plugin.ide.test", { lang: "zig" }, "make-test", { label: "Test", group: "build", order: 2 });
+weft.action("plugin.ide.debug");
+provideInSource("plugin.ide.debug", { lang: "zig" }, "debug-start", { label: "Debug", group: "build", order: 3 });
+weft.action("plugin.ide.format");
+provideInSource("plugin.ide.format", {}, "format-buffer", { label: "Format", group: "edit", order: 10 });
 
 // F2 renames what the focus is ON: the symbol under the cursor in source (the
 // language server), the row's name in a listing. The listing provider keys on
 // the entry's TOOL identity — the files listing, whose rows' names are fields
 // — not on the mode a text-less entry rests in: that was a grammar detail
 // standing in for the fact, and it also claimed git's rows, whose names are
-// not fields. A git status buffer keeps the source default. The options object
-// is how the offer is presented where it wins (a toolbar's label).
-weft.action("rename-here");
-weft.provide("rename-here", {}, "rename", { label: "Rename", group: "edit" });
-weft.provide("rename-here", { tool: "files" }, "field-edit", { label: "Rename", group: "edit" });
+// not fields. A git status buffer is neither source nor the files tool, so
+// it is offered no rename at all.
+weft.action("plugin.ide.rename");
+provideInSource("plugin.ide.rename", {}, "rename", { label: "Rename", group: "edit", order: 11 });
+weft.provide("plugin.ide.rename", { tool: "files" }, "field-edit", { label: "Rename", group: "edit", order: 11 });
 
 // ── Keys ─────────────────────────────────────────────────────────────
 // The GRAMMAR binds the editing keys (arrows, shift-selection, Home/End, Tab,
@@ -143,6 +178,22 @@ bindWorkspace("C-w", "close");
 bindWorkspace("C-Tab", "buffer-next");
 bindWorkspace("C-b", "ide-toggle-sidebar");
 
+// The pointer. mouse-3 opens the context menu for whatever is under it — a
+// row of the sidebar, the text, a git row — and S-F10 / Menu open it at the
+// caret. (The grammar binds what double, triple and C-clicks mean.)
+bindWorkspace("mouse-3", "contextmenu");
+bindWorkspace("S-F10", "contextmenu-at-caret");
+bindWorkspace("Menu", "contextmenu-at-caret");
+
+// Back and forward along the jumplist: M-Left / M-Right, and VS Code's
+// C-M-minus / C-S-minus. A view with its own history (a listing) answers
+// back first.
+bindWorkspace("M-Left", ["std.navigation.back", "jump-back"]);
+bindWorkspace("M-Right", "jump-forward");
+bindWorkspace("C-M-minus", ["std.navigation.back", "jump-back"]);
+bindWorkspace("C-S-minus", "jump-forward");
+bindWorkspace("C-underscore", "jump-forward");
+
 // Search and jump. C-f opens the find bar and C-h the same bar with a
 // replacement field (doc/configs.md §3.4); F3 / S-F3 step through the last
 // search's matches whether the bar is open or not. The bar's own keys
@@ -154,13 +205,13 @@ weft.bind("ide", "S-F3", "find-prev");
 weft.bind("ide", "C-g", "goto-line");
 
 // The language server, in source.
-weft.bind("ide", "F2", "rename-here");
-weft.bind("ide", "F12", "goto-definition");
+weft.bind("ide", "F2", "plugin.ide.rename");
+weft.bind("ide", "F12", "ide-goto-definition");
 weft.bind("ide", "S-F12", "references");
 weft.bind("ide", "C-period", "code-actions");
 weft.bind("ide", "C-space", "complete");
-weft.bind("ide", "C-S-b", "eval");   // build / run, by language
-weft.bind("ide", "M-S-f", "format"); // format the buffer
+weft.bind("ide", "C-S-b", "plugin.ide.build");   // build / run, by language
+weft.bind("ide", "M-S-f", "plugin.ide.format");  // format the buffer
 
 // The debugger: the IDE-standard F-keys.
 bindWorkspace("F5", "debug-continue");

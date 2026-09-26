@@ -25,7 +25,10 @@
 //                                    {mode, lang} at fire time
 //   weft.semanticAction(name)      — declare an open focused-view action command
 //   weft.viewport(name, attrs)     — compose the workspace: a pane's attributes
-//   weft.present(viewport, {subject}) — show a resource in one
+//                                    {edge, extent (a share, or {rows}), cycles,
+//                                    persistent, followFocus, takesFocus, statusLine}
+//   weft.present(viewport, {subject} | {command}) — show a resource in one, or
+//                                    what a command leaves active (a plugin's entry)
 //   weft.set(owner, key, value)    — a value binding; every key has an OWNER
 //   weft.menu(name)                — declare a prefix-menu keymap mode
 //   weft.statusSegment(text, role, prio) — a static status-line segment
@@ -81,6 +84,7 @@ weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's f
 weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
 weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
 weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
+weft.plugin("contextmenu"); // mouse-3: what the thing under the pointer offers
 
 // ── BREADTH, written down ────────────────────────────────────────────
 // A plugin that asks for `fs_read`/`fs_write` in describe() and gets no
@@ -210,6 +214,10 @@ weft.set("palette", "signature", "on");     // show each row's <parameters>
 // persistence, and going back.
 
 weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
+// The pointer's secondary button opens a menu of what the thing under it
+// offers — a row, the text, a git hunk — in any mode, vim's included: the
+// menu's own keys (Up/Down/Return/Escape) are its interaction's, not a mode.
+weft.bind("global", "mouse-3", "contextmenu");
 
 // The keymap derives groups from longer chords. Give those prefixes names for
 // which-key; an unnamed prefix intentionally falls back to "+prefix".

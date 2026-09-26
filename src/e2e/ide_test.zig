@@ -24,12 +24,12 @@ const ConfigLoader = h.ConfigLoader;
 
 /// A weft booted from the real config/ide.js in a throwaway project that is
 /// the process cwd — the ide.js twin of `h.App`.
-const IdeApp = struct {
+pub const IdeApp = struct {
     proj: Project = undefined,
     ed: Editor = undefined,
     loader: ConfigLoader = undefined,
 
-    fn init(self: *IdeApp, gpa: std.mem.Allocator) !void {
+    pub fn init(self: *IdeApp, gpa: std.mem.Allocator) !void {
         try self.proj.init(gpa);
         errdefer self.proj.deinit();
         try Editor.init(gpa, &self.ed);
@@ -43,7 +43,7 @@ const IdeApp = struct {
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
     }
 
-    fn deinit(self: *IdeApp) void {
+    pub fn deinit(self: *IdeApp) void {
         self.loader.deinit();
         self.ed.deinit();
         self.proj.deinit();
@@ -58,11 +58,11 @@ fn embedderOwned(command: []const u8) bool {
         std.mem.startsWith(u8, command, "scroll-");
 }
 
-fn textEd(ed: *Editor) *core.Editor {
+pub fn textEd(ed: *Editor) *core.Editor {
     return ed.buffers.active().textEditor().?;
 }
 
-fn expectText(ed: *Editor, want: []const u8) !void {
+pub fn expectText(ed: *Editor, want: []const u8) !void {
     const got = try ed.textAlloc();
     defer ed.gpa.free(got);
     try t.expectEqualStrings(want, got);
@@ -80,7 +80,7 @@ fn selected(ed: *Editor) ?Span {
 }
 
 /// Open `name` holding `body` as the focused text entry.
-fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
+pub fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
     ed.runStr("open", name);
     try t.expectEqualStrings("ide", ed.mode());
@@ -125,7 +125,7 @@ fn expectBlocked(ed: *Editor, key: []const u8, intention: []const u8, reason: []
 
 /// Whether anything offers `intention` in the active context at all —
 /// absence (nonapplicable), as distinct from a disabled offer.
-fn offered(ed: *Editor, intention: []const u8) bool {
+pub fn offered(ed: *Editor, intention: []const u8) bool {
     const plane = ed.ctx.intent orelse return false;
     const id = plane.catalog.findIntention(intention) orelse return false;
     const snap = plane.snapshotFor(ed.ctx) orelse return false;
@@ -207,9 +207,10 @@ test "e2e/ide: ide.js boots whole, every bound key is answerable, and the sideba
 
     // The sidebar is open from the first frame: the fragment's declaration,
     // realized by the ordinary layout phase, with the editor still focused.
+    // Three panes: the editor, the sidebar, and the toolbar along the top.
     const editor_entry = ed.buffers.active_id;
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 3), ed.paneCount());
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
     const listing = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
@@ -221,11 +222,11 @@ test "e2e/ide: ide.js boots whole, every bound key is answerable, and the sideba
     // no command anywhere knows the word "sidebar" but the config's value.
     ed.press("C-b", "");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 1), ed.paneCount());
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
     try t.expect(ed.win_layout.dockedPanel(.left) == null);
     ed.press("C-b", "");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 3), ed.paneCount());
     const again = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const shown = ed.buffers.get(again.pane().buffer_id) orelse return error.NoSidebarEntry;
     try t.expect(std.mem.startsWith(u8, shown.name, "files:"));
@@ -367,7 +368,7 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectReady(ed, "C-S-z", "std.history.redo", "core.editing");
     try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
     // F2 is an ACTION: in source it is the language server's rename.
-    try expectActionWinner(ed, "rename-here", "rename");
+    try expectActionWinner(ed, "plugin.ide.rename", "rename");
 
     // ── The files sidebar: the same keys, answered by the listing. ──
     ed.run("window-focus-left");
@@ -387,7 +388,7 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectReady(ed, "C-v", "std.transfer.paste", "core.view");
     // …and F2 renames the ROW, through the config provider keyed on this
     // entry's tool identity (a `weft.provide` fact beyond mode and lang).
-    try expectActionWinner(ed, "rename-here", "field-edit");
+    try expectActionWinner(ed, "plugin.ide.rename", "field-edit");
     // Whether the persistence word applies is the `save` providers' call, not
     // core's: the files listing provides one (it applies the draft), so C-s
     // is offered here and runs THAT — while a git listing, below, provides
@@ -419,9 +420,10 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try t.expect(ed.keymap.lookupArms("git", "C-s") != null);
     try t.expect(!offered(ed, "std.persistence.save"));
     try expectCommand(ed, "C-s", "save");
-    // F2's config providers: git's rows are not the files tool, so the source
-    // default stands — the same action, a third answer.
-    try expectActionWinner(ed, "rename-here", "rename");
+    // F2's config providers: git's rows are not the files tool, and a status
+    // listing is not text, so neither answers — the same action, a third
+    // answer: not offered here at all (so no toolbar shows it either).
+    try t.expect(!offered(ed, "plugin.ide.rename"));
 }
 
 test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus, and say when that changes" {
@@ -558,4 +560,90 @@ test "e2e/ide: C-d adds the next occurrence, C-S-l takes them all, and typing ed
     try expectText(ed, "Y bar Y baz Y\n");
     ed.press("C-z", "");
     try expectText(ed, "foo bar foo baz foo\n");
+}
+
+test "e2e/ide: a double click selects a word, a triple click the line, and C-click adds a caret" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "p.txt", "alpha beta gamma\nsecond line\n");
+    ed.applyWindow();
+
+    const at = ed.pointAt(7).?; // inside `beta`
+    ed.click(at);
+    try t.expect(selected(ed) == null);
+    ed.clickAgain(at);
+    try t.expectEqual(Span{ .start = 6, .end = 10 }, selected(ed).?);
+    ed.clickAgain(at);
+    try t.expectEqual(Span{ .start = 0, .end = 17 }, selected(ed).?);
+
+    // A plain click, then C-click elsewhere: two carets, typing at both.
+    ed.click(ed.pointAt(0).?);
+    ed.clickWith(ed.pointAt(17).?, 1, .{ .ctrl = true });
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    ed.typeText(">");
+    try expectText(ed, ">alpha beta gamma\n>second line\n");
+    ed.press("C-z", "");
+    try expectText(ed, "alpha beta gamma\nsecond line\n");
+}
+
+test "e2e/ide: C-c / C-x / C-v ride the system clipboard, and text copied elsewhere pastes" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "q.txt", "one two\n");
+
+    // Select `one`, copy: the clipboard has it.
+    ed.press("Home", "");
+    for (0..3) |_| ed.press("S-Right", "");
+    ed.press("C-c", "");
+    try t.expectEqualStrings("one", ed.head.clipboard.text());
+    // Paste it at the end of the line: the register and the clipboard agree,
+    // so it is the register that pastes.
+    ed.press("End", "");
+    ed.press("C-v", "");
+    try expectText(ed, "one twoone\n");
+
+    // Something else took the clipboard: C-v pastes THAT.
+    try ed.head.clipboard.set(gpa, "EXT");
+    ed.press("C-v", "");
+    try expectText(ed, "one twooneEXT\n");
+
+    // Cut puts the text on the clipboard as well.
+    ed.press("Home", "");
+    for (0..3) |_| ed.press("S-Right", "");
+    ed.press("C-x", "");
+    try expectText(ed, " twooneEXT\n");
+    try t.expectEqualStrings("one", ed.head.clipboard.text());
+}
+
+test "e2e/ide: long moves leave a jump — M-Left comes back from C-End and from C-g" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "r.txt", "l1\nl2\nl3\nl4\nl5\n");
+
+    ed.press("Down", "");
+    const from = cursor(ed);
+    ed.press("C-End", "");
+    try t.expect(cursor(ed) != from);
+    ed.press("M-Left", "");
+    try t.expectEqual(from, cursor(ed));
+    ed.press("M-Right", "");
+    try t.expect(cursor(ed) != from);
+
+    // C-g 4: line 4, and back.
+    ed.press("C-Home", "");
+    ed.press("C-g", "");
+    ed.typeText("4");
+    ed.press("Return", "");
+    try t.expectEqual(@as(usize, 9), cursor(ed));
+    ed.press("M-Left", "");
+    try t.expectEqual(@as(usize, 0), cursor(ed));
 }

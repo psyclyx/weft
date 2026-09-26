@@ -36,4 +36,5 @@ test {
     _ = @import("find_test.zig");
     _ = @import("helix_test.zig");
     _ = @import("history_test.zig");
+    _ = @import("chrome_test.zig");
 }
