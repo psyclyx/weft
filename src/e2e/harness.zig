@@ -1389,6 +1389,13 @@ pub fn loadHelix(ed: *Editor) !void {
     try setResting(ed); // helix init set "helix-normal"
 }
 
+/// vim alone, over the set another grammar already loaded (`loadHelix`), for
+/// a test that crosses grammars: the head rests in `normal` afterwards.
+pub fn loadVimAlongside(ed: *Editor) !void {
+    try ed.load("vim", guest.vim);
+    try setResting(ed);
+}
+
 /// A standard vim editing set (synchronous plugins only — no subprocess).
 pub fn loadVim(ed: *Editor) !void {
     try ed.load("edit", guest.edit);

@@ -61,13 +61,14 @@ pub fn caret(off: usize) Sel {
     return .{ .anchor = off, .head = off };
 }
 
-/// Briefly mark what an operation produced.
-/// TODO(doc/configs.md §0.4): flash every selection once the flash is a set;
-/// today it takes one range, so it marks the primary.
-pub fn flashPrimary() void {
-    if (n == 0) return;
-    const r = primarySpan();
-    weft.flash(r.start, r.end);
+/// Briefly mark what an operation produced or acted on: every selection, as
+/// one flash (doc/configs.md §0.4). Reads the set afresh — after an edit the
+/// selections are wherever core's anchors carried them.
+pub fn flashAll() void {
+    if (!load()) return;
+    var ranges: [max]weft.Range = undefined;
+    for (items[0..n], ranges[0..n]) |s, *r| r.* = span(s);
+    weft.flashRanges(ranges[0..n]);
 }
 
 // ── Motions over every selection ────────────────────────────────────────

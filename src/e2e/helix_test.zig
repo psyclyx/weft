@@ -316,3 +316,352 @@ test "e2e/helix: ]f and A-o/A-i select over the tree, per selection" {
     ed.press("M-i", "");
     try expectSelections(ed, &one);
 }
+
+// ── Phase 4: regex over the selections, and search ─────────────────────
+
+/// Type a pattern into the open regex prompt and accept it.
+fn answer(ed: *Editor, pattern: []const u8) void {
+    keys(ed, pattern);
+    ed.press("Return", "");
+}
+
+/// The `/` register's text: what the last search, by any grammar, set.
+fn searchRegister(ed: *Editor) []const u8 {
+    return (ed.register.get(core.register.Bank.search) orelse return "").slice();
+}
+
+test "e2e/helix: s selects matches, S splits, K and A-K keep and drop — previewed as typed" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                          0       8       16
+    try openFile(ed, "re.txt", "foo bar\nbaz foo\nqux\n");
+
+    // `s` selects every match inside the selection — already while typing.
+    keys(ed, "%s");
+    try t.expectEqualStrings("helix-regex", ed.mode());
+    keys(ed, "fo");
+    try expectSelections(ed, &.{ .{ 0, 2 }, .{ 12, 14 } });
+    keys(ed, "o");
+    ed.press("Return", "");
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    try expectSelections(ed, &.{ .{ 0, 3 }, .{ 12, 15 } });
+
+    // Escape puts back the set the prompt opened on.
+    keys(ed, "%s");
+    keys(ed, "qu");
+    try expectSelections(ed, &.{.{ 16, 18 }});
+    ed.press("Escape", "");
+    try expectSelections(ed, &.{.{ 0, 20 }});
+
+    // `S` splits on the matches: the pieces between them are selected.
+    keys(ed, "S");
+    answer(ed, " ");
+    try expectSelections(ed, &.{ .{ 0, 3 }, .{ 4, 11 }, .{ 12, 20 } });
+
+    // One selection per line, then keep those with a "ba", then drop the one
+    // starting with "baz".
+    keys(ed, "%");
+    ed.press("M-s", "");
+    try expectSelections(ed, &.{ .{ 0, 7 }, .{ 8, 15 }, .{ 16, 19 } });
+    keys(ed, "K");
+    answer(ed, "ba");
+    try expectSelections(ed, &.{ .{ 0, 7 }, .{ 8, 15 } });
+    ed.press("M-K", "");
+    answer(ed, "^baz");
+    try expectSelections(ed, &.{.{ 0, 7 }});
+
+    // A pattern that matches nothing leaves the set alone, and says so.
+    keys(ed, "s");
+    answer(ed, "zzz");
+    try expectSelections(ed, &.{.{ 0, 7 }});
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "nothing selected") != null);
+}
+
+test "e2e/helix: / ? n N search with smart case, wrap around, and extend in select mode" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                            0     6    11    17   22
+    try openFile(ed, "find.txt", "Alpha beta\nalpha Beta\nALPHA\n");
+
+    // A lowercase pattern folds case; the search starts past the caret.
+    keys(ed, "/");
+    answer(ed, "alpha");
+    try expectSelections(ed, &.{.{ 11, 16 }});
+    try t.expectEqualStrings("alpha", searchRegister(ed));
+    keys(ed, "n");
+    try expectSelections(ed, &.{.{ 22, 27 }});
+    keys(ed, "n"); // past the last one: back to the first
+    try expectSelections(ed, &.{.{ 0, 5 }});
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "Wrapped") != null);
+    keys(ed, "N"); // and back over the start
+    try expectSelections(ed, &.{.{ 22, 27 }});
+
+    // A capital makes it case sensitive: only "Beta" matches, not "beta".
+    keys(ed, "?");
+    answer(ed, "Beta");
+    try expectSelections(ed, &.{.{ 17, 21 }});
+    keys(ed, "n");
+    try expectSelections(ed, &.{.{ 17, 21 }});
+
+    // In select mode, `n` adds the next match beside the others.
+    keys(ed, "/");
+    answer(ed, "alpha");
+    try expectSelections(ed, &.{.{ 22, 27 }});
+    keys(ed, "v");
+    keys(ed, "n");
+    try t.expectEqualStrings("helix-select", ed.mode());
+    try expectSelections(ed, &.{ .{ 0, 5 }, .{ 22, 27 } });
+    ed.press("Escape", "");
+}
+
+test "e2e/helix: * searches for the selection's word, A-* for its bare text" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                            0   4      11
+    try openFile(ed, "star.txt", "foo foobar foo\n");
+
+    keys(ed, "e");
+    try expectSelections(ed, &.{.{ 0, 3 }});
+    keys(ed, "*");
+    try t.expectEqualStrings("\\bfoo\\b", searchRegister(ed));
+    keys(ed, "n"); // not "foobar": the next whole word
+    try expectSelections(ed, &.{.{ 11, 14 }});
+
+    keys(ed, "gge");
+    ed.press("M-asterisk", "");
+    try t.expectEqualStrings("foo", searchRegister(ed));
+    keys(ed, "n");
+    try expectSelections(ed, &.{.{ 4, 7 }});
+}
+
+test "e2e/helix: the / register is shared — vim pastes the pattern helix searched for" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "shared.txt", "one two\n");
+
+    keys(ed, "/");
+    answer(ed, "tw.");
+    try expectSelections(ed, &.{.{ 4, 7 }});
+    // helix reads it back too: `"/` names the same register.
+    keys(ed, "gg\"/P");
+    try expectText(ed, "tw.one two\n");
+    keys(ed, "u");
+    try expectText(ed, "one two\n");
+
+    // The same register, read by the other grammar: vim's `"/p`.
+    try h.loadVimAlongside(ed);
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.run("vim-goto-top");
+    ed.press("quotedbl", "");
+    ed.press("slash", "");
+    ed.press("p", ""); // weft's vim puts a fragment at the caret
+    try expectText(ed, "tw.one two\n");
+}
+
+// ── gw, &, mi/ma on the tree, flash, the caret ──────────────────────────
+
+test "e2e/helix: gw labels the words in view, and two keys select one" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                          0     6    11    17
+    try openFile(ed, "gw.txt", "alpha beta gamma\ndelta a\n");
+    // A frame reports the visible range the labels cover.
+    gpa.free(try ed.renderComposite());
+
+    keys(ed, "gw");
+    try t.expectEqualStrings("helix-goto-word", ed.mode());
+    const doc = &textEd(ed).doc;
+    {
+        const layer = ed.caps.layers.find(doc, "helix-goto-word") orelse return error.NoLabels;
+        // Four words: a lone "a" is not one.
+        try t.expectEqual(@as(usize, 4), layer.spanCount());
+        const first = layer.resolvedSpan(0);
+        try t.expectEqual(core.layers.Placement.overlay, first.placement);
+        try t.expectEqual(@as(usize, 0), first.start);
+        try t.expectEqualStrings("aa", first.message);
+    }
+    // The first key narrows: the survivors show what is left to type.
+    keys(ed, "a");
+    try t.expectEqualStrings("helix-goto-word", ed.mode());
+    {
+        const layer = ed.caps.layers.find(doc, "helix-goto-word") orelse return error.NoLabels;
+        try t.expectEqual(@as(usize, 4), layer.spanCount());
+        try t.expectEqualStrings("a", layer.resolvedSpan(0).message);
+    }
+    keys(ed, "c"); // alpha aa, beta ab, gamma ac
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    try expectSelections(ed, &.{.{ 11, 16 }});
+    try t.expectEqual(@as(usize, 0), (ed.caps.layers.find(doc, "helix-goto-word") orelse return).spanCount());
+}
+
+test "e2e/helix: & aligns the selections into columns" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "align.txt", "a=1\nbbb=2\n");
+
+    keys(ed, "%s");
+    answer(ed, "=");
+    try expectSelections(ed, &.{ .{ 1, 2 }, .{ 7, 8 } });
+    keys(ed, "&");
+    try expectText(ed, "a  =1\nbbb=2\n");
+    try expectSelections(ed, &.{ .{ 3, 4 }, .{ 9, 10 } });
+    keys(ed, "u");
+    try expectText(ed, "a=1\nbbb=2\n");
+}
+
+test "e2e/helix: mi over the tree — a comment, an argument, the closest pair" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                          0          12  16      24
+    try openFile(ed, "obj.zig", "// hi there\nfn f(a: u8, b: u8) void {}\n");
+    const syn = lang.attachedSyntax(ed) orelse return error.SyntaxDidNotAttach;
+    try t.expect(lang.waitForTree(ed, syn));
+
+    keys(ed, "gg3l");
+    keys(ed, "mic");
+    try expectSelections(ed, &.{.{ 0, 11 }});
+
+    keys(ed, ";2gg12l");
+    try expectSelections(ed, &.{.{ 24, 24 }});
+    keys(ed, "mia");
+    try expectSelections(ed, &.{.{ 24, 29 }}); // b: u8
+
+    keys(ed, ";2gg12l");
+    keys(ed, "mim");
+    try expectSelections(ed, &.{.{ 17, 29 }}); // inside the parens
+}
+
+/// The flash set on the active entry right now.
+fn flashed(ed: *Editor, out: []core.flash.Range) []core.flash.Range {
+    return ed.caps.flash.ranges(&ed.caps.layers, &textEd(ed).doc, out);
+}
+
+test "e2e/helix: an operation flashes every selection, not just the primary" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "flash.txt", "one\ntwo\n");
+
+    keys(ed, "%s");
+    answer(ed, "o");
+    try expectSelections(ed, &.{ .{ 0, 1 }, .{ 6, 7 } });
+    const before = ed.caps.flash.gen;
+    keys(ed, "y");
+    try t.expect(ed.caps.flash.gen != before);
+    var out: [8]core.flash.Range = undefined;
+    const set = flashed(ed, &out);
+    try t.expectEqual(@as(usize, 2), set.len);
+    try t.expectEqual(@as(usize, 0), set[0].start);
+    try t.expectEqual(@as(usize, 6), set[1].start);
+}
+
+test "e2e/helix: the caret draws on a forward selection's last character" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "caret.txt", "hello world\n");
+
+    // helix declares where its caret draws; insert and every other grammar
+    // keep core's default, the head.
+    const cfg = &ed.session.cursor_cfg;
+    try t.expectEqual(h.view.CaretPlace.inside, cfg.placeFor("helix-normal"));
+    try t.expectEqual(h.view.CaretPlace.inside, cfg.placeFor("helix-select"));
+    try t.expectEqual(h.view.CaretPlace.head, cfg.placeFor("helix-insert"));
+    try t.expectEqual(h.view.CaretPlace.head, cfg.placeFor("normal"));
+
+    keys(ed, "w"); // "hello ", head at 6
+    try expectSelections(ed, &.{.{ 0, 6 }});
+    const te = textEd(ed);
+    try t.expectEqual(@as(usize, 5), h.view.View.caretDrawOffset(te, te.primary, .inside));
+    try t.expectEqual(@as(usize, 6), h.view.View.caretDrawOffset(te, te.primary, .head));
+    keys(ed, "b"); // backward: the head is the first character either way
+    try t.expectEqual(@as(usize, 0), h.view.View.caretDrawOffset(te, te.primary, .inside));
+}
+
+// ── The jumplist, macros and the clipboard (core's doors) ───────────────
+
+test "e2e/helix: SPC y and SPC p go through the system clipboard" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "clip.txt", "foo bar\n");
+
+    keys(ed, "w");
+    ed.chord("space y");
+    try t.expectEqualStrings("foo ", ed.head.clipboard.text());
+
+    // Text copied elsewhere pastes after the selection, and is selected.
+    try ed.head.clipboard.set(gpa, "XY");
+    ed.chord("space p");
+    try expectText(ed, "foo XYbar\n");
+    try expectSelections(ed, &.{.{ 4, 6 }});
+    // …and replaces it with SPC R.
+    try ed.head.clipboard.set(gpa, "Z");
+    ed.chord("space R");
+    try expectText(ed, "foo Zbar\n");
+}
+
+test "e2e/helix: C-o and C-i walk back and forth across a search" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "jump.txt", "a\nb\nfoo\n");
+
+    keys(ed, "/");
+    answer(ed, "foo");
+    try expectSelections(ed, &.{.{ 4, 7 }});
+    ed.press("C-o", "");
+    try t.expectEqual(@as(usize, 0), textEd(ed).cursorOffset());
+    ed.press("C-i", "");
+    try t.expectEqual(@as(usize, 7), textEd(ed).cursorOffset());
+}
+
+test "e2e/helix: Q records a macro, Q stops, q replays it" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "macro.txt", "x\nx\nx\n");
+
+    keys(ed, "Q");
+    try t.expectEqual(@as(?u8, '@'), ed.head.macros.recording);
+    keys(ed, "A1");
+    ed.press("Escape", "");
+    keys(ed, "j");
+    keys(ed, "Q");
+    try t.expectEqual(@as(?u8, null), ed.head.macros.recording);
+    try expectText(ed, "x1\nx\nx\n");
+
+    keys(ed, "q");
+    try expectText(ed, "x1\nx1\nx\n");
+}

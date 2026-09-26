@@ -114,11 +114,12 @@ weft.group("helix-normal", "]", "Next");
 weft.group("helix-normal", "C-w", "Window");
 
 // Space mode is Helix's: f/F files, b buffers, e explorer, s symbols, k hover,
-// a code actions, r rename, h references, c comment, g changed files, `/`
-// search, `?` commands, y/p/P/R the clipboard keys (the unnamed register
-// until a clipboard exists), w windows. Not yet: j (jumplist), S (workspace
-// symbols), d/D (diagnostics pickers), ' (last picker). weft's own groups sit
-// on the keys Helix leaves free.
+// a code actions, r rename, h references, d this file's diagnostics, c
+// comment, g changed files, j the jumplist, `/` search, `?` commands,
+// y/p/P/R the system clipboard, w windows. Not yet: S (workspace symbols) and
+// D (workspace diagnostics) — lsp knows one file at a time — and ' (last
+// picker: no door reopens one). weft's own groups sit on the keys Helix
+// leaves free.
 weft.group("helix-normal", "SPC", "Space");
 weft.group("helix-normal", "SPC w", "Window");
 weft.group("helix-normal", "SPC B", "Buffers");
@@ -162,11 +163,9 @@ weft.bind("helix-normal", "SPC V D", "git-diff-staged");
 weft.bind("helix-source", "SPC V b", "git-blame");
 
 weft.bind("helix-normal", ".", "repeat-change");
-// Search is phase 4 (the regex library); until then `/` is the line picker.
-weft.bind("helix-normal", "/", "consult-line");
-// `C-o` — back where you came from (helix's jump-backward key). A focused
-// view that knows its own history answers the intention; else buffer-back.
-weft.bind("helix-normal", "C-o", ["std.navigation.back", "navigate-back"]);
+// `/ ? n N *` are helix's own search (the plugin binds them); the pattern
+// lands in the `/` register vim reads too. `C-o`/`C-i` walk the jumplist, a
+// focused view's own history first — the plugin binds those as well.
 
 weft.bind("helix-normal", "SPC l p", "project-recent");
 weft.bind("helix-normal", "SPC l f", "find-file");

@@ -38,6 +38,8 @@ const Source = union(enum) {
     /// A line break plus the line's indentation (`o`), or the indentation plus
     /// a line break (`O`).
     open: enum { below, above },
+    /// Job `i` writes `pad[i]` spaces (`&`).
+    pad: []const usize,
 };
 
 var source: Source = .{ .literal = "" };
@@ -129,6 +131,11 @@ fn bytesFor(i: usize, r: weft.Range) ?[]const u8 {
             }
             return put_buf[0 .. indent + 1];
         },
+        .pad => |pad| {
+            const k = @min(pad[i], put_buf.len);
+            @memset(put_buf[0..k], ' ');
+            return put_buf[0..k];
+        },
     }
 }
 
@@ -164,8 +171,35 @@ fn wrote(i: usize) ?weft.Range {
 
 var last_edit: ?u32 = null;
 
+/// The buffers edited most recently, newest first, by name (`gm`).
+var modified: [2][256]u8 = undefined;
+var modified_len: [2]usize = .{ 0, 0 };
+
+fn noteBuffer() void {
+    var buf: [256]u8 = undefined;
+    const name = weft.activeBufferName(&buf) orelse return;
+    if (std.mem.eql(u8, name, modified[0][0..modified_len[0]])) return;
+    modified[1] = modified[0];
+    modified_len[1] = modified_len[0];
+    @memcpy(modified[0][0..name.len], name);
+    modified_len[0] = name.len;
+}
+
+/// `gm`: the buffer edited last, other than this one. Only edits helix made
+/// count — it knows no other history of modification.
+pub fn gotoLastModified() void {
+    var buf: [256]u8 = undefined;
+    const here = weft.activeBufferName(&buf) orelse "";
+    for (&modified, modified_len) |*name, len| {
+        if (len == 0 or std.mem.eql(u8, name[0..len], here)) continue;
+        if (weft.focusBuffer(name[0..len])) return;
+    }
+    weft.echo("no other modified buffer");
+}
+
 /// Remember where the primary selection is as the last place edited.
 pub fn noteEdit() void {
+    noteBuffer();
     if (!sel.load()) return;
     const r = sel.primarySpan();
     const h = weft.anchorRange(.{ .start = r.start, .end = r.start }) orelse return;
@@ -200,7 +234,7 @@ pub fn yank() void {
     var ranges: [max]weft.Range = undefined;
     const lines = spans(&ranges);
     weft.yankEachIn(slot, ranges[0..sel.n], lines);
-    sel.flashPrimary();
+    sel.flashAll();
 }
 
 /// Delete every selection, first yanking it into `slot` (null: no yank),
@@ -242,7 +276,12 @@ pub fn paste(after: bool) void {
     };
     if (!sel.load()) return;
     if (weft.registerTextIn(slot).len == 0) return weft.echo("register is empty");
-    const lines = weft.registerLinewiseIn(slot);
+    pasteFrom(.{ .register = .{ .slot = slot, .count = sel.n } }, weft.registerLinewiseIn(slot), after);
+}
+
+/// Place `src` after (before) every loaded selection — on the next
+/// (previous) line when it is whole lines — and select what landed.
+fn pasteFrom(src: Source, lines: bool, after: bool) void {
     var points: [max]weft.Range = undefined;
     var newline: [max]bool = undefined;
     for (sel.items[0..sel.n], 0..) |s, i| {
@@ -258,8 +297,132 @@ pub fn paste(after: bool) void {
         }
         points[i] = .{ .start = at, .end = at };
     }
-    putEach(points[0..sel.n], .{ .register = .{ .slot = slot, .count = sel.n } }, newline[0..sel.n]);
+    putEach(points[0..sel.n], src, newline[0..sel.n]);
     selectWritten();
+}
+
+// ── The system clipboard (`SPC y p P R`) ────────────────────────────────
+// The clipboard door is config-granted (helix.js grants it). What mirrors it
+// is helix's choice: the unnamed register. A clipboard that still holds what
+// the unnamed register holds pastes FROM the register, so a projection
+// row's ferried identity survives the round trip.
+
+/// `SPC y`: yank, then hand the unnamed register's text to the clipboard.
+pub fn yankToClipboard() void {
+    yank();
+    if (!weft.clipboardSet(weft.registerTextIn(0))) weft.echo("clipboard unavailable");
+}
+
+/// What the clipboard offers a paste: nothing (said why), the unnamed
+/// register (it holds the same text — paste that, identity and all), or
+/// text from elsewhere.
+const Clip = union(enum) { none, register, text: []const u8 };
+
+fn clipboard() Clip {
+    const clip = weft.clipboardGet() orelse {
+        weft.echo("clipboard unavailable");
+        return .none;
+    };
+    if (clip.len == 0) {
+        weft.echo("clipboard is empty");
+        return .none;
+    }
+    if (std.mem.eql(u8, clip, weft.registerTextIn(0))) return .register;
+    return .{ .text = clip };
+}
+
+/// `SPC p` / `SPC P`: the clipboard after (before) every selection.
+pub fn pasteClipboard(after: bool) void {
+    _ = state.takeRegister();
+    switch (clipboard()) {
+        .none => {},
+        .register => paste(after),
+        .text => |t| {
+            if (!sel.load()) return;
+            pasteFrom(.{ .literal = t }, t[t.len - 1] == '\n', after);
+        },
+    }
+}
+
+/// `SPC R`: replace every selection with the clipboard.
+pub fn replaceWithClipboard() void {
+    _ = state.takeRegister();
+    switch (clipboard()) {
+        .none => {},
+        .register => replaceWithRegister(),
+        .text => |t| rewrite(.{ .literal = t }),
+    }
+}
+
+// ── Align (`&`) ─────────────────────────────────────────────────────────
+
+/// `&`: pad the selections with spaces so they line up. The first selection
+/// on each line aligns with the first on every other line, the second with
+/// the second, and so on — each group's heads move to the rightmost head of
+/// the group, by spaces inserted before the selection. A column is counted
+/// in characters (a tab is one).
+pub fn alignSelections() void {
+    if (!sel.load()) return;
+    var row: [max]usize = undefined;
+    var col: [max]usize = undefined;
+    var group: [max]usize = undefined;
+    var groups: usize = 0;
+    for (sel.items[0..sel.n], 0..) |s, i| {
+        const line = weft.lineAt(s.head);
+        if (weft.lineAt(s.anchor).start != line.start) return weft.echo("align cannot work with multi line selections");
+        row[i] = line.start;
+        col[i] = std.unicode.utf8CountCodepoints(weft.slice(line.start, s.head)) catch s.head - line.start;
+        group[i] = if (i > 0 and row[i - 1] == row[i]) group[i - 1] + 1 else 0;
+        groups = @max(groups, group[i] + 1);
+    }
+    // Each group aligns after the ones left of it have already pushed its
+    // members right, so a member's column counts the pads before it on its
+    // own line.
+    var pad: [max]usize = @splat(0);
+    for (0..groups) |g| {
+        var widest: usize = 0;
+        for (0..sel.n) |i| if (group[i] == g) {
+            widest = @max(widest, col[i] + shiftBefore(&row, &group, &pad, i, g));
+        };
+        for (0..sel.n) |i| if (group[i] == g) {
+            pad[i] = widest - (col[i] + shiftBefore(&row, &group, &pad, i, g));
+        };
+    }
+    var points: [max]weft.Range = undefined;
+    var pads: [max]usize = undefined;
+    var m: usize = 0;
+    for (sel.items[0..sel.n], 0..) |s, i| {
+        if (pad[i] == 0) continue;
+        const at = s.range().start;
+        points[m] = .{ .start = at, .end = at };
+        pads[m] = pad[i];
+        m += 1;
+    }
+    if (m == 0) return;
+    const before = sel.items;
+    const count = sel.n;
+    putEach(points[0..m], .{ .pad = pads[0..m] }, null);
+    // Every insertion sits at or before the selections after it: each moves
+    // right by the pads up to and including its own.
+    var shift: usize = 0;
+    for (before[0..count], 0..) |s, i| {
+        shift += pad[i];
+        sel.items[i] = .{ .anchor = s.anchor + shift, .head = s.head + shift };
+    }
+    sel.n = count;
+    sel.store();
+    noteEdit();
+}
+
+fn shiftBefore(row: []const usize, group: []const usize, pad: []const usize, i: usize, g: usize) usize {
+    var total: usize = 0;
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        if (row[j] != row[i]) break;
+        if (group[j] < g) total += pad[j];
+    }
+    return total;
 }
 
 /// `R`: replace every selection with the register (one value each where the
@@ -280,7 +443,7 @@ fn selectWritten() void {
         s.* = .{ .anchor = w.start, .head = w.end };
     }
     sel.store();
-    sel.flashPrimary();
+    sel.flashAll();
     noteEdit();
 }
 
@@ -336,7 +499,7 @@ pub fn onLines(cmd: []const u8) void {
     for (blocks[0..m], handles[0..m]) |b, *h| h.* = weft.anchorRange(b);
     var k = state.takeCount();
     while (k > 0) : (k -= 1) weft.runRangeArgEach(cmd, handles[0..m]);
-    sel.flashPrimary();
+    sel.flashAll();
     noteEdit();
 }
 
@@ -356,7 +519,7 @@ pub fn join() void {
         h.* = weft.anchorRange(.{ .start = b.start, .end = @max(b.start, end) });
     }
     weft.runRangeArgEach("hx-op-join", handles[0..m]);
-    sel.flashPrimary();
+    sel.flashAll();
     noteEdit();
 }
 
@@ -469,6 +632,6 @@ pub fn surround(cmd: []const u8, pair: []const u8, replacement: ?[]const u8) voi
     var handles: [max]?u32 = undefined;
     for (sel.items[0..sel.n], handles[0..sel.n]) |s, *h| h.* = weft.anchorRange(sel.span(s));
     weft.runRangeArgEach(cmd, handles[0..sel.n]);
-    sel.flashPrimary();
+    sel.flashAll();
     noteEdit();
 }
