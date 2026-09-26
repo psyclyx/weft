@@ -380,6 +380,35 @@ test "e2e/helix: s selects matches, S splits, K and A-K keep and drop — previe
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "nothing selected") != null);
 }
 
+test "e2e/helix: two selections on one line paste a line twice, and o opens two lines" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "two.txt", "foo bar\nzzz\n");
+
+    // Both selections' linewise pastes land at ONE point (the next line's
+    // start). The second job's empty range must stay a point there, not
+    // swell over the text the first job just wrote.
+    keys(ed, "xy");
+    keys(ed, "xs");
+    answer(ed, "[fb]");
+    try expectSelections(ed, &.{ .{ 0, 1 }, .{ 4, 5 } });
+    keys(ed, "p");
+    try expectText(ed, "foo bar\nfoo bar\nfoo bar\nzzz\n");
+    keys(ed, "u");
+    try expectText(ed, "foo bar\nzzz\n");
+
+    // `o` likewise: a line each.
+    keys(ed, "ggxs");
+    answer(ed, "[fb]");
+    keys(ed, "o");
+    keys(ed, "X");
+    ed.press("Escape", "");
+    try expectText(ed, "foo bar\nX\nX\nzzz\n");
+}
+
 test "e2e/helix: / ? n N search with smart case, wrap around, and extend in select mode" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

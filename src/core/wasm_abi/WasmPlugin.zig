@@ -453,14 +453,15 @@ pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
     const doc = &editor.doc;
     const len = doc.text().byteLen();
     if (start > end or end > len) return error.InvalidRange;
-    const a = try doc.addAnchor(self.gpa, start, .right);
-    errdefer doc.removeAnchor(a);
-    const b = try doc.addAnchor(self.gpa, end, .left);
-    errdefer doc.removeAnchor(b);
+    const ends = try doc.addRangeAnchors(self.gpa, .{ .start = start, .end = end });
+    errdefer {
+        doc.removeAnchor(ends.start);
+        doc.removeAnchor(ends.end);
+    }
     const handle = try self.ranges.open(self.gpa, .{
         .buffer = buffer.ref(),
-        .start = a,
-        .end = b,
+        .start = ends.start,
+        .end = ends.end,
     });
     errdefer _ = self.ranges.take(handle);
     try self.ephemeral_range_handles.append(self.gpa, handle);
@@ -575,10 +576,7 @@ pub fn activeRange(self: *WasmPlugin, handle: u32) ?*const RangeSlot {
 /// checked separately by `activeRange` before any guest-visible operation.
 pub fn resolveRange(self: *WasmPlugin, slot: *const RangeSlot) ?@import("stemma").Range {
     const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
-    const doc = &(buffer.textEditor() orelse return null).doc;
-    const a = doc.anchorOffset(slot.start);
-    const b = doc.anchorOffset(slot.end);
-    return .{ .start = @min(a, b), .end = @max(a, b) };
+    return (buffer.textEditor() orelse return null).doc.rangeOffsets(slot.start, slot.end);
 }
 
 pub fn borrowedRange(self: *WasmPlugin, slot: *const RangeSlot) ?position.LiveRange {
