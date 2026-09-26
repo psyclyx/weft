@@ -222,9 +222,9 @@ Phases:
   selection to the next) and `state.zig` (the count and register prefixes).
 - A selection is core's `{anchor, head}`, and the cursor a motion starts from is the head,
   where core draws the caret. Helix's "at least one character" rule is `span()`: a caret
-  acts on the character under it. Helix draws its cursor ON the last selected character;
-  weft draws it at the head, one past it on a forward selection. Closing that gap would
-  need the grammar to declare where the caret draws; it is not done.
+  acts on the character under it. Helix draws its cursor ON the last selected character,
+  where core draws at the head, one past it on a forward selection; phase 4's round added
+  the declaration that closes the gap (below).
 - Each motion is generated twice, `hx/n/<m>` (move: the motion's own selection) and
   `hx/x/<m>` (extend: the anchor stays). `helix-normal` binds the first, `helix-select`
   (`v`) the second. `helix-op` is gone: a verb acts on the selections.
@@ -252,11 +252,50 @@ Phases:
 - Space mode is Helix's (`f F b e k s a r h c g / ? y p P R w`). weft's other groups moved
   to keys Helix leaves free: `SPC O` open & save, `SPC B` buffers, `SPC V` version control,
   `SPC l` project, `SPC i`/`SPC m` code, `SPC A` agents, `SPC G` debug, `SPC x` share.
-- Not yet: `gw` (on 0.3's overlay), `gm` (no last-modified-buffer history), `&` (align),
-  `A-u`/`A-U` (history branches), `SPC j` (jumplist), `SPC S` (workspace symbols),
-  `SPC d`/`D` (diagnostics pickers), `]g`/`[g` (no hunk motion), and the clipboard keys use
-  the selected register until 3.3 lands. The flash marks the primary only until 0.4 makes
-  it a set.
+
+**Phases 4 and 5 landed**, with most of what phases 2 and 3 left open. What the build
+settled:
+
+- `s S K A-K / ?` share one prompt (`helix-regex`, the `prompt` library) that previews as
+  you type: every keystroke recomputes from the set the prompt opened on, the selections
+  are the preview, and Escape restores that set. The prompt library grew the two hooks
+  this needed, `on_change` and `trim = false` (a pattern's blanks are pattern). `S` drops
+  empty pieces; `K`/`A-K` count an empty match as a match. `/ ? n N` put the match in
+  place of the primary, or in select mode add it as a new primary, wrapping with helix's
+  "Wrapped around document". `*` joins the selections' escaped texts with `|`, `\b` on a
+  side that sits on a word edge; `A-*` without.
+- The query language is the find bar's: its pure half moved from `plugins/find/search.zig`
+  to a plugin library, `search` (on `regex`), which both link. Smart case, the literal
+  prefilter and the wrap planning are one code path.
+- The last pattern lives in core's register bank, slot 27 (`register.Bank.search`), not in
+  helix. A new door `wl_register_set` (SDK `registerSet`) writes typed bytes as one value
+  without touching unnamed. `n` reads it back, `"/` names it in helix, and vim's `"/p`
+  pastes it (vim's `/` stays consult-line; vim has no `n`).
+- `gw` labels every word of two or more word characters in view with two letters, nearest
+  first, alternating after and before the cursor; the first key narrows the labels to the
+  one still to type. The label machinery is a plugin library, `labels`, which snipe now
+  links too (one-character labels, its behaviour unchanged).
+- The caret door: `cursor-place <mode> head|inside` sits beside `set-cursor`, and the view
+  draws every caret through `View.caretDrawOffset`. helix declares `inside` for its normal,
+  select, capture, prompt and label modes; insert, vim, emacs and ide keep `head`.
+- The flash marks every selection (`flashAll`, one `flashRanges` over the set).
+- `&` pads with spaces before each selection so the n-th selection of every line lines up
+  (columns in characters: a tab counts one). `gm` goes to the buffer helix last edited
+  other than this one — only helix's own edits count. `mi`/`ma` gained `< a c T m` in
+  `textobjects`: `angle`, `argument` (the node directly inside an argument or parameter
+  list, by kind name), `comment`, `test` (tree nodes whose kind says so) and `pair` (the
+  innermost bracket or quote pair).
+- Phase 5 is on core's doors (§3.3): `weft.jumpPush()` before `/ ? n N *`, `gg`, `ge`, `gw`
+  and `gd gy gr gi`; `C-o` (`std.navigation.back` first) / `C-i` walk the jumplist with a
+  count, `C-s` saves the place, `SPC j` picks. `Q` toggles recording into the typed
+  register (`@` by default), `q` plays it with a count. `SPC y` yanks and hands the
+  unnamed register to the clipboard; `SPC p P R` paste the clipboard, or the unnamed
+  register when the clipboard still holds its text, so a ferried identity survives.
+- `SPC d` is a new lsp command, `diagnostics`: a picker over this file's diagnostics.
+- Not yet: `A-u`/`A-U` (core undo is linear: a new edit drops the redo stack, so there is
+  no branch to walk), `]g`/`[g` (no plugin knows a file buffer's hunks; git's hunks live in
+  its status projection), `SPC S` and `SPC D` (lsp tracks one document, and its picker
+  cannot open a location in another file), and `SPC '` (no door reopens the last picker).
 
 "The semantic binds earn their keep" means this, concretely:
 
@@ -354,7 +393,7 @@ shows `n/m`. Enter/F3 and S-Enter/S-F3 step and wrap; M-r, M-c (smart → on →
 M-w toggle regex, case and whole word; Up/Down walk the history. C-h adds the
 replacement field (`$0`–`$9` in regex mode): Enter replaces one, C-M-Return replaces all
 as one undo unit, and M-Return makes every match a selection. The pure half
-(`search.zig`) is tested natively. Speed on 1 MiB comes from not re-reading the
+(now the `search` plugin library, shared with helix) is tested natively. Speed on 1 MiB comes from not re-reading the
 document per keystroke (one copy, refreshed when a snapshot witness says it moved) and
 from not stepping the VM per byte: the plugin prefilters on a pattern's literal lead
 with a substring search and asks the library's new anchored `Regex.matchAt`, and the
