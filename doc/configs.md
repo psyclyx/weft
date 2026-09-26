@@ -320,6 +320,28 @@ Built in the emacs mold: a resting mode `ide` that falls back to `default`, plus
 The system clipboard over `wl_data_device` is a door. Which register mirrors it is the
 grammar's choice: ide mirrors the unnamed register, and vim keeps `"+`.
 
+**Built.** The clipboard is the dispatching head's (`Head.clipboard`, in memory until
+the shell installs the window as its backend). Wayland reads each foreign selection
+eagerly through non-blocking pipes in one epoll set (`platform/clipboard.zig`), so
+`wl_clipboard_get` answers synchronously. Both doors need the `clipboard` grant, which
+is config-only: declaring it in `describe()` confers nothing. vim has `"+`/`"*` (one
+clipboard; primary selection is not bound). For the grammar lanes:
+
+- helix `SPC y`: yank as usual, then `weft.clipboardSet(weft.registerTextIn(0))`;
+  `SPC p`/`SPC P`: `weft.clipboardGet()` and insert it; `SPC R`: replace the
+  selection with it.
+- ide `C-c`/`C-x`: yank into slot 0, then `weft.clipboardSet(weft.registerTextIn(0))`;
+  `C-v`: if `weft.clipboardGet()` equals `weft.registerTextIn(0)`, paste slot 0 (keeps
+  ferried identity), else insert the clipboard text.
+- the configs already `weft.grant("helix" | "ide", "clipboard")`.
+
+The jumplist and macros of §2 phase 5 are core too. Grammars call `weft.jumpPush()`
+before a jump (search, goto, big motion; core already records moves between entries)
+and bind `jump-back`/`jump-forward` (count as `runStr`), `jumplist-pick`. Macros are
+`macro-record-start <reg>`, `macro-record-stop`, `macro-record-toggle [reg]` (default
+`@`, helix's `Q`), `macro-play [reg] [count]` (default: the last played or recorded,
+helix's `q`), and `weft.macroRecording()` for a status chip.
+
 ### 3.4 Find and replace — plugin `find`
 
 An incremental find bar (a bottom surface) on the 0.2 regex: C-f, F3/S-F3, C-h replace,
