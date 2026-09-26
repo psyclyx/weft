@@ -46,7 +46,8 @@ const Guest = struct {
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
 /// adapter, `rowkey` is the round trip between a projection row's key and the
 /// structured identity it names, `gutter` is the guest half of the
-/// `ui/gutter-segment` round, `regex` is the Pike-VM pattern engine
+/// `ui/gutter-segment` round, `statusline` the guest half of
+/// `ui/statusline-seg`'s, `regex` is the Pike-VM pattern engine
 /// (doc/configs.md §0.2) and `search` the query → matches planning over it
 /// that helix's `s S K A-K / ? n N *` and the find bar share — core never
 /// parses a pattern — and `labels` the jump labels snipe and helix's `gw`
@@ -66,6 +67,7 @@ const Library = enum {
     search,
     labels,
     affordances,
+    statusline,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -85,6 +87,7 @@ const Library = enum {
             .search => "weft_search",
             .labels => "weft_labels",
             .affordances => "weft_affordances",
+            .statusline => "weft_statusline",
         };
     }
 
@@ -99,7 +102,7 @@ const Library = enum {
             .rowkey, .jsonrpc, .sessions, .regex, .affordances => .protocol_data,
             // `search` is pure data too, but it sits on `regex`, so it
             // takes the tier above.
-            .annotate, .gutter, .output, .files, .prompt, .search, .labels => .service_presentation,
+            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels => .service_presentation,
             .invoke => .interaction_orchestration,
             .ex => .editor_composition,
         };
@@ -393,6 +396,9 @@ const guests = [_]Guest{
     // The action-system doors (doc/configs.md §3.5) driven the way a toolbar
     // drives them: offers for a chosen context, and the offers-changed event.
     .{ .name = "offerwatch", .import = "guest_offerwatch_wasm", .install = false },
+    // A diagnostics source without a language server: rows set by a test,
+    // announced by the `diagnostics` signal, read by the problems panel.
+    .{ .name = "diagfeed", .import = "guest_diagfeed_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).
@@ -487,6 +493,12 @@ const guests = [_]Guest{
     // offers under the pointer as a menu — both arranged by one library.
     .{ .name = "toolbar", .import = "guest_toolbar_wasm", .install = true, .libraries = &.{.affordances} },
     .{ .name = "contextmenu", .import = "guest_contextmenu_wasm", .install = true, .libraries = &.{.affordances} },
+    // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
+    // shell, and the caret's symbol trail on the status line.
+    .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
+    .{ .name = "problems", .import = "guest_problems_wasm", .install = true },
+    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true },
+    .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
 
 pub fn build(b: *std.Build) void {
