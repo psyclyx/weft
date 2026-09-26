@@ -34,6 +34,7 @@ pub const c = @cImport({
 /// `main.zig`) keeps compiling unchanged — a pure move, no behavior change.
 pub const KeyEvent = platform.KeyEvent;
 pub const Mods = platform.Mods;
+pub const PointerEvent = platform.PointerEvent;
 
 pub const Window = struct {
     const max_outputs = 8;
@@ -86,12 +87,12 @@ pub const Window = struct {
     repeat_code: u32 = 0,
     repeat_next_ns: u64 = 0,
 
-    // Pointer state (sampled; fine for scroll/click).
-    mouse_x: f64 = 0,
-    mouse_y: f64 = 0,
-    mouse_down: [3]bool = @splat(false),
-    mouse_pressed: [3]bool = @splat(false),
-    wheel_accum: f64 = 0,
+    /// Pointer input: the protocol's raw facts go into the platform-neutral
+    /// gesture reducer, which owns click counting and wheel steps.
+    gestures: platform.pointer.Gestures = .{},
+    /// The bound wl_seat version. Below 5 there is no `wl_pointer.frame`, so
+    /// each axis event is its own frame.
+    seat_version: u32 = 0,
 
     pub fn init(width: u32, height: u32, title: [*:0]const u8, app_id: [*:0]const u8) !*Window {
         const display = c.wl_display_connect(null) orelse return error.WaylandConnectFailed;
@@ -282,16 +283,9 @@ pub const Window = struct {
         self.key_tail += 1;
     }
 
-    pub fn consumeMousePressed(self: *Window, button: usize) bool {
-        const pressed = self.mouse_pressed[button];
-        self.mouse_pressed[button] = false;
-        return pressed;
-    }
-
-    pub fn consumeWheel(self: *Window) f64 {
-        const w = self.wheel_accum;
-        self.wheel_accum = 0;
-        return w;
+    /// Next pointer event in arrival order, or null.
+    pub fn nextPointerEvent(self: *Window) ?PointerEvent {
+        return self.gestures.next();
     }
 
     fn currentMods(self: *const Window) Mods {
@@ -374,7 +368,8 @@ fn registryGlobal(
     } else if (std.mem.eql(u8, iface, "xdg_wm_base")) {
         self.wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, 1));
     } else if (std.mem.eql(u8, iface, "wl_seat")) {
-        self.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, @min(version, 5)));
+        self.seat_version = @min(version, 5);
+        self.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, self.seat_version));
         if (self.seat) |seat| {
             _ = c.wl_seat_add_listener(seat, &seat_listener, self);
         }
@@ -486,48 +481,69 @@ fn seatCapabilities(data: ?*anyopaque, seat: ?*c.wl_seat, capabilities: u32) cal
 
 fn pointerEnter(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: ?*c.wl_surface, sx: c.wl_fixed_t, sy: c.wl_fixed_t) callconv(.c) void {
     const self = selfFrom(data);
-    self.mouse_x = c.wl_fixed_to_double(sx);
-    self.mouse_y = c.wl_fixed_to_double(sy);
+    self.gestures.warp(c.wl_fixed_to_double(sx), c.wl_fixed_to_double(sy));
 }
 
-fn pointerLeave(_: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: ?*c.wl_surface) callconv(.c) void {}
+fn pointerLeave(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: ?*c.wl_surface) callconv(.c) void {
+    const self = selfFrom(data);
+    self.gestures.leave(self.currentMods());
+}
 
 fn pointerMotion(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, sx: c.wl_fixed_t, sy: c.wl_fixed_t) callconv(.c) void {
     const self = selfFrom(data);
-    self.mouse_x = c.wl_fixed_to_double(sx);
-    self.mouse_y = c.wl_fixed_to_double(sy);
+    self.gestures.motion(c.wl_fixed_to_double(sx), c.wl_fixed_to_double(sy), self.currentMods());
 }
 
-fn pointerButton(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: u32, button: u32, state: u32) callconv(.c) void {
-    const self = selfFrom(data);
-    // linux/input-event-codes.h values; avoid the header for just three.
-    const BTN_LEFT: u32 = 0x110;
-    const BTN_RIGHT: u32 = 0x111;
-    const BTN_MIDDLE: u32 = 0x112;
-    const slot: ?usize = switch (button) {
-        BTN_LEFT => 0,
-        BTN_RIGHT => 1,
-        BTN_MIDDLE => 2,
+/// A linux/input-event-codes.h button code as the keymap numbers it: 1 is
+/// the primary button, 2 the middle, 3 the secondary, then side/extra.
+fn buttonNumber(code: u32) ?u8 {
+    return switch (code) {
+        0x110 => 1, // BTN_LEFT
+        0x112 => 2, // BTN_MIDDLE
+        0x111 => 3, // BTN_RIGHT
+        0x113 => 8, // BTN_SIDE (back)
+        0x114 => 9, // BTN_EXTRA (forward)
         else => null,
     };
-    if (slot) |s| {
-        const down = state == c.WL_POINTER_BUTTON_STATE_PRESSED;
-        self.mouse_down[s] = down;
-        if (down) self.mouse_pressed[s] = true;
-    }
+}
+
+fn pointerButton(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, time: u32, button: u32, state: u32) callconv(.c) void {
+    const self = selfFrom(data);
+    const b = buttonNumber(button) orelse return;
+    self.gestures.button(b, state == c.WL_POINTER_BUTTON_STATE_PRESSED, time, self.currentMods());
+}
+
+fn axisOf(axis: u32) ?platform.pointer.Axis {
+    return switch (axis) {
+        c.WL_POINTER_AXIS_VERTICAL_SCROLL => .vertical,
+        c.WL_POINTER_AXIS_HORIZONTAL_SCROLL => .horizontal,
+        else => null,
+    };
 }
 
 fn pointerAxis(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, axis: u32, value: c.wl_fixed_t) callconv(.c) void {
     const self = selfFrom(data);
-    if (axis == c.WL_POINTER_AXIS_VERTICAL_SCROLL) {
-        self.wheel_accum -= c.wl_fixed_to_double(value) / 10.0;
-    }
+    self.gestures.axis(axisOf(axis) orelse return, c.wl_fixed_to_double(value));
+    // Before seat v5 nothing groups axis events, so each one ends its frame.
+    if (self.seat_version < 5) self.gestures.frame(self.currentMods());
 }
 
-fn pointerFrame(_: ?*anyopaque, _: ?*c.wl_pointer) callconv(.c) void {}
+fn pointerFrame(data: ?*anyopaque, _: ?*c.wl_pointer) callconv(.c) void {
+    const self = selfFrom(data);
+    self.gestures.frame(self.currentMods());
+}
+
 fn pointerAxisSource(_: ?*anyopaque, _: ?*c.wl_pointer, _: u32) callconv(.c) void {}
-fn pointerAxisStop(_: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: u32) callconv(.c) void {}
-fn pointerAxisDiscrete(_: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: i32) callconv(.c) void {}
+
+fn pointerAxisStop(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, axis: u32) callconv(.c) void {
+    const self = selfFrom(data);
+    self.gestures.axisStop(axisOf(axis) orelse return);
+}
+
+fn pointerAxisDiscrete(data: ?*anyopaque, _: ?*c.wl_pointer, axis: u32, discrete: i32) callconv(.c) void {
+    const self = selfFrom(data);
+    self.gestures.axisDiscrete(axisOf(axis) orelse return, discrete);
+}
 
 const pointer_listener = c.wl_pointer_listener{
     .enter = pointerEnter,
