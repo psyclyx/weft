@@ -105,7 +105,7 @@
                 },
                 .info = null,
             },
-            .pixel_hash = 16058099202248010959,
+            .pixel_hash = 13982244477543146198,
         },
         .{
             .name = "flip_above_near_bottom",

@@ -66,16 +66,24 @@ fn placeCells(
     if (out.len < shaped.glyphs.len) return error.BufferTooSmall;
     const inverse = placement.world_to_pixel.inverse() orelse return error.InvalidTransform;
     const base_device = placement.world_to_pixel.applyPoint(placement.baseline);
-    const device_cell_width = @round(placement.world_to_pixel.xx * placement.cell_width);
-    if (!std.math.isFinite(device_cell_width) or device_cell_width == 0)
+    const device_cell_step = scene.Vec2{
+        .x = placement.world_to_pixel.xx * placement.cell_width,
+        .y = placement.world_to_pixel.yx * placement.cell_width,
+    };
+    if (!std.math.isFinite(device_cell_step.x) or !std.math.isFinite(device_cell_step.y))
         return error.InvalidTransform;
 
     for (shaped.glyphs, 0..) |glyph, index| {
         const cell = cellForSource(cells, glyph.source_start) orelse return error.NoCellForGlyph;
         const cluster_pen = clusterPen(shaped.glyphs, glyph.source_start);
+        const column: f32 = @floatFromInt(cell.column);
+        // Snap each logical cell origin, not the cell advance. Rounding the
+        // advance once and multiplying it by `column` makes glyphs drift from
+        // the layout stops (and therefore the caret) by the rounding error on
+        // every column.
         const device_origin = scene.Vec2{
-            .x = @round(base_device.x) + @as(f32, @floatFromInt(cell.column)) * device_cell_width,
-            .y = @round(base_device.y),
+            .x = @round(base_device.x + column * device_cell_step.x),
+            .y = @round(base_device.y + column * device_cell_step.y),
         };
         const cell_origin = inverse.applyPoint(device_origin);
         out[index] = .{ .glyph = .{
@@ -132,4 +140,39 @@ fn clusterPen(glyphs: []const text_engine.ShapedText.Glyph, source_start: u32) s
             return .{ .x = glyph.x_offset, .y = glyph.y_offset };
     }
     unreachable;
+}
+
+test "cell snapping does not accumulate pitch rounding ahead of the caret" {
+    const glyphs = [_]text_engine.ShapedText.Glyph{.{
+        .font_id = 1,
+        .glyph_id = 2,
+        .x_offset = 0,
+        .y_offset = 0,
+        .x_advance = 0.6,
+        .y_advance = 0,
+        .source_start = 0,
+        .source_end = 1,
+    }};
+    const shaped: text_engine.ShapedText = .{
+        .allocator = std.testing.allocator,
+        .glyphs = @constCast(&glyphs),
+    };
+    const cells = [_]text_engine.Cell{.{
+        .source = .{ .start = 0, .end = 1 },
+        .column = 20,
+    }};
+    var items: [1]scene.DrawItem = undefined;
+
+    _ = try placeCells(&items, &shaped, &cells, .{
+        .baseline = .{ .x = 8.25, .y = 20.25 },
+        .cell_width = 9.6,
+        .em = 16,
+        .world_to_pixel = .identity,
+    });
+
+    const glyph = items[0].glyph;
+    // round(8.25 + 20 * 9.6) = 200. Rounding the 9.6px pitch first would
+    // incorrectly put this glyph at x=208, eight pixels ahead of its caret.
+    try std.testing.expectEqual(@as(f32, 200), glyph.x);
+    try std.testing.expectEqual(@as(f32, 20), glyph.y);
 }
