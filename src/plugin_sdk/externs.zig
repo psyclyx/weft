@@ -80,6 +80,12 @@ pub extern "weft:abi/1" fn wl_range_release(handle: u32) void;
 pub extern "weft:abi/1" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;
 pub extern "weft:abi/1" fn wl_arg_range(i: u32) i32;
 pub extern "weft:abi/1" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
+// Multiple selections: a `{primary, n × {anchor, head}}` u32 record; the
+// per-selection motion/operator pair runs a command once per selection.
+pub extern "weft:abi/1" fn wl_selections_get(out_ptr: u32, cap: u32) u32;
+pub extern "weft:abi/1" fn wl_selections_set(ptr: u32, n: u32) i32;
+pub extern "weft:abi/1" fn wl_run_range_each(ptr: u32, len: u32, out_ptr: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_run_range_arg_each(ptr: u32, len: u32, handles_ptr: u32, n: u32) void;
 pub extern "weft:abi/1" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
 pub extern "weft:abi/1" fn wl_echo(ptr: u32, len: u32) void;
@@ -190,6 +196,11 @@ pub extern "weft:abi/1" fn wl_yank_range(start: u32, end: u32, linewise: u32, na
 pub extern "weft:abi/1" fn wl_register_text(out_ptr: u32, out_cap: u32, name: u32) u32;
 pub extern "weft:abi/1" fn wl_register_linewise(name: u32) u32;
 pub extern "weft:abi/1" fn wl_paste_at(base: u32, name: u32) void;
+// One value per selection: yank n ranges; read/restamp what selection
+// `index` of `count` pastes under the core distribution rule.
+pub extern "weft:abi/1" fn wl_yank_each(ptr: u32, n: u32, linewise: u32, name: u32) void;
+pub extern "weft:abi/1" fn wl_register_paste_value(index: u32, count: u32, out_ptr: u32, out_cap: u32, name: u32) u32;
+pub extern "weft:abi/1" fn wl_paste_value_at(base: u32, index: u32, count: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;

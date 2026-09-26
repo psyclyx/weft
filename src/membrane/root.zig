@@ -195,6 +195,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing an anchored live range as its single borrowed argument" },
     .{ .name = "wl_arg_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "import a borrowed live-range command arg into this plugin's anchored range table" },
     .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over an anchored live-range handle through the gated edit door" },
+    .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{anchor,head}` pairs (document order); returns the selection count" },
+    .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
+    .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
+    .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw" },
@@ -344,6 +348,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_register_text", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "read an explicit register slot's bytes into guest memory" },
     .{ .name = "wl_register_linewise", .params = &.{.u32}, .results = &.{.u32}, .group = .register, .doc = "whether an explicit register slot holds a linewise yank" },
     .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
+    .{ .name = "wl_yank_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture n `[start,end)` ranges as one value each (one per selection) into an explicit register slot" },
+    .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
+    .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
@@ -554,9 +561,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 233;
+const max_import_count: usize = 239;
 const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 251;
+const max_semantic_operation_count: usize = 257;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -711,7 +718,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 233), census.imports);
+    try t.expectEqual(@as(usize, 239), census.imports);
     try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 251), census.semantic_operations);
+    try t.expectEqual(@as(usize, 257), census.semantic_operations);
 }

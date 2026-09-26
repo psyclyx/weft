@@ -118,6 +118,10 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_run_range_arg", .handler = edit.hRunRangeArg },
     .{ .name = "wl_arg_range", .handler = edit.hArgRange },
     .{ .name = "wl_edit_range", .handler = edit.hEditRange },
+    .{ .name = "wl_selections_get", .handler = edit.hSelectionsGet },
+    .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
+    .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
+    .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .handler = layers.hFlash },
@@ -267,6 +271,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_register_text", .handler = register.hRegisterText },
     .{ .name = "wl_register_linewise", .handler = register.hRegisterLinewise },
     .{ .name = "wl_paste_at", .handler = register.hPasteAt },
+    .{ .name = "wl_yank_each", .handler = register.hYankEach },
+    .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
+    .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
 
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },

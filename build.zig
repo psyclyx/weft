@@ -364,6 +364,8 @@ const guests = [_]Guest{
     .{ .name = "deny", .import = "guest_deny_wasm", .install = false },
     .{ .name = "demo_config", .import = "guest_demo_config_wasm", .install = false },
     .{ .name = "headtest", .import = "guest_headtest_wasm", .install = false },
+    // The multiple-selection doors (doc/configs.md §0.1) across the membrane.
+    .{ .name = "multisel", .import = "guest_multisel_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).

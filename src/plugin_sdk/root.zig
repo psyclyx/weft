@@ -443,6 +443,105 @@ pub fn setSelection(r: Range) void {
     e.wl_set_selection(@intCast(r.start), @intCast(r.end));
 }
 
+// ── Multiple selections ───────────────────────────────────────────────
+// Core holds N selections per editor; everything above (`cursor`,
+// `selection`, `jump`, `setSelection`) reads and writes the PRIMARY one. A
+// grammar that works on all of them reads the set, computes the new one, and
+// hands it back — add/remove/collapse below are exactly that, not doors.
+
+/// One selection's endpoints. `anchor == head` is a caret.
+pub const Selection = struct {
+    anchor: usize,
+    head: usize,
+
+    pub fn range(s: Selection) Range {
+        return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
+    }
+};
+
+/// The selection set: document order, `primary` indexing into `items`.
+pub const Selections = struct { primary: usize, items: []Selection };
+
+/// How many selections `selections()` can carry in one read.
+pub const max_selections = 1024;
+var sel_words: [1 + 2 * max_selections]u32 = undefined;
+var sel_items: [max_selections]Selection = undefined;
+
+/// The active editor's selection count (0 for an entry with no text).
+pub fn selectionCount() usize {
+    return e.wl_selections_get(p(&sel_words), 0);
+}
+
+/// The active editor's selections, into a private scratch (valid until the
+/// next call). Past `max_selections`, the rest are not reported.
+pub fn selections() Selections {
+    const total = e.wl_selections_get(p(&sel_words), max_selections);
+    const n = @min(total, max_selections);
+    for (sel_items[0..n], 0..) |*s, i| s.* = .{ .anchor = sel_words[1 + 2 * i], .head = sel_words[2 + 2 * i] };
+    return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
+}
+
+/// Replace every selection (at least one). Core normalizes the set — sorted,
+/// overlaps merged — so read it back rather than assume the indices held.
+pub fn setSelections(items: []const Selection, primary: usize) bool {
+    if (items.len == 0 or items.len > max_selections) return false;
+    sel_words[0] = @intCast(primary);
+    for (items, 0..) |s, i| {
+        sel_words[1 + 2 * i] = @intCast(s.anchor);
+        sel_words[2 + 2 * i] = @intCast(s.head);
+    }
+    return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
+}
+
+/// Add a selection and make it the primary (helix `C`, ide's add-next-match).
+pub fn addSelection(s: Selection) bool {
+    const set = selections();
+    if (set.items.len >= max_selections) return false;
+    // `set.items` is `sel_items[0..n]`: grow it in place.
+    sel_items[set.items.len] = s;
+    return setSelections(sel_items[0 .. set.items.len + 1], set.items.len);
+}
+
+/// Drop selection `i` (never the last one); the primary stays put, or moves
+/// to the selection before a removed primary.
+pub fn removeSelection(i: usize) bool {
+    const set = selections();
+    if (set.items.len <= 1 or i >= set.items.len) return false;
+    const primary = if (set.primary > i or (set.primary == i and i > 0)) set.primary - 1 else set.primary;
+    // `set.items` is `sel_items[0..n]`: close the gap in place.
+    std.mem.copyForwards(Selection, sel_items[i .. set.items.len - 1], sel_items[i + 1 .. set.items.len]);
+    return setSelections(sel_items[0 .. set.items.len - 1], primary);
+}
+
+/// Keep only the primary selection (helix `,`).
+pub fn collapseSelections() bool {
+    const set = selections();
+    if (set.items.len == 0) return false;
+    return setSelections(set.items[set.primary..][0..1], 0);
+}
+
+/// Run a motion once per selection (each read as "the cursor") and fill
+/// `out` with one live-range handle per selection, null where the motion
+/// returned none. Returns the filled prefix of `out`.
+pub fn runRangeEach(cmd: []const u8, out: []?u32) []?u32 {
+    var raw: [max_selections]i32 = undefined;
+    const cap = @min(out.len, max_selections);
+    const total: usize = @intCast(@max(0, e.wl_run_range_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(cap))));
+    const n = @min(total, cap);
+    for (out[0..n], raw[0..n]) |*o, h| o.* = if (h < 0) null else @intCast(h);
+    return out[0..n];
+}
+
+/// Run an operator once per range handle — reverse offset order, one undo
+/// unit. Null entries (a selection the motion found nothing for) are skipped.
+pub fn runRangeArgEach(cmd: []const u8, handles: []const ?u32) void {
+    var raw: [max_selections]i32 = undefined;
+    const n = @min(handles.len, max_selections);
+    for (raw[0..n], handles[0..n]) |*r, h| r.* = if (h) |v| @intCast(v) else -1;
+    if (n == 0) return;
+    e.wl_run_range_arg_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(n));
+}
+
 /// Anchor `[r.start, r.end)` in the active CRDT document and return an opaque
 /// live-range handle. The document advances its endpoints through local and
 /// merged edits; call `releaseRange` when retaining it across a callback.
@@ -1617,6 +1716,32 @@ pub fn pasteAt(base: usize) void {
 }
 pub fn pasteAtIn(name: u8, base: usize) void {
     e.wl_paste_at(@intCast(base), name);
+}
+
+/// Yank one value per selection: each of `ranges` (selection order) becomes
+/// its own value in register `name`.
+pub fn yankEachIn(name: u8, ranges: []const Range, linewise: bool) void {
+    // `sel_words` is free here: `ranges` may alias `sel_items`, never it.
+    const words = sel_words[0 .. 2 * max_selections];
+    const n = @min(ranges.len, max_selections);
+    if (n == 0) return;
+    for (ranges[0..n], 0..) |r, i| {
+        words[2 * i] = @intCast(r.start);
+        words[2 * i + 1] = @intCast(r.end);
+    }
+    e.wl_yank_each(p(words.ptr), @intCast(n), @intFromBool(linewise), name);
+}
+/// What selection `index` of `count` pastes from register `name` — its own
+/// value when the register holds exactly `count`, else every value joined
+/// (core's one distribution rule, `register.zig`'s `pasteSpan`). Private
+/// scratch, valid until the next call.
+pub fn registerPasteValueIn(name: u8, index: usize, count: usize) []const u8 {
+    const n = e.wl_register_paste_value(@intCast(index), @intCast(count), p(&reg_scratch), reg_scratch.len, name);
+    return reg_scratch[0..@intCast(n)];
+}
+/// `pasteAtIn` for the value selection `index` of `count` pasted at `base`.
+pub fn pasteValueAtIn(name: u8, base: usize, index: usize, count: usize) void {
+    e.wl_paste_value_at(@intCast(base), @intCast(index), @intCast(count), name);
 }
 
 // ── Generic semantic views ────────────────────────────────────────────

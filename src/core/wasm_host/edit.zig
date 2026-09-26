@@ -333,27 +333,19 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         return;
     };
     defer p.gpa.free(cmd);
-    const rv = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch {
-        results[0] = -1;
-        return;
-    };
-    if (rv != .range) {
-        results[0] = -1;
-        return;
-    }
-    const doc = p.activeCtx().document() orelse {
-        results[0] = -1;
-        return;
-    };
-    const cur = rv.range.resolve(doc) orelse {
-        results[0] = -1;
-        return;
-    };
-    const h = p.anchorRange(cur.start, cur.end) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(h);
+    results[0] = runForRange(p, cmd);
+}
+
+/// Run `cmd` and import the live range it returns as a handle in this
+/// plugin's table; -1 when it returned none. The shared body of `run_range`
+/// and `run_range_each`.
+fn runForRange(p: *WasmPlugin, cmd: []const u8) i32 {
+    const rv = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch return -1;
+    if (rv != .range) return -1;
+    const doc = p.activeCtx().document() orelse return -1;
+    const cur = rv.range.resolve(doc) orelse return -1;
+    const h = p.anchorRange(cur.start, cur.end) catch return -1;
+    return @intCast(h);
 }
 
 /// Resolve an anchored-range handle to its current `[start, end)` (two u32
@@ -460,6 +452,162 @@ pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         error.OutOfLimit, error.Collapsed => trapDocRegion(p, caller, cur.start, cur.end, e),
         else => {},
     };
+}
+
+// ── Multiple selections ──────────────────────────────────────────────
+// A selection set crosses as ONE u32 record, both ways:
+//
+//     [primary, anchor0, head0, anchor1, head1, …]
+//
+// in document order. `get` writes it, `set` reads it back — so a guest edits
+// the set it read and hands it back, and add/remove/collapse are SDK
+// compositions over the pair rather than three more doors (plugin_sdk
+// `addSelection`/`removeSelection`/`collapseSelections`). A caret reads
+// `anchor == head`, and `anchor == head` sets one.
+
+/// Guest words arrive as i32; every one of these is a u32 on the guest side
+/// (offsets, counts, pointers). Reinterpret, never `@intCast` — a sign-bit
+/// word from a hostile guest must not trap the host.
+fn word(raw: i32) u32 {
+    return @bitCast(raw);
+}
+
+/// A sane ceiling on one selection record, so a hostile count cannot ask the
+/// host to allocate gigabytes. Far above any editing use.
+const max_selections: u32 = 1 << 16;
+
+/// `selections_get(out_ptr, cap) -> count`: write the primary index and up to
+/// `cap` `{anchor, head}` pairs; return the full count (a `cap` of 0 writes
+/// nothing — the count query). An entry with no text reports 0.
+pub fn hSelectionsGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ed = activeEditor(p.activeCtx()) orelse {
+        results[0] = 0;
+        return;
+    };
+    const n = ed.selectionCount();
+    results[0] = @intCast(n);
+    const cap = @min(word(args[1]), n);
+    if (cap == 0) return;
+    const words = p.gpa.alloc(u32, 1 + 2 * cap) catch return;
+    defer p.gpa.free(words);
+    words[0] = @intCast(ed.primary);
+    for (0..cap) |i| {
+        const e = ed.selectionEnds(i);
+        words[1 + 2 * i] = @intCast(e.anchor);
+        words[2 + 2 * i] = @intCast(e.head);
+    }
+    const bytes = std.mem.sliceAsBytes(words);
+    _ = caller.writeMemory(word(args[0]), bytes.len, bytes) catch {};
+}
+
+/// `selections_set(ptr, n) -> 0 | -1`: replace every selection with the `n`
+/// pairs of the record at `ptr` (n ≥ 1). Offsets clamp to the document; the
+/// set is normalized (sorted, overlaps merged). -1 for no editor, n out of
+/// range, or an unreadable record — the old set is then untouched.
+pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const ed = activeEditor(p.activeCtx()) orelse return;
+    const n = word(args[1]);
+    if (n == 0 or n > max_selections) return;
+    const raw = caller.readMemory(p.gpa, word(args[0]), (1 + 2 * @as(usize, n)) * 4) catch return;
+    defer p.gpa.free(raw);
+    const ends = p.gpa.alloc(Editor.Ends, n) catch return;
+    defer p.gpa.free(ends);
+    const primary = std.mem.readInt(u32, raw[0..4], .little);
+    for (ends, 0..) |*e, i| {
+        const at = 4 + 8 * i;
+        e.* = .{
+            .anchor = std.mem.readInt(u32, raw[at..][0..4], .little),
+            .head = std.mem.readInt(u32, raw[at + 4 ..][0..4], .little),
+        };
+    }
+    ed.setSelections(p.gpa, ends, primary) catch return;
+    results[0] = 0;
+}
+
+/// `run_range_each(cmd, out_ptr, cap) -> count`: run a motion ONCE PER
+/// SELECTION, each time with that selection as the primary — so the motion,
+/// which reads "the cursor", reads that selection's head — and write one
+/// live-range handle per selection (-1 where it returned no range), in the
+/// document order the selections had when this began. The primary is restored
+/// afterwards. With one selection this is `run_range`.
+pub fn hRunRangeEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = 0;
+    const cmd = caller.readMemory(p.gpa, word(args[0]), word(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    const ed = activeEditor(p.activeCtx()) orelse return;
+    // Iterate by HANDLE, not index: a motion is free to reshape the set, and
+    // the head handle is the selection's stable identity meanwhile.
+    const heads = p.gpa.alloc(SelectionHead, ed.selectionCount()) catch return;
+    defer p.gpa.free(heads);
+    for (heads, ed.selections.items) |*h, sel| h.* = sel.head;
+    const out = p.gpa.alloc(i32, heads.len) catch return;
+    defer p.gpa.free(out);
+    const primary_head = ed.selections.items[ed.primary].head;
+    for (heads, out) |h, *o| {
+        o.* = -1;
+        // The motion may have closed or switched the entry: stop, honestly.
+        if (activeEditor(p.activeCtx()) != ed) continue;
+        ed.primary = selectionIndexOf(ed, h) orelse continue;
+        o.* = runForRange(p, cmd);
+    }
+    if (activeEditor(p.activeCtx()) == ed) ed.primary = selectionIndexOf(ed, primary_head) orelse @min(ed.primary, ed.selectionCount() - 1);
+    const bytes = std.mem.sliceAsBytes(out[0..@min(word(args[3]), out.len)]);
+    if (bytes.len > 0) _ = caller.writeMemory(word(args[2]), bytes.len, bytes) catch {};
+    results[0] = @intCast(heads.len);
+}
+
+const SelectionHead = @FieldType(Editor.Selection, "head");
+
+fn selectionIndexOf(ed: *const Editor, head: SelectionHead) ?usize {
+    for (ed.selections.items, 0..) |sel, i| {
+        if (sel.head == head) return i;
+    }
+    return null;
+}
+
+/// `run_range_arg_each(cmd, handles_ptr, n)`: run an operator once per live
+/// range handle, in REVERSE offset order (a later edit never shifts an
+/// earlier range's bytes under an operator that reads them), all inside ONE
+/// undo unit of the active editor — the operator's own cursor moves are
+/// barriers `beginUnit` holds shut. Stale or foreign handles are skipped.
+pub fn hRunRangeArgEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const cmd = caller.readMemory(p.gpa, word(args[0]), word(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    const n = word(args[3]);
+    if (n == 0 or n > max_selections) return;
+    const raw = caller.readMemory(p.gpa, word(args[2]), @as(usize, n) * 4) catch return;
+    defer p.gpa.free(raw);
+    const Job = struct { handle: u32, start: usize, end: usize };
+    var jobs: std.ArrayList(Job) = .empty;
+    defer jobs.deinit(p.gpa);
+    for (0..n) |i| {
+        const h = opaqueHandle(std.mem.readInt(i32, raw[4 * i ..][0..4], .little)) orelse continue;
+        const slot = p.activeRange(h) orelse continue;
+        const cur = p.resolveRange(slot) orelse continue;
+        jobs.append(p.gpa, .{ .handle = h, .start = cur.start, .end = cur.end }) catch return;
+    }
+    std.mem.sort(Job, jobs.items, {}, struct {
+        fn gt(_: void, a: Job, b: Job) bool {
+            return a.start > b.start or (a.start == b.start and a.end > b.end);
+        }
+    }.gt);
+    // Close the unit on the editor this began on, found again by its entry
+    // ref: an operator may switch (or close) the entry meanwhile.
+    const entry = p.activeCtx().entry() orelse return;
+    const at = entry.ref();
+    (entry.textEditor() orelse return).history.beginUnit();
+    defer if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |ed| ed.history.endUnit();
+    for (jobs.items) |job| {
+        const slot = p.activeRange(job.handle) orelse continue;
+        const rv = command.Value{ .range = p.borrowedRange(slot) orelse continue };
+        _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{rv}) catch {};
+    }
 }
 
 /// The read/motion doors BOTH membranes bind, named once. `quickjs.zig` walks

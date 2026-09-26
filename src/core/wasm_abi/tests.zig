@@ -4019,3 +4019,88 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
         try t.expectEqualStrings("a=;b=squash bbb second;c=pick ccc third;", line);
     }
 }
+
+// ── Multiple selections across the membrane (doc/configs.md §0.1) ──────────
+
+fn expectDoc(gpa: Allocator, ed: anytype, want: []const u8) !void {
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings(want, s);
+}
+
+test "wasm plugin: multiple selections — get/set record, per-selection motion+operator as one undo unit" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    // A keystroke-driven dispatch: the operator's edits join the user's undo.
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "abc def ghi");
+    ed.placeCursor(0); // a motion: seals the typing's undo unit
+
+    // add/remove/collapse are SDK compositions over the get/set record.
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms-add", &.{ .{ .integer = 4 }, .{ .integer = 4 } }));
+    try t.expectEqual(command.Value{ .integer = 3 }, try command.run(&env.commands, &env.ctx, "ms-add", &.{ .{ .integer = 8 }, .{ .integer = 8 } }));
+    try t.expectEqual(@as(usize, 3), ed.selectionCount());
+    // The last added is primary, and the cursor view reads it.
+    try t.expectEqual(@as(usize, 2), ed.primary);
+    try t.expectEqual(@as(usize, 8), ed.cursorOffset());
+
+    // Motion once per selection, operator once per range: every word's first
+    // letter upcased — and the operator's own jump (a barrier) did not split
+    // the unit.
+    _ = try command.run(&env.commands, &env.ctx, "ms-upcase-each", &.{});
+    try expectDoc(gpa, ed, "Abc Def Ghi");
+    try t.expect(try ed.undo(gpa, .user_driven));
+    try expectDoc(gpa, ed, "abc def ghi");
+    // The primary survived the per-selection runs (each ran AS the primary).
+    try t.expectEqual(@as(usize, 3), ed.selectionCount());
+    try t.expectEqual(@as(usize, 2), ed.primary);
+
+    // remove(1) keeps the primary on the same selection; collapse keeps it alone.
+    const primary_at = ed.cursorOffset();
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms-remove", &.{.{ .integer = 1 }}));
+    try t.expectEqual(primary_at, ed.cursorOffset());
+    try t.expectEqual(command.Value{ .integer = 1 }, try command.run(&env.commands, &env.ctx, "ms-collapse", &.{}));
+    try t.expectEqual(primary_at, ed.cursorOffset());
+}
+
+test "wasm plugin: multiple selections — a per-selection yank distributes across a matching paste" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    var reg: register.Bank = .{};
+    defer reg.deinit(gpa);
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{ .register = &reg });
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "one two|");
+    // Two selections over the two words, then yank one value each.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 3 }, .{ .anchor = 4, .head = 7 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-yank", &.{});
+    try t.expectEqual(@as(usize, 2), reg.get(0).?.valueCount());
+    try t.expectEqualStrings("one\ntwo", reg.get(0).?.slice());
+
+    // Two carets → each gets its own value (counts match).
+    try ed.setSelections(gpa, &.{ .{ .anchor = 3, .head = 3 }, .{ .anchor = 8, .head = 8 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
+    try expectDoc(gpa, ed, "oneone two|two");
+
+    // One caret → the joined text (counts differ; nothing yanked is dropped).
+    try ed.setSelections(gpa, &.{.{ .anchor = 0, .head = 0 }}, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
+    try expectDoc(gpa, ed, "one\ntwooneone two|two");
+}
