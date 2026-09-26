@@ -188,7 +188,8 @@ extern void host_provide(const char *action, int action_len,
 // segment onto the manifest (north-star-plan §6 W3, task #19 item 3).
 __attribute__((import_module("weft"), import_name("qjs_status_segment")))
 extern void host_status_segment(const char *text, int text_len,
-                                const char *role, int role_len, int priority);
+                                const char *role, int role_len, int priority,
+                                const char *command, int command_len);
 // weft.grant(plugin, capability, opts): stage a GrantDecl onto the manifest
 // (north-star-plan §6 W4 slice 4). `root` is opts.root ("" = unrestricted,
 // Limit.none; non-empty narrows to Limit.fs_root) — the only limit kind a
@@ -218,6 +219,7 @@ extern void host_present(const char *viewport, int viewport_len,
 #define WEFT_VP_TAKES_FOCUS (1 << 3)
 #define WEFT_VP_STATUS_LINE (1 << 4)
 #define WEFT_VP_EXTENT_ROWS (1 << 5)
+#define WEFT_VP_HIDDEN (1 << 6)
 
 // The result an i32-returning effect import answers when this plugin holds no
 // grant for the capability it needs (core/membrane/qjs_contract.zig's
@@ -544,18 +546,22 @@ static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
 // segment (north-star-plan §6 W3, task #19). `role` names a
 // core.surface.Role ("normal","muted","accent",…); unknown/empty falls back
 // to "normal" host-side. `priority` defaults to 0 — the composition sort key
-// within `ui/statusline-seg` (an ordered_union slot).
+// within `ui/statusline-seg` (an ordered_union slot). `command`, when given,
+// is what a click on the segment runs.
 static JSValue js_status_segment(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "statusSegment(text, role[, priority])");
-    size_t tl, rl;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "statusSegment(text, role[, priority[, command]])");
+    size_t tl, rl, cl = 0;
     const char *txt = JS_ToCStringLen(ctx, &tl, argv[0]);
     const char *role = JS_ToCStringLen(ctx, &rl, argv[1]);
     int32_t prio = 0;
     if (argc >= 3) JS_ToInt32(ctx, &prio, argv[2]);
-    if (txt && role) host_status_segment(txt, (int)tl, role, (int)rl, prio);
+    const char *cmd = NULL;
+    if (argc >= 4 && JS_IsString(argv[3])) cmd = JS_ToCStringLen(ctx, &cl, argv[3]);
+    if (txt && role) host_status_segment(txt, (int)tl, role, (int)rl, prio, cmd ? cmd : "", (int)cl);
     JS_FreeCString(ctx, txt);
     JS_FreeCString(ctx, role);
+    if (cmd) JS_FreeCString(ctx, cmd);
     return JS_UNDEFINED;
 }
 
@@ -673,6 +679,8 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     if (opt_bool(ctx, opts, "followFocus", 1)) flags |= WEFT_VP_FOCUS_SOURCE;
     if (opt_bool(ctx, opts, "takesFocus", 1)) flags |= WEFT_VP_TAKES_FOCUS;
     if (opt_bool(ctx, opts, "statusLine", 1)) flags |= WEFT_VP_STATUS_LINE;
+    // `shown: false` starts it hidden: a panel opened on demand.
+    if (!opt_bool(ctx, opts, "shown", 1)) flags |= WEFT_VP_HIDDEN;
     host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, extent_arg);
     JS_FreeCString(ctx, name);
     if (edge) JS_FreeCString(ctx, edge);

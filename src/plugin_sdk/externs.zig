@@ -192,8 +192,11 @@ pub extern "weft:abi/1" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32,
 pub extern "weft:abi/1" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
 pub extern "weft:abi/1" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
+pub extern "weft:abi/1" fn wl_outline() i32;
 pub extern "weft:abi/1" fn wl_node_children(off: u32) i32;
 pub extern "weft:abi/1" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_signal_subscribe(name_ptr: u32, name_len: u32) i32;
+pub extern "weft:abi/1" fn wl_signal_emit(name_ptr: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 pub extern "weft:abi/1" fn wl_tool_backing(ptr: u32, len: u32) void;

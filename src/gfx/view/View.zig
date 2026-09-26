@@ -40,7 +40,6 @@ const render = @import("render.zig");
 const Theme = @import("Theme.zig");
 const hud_mod = @import("hud.zig");
 const Hud = hud_mod.Hud;
-const buildTabStrip = hud_mod.buildTabStrip;
 
 const font_id_mono = fonts.font_id_mono;
 const margin: f32 = 8;
@@ -120,6 +119,9 @@ semantic_active: bool = false,
 /// The last `build`'s scene hit regions, active or not: an unfocused pane's
 /// rows are clickable too. `recordPane` files them with the pane.
 build_hits: []const semantic.Hit = &.{},
+/// The last `build`'s CHROME hit regions — tab parts and status segments —
+/// filed with the pane by `recordPane` like `build_hits`. Arena-backed.
+build_chrome: []const hud_mod.ChromeHit = &.{},
 /// Every pane's hit geometry from the last frame, so the pointer can ask
 /// what is under it in ANY pane, not only the focused one — a click in an
 /// unfocused pane must land where it points. Arena-backed like
@@ -290,6 +292,7 @@ pub fn resetFrame(self: *View) void {
     self.semantic_hits = &.{};
     self.semantic_active = false;
     self.build_hits = &.{};
+    self.build_chrome = &.{};
     self.pane_map_count = 0;
 }
 
@@ -302,6 +305,15 @@ pub const PaneMap = struct {
     rect: region.Rect,
     lines: layout.Layout,
     hits: []const semantic.Hit,
+    /// The pane's chrome regions (tab parts, status segments). A point on
+    /// one of these is on the chrome, not on the text or scene beneath.
+    chrome: []const hud_mod.ChromeHit = &.{},
+
+    /// The chrome region (a tab part, a status segment) under (x, y).
+    pub fn chromeAt(self: *const PaneMap, x: f32, y: f32) ?hud_mod.ChromeHit {
+        for (self.chrome) |c| if (c.rect.contains(x, y)) return c;
+        return null;
+    }
 
     /// The byte offset under (x, y), or null when the pane shows no text.
     pub fn offsetAt(self: *const PaneMap, x: f32, y: f32) ?usize {
@@ -329,8 +341,19 @@ pub fn recordPane(self: *View, pane: u32, rect: region.Rect) void {
         .rect = rect,
         .lines = self.frame_layout,
         .hits = self.build_hits,
+        .chrome = self.build_chrome,
     };
     self.pane_map_count += 1;
+}
+
+/// `cols` cells starting at column `col` of the row whose top is `y`.
+pub fn cellsRect(self: *const View, y: f32, col: usize, cols: usize) region.Rect {
+    return .{
+        .x = self.origin_x + @as(f32, @floatFromInt(col)) * self.cell_w,
+        .y = y,
+        .w = @as(f32, @floatFromInt(cols)) * self.cell_w,
+        .h = self.line_h,
+    };
 }
 
 /// The pane whose last-built rect contains (x, y).
@@ -378,6 +401,7 @@ pub fn build(
     world_to_pixel: scene.Transform2D,
 ) !Built {
     self.build_hits = &.{};
+    self.build_chrome = &.{};
     // Carve the pane's frame into regions (no element computes an offset
     // against another): content is the frame inset by `margin`; a top
     // tab strip and a bottom HUD (status line + optional panel) are cut
@@ -509,14 +533,32 @@ pub fn build(
         self.frame_layout = .{ .lines = &.{} };
     }
 
+    // Chrome hit regions, filed with the pane (`recordPane`) so a click on
+    // a tab or a status segment resolves to WHAT it is on, not to the text
+    // under the strip. Arena-backed like the geometry map.
+    var chrome: std.ArrayList(hud_mod.ChromeHit) = .empty;
+    const chrome_gpa = self.layout_arena.allocator();
+
     // Top buffer-tab strip, into its own region.
     if (hud.tabs) |tabs| {
         var tbuf: [1024]u8 = undefined;
-        const strip = buildTabStrip(&tbuf, tabs);
-        try statusline.appendPlainRun(self, scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
+        var parts: [128]hud_mod.TabPart = undefined;
+        const strip = hud_mod.buildTabStripParts(&tbuf, tabs, &parts);
+        try statusline.appendPlainRun(self, scratch, &runs, &rects, strip.text, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
+        for (strip.parts) |part| {
+            if (part.col >= cols_visible) break;
+            try chrome.append(chrome_gpa, .{
+                .rect = self.cellsRect(tab_rect.?.y, part.col, @min(part.cols, cols_visible - part.col)),
+                .kind = .tab,
+                .index = part.index,
+                .part = part.part,
+                .entry = tabs[part.index].id,
+            });
+        }
     }
 
-    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
+    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa });
+    self.build_chrome = chrome.items;
     // Floating surfaces (which-key popup, files/git, a guest's caret
     // popup like the `lsp` plugin's hover) float within the BODY region —
     // never over the status/tab/panel rects, which are carved out. Hand the

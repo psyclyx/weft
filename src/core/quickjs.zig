@@ -1726,7 +1726,7 @@ fn echoProvideMalformed(br: *Bridge, action: []const u8, why: []const u8) void {
     }
 }
 
-/// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
+/// weft.statusSegment(text, role, priority, command) — stage a static `ui/statusline-
 /// seg` segment onto the manifest (doc/contextual-workspace-architecture.md
 /// §11, the mesh-reachability verb). CONFIG-ONLY: unlike
 /// `weft.provide`/`weft.action` this has no LIVE (resident-JS-plugin,
@@ -1744,8 +1744,10 @@ fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const role = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(role);
     const priority = args[4];
+    const on_click = readStr(br, caller, args[5], args[6]) orelse return;
+    defer gpa.free(on_click);
     if (br.manifest) |m| {
-        m.addStatusSegment(text, role, priority) catch {};
+        m.addStatusSegment(text, role, priority, on_click) catch {};
         return;
     }
     std.log.warn("weft.statusSegment: config-plane only (not available to a resident plugin yet)", .{});
@@ -1789,6 +1791,8 @@ const vp_takes_focus: i32 = 1 << 3;
 const vp_status_line: i32 = 1 << 4;
 /// `extent` is a row count, not per-mille of the frame.
 const vp_extent_rows: i32 = 1 << 5;
+/// `{shown: false}`: the viewport starts hidden.
+const vp_hidden: i32 = 1 << 6;
 
 /// `weft.viewport(name, opts)` — stage a viewport's attributes
 /// (doc/configuration.md §5.2). The edge arrives as a name and is PARSED
@@ -1821,7 +1825,7 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     else
         .{ .fraction = @as(f32, @floatFromInt(args[5])) / 1000.0 };
     if (br.manifest) |m| {
-        m.addViewport(name, attrs, extent) catch {};
+        m.addViewport(name, attrs, extent, flags & vp_hidden != 0) catch {};
         return;
     }
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});

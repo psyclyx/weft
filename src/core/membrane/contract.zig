@@ -267,12 +267,15 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_node_enclosing", .handler = syntax.hNodeEnclosing },
     .{ .name = "wl_query", .handler = syntax.hQuery },
     .{ .name = "wl_query_capture", .handler = syntax.hQueryCapture },
+    .{ .name = "wl_outline", .handler = syntax.hOutline },
     .{ .name = "wl_node_children", .handler = syntax.hNodeChildren },
     .{ .name = "wl_claim_subbuffer", .handler = syntax.hClaimSubbuffer },
     .{ .name = "wl_subbuffer_put_fact", .handler = syntax.hSubbufferPutFact },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
+    .{ .name = "wl_signal_subscribe", .handler = activation.hSignalSubscribe },
+    .{ .name = "wl_signal_emit", .handler = activation.hSignalEmit },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },

@@ -12,6 +12,60 @@ const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
 const task = @import("task.zig");
 
+/// The terminal-control filter's state between chunks.
+pub const Controls = enum { text, escape, csi, osc, osc_escape };
+
+/// Append `in` to `out` without its terminal controls. The buffer a session
+/// streams into is plain text with no terminal behind it, so an interactive
+/// shell's colors, cursor moves and window titles would land as literal
+/// bytes: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL | ESC \`) sequences,
+/// other two-byte escapes, carriage returns and bells are dropped. Newlines,
+/// tabs and printable text pass. Returns the state to resume from, since a
+/// sequence may straddle two reads.
+pub fn stripControls(gpa: Allocator, from: Controls, in: []const u8, out: *std.ArrayList(u8)) !Controls {
+    var state = from;
+    for (in) |b| {
+        switch (state) {
+            .text => switch (b) {
+                0x1b => state = .escape,
+                '\r', 0x07, 0x08 => {},
+                else => try out.append(gpa, b),
+            },
+            .escape => state = switch (b) {
+                '[' => .csi,
+                ']' => .osc,
+                else => .text, // a two-byte escape: drop both
+            },
+            .csi => if (b >= 0x40 and b <= 0x7e) {
+                state = .text;
+            },
+            .osc => switch (b) {
+                0x07 => state = .text,
+                0x1b => state = .osc_escape,
+                else => {},
+            },
+            .osc_escape => state = if (b == '\\') .text else .osc,
+        }
+    }
+    return state;
+}
+
+test "repl_session: terminal controls are stripped, even split across reads" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var st = try stripControls(gpa, .text, "\x1b[1;32mgreen\x1b[0m\r\n\x1b]0;title\x07$ ", &out);
+    try std.testing.expectEqualStrings("green\n$ ", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\x1b[3", &out);
+    try std.testing.expectEqual(Controls.csi, st);
+    st = try stripControls(gpa, st, "1mb\x1b]2;t\x1b", &out);
+    st = try stripControls(gpa, st, "\\c\x1b=d", &out);
+    try std.testing.expectEqualStrings("abcd", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+}
+
 pub const Session = struct {
     gpa: Allocator,
     ctx: *command.Context,
@@ -29,6 +83,9 @@ pub const Session = struct {
     child: std.process.Child,
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
+    /// Where the terminal-control filter stands between two chunks: an
+    /// escape sequence may be split across reads.
+    controls: Controls = .text,
     reader: task.Handle(void),
 
     /// Spawn `argv` as a persistent child with piped stdio and start its reader.
@@ -97,7 +154,7 @@ pub const Session = struct {
                 const chunk = r.buffered();
                 if (chunk.len > 0) {
                     s.out_mutex.lock();
-                    s.out_buf.appendSlice(s.gpa, chunk) catch {};
+                    s.controls = stripControls(s.gpa, s.controls, chunk, &s.out_buf) catch s.controls;
                     s.out_mutex.unlock();
                     r.toss(chunk.len);
                 }

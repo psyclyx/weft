@@ -222,6 +222,10 @@ pub const Application = struct {
     pub fn applyWindowIntents(self: *Application) bool {
         var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
         if (self.notifyOffersChanged()) damaged = true;
+        // Named signals plugins raised this wake (`wl_signal_emit`), heard at
+        // the same boundary and for the same reason: never inside the
+        // dispatch or poll that raised them.
+        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items)) damaged = true;
         return damaged;
     }
 

@@ -93,6 +93,10 @@ pub const Seg = struct {
     /// `col += 1` only inside the `if (hud.buffer_pos)` block) for the
     /// legacy rule this reproduces exactly in both cases.
     gap_after: u8 = 0,
+    /// The command a click on the segment runs, or "" (not clickable).
+    /// BORROWED — a manifest decl's, or a plugin answer's in the frame
+    /// arena — so `freeSegs` leaves it alone.
+    command: []const u8 = "",
 };
 
 pub fn freeSegs(gpa: Allocator, segs: []const Seg) void {
@@ -113,10 +117,59 @@ pub const StatuslineArgs = struct {
     diag_layer: ?*const core.layers.Layer = null,
     link: ?[]const u8 = null,
     theme: *const Theme,
+    /// Where a PLUGIN provider's segments come from (`StatuslineRound`); null
+    /// means only in-process providers answer, and a `.schema_provider`
+    /// binding is skipped.
+    round: ?*StatuslineRound = null,
     /// Set by `fireStatusline` itself before invoking providers — a caller
     /// building `StatuslineArgs` need not (and should not) set this.
     out: *std.ArrayList(Seg) = undefined,
 };
+
+/// The plugin half of the status line: ONE slot round (`core.status_segment`)
+/// per fire answers every plugin provider at once, fetched the first time a
+/// plugin binding is reached. HOW a plugin is reached is the app's `fetch`.
+pub const StatuslineRound = struct {
+    ctx: *anyopaque,
+    /// Fill `out.answers` with every eligible plugin provider's segments.
+    /// Allocate from `gpa` (the frame's scratch).
+    fetch: *const fn (ctx: *anyopaque, gpa: Allocator, out: *StatuslineRound) anyerror!void,
+    fetched: bool = false,
+    answers: std.ArrayList(Answer) = .empty,
+
+    pub const Answer = struct { owner: []const u8, segs: []const Seg };
+
+    fn segsOf(self: *StatuslineRound, gpa: Allocator, owner: []const u8) []const Seg {
+        if (!self.fetched) {
+            self.fetched = true;
+            self.fetch(self.ctx, gpa, self) catch |err| {
+                std.log.warn("ui_mesh: statusline round failed: {s}", .{@errorName(err)});
+                return &.{};
+            };
+        }
+        for (self.answers.items) |ans| if (std.mem.eql(u8, ans.owner, owner)) return ans.segs;
+        return &.{};
+    }
+};
+
+/// Decode one provider's `core.status_segment` answer into `Seg`s owned by
+/// `gpa` (text and command both), and append it to `out`. A malformed answer
+/// contributes nothing.
+pub fn appendStatuslineAnswer(out: *StatuslineRound, gpa: Allocator, owner: []const u8, payload: []const u8) !void {
+    var tell = core.status_segment.decodeTell(payload) orelse return;
+    var segs: std.ArrayList(Seg) = .empty;
+    while (tell.next()) |s| {
+        if (segs.items.len >= core.status_segment.max_segments) break;
+        if (s.text.len == 0) continue;
+        try segs.append(gpa, .{
+            .text = try gpa.dupe(u8, s.text),
+            .role = core.surface.Role.fromInt(s.role),
+            .align_right = s.right,
+            .command = try gpa.dupe(u8, s.command),
+        });
+    }
+    try out.answers.append(gpa, .{ .owner = try gpa.dupe(u8, owner), .segs = segs.items });
+}
 
 fn modeChipProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
@@ -182,6 +235,12 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
             .ui_provider => |up| _ = up.call(up.ctx, gpa, @ptrCast(args)) catch |err| {
                 std.log.warn("ui_mesh: statusline provider '{s}' failed: {s}", .{ b.owner, @errorName(err) });
                 continue;
+            },
+            // A plugin: its segments come from the one round, in the
+            // priority position its binding holds.
+            .schema_provider => |ref| {
+                const round = args.round orelse continue;
+                for (round.segsOf(gpa, ref.owner)) |s| try out.append(gpa, s);
             },
             else => {},
         }
@@ -387,8 +446,9 @@ pub fn gutterCellsForLine(bindings: []const *const container.Binding, gpa: Alloc
 // ── Wiring + defaults (doc/rendering.md "Wiring + defaults") ──────────
 
 pub fn declareSlots(c: *container.Container) !void {
-    try c.declareSlot(.{ .name = "ui/statusline-seg", .shape = .query, .composition = .ordered_union });
-    // Declared WITH its schema (`core.gutter`), so a plugin can bind it too.
+    // Both declared WITH their schemas (`core.status_segment`, `core.gutter`),
+    // so a plugin can bind either.
+    try core.status_segment.declare(c);
     try core.gutter.declare(c);
 }
 
@@ -488,7 +548,7 @@ fn manifestSegProvider(ctx: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerr
     const decl: *const core.manifest.StatusSegmentDecl = @ptrCast(@alignCast(ctx.?));
     const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
     const text = try gpa.dupe(u8, decl.text);
-    try a.out.append(gpa, .{ .text = text, .role = decl.resolved_role });
+    try a.out.append(gpa, .{ .text = text, .role = decl.resolved_role, .command = decl.command });
     return true;
 }
 

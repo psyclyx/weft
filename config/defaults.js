@@ -60,6 +60,10 @@ weft.bind("menu", "F1", "which-key-now");
 weft.bind("global", "mouse-1", "pointer-click");
 weft.bind("global", "double-mouse-1", "pointer-click");
 weft.bind("global", "triple-mouse-1", "pointer-click");
+// A click on a tab shows it and one on its close glyph closes it (pointer-click
+// reads the chrome under the pointer); a middle click anywhere on a tab closes
+// it. A status segment that names a command runs it on a click.
+weft.bind("global", "mouse-2", "pointer-close-tab");
 weft.bind("global", "drag-mouse-1", "pointer-drag-select");
 weft.bind("global", "S-mouse-1", "pointer-extend-selection");
 weft.bind("global", "wheel-up", "scroll-wheel-up");

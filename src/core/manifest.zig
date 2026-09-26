@@ -176,6 +176,10 @@ pub const StatusSegmentDecl = struct {
     text: []u8,
     role: []u8,
     priority: i32,
+    /// The command a click on the segment runs (`weft.statusSegment`'s
+    /// optional fourth argument), or `""` for none. The segment stays
+    /// static; only what clicking it does is named.
+    command: []u8 = &.{},
     /// `role`'s parsed `core.surface.Role` — resolved ONCE at BIND time,
     /// inside `StatusSegBinder.bind`'s implementation (`gfx/view/ui_mesh.
     /// zig`'s `bindManifestSegment`), not at fire time: the fire path
@@ -260,6 +264,9 @@ pub const ViewportDecl = struct {
     /// The panel's share of the frame, or its height in rows; ignored when
     /// undocked.
     extent: viewport_mod.Extent,
+    /// `{shown: false}`: the viewport starts hidden (a panel opened on
+    /// demand). Only its first declaration reads this.
+    hidden: bool = false,
 };
 
 /// `weft.present(viewport, {subject})` (doc/configuration.md §5.2) — which
@@ -448,6 +455,7 @@ pub const Manifest = struct {
         for (self.status_segments.items) |d| {
             gpa.free(d.text);
             gpa.free(d.role);
+            gpa.free(d.command);
         }
         self.status_segments.deinit(gpa);
         for (self.slots.items) |d| {
@@ -567,11 +575,18 @@ pub const Manifest = struct {
     pub fn addLog(self: *Manifest, message: []const u8) !void {
         try self.logs.append(self.gpa, .{ .message = try self.gpa.dupe(u8, message) });
     }
-    pub fn addStatusSegment(self: *Manifest, text: []const u8, role: []const u8, priority: i32) !void {
+    pub fn addStatusSegment(self: *Manifest, text: []const u8, role: []const u8, priority: i32, on_click: []const u8) !void {
+        const owned_text = try self.gpa.dupe(u8, text);
+        errdefer self.gpa.free(owned_text);
+        const owned_role = try self.gpa.dupe(u8, role);
+        errdefer self.gpa.free(owned_role);
+        const owned_command = try self.gpa.dupe(u8, on_click);
+        errdefer self.gpa.free(owned_command);
         try self.status_segments.append(self.gpa, .{
-            .text = try self.gpa.dupe(u8, text),
-            .role = try self.gpa.dupe(u8, role),
+            .text = owned_text,
+            .role = owned_role,
             .priority = priority,
+            .command = owned_command,
         });
     }
     /// Stage a `weft.slot` declaration. `schema` is deep-cloned
@@ -594,7 +609,7 @@ pub const Manifest = struct {
             .root = try self.gpa.dupe(u8, root),
         });
     }
-    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent) !void {
+    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent, hidden: bool) !void {
         try self.viewports.append(self.gpa, .{
             .name = try self.gpa.dupe(u8, name),
             .attrs = attrs,
@@ -602,6 +617,7 @@ pub const Manifest = struct {
                 .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
                 .rows => |n| .{ .rows = @max(n, 1) },
             },
+            .hidden = hidden,
         });
     }
     pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8, presenter: []const u8) !void {
@@ -695,6 +711,7 @@ pub const Manifest = struct {
             hStr(h, d.text);
             hStr(h, d.role);
             h.update(std.mem.asBytes(&d.priority));
+            hStr(h, d.command);
         }
         hLen(h, self.grants.items.len);
         for (self.grants.items) |d| {
@@ -733,6 +750,7 @@ pub const Manifest = struct {
                 @intFromBool(d.attrs.focus_source),
                 @intFromBool(d.attrs.takes_focus),
                 @intFromBool(d.attrs.status_line),
+                @intFromBool(d.hidden),
                 if (d.attrs.dock) |e| @as(u8, @intFromEnum(e)) + 1 else 0,
             });
             switch (d.extent) {
@@ -959,7 +977,7 @@ pub const Manifest = struct {
         // reportable typo, never a silently ignored line.
         if (actx.ctx.viewports) |registry| {
             for (self.viewports.items) |d|
-                registry.declare(gpa, d.name, d.attrs, d.extent) catch {};
+                registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
             for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject, d.command) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {

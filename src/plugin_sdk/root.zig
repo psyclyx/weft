@@ -1807,6 +1807,26 @@ pub fn query(scm: []const u8, r: Range) usize {
     const n = e.wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
     return if (n < 0) 0 else @intCast(n);
 }
+/// The active entry's outline — the symbols its grammar's outline query
+/// names, in document order; read each with `queryCapture(i)` (its `name` is
+/// the symbol's, its span the whole item). Nested items are nested spans.
+/// Zero without a grammar or an outline query.
+pub fn outline() usize {
+    const n = e.wl_outline();
+    return if (n < 0) 0 else @intCast(n);
+}
+/// Hear the signal `name` as `on_signal(id)` (export it with
+/// `exportCallback`); returns the id, the same one for the same name.
+/// Signals arrive at the frame boundary, never inside a dispatch.
+pub fn signalSubscribe(name: []const u8) ?u32 {
+    const id = e.wl_signal_subscribe(p(name.ptr), @intCast(name.len));
+    return if (id < 0) null else @intCast(id);
+}
+/// Raise the signal `name` for every plugin listening for it. Carries no
+/// payload: a listener asks through ordinary commands for what changed.
+pub fn signalEmit(name: []const u8) void {
+    _ = e.wl_signal_emit(p(name.ptr), @intCast(name.len));
+}
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {

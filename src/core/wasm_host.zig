@@ -56,6 +56,7 @@ pub const deliverToBuffer = fs.deliverToBuffer;
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
+pub const deliverSignals = activation.deliverSignals;
 
 const intent_doors = @import("wasm_host/intent.zig");
 pub const notifyOffersChanged = intent_doors.notifyOffersChanged;

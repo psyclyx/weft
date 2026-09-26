@@ -260,6 +260,7 @@ pub const Driver = struct {
             self.ctx.head,
             self.ctx.keymap,
             self.ctx.viewports,
+            self.view,
         );
         if (window_cmds.applyIntents(
             self.window_ctx,

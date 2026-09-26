@@ -194,6 +194,56 @@ const GutterRound = struct {
     }
 };
 
+/// The app's half of a plugin status-line round (`ui_mesh.StatuslineRound`):
+/// the live dispatch context, the pane entry's facts (so a provider's
+/// predicate is evaluated host-side), and the two facts `core.status_segment`
+/// asks with. Fired at most once per pane per built frame, and only when a
+/// plugin is among the eligible providers.
+const StatuslineRound = struct {
+    ctx: *core.command.Context,
+    facts: core.facts.Facts,
+    caret: usize,
+    focused: bool,
+    round: view_mod.ui_mesh.StatuslineRound = undefined,
+
+    fn fetch(raw: *anyopaque, gpa: std.mem.Allocator, out: *view_mod.ui_mesh.StatuslineRound) anyerror!void {
+        const self: *StatuslineRound = @ptrCast(@alignCast(raw));
+        const host = self.ctx.slot_host orelse return;
+        const request = try core.status_segment.encodeAsk(gpa, .{
+            .caret = std.math.cast(u32, self.caret) orelse return,
+            .focused = self.focused,
+        });
+        const id = (try host.fire(core.status_segment.slot_name, self.facts, "", .{ .request = request, .ctx = self.ctx })) orelse return;
+        defer host.finish(id);
+        const session = host.session(id) orelse return;
+        for (session.all()) |result| try view_mod.ui_mesh.appendStatuslineAnswer(out, gpa, result.provider, result.payload);
+    }
+
+    /// A round for one pane, arena-allocated for the frame.
+    fn make(arena: std.mem.Allocator, fx: *const FrameCtx, facts: core.facts.Facts, editor: ?*core.Editor, focused: bool) !*view_mod.ui_mesh.StatuslineRound {
+        const self = try arena.create(StatuslineRound);
+        self.* = .{
+            .ctx = fx.cmd_ctx,
+            .facts = facts,
+            .caret = if (editor) |ed| ed.cursorOffset() else 0,
+            .focused = focused,
+        };
+        self.round = .{ .ctx = self, .fetch = fetch };
+        return &self.round;
+    }
+};
+
+/// The facts a pane's chrome providers (status line, gutter) are asked
+/// with: the mode, the entry's path, tool and posture.
+fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, file_name: []const u8) core.facts.Facts {
+    return .{
+        .mode = fx.head.currentMode(),
+        .path = file_name,
+        .tool = buffer.tool,
+        .posture = @tagName(buffer.posture(false)),
+    };
+}
+
 /// Resolve one pane's gutter for this frame: the eligible providers (one
 /// Container scan) and, when a PLUGIN is among them, the round its cells
 /// come from. `buffer`'s tool and posture ride the facts, so a provider bound
@@ -546,8 +596,11 @@ pub const FrameBuilder = struct {
         if (fx.buffers.count() > 1) {
             var bit3 = fx.buffers.iterator();
             while (bit3.next()) |b| {
+                // A docked companion's entry (the file tree, a panel, a
+                // toolbar) is chrome, not a document: never a tab.
+                if (fx.viewports.holdsEntry(b.id)) continue;
                 const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
-                tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
+                tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf, .id = b.id }) catch {};
             }
         }
         // vim-goggles: an operation flashed a set of ranges on a document;
@@ -580,8 +633,9 @@ pub const FrameBuilder = struct {
         // an entry like this one, whose cells then arrive through one slot
         // round per visible window, never one per row.
         var statusline_args: view_mod.ui_mesh.StatuslineArgs = .{
-            .facts = .{ .mode = fx.head.currentMode(), .path = file_name },
+            .facts = paneFacts(fx, abuf, file_name),
             .file = file_name,
+            .round = try StatuslineRound.make(mesh_gpa, fx, paneFacts(fx, abuf, file_name), editor, true),
             .buffer_pos = buffer_pos,
             .diag_layer = diag_layer,
             .link = link_note,
@@ -668,6 +722,12 @@ pub const FrameBuilder = struct {
         // A row-sized dock is as tall as the rows the view draws NOW.
         self.win_layout.rows = .{ .line_h = self.view.line_h, .inset = 2 * view_mod.View.pane_margin };
         const nslots = self.win_layout.collect(focused, frame_rect, &slots);
+        // The tab strip lists the documents, so it sits on a pane that shows
+        // them: the focused one when it is an ordinary pane, else the first
+        // primary pane (focus in a docked panel leaves it over the editor).
+        const tabs_pane: ?u32 = if (focused.pane().attrs.isPrimary())
+            focused.pane().id
+        else if (self.win_layout.primaryPane()) |p| p.pane().id else null;
 
         // Free last frame's builds; each pane appends a fresh one below.
         for (self.built_panes.items) |*old| old.deinit(gpa);
@@ -700,8 +760,9 @@ pub const FrameBuilder = struct {
             // rendering, which never showed those either) plus its own
             // diagnostics count and gutter context.
             var other_args: view_mod.ui_mesh.StatuslineArgs = .{
-                .facts = .{ .mode = fx.head.currentMode(), .path = other_name },
+                .facts = paneFacts(fx, ob, other_name),
                 .file = other_name,
+                .round = try StatuslineRound.make(arena_state.allocator(), fx, paneFacts(fx, ob, other_name), oed, false),
                 .diag_layer = other_diag,
                 .theme = &self.view.theme,
             };
@@ -709,6 +770,7 @@ pub const FrameBuilder = struct {
             const other_gutter = try gutterFrame(arena_state.allocator(), fx, ob, oed, other_name, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),
+                .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
                 .status_line = slot.pane.attrs.status_line,
                 .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                 .statusline_segs = other_segs,
@@ -732,6 +794,7 @@ pub const FrameBuilder = struct {
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
+        if (tabs_pane != focused.pane().id) fhud.tabs = null;
         fhud.status_line = focused.pane().attrs.status_line;
         if (act.attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
         if (editor) |ed| {

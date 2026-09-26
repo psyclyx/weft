@@ -74,6 +74,9 @@ pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
 /// The gutter's plugin exchange: the `ui/gutter-segment` slot's name and schema.
 pub const gutter = @import("gutter.zig");
+/// The status line's plugin exchange: the `ui/statusline-seg` slot's name
+/// and schema.
+pub const status_segment = @import("status_segment.zig");
 /// The transient highlight over what an operation just touched: a set of
 /// ranges anchored on its document.
 pub const flash = @import("flash.zig");
@@ -134,4 +137,5 @@ test {
     _ = @import("identity.zig");
     _ = @import("weft_facts");
     _ = @import("container.zig");
+    _ = @import("repl_session.zig");
 }

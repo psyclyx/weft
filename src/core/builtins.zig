@@ -685,6 +685,17 @@ fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Va
     return ok;
 }
 
+/// Bring the ACTIVE entry into a declared viewport, show the viewport, and
+/// focus it there — replacing whatever it showed. How a plugin puts its own
+/// entry (a terminal, a list of problems) in a panel the config declared:
+/// focus-or-create the entry, then take it. The pane the command ran in keeps
+/// what it showed; the layout phase realizes the move.
+fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
+    registry.takeEntry(args.name, ctx.buffers.active_id) catch return .{ .string = "no viewport by that name" };
+    return ok;
+}
+
 fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     return switch (p) {
         .command => |c| c,
@@ -761,6 +772,7 @@ const table = [_]command.Command{
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
     command.define("echo", "Show a message on the status line.", cEcho),
     command.define("viewport-toggle", "Show or hide a declared viewport.", cViewportToggle),
+    command.define("viewport-take", "Show the active entry in a declared viewport, and focus it there.", cViewportTake),
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),

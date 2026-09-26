@@ -352,12 +352,15 @@ pub const imports = [_]Entry{
     .{ .name = "wl_node_enclosing", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the smallest named node strictly enclosing `[start,end)` (expand-selection)" },
     .{ .name = "wl_query", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "run a tree-sitter query over `[start,end)`, stashing its captures" },
     .{ .name = "wl_query_capture", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "read the `i`-th capture from the last `wl_query`/`wl_node_children`" },
+    .{ .name = "wl_outline", .params = &.{}, .results = &.{.i32}, .group = .syntax, .doc = "the active entry's outline symbols (the grammar's outline query), stashed as captures in document order" },
     .{ .name = "wl_node_children", .params = &.{.u32}, .results = &.{.i32}, .group = .syntax, .doc = "the named children of the smallest node at `off` (structural descent)" },
     .{ .name = "wl_claim_subbuffer", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "claim `[start,end)` as a subbuffer (a projection row's hidden identity)" },
     .{ .name = "wl_subbuffer_put_fact", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .syntax, .doc = "attach a key/value fact to a claimed subbuffer" },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "the path of the buffer taking focus (host→guest activation, borrowed)" },
+    .{ .name = "wl_signal_subscribe", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "hear a named signal as `on_signal(id)`; returns the id, -1 refused" },
+    .{ .name = "wl_signal_emit", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "raise a named signal for every listener, delivered at the next frame boundary" },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
@@ -550,6 +553,7 @@ pub const exports = [_]Export{
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
+    .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_offers_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "what the head's primary context offers moved (focus, mode, entry, provider set, availability); at most once per frame, at the frame boundary, never inside a dispatch" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
@@ -590,9 +594,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 251;
-const max_export_count: usize = 19;
-const max_semantic_operation_count: usize = 270;
+const max_import_count: usize = 254;
+const max_export_count: usize = 20;
+const max_semantic_operation_count: usize = 274;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -736,7 +740,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
             try t.expectEqualStrings("run", entry.name);
         },
     };
-    try t.expectEqual(@as(usize, 18), full);
+    try t.expectEqual(@as(usize, 19), full);
     try t.expectEqual(@as(usize, 1), mini);
     try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
     for (legacy_callback_names, 0..) |name, i| {
@@ -747,7 +751,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 251), census.imports);
-    try t.expectEqual(@as(usize, 19), census.exports);
-    try t.expectEqual(@as(usize, 270), census.semantic_operations);
+    try t.expectEqual(@as(usize, 254), census.imports);
+    try t.expectEqual(@as(usize, 20), census.exports);
+    try t.expectEqual(@as(usize, 274), census.semantic_operations);
 }

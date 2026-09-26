@@ -315,6 +315,13 @@ query_caps: std.ArrayList(QueryCap) = .empty,
 /// The path of the buffer being activated (design §3): valid only during an
 /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
 cur_activate_path: []const u8 = &.{},
+/// Signal names this plugin listens for (`wl_signal_subscribe`); a name's
+/// index is the id `on_signal` hears it as. Owned.
+signal_subscriptions: std.ArrayList([]u8) = .empty,
+/// Signal names this plugin raised since the last frame boundary
+/// (`wl_signal_emit`), delivered by `wasm_host/activation.zig`'s
+/// `deliverSignals`. Owned.
+signals_raised: std.ArrayList([]u8) = .empty,
 
 /// This plugin.s node-tree projection over a text buffer, if it has published
 /// one (`wasm_host/projection.zig`). Held here, released in `deinit`, like
@@ -774,6 +781,10 @@ pub fn deinit(self: *WasmPlugin) void {
     }
     self.capsBuilderClear();
     self.caps_builder.deinit(gpa);
+    for (self.signal_subscriptions.items) |name| gpa.free(name);
+    self.signal_subscriptions.deinit(gpa);
+    for (self.signals_raised.items) |name| gpa.free(name);
+    self.signals_raised.deinit(gpa);
     // Offers die with the plugin: the table is retracted and every endpoint
     // it minted is refused from here on (the invoker's generation bumps).
     if (self.offers_ready) self.offers.deinit(gpa);

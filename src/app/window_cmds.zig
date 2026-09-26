@@ -283,6 +283,7 @@ pub fn materializeViewports(
     head: *core.Head,
     keymap: *const core.Keymap,
     registry: *core.viewport.Registry,
+    view: *view_mod.View,
 ) bool {
     var dirty = false;
     for (registry.list.items) |*decl| {
@@ -300,18 +301,65 @@ pub fn materializeViewports(
             decl.presented = false;
             continue;
         }
+        // A pending take, only while its entry is still open.
+        const take: ?core.Buffers.Id = if (decl.take) |id| (if (buffers.get(id) != null) id else null) else null;
+        decl.take = null;
         if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
-            const panel = win_layout.dock(edge, decl.extent, buffers.active_id, decl.attrs) catch continue;
+            // Dock showing what it showed last (or is being handed), never a
+            // second view of the active document when there is one.
+            const kept: ?core.Buffers.Id = if (decl.entry) |id| (if (buffers.get(id) != null) id else null) else null;
+            const first = take orelse kept orelse buffers.active_id;
+            const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
             decl.pane = panel.leaf.id;
-            decl.presented = false;
+            // Something to show already: an entry kept across a hide stays
+            // what it was, rather than being re-presented over.
+            decl.presented = kept != null and take == null;
             dirty = true;
         }
-        if (decl.presented or !decl.hasPresentation()) continue;
+        const node = win_layout.paneById(decl.pane.?) orelse continue;
+        if (take) |id| {
+            takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
+            decl.entry = id;
+            decl.presented = true; // what was taken replaces what was declared
+            dirty = true;
+            continue;
+        }
+        if (decl.presented or !decl.hasPresentation()) {
+            if (decl.entry == null) decl.entry = node.pane().buffer_id;
+            continue;
+        }
         decl.presented = true;
         presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
+        decl.entry = node.pane().buffer_id;
         dirty = true;
     }
     return dirty;
+}
+
+/// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`
+/// shows `entry`, and the head's focus moves there when the pane takes focus.
+/// The pane the head leaves keeps its OWN entry — the command that made
+/// `entry` active ran in it, but the focused-pane mirror has not run yet
+/// this phase, so nothing was written over it.
+fn takeInto(
+    win_layout: *window_layout.Layout,
+    view: *view_mod.View,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: *window_layout.Node,
+    entry: core.Buffers.Id,
+) void {
+    node.pane().buffer_id = entry;
+    node.pane().top_row = 0;
+    if (!node.pane().attrs.takes_focus) return;
+    const focused = window_layout.headFocus(win_layout, head);
+    if (node != focused) {
+        focused.pane().top_row = view.top_row;
+        window_layout.setHeadFocus(head, node, win_layout);
+    }
+    applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
 }
 
 /// "Present resource R in viewport V" (§7) — an ordinary operation, not a

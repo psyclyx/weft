@@ -68,6 +68,42 @@ pub const NodeRef = struct {
     node: semantic_model.scene.NodeId,
 };
 
+/// A pane's chrome under the point, as the view laid it out: a tab of the
+/// tab strip (its body or its close glyph, naming the entry it shows), or a
+/// segment of the status line (naming the command a click on it runs). Plain
+/// facts — what a click on one does is the bound command's business.
+pub const Chrome = struct {
+    kind: Of,
+    /// Which tab, or which status segment, in the order drawn.
+    index: u16 = 0,
+    part: Part = .body,
+    /// The entry a tab shows.
+    entry: ?Buffers.Id = null,
+    /// A segment's command, `name [argument]`, copied (the segment itself
+    /// lives in last frame's arena). Empty: not clickable.
+    command_buf: [max_command]u8 = undefined,
+    command_len: u8 = 0,
+
+    pub const Of = enum { tab, status };
+    pub const Part = enum { body, close };
+    pub const max_command = 128;
+
+    pub fn command(self: *const Chrome) []const u8 {
+        return self.command_buf[0..self.command_len];
+    }
+
+    /// Record `text` as the command; one longer than `max_command` is
+    /// dropped whole rather than cut into a different command.
+    pub fn setCommand(self: *Chrome, text: []const u8) void {
+        if (text.len > max_command) {
+            self.command_len = 0;
+            return;
+        }
+        @memcpy(self.command_buf[0..text.len], text);
+        self.command_len = @intCast(text.len);
+    }
+};
+
 /// What is under one point of the window, as of the last built frame.
 pub const Hit = struct {
     /// Framebuffer pixels.
@@ -83,6 +119,10 @@ pub const Hit = struct {
     offset: ?usize = null,
     /// The scene node under the point, in a pane showing a scene.
     node: ?NodeRef = null,
+    /// The pane CHROME under the point — a tab, a status segment. When set,
+    /// `offset` and `node` are null: the point is on the chrome, not on what
+    /// the pane shows beneath it.
+    chrome: ?Chrome = null,
 
     pub fn samePane(a: Hit, b: Hit) bool {
         const pa = a.pane orelse return false;
@@ -240,6 +280,7 @@ fn cPointerFocusPoint(ctx: *Context, args: struct {}) anyerror!Value {
 /// action node acts, and in place.
 fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (ctx.head.pointer.hit.chrome) |chrome| return clickChrome(ctx, chrome);
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
@@ -252,6 +293,58 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     ed.clearSelection();
     ed.placeCursor(off);
     return ok;
+}
+
+// ── Chrome ──────────────────────────────────────────────────────────
+
+/// A click on the pane's chrome: a tab's body shows its entry, its close
+/// glyph closes it, and a status segment runs the command it declared. The
+/// pane is focused first, so a segment's command acts for the entry of the
+/// status line it sits in.
+fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
+    _ = focusHitPane(ctx);
+    switch (chrome.kind) {
+        .tab => {
+            const entry = chrome.entry orelse return ok;
+            if (chrome.part == .close) return closeEntry(ctx, entry);
+            _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = entry }});
+        },
+        .status => try runLine(ctx, chrome.command()),
+    }
+    return ok;
+}
+
+/// Run `name [argument]` — a status segment's command: the name, then the
+/// rest of the line as its one string argument when there is any.
+fn runLine(ctx: *Context, line: []const u8) !void {
+    const trimmed = std.mem.trim(u8, line, " ");
+    if (trimmed.len == 0) return;
+    const space = std.mem.indexOfScalar(u8, trimmed, ' ');
+    const name = trimmed[0 .. space orelse trimmed.len];
+    const rest = if (space) |at| std.mem.trim(u8, trimmed[at + 1 ..], " ") else "";
+    _ = try command.run(ctx.commands, ctx, name, if (rest.len > 0) &.{.{ .string = rest }} else &.{});
+}
+
+/// Close `entry` through the ordinary `buffer-close` (which refuses a dirty
+/// one), coming back to the entry that was active when it was another one.
+fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
+    const was = ctx.buffers.active_id;
+    if (entry != was) _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = entry }});
+    if (ctx.buffers.active_id != entry) return ok;
+    const result = try command.run(ctx.commands, ctx, "buffer-close", &.{});
+    if (entry != was and ctx.buffers.get(was) != null)
+        _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = was }});
+    return result;
+}
+
+/// Close the tab under the pointer, wherever on the tab it is (a middle
+/// click). Anywhere else it does nothing.
+fn cPointerCloseTab(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const chrome = ctx.head.pointer.hit.chrome orelse return ok;
+    if (chrome.kind != .tab) return ok;
+    _ = focusHitPane(ctx);
+    return closeEntry(ctx, chrome.entry orelse return ok);
 }
 
 /// Motion with the button held: select from where the button went down to
@@ -355,6 +448,7 @@ pub const table = [_]command.Command{
     command.define("pointer-drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
     command.define("pointer-extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
     command.define("pointer-activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),
+    command.define("pointer-close-tab", "Close the tab under the pointer.", cPointerCloseTab),
     command.define("scroll-wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp),
     command.define("scroll-wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown),
     command.define("activate-focused-action", "Run the action the focused action node names.", cActivateFocusedAction),

@@ -122,6 +122,15 @@ pub const Declaration = struct {
     /// to match. Workspace state, not manifest data: a config reload
     /// re-declaring the viewport leaves it as the user left it.
     shown: bool = true,
+    /// The entry this viewport last showed: what the layout phase presented
+    /// into it, or what `take` put there. Kept across a hide, so showing it
+    /// again brings the same entry back rather than whatever is active, and
+    /// so the chrome can tell a docked companion's entry from a document
+    /// (`holdsEntry`).
+    entry: ?u32 = null,
+    /// A pending `take`: put this entry in the viewport, show it, and focus
+    /// it, at the next layout phase.
+    take: ?u32 = null,
 
     /// Whether there is anything to present: a subject to open, or a command
     /// that presents on its own.
@@ -158,6 +167,17 @@ pub const Registry = struct {
     }
 
     pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent) !void {
+        return self.declareWith(gpa, name, attrs, extent, .{});
+    }
+
+    pub const DeclareOptions = struct {
+        /// Start hidden: a panel that opens on demand (`take`, a toggle)
+        /// rather than at startup. Only a FIRST declaration reads it — a
+        /// re-declaration leaves the shown state as the user left it.
+        hidden: bool = false,
+    };
+
+    pub fn declareWith(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent, opts: DeclareOptions) !void {
         if (self.find(name)) |d| {
             d.attrs = attrs;
             d.extent = extent;
@@ -169,7 +189,7 @@ pub const Registry = struct {
         errdefer gpa.free(subject);
         const command = try gpa.dupe(u8, "");
         errdefer gpa.free(command);
-        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject, .command = command });
+        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject, .command = command, .shown = !opts.hidden });
     }
 
     /// Flip whether `name` is held on screen; returns the new state. Only the
@@ -179,6 +199,27 @@ pub const Registry = struct {
         const d = self.find(name) orelse return error.UnknownViewport;
         d.shown = !d.shown;
         return d.shown;
+    }
+
+    /// Put entry `entry` in `name`, show it, and focus it — at the next
+    /// layout phase, which owns the pane tree. What a plugin runs to bring its
+    /// own entry (a terminal, a problems list) into a declared panel: the
+    /// viewport shows one entry at a time, so this REPLACES what it showed.
+    pub fn takeEntry(self: *Registry, name: []const u8, entry: u32) error{UnknownViewport}!void {
+        const d = self.find(name) orelse return error.UnknownViewport;
+        d.take = entry;
+        d.shown = true;
+    }
+
+    /// Whether `entry` is what some DOCKED viewport holds — a companion's
+    /// entry (a file tree, a panel, a toolbar), which the chrome lists
+    /// apart from the documents (never as a tab).
+    pub fn holdsEntry(self: *const Registry, entry: u32) bool {
+        for (self.list.items) |d| {
+            if (d.attrs.dock == null) continue;
+            if (d.entry == entry) return true;
+        }
+        return false;
     }
 
     /// "Present resource R in viewport V" as a declaration. A NEW subject
@@ -293,4 +334,31 @@ test "viewport: edge names round-trip; an unknown spelling is not an edge" {
         try t.expectEqual(@as(?Edge, e), parseEdge(e.label()));
     try t.expectEqual(@as(?Edge, null), parseEdge(""));
     try t.expectEqual(@as(?Edge, null), parseEdge("LEFT"));
+}
+
+test "viewport: a panel can start hidden, take an entry, and holds it as chrome" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+    const panel: Attrs = .{ .dock = .bottom, .persistent = true, .cycles = false };
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, .{ .hidden = true });
+    try t.expect(!reg.find("panel").?.shown);
+    // A re-declaration never re-hides what the user showed.
+    reg.find("panel").?.shown = true;
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, .{ .hidden = true });
+    try t.expect(reg.find("panel").?.shown);
+
+    reg.find("panel").?.shown = false;
+    try reg.takeEntry("panel", 7);
+    try t.expect(reg.find("panel").?.shown);
+    try t.expectEqual(@as(?u32, 7), reg.find("panel").?.take);
+    try t.expectError(error.UnknownViewport, reg.takeEntry("nope", 7));
+
+    // Only what a DOCKED viewport shows is chrome.
+    reg.find("panel").?.entry = 7;
+    try t.expect(reg.holdsEntry(7));
+    try t.expect(!reg.holdsEntry(8));
+    try reg.declare(gpa, "tiled", .{}, .{ .fraction = 0.5 });
+    reg.find("tiled").?.entry = 8;
+    try t.expect(!reg.holdsEntry(8));
 }
