@@ -46,6 +46,7 @@ pub extern "weft:abi/1" fn wl_doc_snapshot_release(handle: u32) void;
 pub extern "weft:abi/1" fn wl_slice(start: u32, end: u32, out_ptr: u32, out_cap: u32) u32;
 pub extern "weft:abi/1" fn wl_line_at(offset: u32, out_ptr: u32) void;
 pub extern "weft:abi/1" fn wl_selection(out_ptr: u32) u32;
+pub extern "weft:abi/1" fn wl_pointer(out_ptr: u32) u32;
 pub extern "weft:abi/1" fn wl_path(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_render(start: u32, end: u32, ptr: u32, len: u32) void;

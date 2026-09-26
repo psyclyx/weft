@@ -142,6 +142,10 @@ __attribute__((import_module("weft"), import_name("qjs_path")))
 extern int host_path(char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_jump")))
 extern void host_jump(int offset);
+// The pointer facts of the dispatch in flight — wasm_host/pointer.zig's body,
+// the one `wl_pointer` runs: eight u32 words, 0 when there is no gesture.
+__attribute__((import_module("weft"), import_name("qjs_pointer")))
+extern int host_pointer(unsigned *out_words);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -1001,6 +1005,29 @@ static JSValue js_path(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
 }
 
+// weft.pointer() -> {kind, button, clicks, ctrl, alt, shift, offset, node,
+// focused} | null: where the pointer gesture this command is bound to
+// happened. `offset`/`node` are null when the pointer is over no text / no
+// scene node. Kinds: "press", "release", "drag", "wheel", "hover".
+static JSValue js_pointer(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    static const char *const kinds[] = {"none", "press", "release", "drag", "wheel", "hover"};
+    unsigned w[8] = {0};
+    if (!host_pointer(w)) return JS_NULL;
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, w[0] < 6 ? kinds[w[0]] : "none"));
+    JS_SetPropertyStr(ctx, o, "button", JS_NewInt32(ctx, (int32_t)w[1]));
+    JS_SetPropertyStr(ctx, o, "clicks", JS_NewInt32(ctx, (int32_t)w[2]));
+    JS_SetPropertyStr(ctx, o, "ctrl", JS_NewBool(ctx, (w[3] & 1) != 0));
+    JS_SetPropertyStr(ctx, o, "alt", JS_NewBool(ctx, (w[3] & 2) != 0));
+    JS_SetPropertyStr(ctx, o, "shift", JS_NewBool(ctx, (w[3] & 4) != 0));
+    JS_SetPropertyStr(ctx, o, "offset", w[4] == 0xffffffffu ? JS_NULL : JS_NewFloat64(ctx, (double)w[4]));
+    JS_SetPropertyStr(ctx, o, "node", (w[7] & 4) ? JS_NewFloat64(ctx, (double)w[6] * 4294967296.0 + (double)w[5]) : JS_NULL);
+    JS_SetPropertyStr(ctx, o, "focused", JS_NewBool(ctx, (w[7] & 2) != 0));
+    return o;
+}
+
 // weft.jump(offset): move the caret, clamped by the host.
 static JSValue js_jump(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
@@ -1144,6 +1171,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "selection", JS_NewCFunction(g_ctx, js_selection, "selection", 0));
     JS_SetPropertyStr(g_ctx, weft, "path", JS_NewCFunction(g_ctx, js_path, "path", 0));
     JS_SetPropertyStr(g_ctx, weft, "jump", JS_NewCFunction(g_ctx, js_jump, "jump", 1));
+    JS_SetPropertyStr(g_ctx, weft, "pointer", JS_NewCFunction(g_ctx, js_pointer, "pointer", 0));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));

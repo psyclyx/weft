@@ -41,6 +41,7 @@ const fs_gate = @import("wasm_host/fs.zig");
 const proc_doors = @import("wasm_host/proc.zig");
 const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
+const pointer_doors = @import("wasm_host/pointer.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -252,6 +253,7 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_selection", .handler = cSelection },
     .{ .name = "qjs_path", .handler = cPath },
     .{ .name = "qjs_jump", .handler = cJump },
+    .{ .name = "qjs_pointer", .handler = cPointer },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -759,6 +761,8 @@ const cLineAt = jsDoor(edit_doors.lineAtBody, null);
 const cSelection = jsDoor(edit_doors.selectionBody, null);
 const cPath = jsDoor(edit_doors.pathBody, null);
 const cJump = jsDoor(edit_doors.jumpBody, null);
+/// Where the pointer gesture being dispatched is — `wl_pointer`'s body.
+pub const cPointer = jsDoor(pointer_doors.pointerBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";

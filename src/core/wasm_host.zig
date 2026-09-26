@@ -93,6 +93,14 @@ pub const edit_doors = struct {
     pub const jumpBody = edit.jumpBody;
 };
 
+/// The pointer-facts door, whose one body both membranes run. Re-exported
+/// for the same function-pointer proof as `edit_doors`.
+const pointer = @import("wasm_host/pointer.zig");
+pub const pointer_doors = struct {
+    pub const pointerBody = pointer.pointerBody;
+    pub const hPointer = pointer.hPointer;
+};
+
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
 

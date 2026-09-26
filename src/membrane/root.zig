@@ -55,6 +55,9 @@ pub const export_prefix = "weft:abi/1/";
 pub const Group = enum {
     declare,
     edit,
+    /// `wasm_host/pointer.zig` — where the pointer gesture being dispatched
+    /// is: the facts a command bound to `mouse-1` needs to act at the click.
+    pointer,
     layers,
     /// `wasm_host/annotate.zig` — the third-party decoration package
     /// (doc/contextual-workspace-architecture.md §11.7): named annotation
@@ -200,6 +203,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
     .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
     .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
+
+    // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
+    .{ .name = "wl_pointer", .params = &.{.u32}, .results = &.{.u32}, .group = .pointer, .doc = "write the pointer gesture being dispatched (kind, button, clicks, mods, offset and scene node under the pointer) as eight u32 words; 0 when there is none" },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: replace the flash set with `[start,end)` on the active document, for the frame loop to fade and the view to draw" },
@@ -563,9 +569,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 242;
+const max_import_count: usize = 243;
 const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 260;
+const max_semantic_operation_count: usize = 261;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -720,7 +726,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 242), census.imports);
+    try t.expectEqual(@as(usize, 243), census.imports);
     try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 260), census.semantic_operations);
+    try t.expectEqual(@as(usize, 261), census.semantic_operations);
 }

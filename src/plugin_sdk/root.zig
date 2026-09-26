@@ -239,6 +239,40 @@ pub fn selection() ?Range {
     if (e.wl_selection(p(&pair)) == 0) return null;
     return .{ .start = pair[0], .end = pair[1] };
 }
+/// The pointer gesture being dispatched, for a command bound to one
+/// (`mouse-1`, `double-mouse-1`, `drag-mouse-1`, …): where it happened.
+pub const PointerKind = enum(u32) { none, press, release, drag, wheel, hover, _ };
+pub const Pointer = struct {
+    kind: PointerKind,
+    button: u32,
+    clicks: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    /// The byte offset under the pointer, in a pane showing text.
+    offset: ?u32,
+    /// The scene node under the pointer, in a pane showing a scene.
+    node: ?u64,
+    /// Whether the pane under the pointer is the focused one (a click-through
+    /// command focuses it before acting).
+    focused: bool,
+};
+/// The pointer facts of this dispatch, or null when there is no gesture.
+pub fn pointer() ?Pointer {
+    var w: [8]u32 = undefined;
+    if (e.wl_pointer(p(&w)) == 0) return null;
+    return .{
+        .kind = @enumFromInt(w[0]),
+        .button = w[1],
+        .clicks = w[2],
+        .ctrl = w[3] & 1 != 0,
+        .alt = w[3] & 2 != 0,
+        .shift = w[3] & 4 != 0,
+        .offset = if (w[4] == 0xffff_ffff) null else w[4],
+        .node = if (w[7] & 4 != 0) @as(u64, w[6]) << 32 | w[5] else null,
+        .focused = w[7] & 2 != 0,
+    };
+}
 /// The active buffer's backing path, or null. Valid until the next read call.
 pub fn path() ?[]const u8 {
     const n = e.wl_path(p(&scratch), scratch.len);

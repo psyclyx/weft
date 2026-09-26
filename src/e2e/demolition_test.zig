@@ -555,3 +555,24 @@ test "demolition: the plugin-plane read doors are ONE body reached two ways" {
         try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, null)), qjs_handler);
     }
 }
+
+// And for the pointer facts: `wl_pointer` and `qjs_pointer` are one body, so a
+// config's `mouse-1` command and a wasm plugin's read the same click.
+test "demolition: the pointer-facts door is ONE body reached two ways" {
+    const pointer_doors = h.core.wasm_host.pointer_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const HostFn = @TypeOf(pointer_doors.hPointer);
+
+    var wl_handler: ?HostFn = null;
+    for (wl_bound.imports) |entry| {
+        if (std.mem.eql(u8, entry.name, "wl_pointer")) wl_handler = entry.handler;
+    }
+    try t.expectEqual(@as(?HostFn, pointer_doors.hPointer), wl_handler);
+
+    var qjs_handler: ?HostFn = null;
+    inline for (quickjs.plugin_handlers) |entry| {
+        if (comptime std.mem.eql(u8, entry.name, "qjs_pointer")) qjs_handler = entry.handler;
+    }
+    try t.expectEqual(@as(?HostFn, quickjs.jsDoor(pointer_doors.pointerBody, null)), qjs_handler);
+}

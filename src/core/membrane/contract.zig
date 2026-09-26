@@ -43,6 +43,7 @@ const config_kv = @import("../wasm_host/config_kv.zig");
 const declare = @import("../wasm_host/declare.zig");
 const dispatch = @import("../wasm_host/dispatch.zig");
 const edit = @import("../wasm_host/edit.zig");
+const pointer = @import("../wasm_host/pointer.zig");
 const fs = @import("../wasm_host/fs.zig");
 const intent = @import("../wasm_host/intent.zig");
 const keymap = @import("../wasm_host/keymap.zig");
@@ -123,6 +124,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
     .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
     .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
+
+    // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
+    .{ .name = "wl_pointer", .handler = pointer.hPointer },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .handler = layers.hFlash },
