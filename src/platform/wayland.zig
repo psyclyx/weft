@@ -94,6 +94,27 @@ pub const Window = struct {
     /// each axis event is its own frame.
     seat_version: u32 = 0,
 
+    // The clipboard (`wl_data_device`, doc/configs.md §3.3). `clip` is the
+    // last-known selection text; `xfers` moves it through pipes without
+    // blocking (`clipboard.zig`). With no data-device manager (a compositor
+    // without one) the clipboard is `clip` alone — in memory, like headless.
+    // Primary selection (`zwp_primary_selection_v1`, middle-click paste) is
+    // not bound: it needs a generated protocol header this build does not
+    // carry, and vim's `"*` maps onto the one clipboard instead.
+    data_device_manager: ?*c.wl_data_device_manager = null,
+    data_device: ?*c.wl_data_device = null,
+    /// Our current selection source, while we own the clipboard.
+    data_source: ?*c.wl_data_source = null,
+    /// The offer the desktop's current selection arrived as.
+    selection_offer: ?*Offer = null,
+    /// A drag-and-drop offer over the window — never accepted, only released.
+    dnd_offer: ?*Offer = null,
+    clip: platform.clipboard.Store = .{},
+    xfers: ?platform.clipboard.Transfers = null,
+    /// The serial of the newest input event: `set_selection` must name one,
+    /// so a compositor can refuse a client that grabs the clipboard unasked.
+    input_serial: u32 = 0,
+
     pub fn init(width: u32, height: u32, title: [*:0]const u8, app_id: [*:0]const u8) !*Window {
         const display = c.wl_display_connect(null) orelse return error.WaylandConnectFailed;
         errdefer c.wl_display_disconnect(display);
@@ -142,10 +163,23 @@ pub const Window = struct {
         // size the compositor actually granted.
         if (c.wl_display_roundtrip(display) < 0) return error.WaylandRoundtripFailed;
         self.refreshBufferScale();
+        self.xfers = platform.clipboard.Transfers.init() catch null;
+        if (self.data_device_manager) |mgr| if (self.seat) |seat| {
+            self.data_device = c.wl_data_device_manager_get_data_device(mgr, seat);
+            if (self.data_device) |dev| _ = c.wl_data_device_add_listener(dev, &data_device_listener, self);
+        };
         return self;
     }
 
     pub fn deinit(self: *Window) void {
+        const gpa = std.heap.c_allocator;
+        if (self.data_source) |src| c.wl_data_source_destroy(src);
+        if (self.selection_offer) |o| o.destroy();
+        if (self.dnd_offer) |o| o.destroy();
+        if (self.data_device) |dev| c.wl_data_device_destroy(dev);
+        if (self.data_device_manager) |mgr| c.wl_data_device_manager_destroy(mgr);
+        if (self.xfers) |*x| x.deinit(gpa);
+        self.clip.deinit(gpa);
         if (self.xkb_state) |s| c.xkb_state_unref(s);
         if (self.xkb_keymap) |k| c.xkb_keymap_unref(k);
         if (self.xkb_context) |ctx| c.xkb_context_unref(ctx);
@@ -189,8 +223,60 @@ pub const Window = struct {
             _ = c.wl_display_cancel_read(self.display);
         }
         _ = c.wl_display_dispatch_pending(self.display);
+        if (self.xfers) |*x| _ = x.service(std.heap.c_allocator, &self.clip);
         self.emitKeyRepeats();
         self.refreshBufferScale();
+    }
+
+    // ── The clipboard (Platform contract: clipboardText/Set/Fd) ────────
+
+    /// The clipboard's last-known text: ours while we own the selection,
+    /// else the newest offer as far as it has been read.
+    pub fn clipboardText(self: *const Window) []const u8 {
+        return self.clip.text();
+    }
+
+    /// Take the selection with `bytes`: remember them, then offer them to the
+    /// desktop as text. Other clients read them through `sourceSend`, one
+    /// non-blocking pipe each.
+    pub fn clipboardSet(self: *Window, bytes: []const u8) void {
+        self.clip.set(std.heap.c_allocator, bytes) catch return;
+        const mgr = self.data_device_manager orelse return;
+        const dev = self.data_device orelse return;
+        const src = c.wl_data_device_manager_create_data_source(mgr) orelse return;
+        _ = c.wl_data_source_add_listener(src, &data_source_listener, self);
+        for (text_mimes) |mime| c.wl_data_source_offer(src, mime);
+        c.wl_data_source_offer(src, own_mime);
+        c.wl_data_device_set_selection(dev, src, self.input_serial);
+        if (self.data_source) |old| c.wl_data_source_destroy(old);
+        self.data_source = src;
+        _ = c.wl_display_flush(self.display);
+    }
+
+    /// Readable when a clipboard pipe can make progress; -1 without one.
+    pub fn clipboardFd(self: *const Window) i32 {
+        const x = self.xfers orelse return -1;
+        return x.fd();
+    }
+
+    /// Start reading the desktop's new selection. Our own offer (marked with
+    /// `own_mime`) is not read back — we already hold its text.
+    fn takeSelection(self: *Window, offer: ?*Offer) void {
+        if (self.selection_offer) |old| if (old != offer) old.destroy();
+        self.selection_offer = offer;
+        const o = offer orelse {
+            // No selection at all: the owner went away with it.
+            if (self.data_source == null) self.clip.set(std.heap.c_allocator, "") catch {};
+            return;
+        };
+        if (o.ours) return;
+        const mime = o.bestMime() orelse return;
+        if (self.xfers == null) return;
+        const fds = platform.clipboard.pipe() orelse return;
+        c.wl_data_offer_receive(o.offer, mime, fds[1]);
+        _ = std.c.close(fds[1]);
+        self.xfers.?.receive(std.heap.c_allocator, fds[0]);
+        _ = c.wl_display_flush(self.display);
     }
 
     /// Synthesize repeat events for a held key, paced by the compositor's
@@ -352,6 +438,141 @@ fn selfFrom(data: ?*anyopaque) *Window {
     return @ptrCast(@alignCast(data.?));
 }
 
+// ── Clipboard protocol glue (wl_data_device / wl_data_offer / wl_data_source)
+
+/// The text types we offer, best first; also what we look for in an offer.
+const text_mimes = [_][*:0]const u8{ "text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT", "STRING" };
+/// Marks a selection as ours, so the offer the compositor echoes back to us
+/// for our own copy is not read through a pipe to ourselves.
+const own_mime: [*:0]const u8 = "application/x-weft-selection";
+
+/// One `wl_data_offer` and the text types it announced (they arrive one
+/// `offer` event at a time, before the `selection`/`enter` that uses it).
+const Offer = struct {
+    offer: *c.wl_data_offer,
+    /// Index into `text_mimes` of the best type offered so far.
+    best: ?usize = null,
+    ours: bool = false,
+
+    fn create(offer: *c.wl_data_offer) ?*Offer {
+        const o = std.heap.c_allocator.create(Offer) catch {
+            c.wl_data_offer_destroy(offer);
+            return null;
+        };
+        o.* = .{ .offer = offer };
+        _ = c.wl_data_offer_add_listener(offer, &data_offer_listener, o);
+        return o;
+    }
+
+    fn destroy(self: *Offer) void {
+        c.wl_data_offer_destroy(self.offer);
+        std.heap.c_allocator.destroy(self);
+    }
+
+    fn bestMime(self: *const Offer) ?[*:0]const u8 {
+        return text_mimes[self.best orelse return null];
+    }
+};
+
+fn offerFrom(data: ?*anyopaque) *Offer {
+    return @ptrCast(@alignCast(data.?));
+}
+
+fn offerMime(data: ?*anyopaque, _: ?*c.wl_data_offer, mime_type: [*c]const u8) callconv(.c) void {
+    const o = offerFrom(data);
+    const mime = std.mem.span(mime_type);
+    if (std.mem.eql(u8, mime, std.mem.span(own_mime))) o.ours = true;
+    for (text_mimes, 0..) |m, i| {
+        if (!std.mem.eql(u8, mime, std.mem.span(m))) continue;
+        if (o.best == null or i < o.best.?) o.best = i;
+    }
+}
+
+fn offerSourceActions(_: ?*anyopaque, _: ?*c.wl_data_offer, _: u32) callconv(.c) void {}
+fn offerAction(_: ?*anyopaque, _: ?*c.wl_data_offer, _: u32) callconv(.c) void {}
+
+const data_offer_listener = c.wl_data_offer_listener{
+    .offer = offerMime,
+    .source_actions = offerSourceActions,
+    .action = offerAction,
+};
+
+/// A new offer is being introduced; its user data is the `Offer` that
+/// collects its types until `selection` or `enter` says what it is for.
+fn deviceDataOffer(_: ?*anyopaque, _: ?*c.wl_data_device, offer: ?*c.wl_data_offer) callconv(.c) void {
+    _ = Offer.create(offer orelse return);
+}
+
+fn offerOf(offer: ?*c.wl_data_offer) ?*Offer {
+    const o = offer orelse return null;
+    return @ptrCast(@alignCast(c.wl_data_offer_get_user_data(o)));
+}
+
+fn deviceEnter(data: ?*anyopaque, _: ?*c.wl_data_device, _: u32, _: ?*c.wl_surface, _: c.wl_fixed_t, _: c.wl_fixed_t, offer: ?*c.wl_data_offer) callconv(.c) void {
+    const self = selfFrom(data);
+    if (self.dnd_offer) |old| old.destroy();
+    self.dnd_offer = offerOf(offer);
+}
+
+fn deviceLeave(data: ?*anyopaque, _: ?*c.wl_data_device) callconv(.c) void {
+    const self = selfFrom(data);
+    if (self.dnd_offer) |old| old.destroy();
+    self.dnd_offer = null;
+}
+
+fn deviceMotion(_: ?*anyopaque, _: ?*c.wl_data_device, _: u32, _: c.wl_fixed_t, _: c.wl_fixed_t) callconv(.c) void {}
+
+fn deviceDrop(data: ?*anyopaque, dev: ?*c.wl_data_device) callconv(.c) void {
+    deviceLeave(data, dev); // drops are not accepted; release the offer
+}
+
+fn deviceSelection(data: ?*anyopaque, _: ?*c.wl_data_device, offer: ?*c.wl_data_offer) callconv(.c) void {
+    selfFrom(data).takeSelection(offerOf(offer));
+}
+
+const data_device_listener = c.wl_data_device_listener{
+    .data_offer = deviceDataOffer,
+    .enter = deviceEnter,
+    .leave = deviceLeave,
+    .motion = deviceMotion,
+    .drop = deviceDrop,
+    .selection = deviceSelection,
+};
+
+fn sourceTarget(_: ?*anyopaque, _: ?*c.wl_data_source, _: [*c]const u8) callconv(.c) void {}
+
+/// Another client pastes from us: hand our text to its pipe, non-blocking.
+fn sourceSend(data: ?*anyopaque, src: ?*c.wl_data_source, _: [*c]const u8, fd: i32) callconv(.c) void {
+    const self = selfFrom(data);
+    if (src != self.data_source or self.xfers == null) {
+        _ = std.c.close(fd);
+        return;
+    }
+    self.xfers.?.send(std.heap.c_allocator, fd, self.clip.text());
+}
+
+/// Someone else took the clipboard. Our text stays the last-known one until
+/// their offer has been read (`takeSelection`).
+fn sourceCancelled(data: ?*anyopaque, src: ?*c.wl_data_source) callconv(.c) void {
+    const self = selfFrom(data);
+    const s = src orelse return;
+    if (self.data_source == s) self.data_source = null;
+    c.wl_data_source_destroy(s);
+}
+
+fn sourceDndDropPerformed(_: ?*anyopaque, _: ?*c.wl_data_source) callconv(.c) void {}
+fn sourceDndFinished(_: ?*anyopaque, _: ?*c.wl_data_source) callconv(.c) void {}
+fn sourceAction(_: ?*anyopaque, _: ?*c.wl_data_source, _: u32) callconv(.c) void {}
+
+const data_source_listener = c.wl_data_source_listener{
+    .target = sourceTarget,
+    .send = sourceSend,
+    .cancelled = sourceCancelled,
+    .dnd_drop_performed = sourceDndDropPerformed,
+    .dnd_finished = sourceDndFinished,
+    .action = sourceAction,
+};
+
 fn registryGlobal(
     data: ?*anyopaque,
     registry: ?*c.wl_registry,
@@ -373,6 +594,10 @@ fn registryGlobal(
         if (self.seat) |seat| {
             _ = c.wl_seat_add_listener(seat, &seat_listener, self);
         }
+    } else if (std.mem.eql(u8, iface, "wl_data_device_manager")) {
+        // v3 is what the listeners below implement (dnd actions); the device
+        // itself is made in `init`, once the seat is known too.
+        self.data_device_manager = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_data_device_manager_interface, @min(version, 3)));
     } else if (std.mem.eql(u8, iface, "wl_output")) {
         const slot = self.allocOutputInfo() orelse return;
         slot.* = .{
@@ -479,8 +704,9 @@ fn seatCapabilities(data: ?*anyopaque, seat: ?*c.wl_seat, capabilities: u32) cal
     }
 }
 
-fn pointerEnter(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, _: ?*c.wl_surface, sx: c.wl_fixed_t, sy: c.wl_fixed_t) callconv(.c) void {
+fn pointerEnter(data: ?*anyopaque, _: ?*c.wl_pointer, serial: u32, _: ?*c.wl_surface, sx: c.wl_fixed_t, sy: c.wl_fixed_t) callconv(.c) void {
     const self = selfFrom(data);
+    self.input_serial = serial;
     self.gestures.warp(c.wl_fixed_to_double(sx), c.wl_fixed_to_double(sy));
 }
 
@@ -507,8 +733,9 @@ fn buttonNumber(code: u32) ?u8 {
     };
 }
 
-fn pointerButton(data: ?*anyopaque, _: ?*c.wl_pointer, _: u32, time: u32, button: u32, state: u32) callconv(.c) void {
+fn pointerButton(data: ?*anyopaque, _: ?*c.wl_pointer, serial: u32, time: u32, button: u32, state: u32) callconv(.c) void {
     const self = selfFrom(data);
+    self.input_serial = serial;
     const b = buttonNumber(button) orelse return;
     self.gestures.button(b, state == c.WL_POINTER_BUTTON_STATE_PRESSED, time, self.currentMods());
 }
@@ -593,8 +820,10 @@ fn keyboardKeymap(data: ?*anyopaque, _: ?*c.wl_keyboard, format: u32, fd: i32, s
     self.xkb_state = state;
 }
 
-fn keyboardEnter(data: ?*anyopaque, _: ?*c.wl_keyboard, _: u32, _: ?*c.wl_surface, _: ?*c.wl_array) callconv(.c) void {
-    selfFrom(data).focused = true;
+fn keyboardEnter(data: ?*anyopaque, _: ?*c.wl_keyboard, serial: u32, _: ?*c.wl_surface, _: ?*c.wl_array) callconv(.c) void {
+    const self = selfFrom(data);
+    self.focused = true;
+    self.input_serial = serial;
 }
 
 fn keyboardLeave(data: ?*anyopaque, _: ?*c.wl_keyboard, _: u32, _: ?*c.wl_surface) callconv(.c) void {
@@ -606,12 +835,13 @@ fn keyboardLeave(data: ?*anyopaque, _: ?*c.wl_keyboard, _: u32, _: ?*c.wl_surfac
 fn keyboardKey(
     data: ?*anyopaque,
     _: ?*c.wl_keyboard,
-    _: u32,
+    serial: u32,
     _: u32,
     key: u32,
     state: u32,
 ) callconv(.c) void {
     const self = selfFrom(data);
+    self.input_serial = serial;
     const xkb_state = self.xkb_state orelse return;
     // Wayland delivers evdev codes; xkb keycodes are offset by 8.
     const keycode: c.xkb_keycode_t = key + 8;

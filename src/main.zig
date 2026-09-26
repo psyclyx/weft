@@ -414,6 +414,11 @@ pub fn main(init: std.process.Init) !void {
     var whead: window_head.WindowHead = undefined;
     try whead.init(gpa, &session.cmd_ctx, 1280, 800, font_bytes, configured_em, buffers.active_id);
     defer whead.deinit();
+    // This head's clipboard is the desktop's from here on (doc/configs.md
+    // §3.3); cleared before the window goes, so the head never outlives it
+    // holding a pointer into it.
+    session.head.clipboard.backend = whead.clipboardBackend();
+    defer session.head.clipboard.backend = null;
     // The swapchain's actual extent is authoritative: a server-side-deco or
     // tiling compositor can force it to differ from the requested framebuffer
     // size. Drive all render geometry (layout, MVP, surface size) from it — from
@@ -602,6 +607,11 @@ pub fn main(init: std.process.Init) !void {
     // stays in the body, unconditional, below) and the task pool's
     // completion signal (real push wakeup — §6 W2a-3 item 3).
     _ = try sched.addFd(whead.window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "wayland");
+    // Clipboard pipes (one epoll set for all of them): a wake reason only —
+    // `pumpEvents` moves the bytes, so a paste from a slow client never
+    // blocks a frame.
+    if (whead.window.clipboardFd() >= 0)
+        _ = try sched.addFd(whead.window.clipboardFd(), .{ .read = true }, null, loop_sources.noopFdReady, "clipboard");
     const pool_wake_fd = try scheduler.newWakeFd();
     defer scheduler.closeWakeFd(pool_wake_fd);
     pool.setNotifyFd(pool_wake_fd);

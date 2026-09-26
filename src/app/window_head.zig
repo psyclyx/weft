@@ -122,6 +122,24 @@ pub const WindowHead = struct {
         return dispatch.dispatchKey(ctx, ev);
     }
 
+    /// This window's clipboard as a head sees it (`core.Clipboard.Backend`):
+    /// the head that dispatches through this window reads and takes the
+    /// desktop clipboard the platform keeps. Valid while the window lives —
+    /// the installer clears it before `deinit`.
+    pub fn clipboardBackend(self: *WindowHead) core.Clipboard.Backend {
+        const Adapter = struct {
+            fn text(context: *anyopaque) []const u8 {
+                const w: *wayland.Window = @ptrCast(@alignCast(context));
+                return w.clipboardText();
+            }
+            fn set(context: *anyopaque, bytes: []const u8) void {
+                const w: *wayland.Window = @ptrCast(@alignCast(context));
+                w.clipboardSet(bytes);
+            }
+        };
+        return .{ .context = self.window, .text = Adapter.text, .set = Adapter.set };
+    }
+
     /// The pointer twin of `dispatchKey`: scale the event from surface to
     /// framebuffer pixels (the platform owns the scale), then hand it to the
     /// application under this head's identity.

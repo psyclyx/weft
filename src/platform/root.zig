@@ -40,6 +40,13 @@
 //!   rather than re-derives.
 //! - `repeatDueNs` — the key-repeat timer source's pure due-time query
 //!   (`app/loop_sources.zig:keyRepeatDue`).
+//! - `clipboardText`/`clipboardSet` — the system clipboard (doc/configs.md
+//!   §3.3): the last-known selection text, and taking the selection. Reads
+//!   never block; a platform with a desktop reads each offer as it is
+//!   announced (`clipboard.zig`), one with none keeps a `clipboard.Store`.
+//! - `clipboardFd` — readable when a clipboard transfer can make progress
+//!   (-1 when a platform has none); registered once as a scheduler source,
+//!   serviced inside `pumpEvents`.
 //! Plus fields sampled directly (no method — they're read-mostly state, not
 //! edge-triggered events): `display`/`surface` (raw native handles — see
 //! "the SurfaceSource leak" below). `bufferScale()` is a method so accepted
@@ -101,6 +108,7 @@
 const std = @import("std");
 pub const pointer = @import("pointer.zig");
 pub const PointerEvent = pointer.PointerEvent;
+pub const clipboard = @import("clipboard.zig");
 
 /// One raw modifier state, sampled at key-event time. Portable in principle
 /// (every platform this doc anticipates has some notion of ctrl/alt/shift/
@@ -156,6 +164,9 @@ pub fn assertPlatform(comptime T: type) void {
         // W-later keysym-as-xkb-u32 leak (see KeyEvent.keysym's doc), but a
         // second impl must still provide SOME naming, so it's contract.
         "keysymName",
+        "clipboardText",
+        "clipboardSet",
+        "clipboardFd",
     }) |name| {
         if (!@hasDecl(T, name)) @compileError(@typeName(T) ++ ": missing Platform method `" ++ name ++ "`");
         if (@typeInfo(@TypeOf(@field(T, name))) != .@"fn") @compileError(@typeName(T) ++ ": `" ++ name ++ "` must be a function");
@@ -184,6 +195,8 @@ const HeadlessPlatformSkeleton = struct {
     display: usize = 0, // stand-in "native handle" — any type satisfies @hasField
     surface: usize = 0,
     gestures: pointer.Gestures = .{},
+    /// No desktop: the clipboard is this store (see `clipboardSet`).
+    clip: clipboard.Store = .{},
 
     fn init(width: u32, height: u32, title: [*:0]const u8, app_id: [*:0]const u8) !*HeadlessPlatformSkeleton {
         _ = .{ width, height, title, app_id };
@@ -226,6 +239,16 @@ const HeadlessPlatformSkeleton = struct {
         _ = keysym;
         return "";
     }
+    fn clipboardText(self: *const HeadlessPlatformSkeleton) []const u8 {
+        return self.clip.text();
+    }
+    fn clipboardSet(self: *HeadlessPlatformSkeleton, bytes: []const u8) void {
+        self.clip.set(std.heap.c_allocator, bytes) catch {};
+    }
+    fn clipboardFd(self: *const HeadlessPlatformSkeleton) i32 {
+        _ = self;
+        return -1;
+    }
     fn repeatDueNs(self: *const HeadlessPlatformSkeleton) ?u64 {
         _ = self;
         return null;
@@ -252,5 +275,6 @@ test {
     // five configure-reducer tests had never run. A module owns its tests.
     _ = @import("resize.zig");
     _ = pointer;
+    _ = clipboard;
     _ = wayland;
 }
