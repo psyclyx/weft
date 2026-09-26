@@ -1,8 +1,11 @@
-//! The find bar's pure half: a typed query and its options → a regex, the
-//! match list over a document, and the planning the bar does over that list
-//! (the nearest match, a step with wrap, the replace-all edit list). No
-//! `weft` import, so it is tested natively (build.zig wires this file as a
-//! host test module) as well as compiled into the plugin.
+//! search — a typed query and its options → a regex, the match list over a
+//! document, and the planning a search does over that list (the nearest
+//! match, a step with wrap, the replace-all edit list). Two grammars of
+//! search share it: the `find` bar (doc/configs.md §3.4) and helix's
+//! `/ ? n N * s S K` (§2 phase 4), so smart case, whole word and the
+//! prefilter below mean the same thing under both. No `weft` import, so it
+//! is tested natively (build.zig wires it as a host test module) as well as
+//! compiled into every guest that declares the `search` library.
 //!
 //! WHY A PREFILTER. The regex library is a Pike VM: linear, never
 //! pathological, and slow per byte next to a substring search, because it

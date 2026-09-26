@@ -47,8 +47,9 @@ const Guest = struct {
 /// adapter, `rowkey` is the round trip between a projection row's key and the
 /// structured identity it names, `gutter` is the guest half of the
 /// `ui/gutter-segment` round, `regex` is the Pike-VM pattern engine
-/// (doc/configs.md §0.2) helix's `s S K A-K / ? n N *` and ide's find/replace
-/// bar link — core never parses a pattern.
+/// (doc/configs.md §0.2) and `search` the query → matches planning over it
+/// that helix's `s S K A-K / ? n N *` and the find bar share — core never
+/// parses a pattern.
 const Library = enum {
     prompt,
     invoke,
@@ -61,6 +62,7 @@ const Library = enum {
     gutter,
     rowkey,
     regex,
+    search,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -77,6 +79,7 @@ const Library = enum {
             .gutter => "weft_gutter",
             .rowkey => "weft_rowkey",
             .regex => "weft_regex",
+            .search => "weft_search",
         };
     }
 
@@ -87,7 +90,9 @@ const Library = enum {
             // and the lowest tier is what lets `ex` (editor_composition)
             // depend on it once helix's `s`/`/` land on it.
             .rowkey, .jsonrpc, .sessions, .regex => .protocol_data,
-            .annotate, .gutter, .output, .files, .prompt => .service_presentation,
+            // `search` is pure data too, but it sits on `regex`, so it
+            // takes the tier above.
+            .annotate, .gutter, .output, .files, .prompt, .search => .service_presentation,
             .invoke => .interaction_orchestration,
             .ex => .editor_composition,
         };
@@ -102,6 +107,7 @@ const Library = enum {
         return switch (self) {
             .invoke => &.{.prompt},
             .ex => &.{ .prompt, .invoke },
+            .search => &.{.regex},
             else => &.{},
         };
     }
@@ -468,7 +474,7 @@ const guests = [_]Guest{
     // Jump labels on f/F/t/T over the visible range; composes with operators.
     .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
-    .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.regex} },
+    .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
 };
 
 pub fn build(b: *std.Build) void {
@@ -1117,11 +1123,12 @@ pub fn build(b: *std.Build) void {
     const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
     test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
 
-    // The find bar's pure half (query → regex, the prefilter, the match
-    // planning) imports nothing but `weft_regex`, so it too runs natively —
-    // against the same library module the tests above exercise.
+    // The `search` library (query → regex, the prefilter, the match
+    // planning — the find bar and helix both link it) imports nothing but
+    // `weft_regex`, so it too runs natively — against the same library
+    // module the tests above exercise.
     const find_search = b.createModule(.{
-        .root_source_file = b.path("src/plugins/find/search.zig"),
+        .root_source_file = b.path("src/plugin_lib/search/root.zig"),
         .target = target,
         .optimize = optimize,
     });

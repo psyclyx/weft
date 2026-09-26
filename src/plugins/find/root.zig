@@ -26,13 +26,13 @@
 //! (the count is over all of it), so the plugin keeps ONE copy and re-reads
 //! it only when the document moved since — an opaque snapshot witness says
 //! so. Typing into the bar reads nothing from the host. The match scan
-//! skips to the places a match can start (search.zig's module doc), and
+//! skips to the places a match can start (the `search` library's module doc), and
 //! only the matches around the current one are painted, so a thousand-hit
 //! file costs the same paint as a ten-hit one.
 
 const std = @import("std");
 const weft = @import("weft");
-const search = @import("search.zig");
+const search = @import("weft_search");
 
 const Span = search.Span;
 const gpa = weft.allocator;
