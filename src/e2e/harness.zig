@@ -581,6 +581,46 @@ pub const Editor = struct {
         return null;
     }
 
+    /// The centre of the tab showing `entry` in the last frame — its body or
+    /// its close glyph. What a person aims a click at.
+    pub fn pointAtTab(self: *Editor, entry: u32, part: enum { body, close }) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .tab or c.entry != entry) continue;
+                if (@intFromEnum(c.part) != @intFromEnum(part)) continue;
+                return .{ c.rect.x + c.rect.w / 2, c.rect.y + c.rect.h / 2 };
+            }
+        }
+        return null;
+    }
+
+    /// The centre of the status segment with command `command`, in any pane.
+    pub fn pointAtStatusCommand(self: *Editor, cmd: []const u8) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .status or !std.mem.eql(u8, c.command, cmd)) continue;
+                return .{ c.rect.x + c.rect.w / 2, c.rect.y + c.rect.h / 2 };
+            }
+        }
+        return null;
+    }
+
+    /// The tab strip of the last frame, as the entries it lists, in order.
+    pub fn tabEntries(self: *Editor, out: []u32) []const u32 {
+        const v = self.ensureView() catch return out[0..0];
+        var n: usize = 0;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .tab or c.part != .body or n >= out.len) continue;
+                out[n] = c.entry orelse continue;
+                n += 1;
+            }
+        }
+        return out[0..n];
+    }
+
     /// The current transient echo line (what a plugin last reported to the user).
     pub fn echoText(self: *Editor) []const u8 {
         return self.session.head.echo.items;
@@ -1353,6 +1393,7 @@ const guest = struct {
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
     const offerwatch = @embedFile("guest_offerwatch_wasm");
+    const diagfeed = @embedFile("guest_diagfeed_wasm");
     /// Test fixture only — `src/plugin_fixtures/fs_limit.zig`: declares fs_read +
     /// fs_write and exposes each path-taking door as a command reading its
     /// path from the args, so a test controls exactly which path to try
@@ -1422,6 +1463,13 @@ pub fn loadHeadtest(ed: *Editor) !void {
 /// toolbar's reads and its offers-changed listener, as commands a test reads.
 pub fn loadOfferwatch(ed: *Editor) !void {
     try ed.load("offerwatch", guest.offerwatch);
+}
+
+/// A diagnostics source without a language server
+/// (`src/plugin_fixtures/diagfeed.zig`): rows a test sets, announced by the
+/// `diagnostics` signal.
+pub fn loadDiagfeed(ed: *Editor) !void {
+    try ed.load("diagfeed", guest.diagfeed);
 }
 
 /// Load ONE grammar from the embedded bundle by name — the load a config's
@@ -2151,6 +2199,10 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "find", @embedFile("guest_find_wasm") },
     .{ "toolbar", @embedFile("guest_toolbar_wasm") },
     .{ "contextmenu", @embedFile("guest_contextmenu_wasm") },
+    .{ "panel", @embedFile("guest_panel_wasm") },
+    .{ "problems", @embedFile("guest_problems_wasm") },
+    .{ "terminal", @embedFile("guest_terminal_wasm") },
+    .{ "breadcrumbs", @embedFile("guest_breadcrumbs_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
     // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.

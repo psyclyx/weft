@@ -527,9 +527,62 @@ The plugins:
 
 Not done: hover dispatches nothing, so there are no tooltips (the reason and provider
 ride on each button as scene facts). A strip wider than the window is clipped, with no
-overflow menu. The toolbar and sidebar entries show in the tab strip. A docked
-companion never becomes the primary context, so while the sidebar has focus the
-toolbar still describes the editor; the context menu covers the sidebar.
+overflow menu. A docked companion never becomes the primary context, so while the
+sidebar has focus the toolbar still describes the editor; the context menu covers the
+sidebar.
+
+**Landed (4, and 3.1.4).** The doors, all generic:
+
+- Chrome hits. The view records a hit rect for each tab's body, each tab's close
+  glyph (`×`, drawn after every name), and each status segment
+  (`View.PaneMap.chrome`). A point on one sets `Head.pointer.hit.chrome`
+  (`core.pointer.Chrome`: tab or status, index, part, the tab's entry, the segment's
+  command) instead of an offset or node. `pointer-click` reads it: a tab's body shows
+  that entry, its glyph closes it, a segment runs its command (`name [argument]`).
+  `pointer-close-tab` closes the tab under the pointer; defaults.js binds it to
+  mouse-2.
+- A docked viewport's entry is chrome, not a document: `Registry.holdsEntry`, from
+  the entry each docked declaration last showed. The tab strip skips those entries,
+  so the sidebar listing, the toolbar and the panel's entry are never tabs.
+- `weft.statusSegment(text, role, priority, command)`. `ui/statusline-seg` is
+  declared with a schema (`core.status_segment`), so a plugin binds it like the
+  gutter. It is asked once per pane per built frame with the caret and whether the
+  pane is focused, and it answers segments with a role, a side and a click command.
+  The guest half is the `statusline` plugin library.
+- `viewport-take <name>`: the active entry goes into a declared viewport, which is
+  shown and focused, replacing what it showed. `weft.viewport(..., {shown: false})`
+  starts one hidden. A hidden viewport keeps its entry for when it is shown again.
+- Named signals: `wl_signal_emit(name)` and `wl_signal_subscribe(name)` →
+  `on_signal(id)`, delivered at the frame boundary like `on_offers_changed`. Core
+  knows no signal names and carries no payload.
+- `wl_outline`: the active entry's outline symbols from the grammar's `outline.scm`.
+- A REPL session strips terminal controls (CSI, OSC, other escapes, CR, BEL) from
+  what it streams into its buffer, even when a sequence straddles two reads.
+
+The plugins:
+
+- **`panel`** (`config/panel.js`) is a bottom viewport, 12 rows, persistent, out of
+  the cycle, not a focus source, hidden at start. `panel-toggle` is C-j.
+- **`problems`** (C-S-m) reads a source command's rows (`path\tline\tcol\tseverity\t
+  message`, default `diagnostics-list`, which `lsp` now answers from every session)
+  into a semantic view of `action` rows under a heading per file. It re-reads on the
+  `diagnostics` signal, which `lsp` raises when a publish lands or a set is released.
+  Return or a click opens the file at the line and column. The open lands in the
+  editor pane, and the panel keeps the list.
+- **`terminal`** (C-`) is a LINE-MODE shell. It is the REPL session with `exec
+  "${SHELL:-sh}" -i` on the other end, plus a `terminal` mode that keeps the input
+  line, echoes it, and sends it on Return. It does no VT100 emulation: full-screen
+  programs do not work, and colors are stripped.
+- **`breadcrumbs`** is a status-line provider for text entries. It shows ` › outer ›
+  inner` after the path, from the outline, cached against the document's snapshot
+  witness, so a caret move is a span scan and only an edit re-reads the outline. A
+  crumb's command is `breadcrumbs-jump <offset>`.
+- config.js loads all four (SPC o p, SPC o t, SPC o P). helix.js loads them with no
+  keys.
+
+Not done: breadcrumbs read the grammar outline only, not LSP document symbols. The
+problems list shows what `lsp` holds, which is one document per server. The terminal
+has no interrupt: C-c cannot reach a piped child as a signal.
 
 ### 3.7 ide.js keys
 
