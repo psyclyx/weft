@@ -672,6 +672,25 @@ fn provideRowVerbs() void {
     weft.provide("plugin.git.reword", in_draft, "git-draft-reword", 0);
     weft.provide("plugin.git.fixup", in_draft, "git-draft-fixup", 0);
     weft.provide("plugin.git.squash", in_draft, "git-draft-squash", 0);
+
+    // How each verb is PRESENTED where it wins — a toolbar button, a menu
+    // entry: the row's verbs first, then the repository's, then a draft's.
+    // Presentation only; nothing above resolves differently for it.
+    const shown = [_]struct { action: []const u8, label: []const u8 }{
+        .{ .action = "plugin.git.stage", .label = "Stage" },
+        .{ .action = "plugin.git.unstage", .label = "Unstage" },
+        .{ .action = "plugin.git.open-diff", .label = "Diff" },
+        .{ .action = "plugin.git.commit", .label = "Commit" },
+        .{ .action = "plugin.git.push", .label = "Push" },
+        .{ .action = "plugin.git.pull", .label = "Pull" },
+        .{ .action = "plugin.git.fetch", .label = "Fetch" },
+        .{ .action = "plugin.git.refresh", .label = "Refresh" },
+        .{ .action = "plugin.git.amend", .label = "Amend" },
+        .{ .action = "plugin.git.reword", .label = "Reword" },
+        .{ .action = "plugin.git.fixup", .label = "Fixup" },
+        .{ .action = "plugin.git.squash", .label = "Squash" },
+    };
+    for (shown, 0..) |s, i| _ = weft.provideAffordance(s.action, .{ .label = s.label, .group = "git", .order = @intCast(i) });
 }
 
 // ── Navigation / folding ────────────────────────────────────────────────────
