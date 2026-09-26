@@ -295,10 +295,20 @@ for (const [key, dir] of [["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
 weft.bind("normal", ";", "snipe-repeat");
 weft.bind("normal", ",", "snipe-repeat-rev");
 
-// `C-o` — back where you came from, vim's jump-list key. The intention first:
-// a focused view that knows its own history answers it; otherwise the generic
-// buffer-back action does.
-weft.bind("normal", "C-o", ["std.navigation.back", "navigate-back"]);
+// `C-o` / `C-i` — vim's jumplist. The intention first: a focused view that
+// knows its own history answers it; otherwise the head's jumplist does, which
+// core fills on every move between entries and vim fills on `G`, `gg`, `%`.
+// `q` in a tool is a different verb (leave it) and stays `navigate-back`.
+weft.bind("normal", "C-o", ["std.navigation.back", "jump-back"]);
+weft.bind("normal", "C-i", "jump-forward");
+weft.bind("normal", "SPC s j", "jumplist-pick");
+
+// `q<reg>` / `@<reg>` / `@@` — macros are vim's (it binds them); the recorder
+// is core, so a macro replays through every plugin a typed key reaches.
+// `"+` / `"*` — the system clipboard as a vim register. Reading it reads
+// whatever you last copied anywhere, so it is a grant, and only config can
+// give it.
+weft.grant("vim", "clipboard");
 
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");

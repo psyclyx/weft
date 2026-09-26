@@ -70,6 +70,9 @@ weft.plugin("linenumbers"); // a line-number gutter on text entries
 // lines grant them.
 weft.grant("files", "fs_read",  { root: "/" });
 weft.grant("files", "fs_write", { root: "/" });
+// C-c / C-x / C-v mirror the unnamed register into the system clipboard,
+// which only config can grant.
+weft.grant("ide", "clipboard");
 weft.grant("dap", "proc");
 weft.plugin("dap.js");         // DAP client: F5/F10/F11
 weft.grant("acp", "proc");

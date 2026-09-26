@@ -1549,7 +1549,7 @@ test "e2e/config: the showcased intention binds resolve to what answers them" {
     const back_arms = ed.keymap.resolveExactArms("normal", "C-o").?;
     try t.expectEqual(@as(usize, 2), back_arms.len);
     try t.expectEqualStrings("std.navigation.back", back_arms[0]);
-    try t.expectEqualStrings("navigate-back", back_arms[1]);
+    try t.expectEqualStrings("jump-back", back_arms[1]);
 
     // Grammar tier, observed through the booted config: the arms the config's
     // comments send the reader to are really there.
@@ -1573,8 +1573,9 @@ test "e2e/config: the showcased intention binds resolve to what answers them" {
     }
 
     // `C-o` walks back to the entry we came from: no view offered the
-    // navigation intention here, so the second arm — the generic action —
-    // answers, which is exactly what a fallback list is for.
+    // navigation intention here, so the second arm — the jumplist, which the
+    // switch between entries filled — answers, which is exactly what a
+    // fallback list is for.
     ed.runStr("open", "note.txt");
     const first = try gpa.dupe(u8, ed.bufferName());
     defer gpa.free(first);

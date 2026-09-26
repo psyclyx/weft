@@ -46,6 +46,9 @@ weft.plugin("languages.js"); // parser packages + explicit query paths
 // more.
 weft.grant("files", "fs_read", { root: "/" });
 weft.grant("files", "fs_write", { root: "/" });
+// The system clipboard (`SPC y` / `SPC p`): config-only, like every read of
+// what you copied elsewhere.
+weft.grant("helix", "clipboard");
 weft.grant("dap", "proc");
 weft.plugin("dap.js");
 weft.grant("acp", "proc");
