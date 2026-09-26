@@ -125,9 +125,11 @@ their text in the same column. `virtual_after` and `eol` still do not draw.
 **Built.** `core/flash.zig`: a `flash` layer per document (anchored spans) plus a
 generation and a source on `Caps.flash`. `wl_flash` replaces the set, `wl_flash_add`
 adds to it (SDK `flash`, `flashAdd`, `flashRanges`). `undo`/`redo` always record the
-span their commits changed (`flash.changedSince`) as an `undo` flash; the frame shows it
-only when `editor/flash-undo` is `on`, and re-reads `editor/flash-ms` whenever a new
-flash starts.
+span their commits changed (`flash.changedSince`) as an `undo` flash, in a set of its own
+beside the edit set (`Flash.showing`): the frame shows it only when `editor/flash-undo`
+is `on` and it is the newer, so with the option off an undo cannot cut a fading
+operation flash short. The frame re-reads `editor/flash-ms` whenever a new flash starts,
+and draws every range of the set (no fixed cap).
 
 ### 0.5 Gutter door — core-door
 

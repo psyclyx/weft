@@ -600,21 +600,25 @@ pub const FrameBuilder = struct {
         // configuration as each new flash starts, so a reload applies to the
         // next one; an undo's flash shows only where the configuration
         // turned it on (`editor/flash-undo`).
-        var flash_buf: [64]stemma.Range = undefined;
+        // The undo set lives beside the edit set (`core/flash.zig`), so with
+        // flash-undo off an undo is not even a new generation here: a fading
+        // yank keeps fading. Every range of the set draws (frame arena).
         const flash_ranges: []const stemma.Range = fblk: {
             const fs = &fx.caps.flash;
-            if (fs.gen != fx.flash_gen.*) {
-                fx.flash_gen.* = fs.gen;
+            const which = fs.showing(configOn(fx.config, "editor", "flash-undo"));
+            const gen = fs.genOf(which);
+            if (gen != fx.flash_gen.*) {
+                fx.flash_gen.* = gen;
                 fx.flash_start_ns.* = act.frame_start;
                 if (configMs(fx.config, "editor", "flash-ms")) |ms| fx.flash_duration_ns.* = ms * std.time.ns_per_ms;
             }
-            const shown = fs.source != .undo or configOn(fx.config, "editor", "flash-undo");
-            const active = fs.gen > 0 and shown and (act.frame_start -| fx.flash_start_ns.*) < fx.flash_duration_ns.*;
+            const active = gen > 0 and (act.frame_start -| fx.flash_start_ns.*) < fx.flash_duration_ns.*;
             if (active or fx.flash_was_active.*) fx.view_dirty.* = true; // draw it, then clear it
             fx.flash_was_active.* = active;
             if (!active) break :fblk &.{};
             const ed = editor orelse break :fblk &.{};
-            break :fblk fs.ranges(&fx.caps.layers, &ed.doc, &flash_buf);
+            const buf = mesh_gpa.alloc(stemma.Range, fs.countOf(which, &fx.caps.layers, &ed.doc)) catch break :fblk &.{};
+            break :fblk fs.rangesOf(which, &fx.caps.layers, &ed.doc, buf);
         };
         // `ui/statusline-seg` (doc/contextual-workspace-architecture.md
         // §11): fire the mesh with this frame's

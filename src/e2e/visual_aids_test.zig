@@ -156,6 +156,31 @@ test "e2e/visual-aids: every vim edit flashes what it touched, undo included" {
     try t.expect(ed.application.flash_was_active);
 }
 
+test "e2e/visual-aids: with flash-undo off, an undo does not cut an operation's flash short" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "u.txt", "alpha\nbeta\n");
+    ed.chord("g g");
+    try ed.setConfig("editor", "flash-undo", "off");
+    // Long enough that no fade can end inside the test, loaded or not.
+    try ed.setConfig("editor", "flash-ms", "600000");
+    // An operation flashes what it touched, and `u` takes it back at once.
+    for ([_][]const u8{ "g", "U", "i", "w" }) |k| ed.press(k, "");
+    try t.expect(ed.caps.flash.gen > 0);
+    try t.expect(ed.application.flash_was_active);
+    ed.press("u", "");
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("alpha\nbeta\n", text);
+    // The operation's flash is still the one showing.
+    try t.expect(ed.application.flash_was_active);
+    try t.expectEqual(core.flash.Source.edit, ed.caps.flash.showing(false));
+}
+
 test "e2e/visual-aids: snipe — one hit jumps, several are labelled, and d composes across lines" {
     const gpa = t.allocator;
     var app: App = undefined;
