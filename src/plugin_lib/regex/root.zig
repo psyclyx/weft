@@ -752,6 +752,104 @@ const ThreadList = struct {
     }
 };
 
+/// A set of byte values — the bytes a match can begin with (`Regex.first`).
+const ByteSet = struct {
+    bits: std.StaticBitSet(256) = .initEmpty(),
+    /// The set's one member when it has exactly one, so `next` is a plain
+    /// scalar search (the common literal-lead case) instead of a set probe
+    /// per byte.
+    only: ?u8 = null,
+
+    fn has(self: *const ByteSet, b: u8) bool {
+        return self.bits.isSet(b);
+    }
+
+    fn add(self: *ByteSet, b: u8) void {
+        self.bits.set(b);
+    }
+
+    fn addRange(self: *ByteSet, lo: u8, hi: u8) void {
+        var b: usize = lo;
+        while (b <= hi) : (b += 1) self.add(@intCast(b));
+    }
+
+    /// Every byte codepoint `cp` can begin with in a haystack, as
+    /// `decodeUtf8At` reads one: its UTF-8 lead byte, and for 0x80..0xFF the
+    /// raw byte too (an invalid byte decodes as itself). ASCII letters add
+    /// their other case when folding.
+    fn addCp(self: *ByteSet, cp: u21, ci: bool) void {
+        if (cp < 0x80) {
+            self.add(@intCast(cp));
+            if (ci and isAsciiUpper(cp)) self.add(@intCast(cp + 32));
+            if (ci and isAsciiLower(cp)) self.add(@intCast(cp - 32));
+            return;
+        }
+        if (cp <= 0xff) self.add(@intCast(cp));
+        var buf: [4]u8 = undefined;
+        _ = std.unicode.utf8Encode(cp, &buf) catch return; // a surrogate never decodes
+        self.add(buf[0]);
+    }
+
+    fn seal(self: *ByteSet) void {
+        if (self.bits.count() == 1) self.only = @intCast(self.bits.findFirstSet().?);
+    }
+
+    /// The first position at or after `from` holding a member.
+    fn next(self: *const ByteSet, haystack: []const u8, from: usize) ?usize {
+        if (self.only) |b| return std.mem.indexOfScalarPos(u8, haystack, from, b);
+        var i = from;
+        while (i < haystack.len) : (i += 1) {
+            if (self.bits.isSet(haystack[i])) return i;
+        }
+        return null;
+    }
+};
+
+/// The bytes a match of `prog` can begin with, or null when a match can
+/// begin with (nearly) anything or with nothing at all: `.` and a negated
+/// class, or a `match` reachable without consuming — an empty match, which
+/// needs no byte to begin with. Assertions are passed through (they only
+/// ever narrow where a match starts, so ignoring them over-approximates,
+/// which is the safe direction).
+fn firstBytes(gpa: Allocator, prog: []const Inst, classes: []const ClassSet, ci: bool) Allocator.Error!?ByteSet {
+    const seen = try gpa.alloc(bool, prog.len);
+    defer gpa.free(seen);
+    @memset(seen, false);
+    var stack: std.ArrayList(usize) = .empty;
+    defer stack.deinit(gpa);
+    try stack.append(gpa, 0);
+    var set: ByteSet = .{};
+    while (stack.pop()) |pc| {
+        if (seen[pc]) continue;
+        seen[pc] = true;
+        const inst = prog[pc];
+        switch (inst.op) {
+            .jmp => try stack.append(gpa, inst.x),
+            .split => {
+                try stack.append(gpa, inst.x);
+                try stack.append(gpa, inst.y);
+            },
+            .save, .assert_bol, .assert_eol, .assert_wb, .assert_nwb => try stack.append(gpa, pc + 1),
+            .match, .any => return null,
+            .char => set.addCp(inst.ch, ci),
+            .class => {
+                const cls = classes[inst.class_idx];
+                if (cls.negate) return null;
+                for (cls.ranges) |r| {
+                    if (r.lo < 0x80) {
+                        var cp = r.lo;
+                        while (cp <= @min(r.hi, 0x7f)) : (cp += 1) set.addCp(cp, ci);
+                    }
+                    // Past ASCII: every lead byte and every raw high byte.
+                    if (r.hi >= 0x80) set.addRange(0x80, 0xff);
+                }
+            },
+        }
+    }
+    set.seal();
+    return set;
+}
+
 pub const Regex = struct {
     gpa: Allocator,
     prog: []const Inst,
@@ -764,6 +862,13 @@ pub const Regex = struct {
     nlist: ThreadList,
     gen: []usize,
     gen_cur: usize,
+    /// The bytes a match can begin with, or null when that is "any" (a
+    /// pattern that can match empty, or opens with `.` or a negated class).
+    /// While no thread is alive, the unanchored scan jumps straight to the
+    /// next such byte instead of seeding and stepping a thread per byte in
+    /// between — the difference between walking the VM across a whole
+    /// document and walking it across the places a match could be.
+    first: ?ByteSet,
 
     /// See `compile`; this variant additionally reports the byte offset
     /// into `pattern` a `CompileError` points at (`err_pos.*` is
@@ -812,10 +917,12 @@ pub const Regex = struct {
         errdefer gpa.free(clist_buf);
         const nlist_buf = try gpa.alloc(Thread, prog.len);
         errdefer gpa.free(nlist_buf);
+        const first = try firstBytes(gpa, prog, classes, ci);
         const gen_buf = try gpa.alloc(usize, prog.len);
         @memset(gen_buf, 0);
 
         return Regex{
+            .first = first,
             .gpa = gpa,
             .prog = prog,
             .classes = classes,
@@ -850,7 +957,20 @@ pub const Regex = struct {
     /// would return, just without backtracking to get there.
     pub fn find(self: *Regex, haystack: []const u8, start: usize) ?Match {
         if (start > haystack.len) return null;
-        return self.run(haystack, start);
+        return self.run(haystack, start, false);
+    }
+
+    /// The match starting EXACTLY at `pos`, or `null` — `find` without the
+    /// per-position re-seeding that makes it unanchored. A caller that
+    /// already knows where a match can start (a find bar's literal
+    /// prefilter, which skips to each occurrence of a required prefix with a
+    /// plain substring search) tries only those positions instead of
+    /// stepping every thread across the bytes between them. Assertions still
+    /// see the whole haystack, so `\b` and `^` at `pos` look behind it
+    /// exactly as they would inside `find`.
+    pub fn matchAt(self: *Regex, haystack: []const u8, pos: usize) ?Match {
+        if (pos > haystack.len) return null;
+        return self.run(haystack, pos, true);
     }
 
     pub const Iterator = struct {
@@ -950,7 +1070,7 @@ pub const Regex = struct {
     /// LOWER-priority threads for this step only; higher-priority threads
     /// already advanced into `nlist` keep racing, which is exactly what
     /// gives greedy quantifiers first refusal on a longer match.
-    fn run(self: *Regex, haystack: []const u8, start: usize) ?Match {
+    fn run(self: *Regex, haystack: []const u8, start: usize, anchored: bool) ?Match {
         var zero_caps: [2 * MAX_CAPTURES]usize = undefined;
         @memset(&zero_caps, UNSET);
 
@@ -962,8 +1082,18 @@ pub const Regex = struct {
         var pos = start;
         var matched: ?Match = null;
         while (true) {
+            // Nothing alive and nothing found: jump to the next byte a match
+            // can begin with and seed there, rather than seeding one doomed
+            // thread per byte on the way (`first`).
+            if (self.clist.len == 0 and matched == null and !anchored) {
+                if (self.first) |set| {
+                    pos = set.next(haystack, pos) orelse break;
+                    self.gen_cur += 1;
+                    self.addThread(&self.clist, 0, pos, zero_caps, haystack);
+                }
+            }
             const decoded = decodeUtf8At(haystack, pos);
-            if (self.clist.len == 0 and (matched != null or decoded == null)) break;
+            if (self.clist.len == 0 and (matched != null or decoded == null or anchored)) break;
 
             self.gen_cur += 1;
             self.nlist.clear();
@@ -988,8 +1118,14 @@ pub const Regex = struct {
                     else => unreachable, // addThread's closure never leaves an epsilon op in a list
                 }
             }
-            if (matched == null) {
-                if (decoded) |d| self.addThread(&self.nlist, 0, pos + d.len, zero_caps, haystack);
+            // Anchored: no later starting point is tried — the threads
+            // seeded at `start` are the only ones that ever run.
+            if (matched == null and !anchored) {
+                if (decoded) |d| {
+                    const at = pos + d.len;
+                    const can_start = if (self.first) |set| at < haystack.len and set.has(haystack[at]) else true;
+                    if (can_start) self.addThread(&self.nlist, 0, at, zero_caps, haystack);
+                }
             }
             std.mem.swap(ThreadList, &self.clist, &self.nlist);
             const d = decoded orelse break;
@@ -1049,6 +1185,36 @@ fn expectFind(pattern: []const u8, haystack: []const u8, start: usize, options: 
 test "literal and concatenation" {
     try expectFind("abc", "xxabcxx", 0, .{}, .{ .start = 2, .end = 5 });
     try expectFind("abc", "xxabxx", 0, .{}, null);
+}
+
+test "matchAt is anchored: it never tries a later start" {
+    var re = try Regex.compile(t.allocator, "b+c", .{});
+    defer re.deinit();
+    try t.expectEqual(@as(?Match, null), re.matchAt("abbc", 0));
+    const m = re.matchAt("abbc", 1).?;
+    try t.expectEqual(@as(usize, 1), m.start);
+    try t.expectEqual(@as(usize, 4), m.end);
+    // Assertions still look behind `pos`: `\b` at 1 of "ab" is no boundary.
+    var wb = try Regex.compile(t.allocator, "\\bb", .{});
+    defer wb.deinit();
+    try t.expectEqual(@as(?Match, null), wb.matchAt("ab", 1));
+    try t.expect(wb.matchAt("a b", 2) != null);
+}
+
+test "the first-byte skip lands on every place a match can begin" {
+    try expectFind("\\d+", "abc123", 0, .{}, .{ .start = 3, .end = 6 });
+    try expectFind("[b-c]x", "aaCX", 0, .{ .case_insensitive = true }, .{ .start = 2, .end = 4 });
+    try expectFind("é", "xyé", 0, .{}, .{ .start = 2, .end = 4 });
+    try expectFind("\\bab", "cab ab", 0, .{}, .{ .start = 4, .end = 6 });
+    try expectFind("(?:ab|cd)e", "abxcde", 0, .{}, .{ .start = 3, .end = 6 });
+    // A pattern that can match empty has no first byte: no skip, same answer.
+    try expectFind("x*", "abc", 1, .{}, .{ .start = 1, .end = 1 });
+    var re = try Regex.compile(t.allocator, "q", .{});
+    defer re.deinit();
+    try t.expectEqual(@as(?u8, 'q'), re.first.?.only);
+    var any = try Regex.compile(t.allocator, "a|.", .{});
+    defer any.deinit();
+    try t.expect(any.first == null);
 }
 
 test "dot matches any byte but newline" {
