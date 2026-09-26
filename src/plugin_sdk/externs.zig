@@ -137,6 +137,10 @@ pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision:
 pub extern "weft:abi/1" fn wl_offer(i: u32, il: u32, c: u32, cl: u32, r: u32, rl: u32) u32;
 pub extern "weft:abi/1" fn wl_offers_commit() u32;
 pub extern "weft:abi/1" fn wl_offers_retract() void;
+// A chosen context's offers (0 active, 1 primary focus), as one record.
+pub extern "weft:abi/1" fn wl_offers_list(where: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_intent_invoke_at(where: u32, ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_provide_affordance(a: u32, al: u32, l: u32, ll: u32, g: u32, gl: u32, order: i32) u32;
 pub extern "weft:abi/1" fn wl_buffer_count() u32;
 pub extern "weft:abi/1" fn wl_buffer_id(i: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;

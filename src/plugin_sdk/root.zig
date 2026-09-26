@@ -1034,6 +1034,111 @@ pub fn invokeIntention(name: []const u8) Invocation {
     return .{ .refused = intent_scratch[0..@intCast(n)] };
 }
 
+// ── Offers for a CHOSEN context (a toolbar, a context menu) ──────────
+/// Which context an offer question is about. `primary` is the head's last
+/// primary-focus pane (the editor, never a docked companion), so a toolbar
+/// or sidebar that holds focus itself still describes the editor.
+pub const OfferContext = enum(u32) { active = 0, primary = 1 };
+
+pub const OfferAvailability = enum(u8) { enabled = 0, disabled = 1, checking = 2 };
+
+/// One offer, as `offersIn` reads it. Every string borrows `offers_scratch`
+/// until the next `offersIn`. `label` and `group` are always filled (the
+/// host completes them from the intention table); `order` is a hint, lower
+/// first, null when nothing said.
+pub const Offer = struct {
+    intention: []const u8,
+    provider: []const u8,
+    availability: OfferAvailability,
+    /// The stable reason code when not enabled; empty when it is.
+    reason: []const u8,
+    label: []const u8,
+    group: []const u8,
+    order: ?i32,
+};
+
+var offers_scratch: [1 << 16]u8 = undefined;
+
+/// The rows of one `offersIn` read, in the host's stable order. Iterate with
+/// `next`; grouping and ordering by `group`/`order` is the UI's policy.
+pub const Offers = struct {
+    bytes: []const u8,
+    count: u32,
+    at: usize = 4,
+    index: u32 = 0,
+
+    pub fn next(self: *Offers) ?Offer {
+        if (self.index >= self.count) return null;
+        const availability = std.enums.fromInt(OfferAvailability, self.byte()) orelse return null;
+        const has_order = self.byte() != 0;
+        const order: i32 = @bitCast(self.word());
+        var parts: [5][]const u8 = undefined;
+        for (&parts) |*part| {
+            const n = self.word();
+            if (self.at + n > self.bytes.len) return null;
+            part.* = self.bytes[self.at..][0..n];
+            self.at += n;
+        }
+        self.index += 1;
+        return .{
+            .availability = availability,
+            .order = if (has_order) order else null,
+            .intention = parts[0],
+            .provider = parts[1],
+            .reason = parts[2],
+            .label = parts[3],
+            .group = parts[4],
+        };
+    }
+
+    fn byte(self: *Offers) u8 {
+        if (self.at >= self.bytes.len) return 0;
+        defer self.at += 1;
+        return self.bytes[self.at];
+    }
+
+    fn word(self: *Offers) u32 {
+        if (self.at + 4 > self.bytes.len) return 0;
+        defer self.at += 4;
+        return std.mem.readInt(u32, self.bytes[self.at..][0..4], .little);
+    }
+};
+
+/// Everything `where` offers right now, one consistent snapshot. Empty when
+/// there is no catalog (or the record outgrew the scratch).
+pub fn offersIn(where: OfferContext) Offers {
+    const n = e.wl_offers_list(@intFromEnum(where), p(&offers_scratch), offers_scratch.len);
+    if (n < 4 or n > offers_scratch.len) return .{ .bytes = &.{}, .count = 0 };
+    const bytes = offers_scratch[0..@intCast(n)];
+    return .{ .bytes = bytes, .count = std.mem.readInt(u32, bytes[0..4], .little) };
+}
+
+/// `invokeIntention` in a chosen context: resolved and run THERE, so a
+/// toolbar's Undo undoes the editor it describes. Only from a dispatch (a
+/// command or a click), like any other change to where the head is.
+pub fn invokeIntentionIn(where: OfferContext, name: []const u8) Invocation {
+    const n = e.wl_intent_invoke_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
+    if (n < 0) return .unknown;
+    if (n == 0) return .invoked;
+    return .{ .refused = intent_scratch[0..@intCast(n)] };
+}
+
+/// How THIS plugin's providers of `action` present their offer where they
+/// win (a toolbar label, a group, an order hint). Presentation only — it
+/// changes nothing about which provider wins. Call after `provide`; returns
+/// how many of this plugin's providers took it.
+pub fn provideAffordance(action: []const u8, a: struct { label: []const u8 = "", group: []const u8 = "", order: ?i32 = null }) usize {
+    return e.wl_provide_affordance(
+        p(action.ptr),
+        @intCast(action.len),
+        p(a.label.ptr),
+        @intCast(a.label.len),
+        p(a.group.ptr),
+        @intCast(a.group.len),
+        a.order orelse std.math.minInt(i32),
+    );
+}
+
 // ── Publishing THIS plugin's offers ──────────────────────────────────
 /// Start the table this plugin offers about its own projection. `tool` is
 /// that buffer's tool identity (`toolBacking`) — the offers apply there and

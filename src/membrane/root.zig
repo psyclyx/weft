@@ -283,6 +283,11 @@ pub const imports = [_]Entry{
     .{ .name = "wl_offer", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "stage one offer row: an intention, one of this plugin's own commands, and the reason it cannot run (empty = enabled)" },
     .{ .name = "wl_offers_commit", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "publish the staged table as this plugin's whole offer set" },
     .{ .name = "wl_offers_retract", .params = &.{}, .results = &.{}, .group = .intent, .doc = "withdraw this plugin's offers entirely" },
+    // A CHOSEN context (doc/configs.md §3.5): 0 = the active pane, 1 = the
+    // head's primary focus, which a toolbar describes while it holds focus.
+    .{ .name = "wl_offers_list", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "every offer in a chosen context (0 active, 1 primary focus) as one record: availability, order, intention, provider, reason, label, group; returns the record length (written only if it fits), -1 if unknown" },
+    .{ .name = "wl_intent_invoke_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .head_gated = true, .doc = "resolve an intention in a chosen context and invoke it THERE through the effect door; 0 = invoked, -1 = not an intention, else a refusal written to guest memory" },
+    .{ .name = "wl_provide_affordance", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{.u32}, .group = .intent, .doc = "how this plugin's providers of an action present their offer (label, group, order; minInt = no order); presentation only, returns how many providers took it" },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .params = &.{}, .results = &.{.u32}, .group = .buffers, .doc = "the number of open buffers" },
@@ -530,6 +535,7 @@ pub const exports = [_]Export{
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
+    .{ .name = "on_offers_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "what the head's primary context offers moved (focus, mode, entry, provider set, availability); at most once per frame, at the frame boundary, never inside a dispatch" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
@@ -569,9 +575,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 243;
-const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 261;
+const max_import_count: usize = 246;
+const max_export_count: usize = 19;
+const max_semantic_operation_count: usize = 265;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -699,7 +705,7 @@ test "membrane contract data: every export entry is well-formed, documented, and
     try t.expectEqual(@as(usize, max_export_count), census.exports);
 }
 
-test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini callback" {
+test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini callback" {
     try t.expectEqualStrings("1", abi_major);
     try t.expectEqualStrings("weft:abi/1", abi_namespace);
     try t.expectEqualStrings("weft:abi/1/", export_prefix);
@@ -715,7 +721,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
             try t.expectEqualStrings("run", entry.name);
         },
     };
-    try t.expectEqual(@as(usize, 17), full);
+    try t.expectEqual(@as(usize, 18), full);
     try t.expectEqual(@as(usize, 1), mini);
     try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
     for (legacy_callback_names, 0..) |name, i| {
@@ -726,7 +732,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 243), census.imports);
-    try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 261), census.semantic_operations);
+    try t.expectEqual(@as(usize, 246), census.imports);
+    try t.expectEqual(@as(usize, 19), census.exports);
+    try t.expectEqual(@as(usize, 265), census.semantic_operations);
 }

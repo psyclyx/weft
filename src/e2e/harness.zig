@@ -1352,6 +1352,7 @@ const guest = struct {
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
+    const offerwatch = @embedFile("guest_offerwatch_wasm");
     /// Test fixture only — `src/plugin_fixtures/fs_limit.zig`: declares fs_read +
     /// fs_write and exposes each path-taking door as a command reading its
     /// path from the args, so a test controls exactly which path to try
@@ -1408,6 +1409,12 @@ pub fn loadVim(ed: *Editor) !void {
 /// head to prove the guest ABI itself is head-addressed.
 pub fn loadHeadtest(ed: *Editor) !void {
     try ed.load("headtest", guest.headtest);
+}
+
+/// The action-system fixture (`src/plugin_fixtures/offerwatch.zig`): a
+/// toolbar's reads and its offers-changed listener, as commands a test reads.
+pub fn loadOfferwatch(ed: *Editor) !void {
+    try ed.load("offerwatch", guest.offerwatch);
 }
 
 /// Load ONE grammar from the embedded bundle by name — the load a config's

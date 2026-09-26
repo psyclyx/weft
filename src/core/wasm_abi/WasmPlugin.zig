@@ -365,6 +365,10 @@ surface: surface_mod.Surface = .{},
 /// address it captures is the address it keeps.
 offers: plugin_offers.Publisher = undefined,
 offers_ready: bool = false,
+/// Whether this plugin exports `on_offers_changed` — learned on the first
+/// delivery (`wasm_host/intent.zig`'s `notifyOffersChanged`), so a plugin
+/// without it is asked once, not every change.
+offers_listener: enum { unknown, listening, deaf } = .unknown,
 
 // ── Sandboxed semantic field providers ──
 /// Stable heap proxies + host-owned snapshots for fields registered by this

@@ -204,6 +204,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_offer", .handler = intent.hOffer },
     .{ .name = "wl_offers_commit", .handler = intent.hOffersCommit },
     .{ .name = "wl_offers_retract", .handler = intent.hOffersRetract },
+    .{ .name = "wl_offers_list", .handler = intent.hOffersList },
+    .{ .name = "wl_intent_invoke_at", .handler = intent.hIntentInvokeAt },
+    .{ .name = "wl_provide_affordance", .handler = intent.hProvideAffordance },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .handler = buffers.hBufferCount },
@@ -644,6 +647,7 @@ const head_gated_list = [_][]const u8{
     "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
     "wl_semantic_action", // semantic.zig hSemanticAction
+    "wl_intent_invoke_at", // intent.zig hIntentInvokeAt
 };
 
 test "membrane contract: table .head_gated metadata agrees with the handlers' actual requireDispatch gates" {

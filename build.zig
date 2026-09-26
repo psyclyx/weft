@@ -377,6 +377,9 @@ const guests = [_]Guest{
     .{ .name = "headtest", .import = "guest_headtest_wasm", .install = false },
     // The multiple-selection doors (doc/configs.md §0.1) across the membrane.
     .{ .name = "multisel", .import = "guest_multisel_wasm", .install = false },
+    // The action-system doors (doc/configs.md §3.5) driven the way a toolbar
+    // drives them: offers for a chosen context, and the offers-changed event.
+    .{ .name = "offerwatch", .import = "guest_offerwatch_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).

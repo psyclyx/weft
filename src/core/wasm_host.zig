@@ -57,6 +57,10 @@ const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
 
+const intent_doors = @import("wasm_host/intent.zig");
+pub const notifyOffersChanged = intent_doors.notifyOffersChanged;
+pub const hearsOffers = intent_doors.hearsOffers;
+
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
 /// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
 /// ever reaches core through this facade — can recompute each handler from

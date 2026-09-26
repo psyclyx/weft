@@ -38,6 +38,9 @@ pub const Application = struct {
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
     last_activate_len: usize = 0,
     last_active: core.Buffers.Id,
+    /// What the primary context offered when listeners were last told
+    /// (`notifyOffersChanged`); null before the first delivery.
+    offers_seen: ?u64 = null,
     which_key_delay_ns: u64,
     lifecycle: lifecycle_mod.Lifecycle,
 
@@ -217,7 +220,38 @@ pub const Application = struct {
     }
 
     pub fn applyWindowIntents(self: *Application) bool {
-        return self.driver.applyWindowIntents(&self.session.cmd_ctx);
+        var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
+        if (self.notifyOffersChanged()) damaged = true;
+        return damaged;
+    }
+
+    /// The offers-changed event (doc/configs.md §3.5.3): tell listening
+    /// plugins that what the head's PRIMARY context offers moved, so chrome (a
+    /// toolbar) redraws without polling.
+    ///
+    /// Here, after the layout phase, because that is where primary focus is
+    /// recorded — so a focus move, a mode change, an entry switch, a provider
+    /// registration and an availability flip made anywhere in this wake are
+    /// all visible, and are delivered as ONE event. It runs at the frame
+    /// boundary, never inside a dispatch, so a listener re-entering the offer
+    /// doors cannot recurse into the dispatch that caused the change. The
+    /// comparison is over the offers' content (`Plane.signatureAt`), so a
+    /// frame where nothing a toolbar shows moved fires nothing.
+    fn notifyOffersChanged(self: *Application) bool {
+        const plugins = self.driver.ctx.plugins.items;
+        for (plugins) |pl| {
+            if (core.wasm_host.hearsOffers(pl)) break;
+        } else return false;
+        const ctx = &self.session.cmd_ctx;
+        const plane = ctx.intent orelse return false;
+        const signature = plane.signatureAt(ctx, .primary);
+        if (self.offers_seen) |seen| if (seen == signature) return false;
+        self.offers_seen = signature;
+        var ran = false;
+        for (plugins) |pl| {
+            if (core.wasm_host.notifyOffersChanged(pl)) ran = true;
+        }
+        return ran;
     }
 
     pub fn observe(self: *Application, active: frame.Driver.Prepared) bool {
