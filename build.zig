@@ -45,7 +45,8 @@ const Guest = struct {
 /// is the tool-buffer surface `run`/`make`/`grep` share, `jsonrpc` is the
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
 /// adapter, `rowkey` is the round trip between a projection row's key and the
-/// structured identity it names.
+/// structured identity it names, `gutter` is the guest half of the
+/// `ui/gutter-segment` round.
 const Library = enum {
     prompt,
     invoke,
@@ -55,6 +56,7 @@ const Library = enum {
     sessions,
     files,
     annotate,
+    gutter,
     rowkey,
 
     /// The import name a guest spells. One place, so a library cannot be
@@ -69,6 +71,7 @@ const Library = enum {
             .sessions => "weft_sessions",
             .files => "weft_files",
             .annotate => "weft_annotate",
+            .gutter => "weft_gutter",
             .rowkey => "weft_rowkey",
         };
     }
@@ -76,7 +79,7 @@ const Library = enum {
     fn tier(self: Library) plugin_lib_tiers.Tier {
         return switch (self) {
             .rowkey, .jsonrpc, .sessions => .protocol_data,
-            .annotate, .output, .files, .prompt => .service_presentation,
+            .annotate, .gutter, .output, .files, .prompt => .service_presentation,
             .invoke => .interaction_orchestration,
             .ex => .editor_composition,
         };
@@ -447,6 +450,11 @@ const guests = [_]Guest{
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
     .{ .name = "ide", .import = "guest_ide_wasm", .install = true },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
+    // Line numbers: binds `ui/gutter-segment` for text entries and answers a
+    // window of cells per round (absolute or caret-relative). No commands.
+    .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
+    // Jump labels on f/F/t/T over the visible range; composes with operators.
+    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {

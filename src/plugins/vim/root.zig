@@ -222,6 +222,7 @@ fn applyOpRange(hnd: u32) void {
     if (op_copies) yankCurrent(r.start, r.end, false);
     if (op_edit_cmd) |cmd| {
         weft.runRangeArg(cmd, hnd);
+        flashAfter(hnd);
         weft.jump(r.start);
         enterAfterOp();
     } else {
@@ -229,6 +230,26 @@ fn applyOpRange(hnd: u32) void {
         weft.jump(r.start);
         weft.exitToResting();
     }
+}
+
+/// vim-goggles for an EDIT operator: flash what the operator left in the
+/// anchored range, re-read after the edit — an indent, a case change, or a
+/// comment toggle keeps a span to show; a delete collapses it to nothing,
+/// and nothing is flashed.
+fn flashAfter(hnd: u32) void {
+    const after = weft.rangeEnds(hnd) orelse return;
+    if (after.end > after.start) weft.flash(after.start, after.end);
+}
+
+/// `vim-operate <range>`: apply the pending operator over a range ANOTHER
+/// plugin computed. This is the door a motion that has to read keys before
+/// it knows its target (snipe's labelled `f`) composes through: it cannot be
+/// a synchronous range command like `motions`' — its answer arrives a key
+/// or two later — so it hands the range back here, and `d`/`c`/`y`/`gc`
+/// apply exactly as they do over `w` or `iw`.
+fn operate() void {
+    const hnd = weft.argRange(0) orelse return opCancel();
+    applyOpRange(hnd);
 }
 
 // ── Text objects: `i`/`a` in operator-pending enter a text-object mode with a
@@ -320,6 +341,7 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "enter-op-yank", .call = enterOpYank },
     .{ .name = "enter-op-comment", .call = enterOpComment },
     .{ .name = "op-cancel", .call = opCancel },
+    .{ .name = "vim-operate", .call = operate },
     .{ .name = "op-line", .call = opLine },
     .{ .name = "enter-op-inner", .call = enterOpInner },
     .{ .name = "enter-op-around", .call = enterOpAround },
@@ -873,7 +895,10 @@ fn visualOp(comptime cmd: []const u8) fn () void {
         fn h() void {
             if (weft.selection()) |s0| {
                 const s = visualSpan(s0);
-                if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| weft.runRangeArg(cmd, hnd);
+                if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| {
+                    weft.runRangeArg(cmd, hnd);
+                    flashAfter(hnd);
+                }
                 weft.jump(s.start);
             }
             weft.run("clear-selection");
@@ -992,11 +1017,13 @@ fn paste() void {
         // The register text lands after the synthesized newline; re-stamp any
         // ferried id-span there so `dd`→`p` is a move, not a delete+create.
         weft.pasteAtIn(slot, l.end + 1);
+        weft.flash(l.end + 1, l.end + 1 + r.len); // vim-goggles: what landed
     } else {
         const off = weft.cursor();
         const r = weft.registerTextIn(slot);
         weft.edit(.{ .start = off, .end = off }, r);
         weft.pasteAtIn(slot, off);
+        weft.flash(off, off + r.len);
     }
 }
 fn pasteBefore() void {
@@ -1009,11 +1036,13 @@ fn pasteBefore() void {
         paste_buf[r.len] = '\n';
         weft.edit(.{ .start = l.start, .end = l.start }, paste_buf[0 .. r.len + 1]);
         weft.pasteAtIn(slot, l.start); // text lands at l.start (the '\n' trails it)
+        weft.flash(l.start, l.start + r.len);
     } else {
         const off = weft.cursor();
         const r = weft.registerTextIn(slot);
         weft.edit(.{ .start = off, .end = off }, r);
         weft.pasteAtIn(slot, off);
+        weft.flash(off, off + r.len);
     }
 }
 fn joinLines() void {
@@ -1024,6 +1053,7 @@ fn joinLines() void {
     var drop: usize = 0;
     while (drop < ntext.len and (ntext[drop] == ' ' or ntext[drop] == '\t')) drop += 1;
     weft.edit(.{ .start = l.end, .end = nxt.start + drop }, " ");
+    weft.flash(l.end, l.end + 1); // vim-goggles: the seam the join made
     weft.jump(l.end);
 }
 
@@ -1111,7 +1141,10 @@ fn opLine() void {
     };
     // A non-delete line operator (gcc) toggles over the line's content in place.
     if (!std.mem.eql(u8, edit, "op.delete")) {
-        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg(edit, h);
+        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| {
+            weft.runRangeArg(edit, h);
+            flashAfter(h);
+        }
         weft.jump(l.start);
         enterAfterOp();
         return;
@@ -1270,7 +1303,8 @@ fn repeatFindRev() void {
 fn tildeCase() void {
     var n = consumeCount();
     const l = weft.lineAt(weft.cursor());
-    var pos = weft.cursor();
+    const start = weft.cursor();
+    var pos = start;
     while (n > 0 and pos < l.end) : (n -= 1) {
         const s = weft.slice(pos, pos + 1);
         if (s.len == 0) break;
@@ -1282,6 +1316,7 @@ fn tildeCase() void {
         }
         pos += 1;
     }
+    if (pos > start) weft.flash(start, pos); // vim-goggles
     weft.jump(pos);
 }
 
@@ -1307,6 +1342,7 @@ fn doReplaceChar() void {
         weft.edit(.{ .start = pos, .end = pos + 1 }, ch);
         pos += ch.len;
     }
+    if (pos > cur) weft.flash(cur, pos); // vim-goggles
     weft.jump(if (pos > cur) pos - ch.len else cur);
 }
 fn findCharImpl(dir: u8, ch_s: []const u8) void {

@@ -233,6 +233,7 @@ pub const Editor = struct {
             .window_ctx = &self.win_ctx,
             .layout = self.win_layout,
             .view = &self.render.fb.view,
+            .config = &self.config_kv,
         });
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         // The app's provider-aware open/close (shadows the core versions): opening
@@ -2033,6 +2034,8 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "ide", @embedFile("guest_ide_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
     .{ "marginalia", @embedFile("guest_marginalia_wasm") },
+    .{ "linenumbers", @embedFile("guest_linenumbers_wasm") },
+    .{ "snipe", @embedFile("guest_snipe_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
     // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.
