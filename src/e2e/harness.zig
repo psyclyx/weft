@@ -2107,6 +2107,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "motions", @embedFile("guest_motions_wasm") },
     .{ "textobjects", @embedFile("guest_textobjects_wasm") },
     .{ "operators", @embedFile("guest_operators_wasm") },
+    .{ "surround", @embedFile("guest_surround_wasm") },
     .{ "vim", @embedFile("guest_vim_wasm") },
     .{ "comment", @embedFile("guest_comment_wasm") },
     .{ "indent", @embedFile("guest_indent_wasm") },

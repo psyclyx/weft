@@ -47,6 +47,7 @@ weft.plugin("palette");     // "std" UI: command/buffer palette, status line
 weft.plugin("motions");     // word/WORD/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("surround");    // add/delete/replace a delimiter pair — operators too
 weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
 weft.plugin("ts");          // tree-sitter navigation: expand-selection, select-function
 weft.set("languages", "query-root", "assets");

@@ -69,12 +69,12 @@ fn pairBodyChanged(before: []const u8, after: []const u8, right: bool) bool {
 // entry and that every entry loaded successfully, including the resident
 // `dap.js` plugin through the same QuickJS reactor used by the desktop app.
 const shipped_config_plugins = [_][]const u8{
-    "edit",       "complete",    "project",   "structural",   "region",    "shell",     "palette",
-    "motions",    "textobjects", "operators", "vim",          "ts",        "comment",   "indent",
-    "whitespace", "numbers",     "autopair",  "consult",      "git",       "grep",      "run",
-    "make",       "notes",       "fmt",       "buffers",      "windows",   "modes",     "snippets",
-    "direnv",     "llm",         "console",   "repl",         "net",       "which_key", "files",
-    "lsp",        "debug",       "dap.js",    "languages.js", "dashboard",
+    "edit",     "complete",    "project",   "structural", "region",       "shell",     "palette",
+    "motions",  "textobjects", "operators", "surround",   "vim",          "ts",        "comment",
+    "indent",   "whitespace",  "numbers",   "autopair",   "consult",      "git",       "grep",
+    "run",      "make",        "notes",     "fmt",        "buffers",      "windows",   "modes",
+    "snippets", "direnv",      "llm",       "console",    "repl",         "net",       "which_key",
+    "files",    "lsp",         "debug",     "dap.js",     "languages.js", "dashboard",
 };
 
 fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {

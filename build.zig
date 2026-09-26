@@ -426,6 +426,7 @@ const guests = [_]Guest{
     .{ .name = "motions", .import = "guest_motions_wasm", .install = true },
     .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true },
     .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
+    .{ .name = "surround", .import = "guest_surround_wasm", .install = true },
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
     .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
