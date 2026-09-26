@@ -135,8 +135,9 @@ pub const Node = union(enum) {
     /// these.
     const Dock = struct {
         edge: core.viewport.Edge,
-        /// The panel's share of this rect (0..1).
-        extent: f32,
+        /// The panel's share of this rect, or its height in text rows
+        /// (resolved against `Layout.rows` at every carve).
+        extent: core.viewport.Extent,
         panel: *Node,
         rest: *Node,
     };
@@ -149,15 +150,41 @@ pub const Node = union(enum) {
     }
 };
 
+/// What a row-sized dock needs to become pixels: the height of one text row
+/// and the pane chrome around a body (its margins). The frame driver sets it
+/// from the view's metrics before every layout, so a zoom keeps a one-row
+/// strip one row tall. The defaults are the view's at its default font size,
+/// for layouts no view has measured yet.
+pub const Rows = struct {
+    line_h: f32 = 16,
+    /// Margins around a pane's body, both sides together.
+    inset: f32 = 16,
+
+    /// The pixel extent of `n` body rows in a pane under `attrs`: its own
+    /// status line is one more row.
+    pub fn px(self: Rows, n: u16, attrs: core.viewport.Attrs) f32 {
+        const status: f32 = if (attrs.status_line) 1 else 0;
+        return (@as(f32, @floatFromInt(n)) + status) * self.line_h + self.inset;
+    }
+};
+
 /// Carve `rect` for a dock: the panel takes `extent` off `edge`, the rest
 /// keeps the remainder. The single place edge-to-geometry is decided.
-fn dockHalves(d: Node.Dock, rect: Rect) struct { panel: Rect, rest: Rect } {
+fn dockHalves(d: Node.Dock, rect: Rect, rows: Rows) struct { panel: Rect, rest: Rect } {
     const axis: Axis = switch (d.edge) {
         .left, .right => .vertical,
         .top, .bottom => .horizontal,
     };
     const panel_first = d.edge == .left or d.edge == .top;
-    const halves = rect.split(axis, if (panel_first) d.extent else 1 - d.extent);
+    const share: f32 = switch (d.extent) {
+        .fraction => |f| f,
+        .rows => |n| blk: {
+            const along = if (axis == .horizontal) rect.h else rect.w;
+            if (along <= 0) break :blk 0;
+            break :blk @min(1, rows.px(n, d.panel.leaf.attrs) / along);
+        },
+    };
+    const halves = rect.split(axis, if (panel_first) share else 1 - share);
     return if (panel_first)
         .{ .panel = halves[0], .rest = halves[1] }
     else
@@ -218,6 +245,8 @@ pub const Layout = struct {
     /// indexed by `PaneId`. `free` recycles retired ids.
     slots: std.ArrayList(PaneSlot) = .empty,
     free: std.ArrayList(PaneId) = .empty,
+    /// Row metrics for row-sized docks; the frame driver keeps them current.
+    rows: Rows = .{},
 
     /// A single-leaf layout showing `buffer_id` — the ordinary, unsplit case.
     /// The caller's head(s) start focused on the root pane by default
@@ -312,8 +341,8 @@ pub const Layout = struct {
         return firstPrimaryLeaf(self.root);
     }
 
-    /// Anchor a new panel to `edge`, taking `extent` (0..1) of the frame,
-    /// showing `buffer_id` under `attrs`; returns the panel leaf.
+    /// Anchor a new panel to `edge`, taking `extent` (a share, or rows) of the
+    /// frame, showing `buffer_id` under `attrs`; returns the panel leaf.
     ///
     /// Nothing existing MOVES: the fresh `.dock` node becomes the new root
     /// and adopts the old root as its `rest`, so every live pane keeps its
@@ -324,7 +353,7 @@ pub const Layout = struct {
     pub fn dock(
         self: *Layout,
         edge: core.viewport.Edge,
-        extent: f32,
+        extent: core.viewport.Extent,
         buffer_id: core.Buffers.Id,
         attrs: core.viewport.Attrs,
     ) !*Node {
@@ -436,7 +465,7 @@ pub const Layout = struct {
 
     /// The rect `focused` occupies within `frame` (for click routing).
     pub fn focusedRect(self: *const Layout, focused: *Node, frame: Rect) Rect {
-        return rectOfNode(self.root, frame, focused) orelse frame;
+        return rectOfNode(self.root, frame, focused, self.rows) orelse frame;
     }
 
     /// Assign each leaf its rect + divider mask within `frame`, into `out`
@@ -444,14 +473,14 @@ pub const Layout = struct {
     /// Returns the count written (capped at `out.len`).
     pub fn collect(self: *Layout, focused: *Node, frame: Rect, out: []Slot) usize {
         var n: usize = 0;
-        collectRec(self.root, frame, frame, focused, out, &n);
+        collectRec(self.root, frame, frame, focused, out, &n, self.rows);
         return n;
     }
 
     /// The leaf whose rect contains (px,py), or null (frame miss). Caller
     /// compares against its own current focus to decide if focus moved.
     pub fn focusAt(self: *Layout, frame: Rect, px: f32, py: f32) ?*Node {
-        return leafAt(self.root, frame, px, py);
+        return leafAt(self.root, frame, px, py, self.rows);
     }
 
     /// The nearest pane to `focused` in `dir` (vim `C-w h/j/k/l`), or null
@@ -504,7 +533,7 @@ pub const Layout = struct {
         const from = start orelse return null;
         for (1..n) |step| {
             const cand = buf[(from + step) % n];
-            if (cand != focused and cand.leaf.attrs.cycles) return cand;
+            if (cand != focused and cand.leaf.attrs.cycles and cand.leaf.attrs.takes_focus) return cand;
         }
         return null;
     }
@@ -521,11 +550,13 @@ pub const Layout = struct {
         const fcy = fr.y + fr.h / 2;
         var buf: [max_panes]NodeRect = undefined;
         var n: usize = 0;
-        leafRects(self.root, frame, &buf, &n);
+        leafRects(self.root, frame, &buf, &n, self.rows);
         var best: ?*Node = null;
         var best_score: f32 = std.math.inf(f32);
         for (buf[0..n]) |nr| {
             if (nr.node == focused) continue;
+            // A pane that never takes the keys is not somewhere to go.
+            if (!nr.node.leaf.attrs.takes_focus) continue;
             const cx = nr.rect.x + nr.rect.w / 2;
             const cy = nr.rect.y + nr.rect.h / 2;
             const along: f32, const perp: f32 = switch (dir) {
@@ -621,7 +652,7 @@ fn children(node: *Node) ?[2]*Node {
 }
 
 /// The same pair with each child's rect — the geometry half of `children`.
-fn childRects(node: *Node, rect: Rect) ?[2]NodeRect {
+fn childRects(node: *Node, rect: Rect, rows: Rows) ?[2]NodeRect {
     return switch (node.*) {
         .leaf => null,
         .split => |s| blk: {
@@ -629,7 +660,7 @@ fn childRects(node: *Node, rect: Rect) ?[2]NodeRect {
             break :blk .{ .{ .node = s.first, .rect = halves[0] }, .{ .node = s.second, .rect = halves[1] } };
         },
         .dock => |d| blk: {
-            const halves = dockHalves(d, rect);
+            const halves = dockHalves(d, rect, rows);
             break :blk .{ .{ .node = d.rest, .rect = halves.rest }, .{ .node = d.panel, .rect = halves.panel } };
         },
     };
@@ -663,18 +694,18 @@ fn findDock(node: *Node, edge: core.viewport.Edge) ?*Node {
     }
 }
 
-fn rectOfNode(node: *Node, rect: Rect, target: *Node) ?Rect {
+fn rectOfNode(node: *Node, rect: Rect, target: *Node, rows: Rows) ?Rect {
     if (node == target) return rect;
-    const pair = childRects(node, rect) orelse return null;
-    return rectOfNode(pair[0].node, pair[0].rect, target) orelse
-        rectOfNode(pair[1].node, pair[1].rect, target);
+    const pair = childRects(node, rect, rows) orelse return null;
+    return rectOfNode(pair[0].node, pair[0].rect, target, rows) orelse
+        rectOfNode(pair[1].node, pair[1].rect, target, rows);
 }
 
-fn leafAt(node: *Node, rect: Rect, px: f32, py: f32) ?*Node {
-    const pair = childRects(node, rect) orelse
+fn leafAt(node: *Node, rect: Rect, px: f32, py: f32, rows: Rows) ?*Node {
+    const pair = childRects(node, rect, rows) orelse
         return if (rect.contains(px, py)) node else null;
-    return leafAt(pair[0].node, pair[0].rect, px, py) orelse
-        leafAt(pair[1].node, pair[1].rect, px, py);
+    return leafAt(pair[0].node, pair[0].rect, px, py, rows) orelse
+        leafAt(pair[1].node, pair[1].rect, px, py, rows);
 }
 
 fn leafNodes(node: *Node, out: []*Node, n: *usize) void {
@@ -689,16 +720,16 @@ fn leafNodes(node: *Node, out: []*Node, n: *usize) void {
     leafNodes(pair[1], out, n);
 }
 
-fn leafRects(node: *Node, rect: Rect, out: []NodeRect, n: *usize) void {
-    const pair = childRects(node, rect) orelse {
+fn leafRects(node: *Node, rect: Rect, out: []NodeRect, n: *usize, rows: Rows) void {
+    const pair = childRects(node, rect, rows) orelse {
         if (n.* < out.len) {
             out[n.*] = .{ .node = node, .rect = rect };
             n.* += 1;
         }
         return;
     };
-    leafRects(pair[0].node, pair[0].rect, out, n);
-    leafRects(pair[1].node, pair[1].rect, out, n);
+    leafRects(pair[0].node, pair[0].rect, out, n, rows);
+    leafRects(pair[1].node, pair[1].rect, out, n, rows);
 }
 
 /// A rect edge is a divider exactly when it is off the outer frame (a
@@ -713,8 +744,8 @@ fn edgesOf(rect: Rect, frame: Rect) region.Edges {
     };
 }
 
-fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot, n: *usize) void {
-    const pair = childRects(node, rect) orelse {
+fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot, n: *usize, rows: Rows) void {
+    const pair = childRects(node, rect, rows) orelse {
         if (n.* < out.len) {
             out[n.*] = .{
                 .pane = &node.leaf,
@@ -726,8 +757,8 @@ fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot,
         }
         return;
     };
-    collectRec(pair[0].node, pair[0].rect, frame, focused, out, n);
-    collectRec(pair[1].node, pair[1].rect, frame, focused, out, n);
+    collectRec(pair[0].node, pair[0].rect, frame, focused, out, n, rows);
+    collectRec(pair[1].node, pair[1].rect, frame, focused, out, n, rows);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -854,7 +885,7 @@ test "dock: an edge-anchored panel takes its extent and leaves the rest tiled" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
     const editor = l.root;
-    const panel = try l.dock(.left, 0.25, 99, companion);
+    const panel = try l.dock(.left, .{ .fraction = 0.25 }, 99, companion);
     // Nothing relocated: the pre-existing pane kept its exact address, so
     // every head's focus handle still resolves.
     try t.expectEqual(editor, l.root.dock.rest);
@@ -881,17 +912,38 @@ test "dock: an edge-anchored panel takes its extent and leaves the rest tiled" {
 test "dock: a bottom panel anchors to the far edge" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
-    const panel = try l.dock(.bottom, 0.2, 5, companion);
+    const panel = try l.dock(.bottom, .{ .fraction = 0.2 }, 5, companion);
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
     try t.expectEqual(Rect{ .x = 0, .y = 80, .w = 200, .h = 20 }, l.focusedRect(panel, frame));
     try t.expectEqual(panel, l.focusAt(frame, 100, 90).?);
+}
+
+test "dock: a row-sized strip is its rows plus chrome, at any frame and row height" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const editor = l.root;
+    const strip_attrs: core.viewport.Attrs = .{ .cycles = false, .persistent = true, .focus_source = false, .takes_focus = false, .status_line = false };
+    const strip = try l.dock(.top, .{ .rows = 1 }, 7, strip_attrs);
+    l.rows = .{ .line_h = 20, .inset = 16 };
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 300 };
+    // One body row and the margins; no status line was declared.
+    try t.expectEqual(Rect{ .x = 0, .y = 0, .w = 400, .h = 36 }, l.focusedRect(strip, frame));
+    try t.expectEqual(Rect{ .x = 0, .y = 36, .w = 400, .h = 264 }, l.focusedRect(editor, frame));
+    // A taller frame does not grow it; a larger font does.
+    try t.expectEqual(@as(f32, 36), l.focusedRect(strip, .{ .x = 0, .y = 0, .w = 400, .h = 900 }).h);
+    l.rows.line_h = 30;
+    try t.expectEqual(@as(f32, 46), l.focusedRect(strip, frame).h);
+    // Nothing that moves focus lands in it.
+    try t.expect(l.focusNeighbor(editor, frame, .up) == null);
+    try t.expect(l.focusNext(editor) == null);
+    try t.expect(!l.paneById(strip.leaf.id).?.leaf.attrs.isPrimary());
 }
 
 test "dock: the workspace enforces the attributes the panel declares" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
     const editor = l.root;
-    const panel = try l.dock(.left, 0.25, 99, companion);
+    const panel = try l.dock(.left, .{ .fraction = 0.25 }, 99, companion);
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     // Cycling never lands IN the companion, but always lets you back OUT of
@@ -933,7 +985,7 @@ test "dock: closing the panel collapses the dock and recovery avoids companions"
     defer l.deinit();
     var head: core.Head = .empty;
     defer head.deinit(t.allocator);
-    const panel = try l.dock(.left, 0.25, 99, companion);
+    const panel = try l.dock(.left, .{ .fraction = 0.25 }, 99, companion);
 
     // A head parked in the sidebar whose handle goes stale recovers onto the
     // EDITING pane, never into a companion it never chose.

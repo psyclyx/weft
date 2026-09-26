@@ -46,6 +46,8 @@ pub const MdInline = struct {
 /// one is open. Plain data — the caller assembles it, the view renders it.
 pub const Hud = struct {
     mode: []const u8,
+    /// Draw the pane's status line (the viewport's `status_line` attribute).
+    status_line: bool = true,
     dirty: bool = false,
     save_failed: bool = false,
     /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.

@@ -664,6 +664,8 @@ pub const FrameBuilder = struct {
 
         var slots: [window_layout.max_panes]window_layout.Slot = undefined;
         const focused = window_layout.headFocus(&self.win_layout, fx.head);
+        // A row-sized dock is as tall as the rows the view draws NOW.
+        self.win_layout.rows = .{ .line_h = self.view.line_h, .inset = 2 * view_mod.View.pane_margin };
         const nslots = self.win_layout.collect(focused, frame_rect, &slots);
 
         // Free last frame's builds; each pane appends a fresh one below.
@@ -706,6 +708,7 @@ pub const FrameBuilder = struct {
             const other_gutter = try gutterFrame(arena_state.allocator(), fx, ob, oed, other_name, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),
+                .status_line = slot.pane.attrs.status_line,
                 .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                 .statusline_segs = other_segs,
                 .gutter = other_gutter,
@@ -728,6 +731,7 @@ pub const FrameBuilder = struct {
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
+        fhud.status_line = focused.pane().attrs.status_line;
         if (act.attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
         if (editor) |ed| {
             ed.fold_layer = fx.caps.layers.find(&ed.doc, "folds");

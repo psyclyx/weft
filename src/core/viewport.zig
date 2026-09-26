@@ -19,6 +19,11 @@
 //!   `focus_feed`. False for companions, which is what structurally kills the
 //!   outline-retargets-to-itself bug (D2): a companion cannot observe its own
 //!   focus, so it cannot chase it.
+//! - `takes_focus`: whether the pane can hold a head's keyboard focus at
+//!   all. False for a strip of buttons: a click acts through it and the
+//!   editor keeps the keys, so what the strip describes never moves under it.
+//! - `status_line`: whether the pane carries its own status line. A one-row
+//!   strip has no room for one, and nothing to say in it.
 //!
 //! Attributes live in core, not `gfx/window_layout.zig`, because the focus
 //! feed and the placement policy both read them and neither may depend on
@@ -54,6 +59,10 @@ pub const Attrs = struct {
     dock: ?Edge = null,
     /// Focus landing here is a primary-focus change others may follow.
     focus_source: bool = true,
+    /// A head's keyboard focus may land here (a click, a window command).
+    takes_focus: bool = true,
+    /// The pane draws its own status line under its body.
+    status_line: bool = true,
 
     /// The ordinary tiled pane every split produces. Deliberately the only
     /// named bundle in core: "sidebar" and "drawer" are bundles a CONFIG
@@ -66,11 +75,27 @@ pub const Attrs = struct {
     /// treats as "primary". A docked companion is not one even if some other
     /// attribute were relaxed, so this is a conjunction, not an alias.
     pub fn isPrimary(self: Attrs) bool {
-        return self.dock == null and !self.persistent;
+        return self.dock == null and !self.persistent and self.takes_focus;
     }
 
     pub fn eql(self: Attrs, other: Attrs) bool {
         return std.meta.eql(self, other);
+    }
+};
+
+/// How much of the frame a docked viewport takes along its edge: a SHARE of
+/// the frame, or a count of text ROWS (a one-row strip of buttons). Rows are
+/// resolved to pixels by whoever knows the row height — the window layout,
+/// from the view's metrics — so a font-size change keeps a one-row strip one
+/// row tall instead of freezing the pixels it happened to be at declaration.
+pub const Extent = union(enum) {
+    /// A share of the frame, clamped to (0.05, 0.95).
+    fraction: f32,
+    /// Whole text rows, at least one.
+    rows: u16,
+
+    pub fn eql(a: Extent, b: Extent) bool {
+        return std.meta.eql(a, b);
     }
 };
 
@@ -82,9 +107,13 @@ pub const Attrs = struct {
 pub const Declaration = struct {
     name: []u8,
     attrs: Attrs,
-    extent: f32,
+    extent: Extent,
     /// The resource to present, or `""` for none.
     subject: []u8,
+    /// The command that presents `subject` (`open` when empty): the entry it
+    /// leaves active is what the viewport shows. A plugin whose entry has no
+    /// path presents it by naming its own command here.
+    command: []u8,
     /// The `window_layout` pane slot this was materialized into.
     pane: ?u32 = null,
     presented: bool = false,
@@ -93,6 +122,12 @@ pub const Declaration = struct {
     /// to match. Workspace state, not manifest data: a config reload
     /// re-declaring the viewport leaves it as the user left it.
     shown: bool = true,
+
+    /// Whether there is anything to present: a subject to open, or a command
+    /// that presents on its own.
+    pub fn hasPresentation(self: *const Declaration) bool {
+        return self.subject.len != 0 or self.command.len != 0;
+    }
 };
 
 /// The declared viewports of one system. Keyed by name, last declaration
@@ -109,6 +144,7 @@ pub const Registry = struct {
         for (self.list.items) |d| {
             gpa.free(d.name);
             gpa.free(d.subject);
+            gpa.free(d.command);
         }
         self.list.deinit(gpa);
         self.* = undefined;
@@ -121,7 +157,7 @@ pub const Registry = struct {
         return null;
     }
 
-    pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: f32) !void {
+    pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent) !void {
         if (self.find(name)) |d| {
             d.attrs = attrs;
             d.extent = extent;
@@ -131,7 +167,9 @@ pub const Registry = struct {
         errdefer gpa.free(owned);
         const subject = try gpa.dupe(u8, "");
         errdefer gpa.free(subject);
-        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject });
+        const command = try gpa.dupe(u8, "");
+        errdefer gpa.free(command);
+        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject, .command = command });
     }
 
     /// Flip whether `name` is held on screen; returns the new state. Only the
@@ -144,14 +182,18 @@ pub const Registry = struct {
     }
 
     /// "Present resource R in viewport V" as a declaration. A NEW subject
-    /// clears `presented`, so the layout phase presents it; the same subject
-    /// again changes nothing.
-    pub fn present(self: *Registry, gpa: std.mem.Allocator, name: []const u8, subject: []const u8) !void {
+    /// (or presenting command) clears `presented`, so the layout phase
+    /// presents it; the same pair again changes nothing.
+    pub fn present(self: *Registry, gpa: std.mem.Allocator, name: []const u8, subject: []const u8, command: []const u8) !void {
         const d = self.find(name) orelse return error.UnknownViewport;
-        if (std.mem.eql(u8, d.subject, subject)) return;
+        if (std.mem.eql(u8, d.subject, subject) and std.mem.eql(u8, d.command, command)) return;
         const owned = try gpa.dupe(u8, subject);
+        errdefer gpa.free(owned);
+        const owned_command = try gpa.dupe(u8, command);
         gpa.free(d.subject);
+        gpa.free(d.command);
         d.subject = owned;
+        d.command = owned_command;
         d.presented = false;
     }
 };
@@ -168,25 +210,25 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
 
-    try reg.declare(gpa, "sidebar", companion, 0.25);
-    try reg.present(gpa, "sidebar", ".");
+    try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
+    try reg.present(gpa, "sidebar", ".", "");
     reg.find("sidebar").?.pane = 3;
     reg.find("sidebar").?.presented = true;
 
     // Re-applying the same manifest updates in place — no second sidebar,
     // and nothing already realized is disturbed.
-    try reg.declare(gpa, "sidebar", companion, 0.25);
-    try reg.present(gpa, "sidebar", ".");
+    try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
+    try reg.present(gpa, "sidebar", ".", "");
     try t.expectEqual(@as(usize, 1), reg.list.items.len);
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
     try t.expect(reg.find("sidebar").?.presented);
 
     // A new subject is a new presentation, and only that.
-    try reg.present(gpa, "sidebar", "src");
+    try reg.present(gpa, "sidebar", "src", "");
     try t.expect(!reg.find("sidebar").?.presented);
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
 
-    try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", "."));
+    try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", ".", ""));
 }
 
 test "viewport: toggling is workspace state a re-declaration leaves alone" {
@@ -194,11 +236,11 @@ test "viewport: toggling is workspace state a re-declaration leaves alone" {
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
 
-    try reg.declare(gpa, "sidebar", companion, 0.25);
+    try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
     try t.expect(reg.find("sidebar").?.shown);
     try t.expect(!try reg.toggle("sidebar"));
     // A config reload re-declares it; the choice to hide it stands.
-    try reg.declare(gpa, "sidebar", companion, 0.25);
+    try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
     try t.expect(!reg.find("sidebar").?.shown);
     try t.expect(try reg.toggle("sidebar"));
     try t.expectError(error.UnknownViewport, reg.toggle("nope"));
@@ -221,6 +263,29 @@ test "viewport: a sidebar is a bundle of attributes, not a kind" {
 
     try t.expect(Attrs.tiled.isPrimary());
     try t.expect(Attrs.tiled.eql(.{}));
+
+    // A strip that never takes the keys is a companion however else it is
+    // declared: no entry is ever placed where no head can focus it.
+    const strip: Attrs = .{ .dock = .top, .takes_focus = false, .status_line = false };
+    try t.expect(!strip.isPrimary());
+    try t.expect(!(Attrs{ .takes_focus = false }).isPrimary());
+}
+
+test "viewport: a command presents what has no path, and rows are an extent" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+    try reg.declare(gpa, "strip", .{ .dock = .top, .takes_focus = false }, .{ .rows = 1 });
+    try reg.present(gpa, "strip", "", "strip-open");
+    const d = reg.find("strip").?;
+    try t.expectEqualStrings("strip-open", d.command);
+    try t.expect(d.extent.eql(.{ .rows = 1 }));
+    d.presented = true;
+    // The same pair is no change; a different command is a new presentation.
+    try reg.present(gpa, "strip", "", "strip-open");
+    try t.expect(reg.find("strip").?.presented);
+    try reg.present(gpa, "strip", "", "other-open");
+    try t.expect(!reg.find("strip").?.presented);
 }
 
 test "viewport: edge names round-trip; an unknown spelling is not an edge" {

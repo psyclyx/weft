@@ -44,6 +44,9 @@ const buildTabStrip = hud_mod.buildTabStrip;
 
 const font_id_mono = fonts.font_id_mono;
 const margin: f32 = 8;
+/// A pane's frame is its body inset by this on every side — what a row-sized
+/// dock adds to its rows (`window_layout.Rows.inset` is twice it).
+pub const pane_margin = margin;
 
 const View = @This();
 
@@ -397,7 +400,9 @@ pub fn build(
         tab_rect = c.strip;
         stack = c.rest;
     }
-    const status_cut = stack.cutBottom(self.line_h);
+    // A pane that declares no status line (a one-row strip) gives the row
+    // to its body.
+    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
     const status_rect = status_cut.strip;
     const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
     const panel_rect = panel_cut.strip;
@@ -511,7 +516,7 @@ pub fn build(
         try statusline.appendPlainRun(self, scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
     }
 
-    try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
+    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
     // Floating surfaces (which-key popup, files/git, a guest's caret
     // popup like the `lsp` plugin's hover) float within the BODY region —
     // never over the status/tab/panel rects, which are carved out. Hand the

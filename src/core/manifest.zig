@@ -257,8 +257,9 @@ pub const ManifestGrantDecl = struct {
 pub const ViewportDecl = struct {
     name: []u8,
     attrs: viewport_mod.Attrs,
-    /// The panel's share of the frame (0..1); ignored when undocked.
-    extent: f32,
+    /// The panel's share of the frame, or its height in rows; ignored when
+    /// undocked.
+    extent: viewport_mod.Extent,
 };
 
 /// `weft.present(viewport, {subject})` (doc/configuration.md §5.2) — which
@@ -269,6 +270,8 @@ pub const ViewportDecl = struct {
 pub const PresentDecl = struct {
     viewport: []u8,
     subject: []u8,
+    /// The presenting command (`{command}`), or `""` for `open`.
+    command: []u8,
 };
 
 pub const SlotDeclDecl = struct {
@@ -463,6 +466,7 @@ pub const Manifest = struct {
         for (self.presents.items) |d| {
             gpa.free(d.viewport);
             gpa.free(d.subject);
+            gpa.free(d.command);
         }
         self.presents.deinit(gpa);
         gpa.destroy(self);
@@ -590,19 +594,27 @@ pub const Manifest = struct {
             .root = try self.gpa.dupe(u8, root),
         });
     }
-    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: f32) !void {
+    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent) !void {
         try self.viewports.append(self.gpa, .{
             .name = try self.gpa.dupe(u8, name),
             .attrs = attrs,
-            .extent = std.math.clamp(extent, 0.05, 0.95),
+            .extent = switch (extent) {
+                .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
+                .rows => |n| .{ .rows = @max(n, 1) },
+            },
         });
     }
-    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8) !void {
+    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8, presenter: []const u8) !void {
         const owned = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned);
+        const owned_subject = try self.gpa.dupe(u8, subject);
+        errdefer self.gpa.free(owned_subject);
+        const owned_presenter = try self.gpa.dupe(u8, presenter);
+        errdefer self.gpa.free(owned_presenter);
         try self.presents.append(self.gpa, .{
             .viewport = owned,
-            .subject = try self.gpa.dupe(u8, subject),
+            .subject = owned_subject,
+            .command = owned_presenter,
         });
     }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
@@ -719,14 +731,26 @@ pub const Manifest = struct {
                 @intFromBool(d.attrs.cycles),
                 @intFromBool(d.attrs.persistent),
                 @intFromBool(d.attrs.focus_source),
+                @intFromBool(d.attrs.takes_focus),
+                @intFromBool(d.attrs.status_line),
                 if (d.attrs.dock) |e| @as(u8, @intFromEnum(e)) + 1 else 0,
             });
-            h.update(std.mem.asBytes(&d.extent));
+            switch (d.extent) {
+                .fraction => |f| {
+                    h.update(&[_]u8{0});
+                    h.update(std.mem.asBytes(&f));
+                },
+                .rows => |n| {
+                    h.update(&[_]u8{1});
+                    h.update(std.mem.asBytes(&n));
+                },
+            }
         }
         hLen(h, self.presents.items.len);
         for (self.presents.items) |d| {
             hStr(h, d.viewport);
             hStr(h, d.subject);
+            hStr(h, d.command);
         }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
@@ -936,7 +960,7 @@ pub const Manifest = struct {
         if (actx.ctx.viewports) |registry| {
             for (self.viewports.items) |d|
                 registry.declare(gpa, d.name, d.attrs, d.extent) catch {};
-            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject) catch |e|
+            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject, d.command) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
             std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});

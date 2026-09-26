@@ -306,9 +306,9 @@ pub fn materializeViewports(
             decl.presented = false;
             dirty = true;
         }
-        if (decl.presented or decl.subject.len == 0) continue;
+        if (decl.presented or !decl.hasPresentation()) continue;
         decl.presented = true;
-        presentIn(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, decl.subject);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
         dirty = true;
     }
     return dirty;
@@ -334,9 +334,29 @@ pub fn presentIn(
     pane: window_layout.PaneId,
     subject: []const u8,
 ) void {
+    presentBy(ctx, win_layout, buffers, gpa, head, keymap, pane, "open", subject);
+}
+
+/// `presentIn` through any presenting command, not only `open`: whatever
+/// entry `command` leaves active is what `pane` shows. It is how a plugin's
+/// own entry, which has no path to open, reaches a declared viewport
+/// (`weft.present(v, {command})`). `subject` is the command's one argument,
+/// or none when empty.
+pub fn presentBy(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    pane: window_layout.PaneId,
+    command: []const u8,
+    subject: []const u8,
+) void {
     const node = win_layout.paneById(pane) orelse return;
     const restore = buffers.active_id;
-    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = subject }}) catch return;
+    const arg = [_]core.command.Value{.{ .string = subject }};
+    _ = core.command.run(ctx.commands, ctx, command, if (subject.len > 0) &arg else &.{}) catch return;
     node.pane().buffer_id = buffers.active_id;
     node.pane().top_row = 0;
     if (buffers.active_id != restore)

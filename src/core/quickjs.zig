@@ -1785,6 +1785,10 @@ pub fn cGrant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 const vp_cycles: i32 = 1 << 0;
 const vp_persistent: i32 = 1 << 1;
 const vp_focus_source: i32 = 1 << 2;
+const vp_takes_focus: i32 = 1 << 3;
+const vp_status_line: i32 = 1 << 4;
+/// `extent` is a row count, not per-mille of the frame.
+const vp_extent_rows: i32 = 1 << 5;
 
 /// `weft.viewport(name, opts)` — stage a viewport's attributes
 /// (doc/configuration.md §5.2). The edge arrives as a name and is PARSED
@@ -1809,8 +1813,13 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .persistent = flags & vp_persistent != 0,
         .dock = edge,
         .focus_source = flags & vp_focus_source != 0,
+        .takes_focus = flags & vp_takes_focus != 0,
+        .status_line = flags & vp_status_line != 0,
     };
-    const extent: f32 = @as(f32, @floatFromInt(args[5])) / 1000.0;
+    const extent: viewport_mod.Extent = if (flags & vp_extent_rows != 0)
+        .{ .rows = std.math.cast(u16, args[5]) orelse 1 }
+    else
+        .{ .fraction = @as(f32, @floatFromInt(args[5])) / 1000.0 };
     if (br.manifest) |m| {
         m.addViewport(name, attrs, extent) catch {};
         return;
@@ -1818,8 +1827,8 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
 }
 
-/// `weft.present(viewport, {subject})` — stage what a declared viewport
-/// shows (§7).
+/// `weft.present(viewport, {subject, command})` — stage what a declared
+/// viewport shows (§7), and optionally the command that presents it.
 fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1828,8 +1837,10 @@ fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(name);
     const subject = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(subject);
+    const presenter = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(presenter);
     if (br.manifest) |m| {
-        m.addPresent(name, subject) catch {};
+        m.addPresent(name, subject, presenter) catch {};
         return;
     }
     std.log.warn("weft.present: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});

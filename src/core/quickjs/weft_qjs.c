@@ -209,11 +209,15 @@ extern void host_viewport(const char *name, int name_len,
 // weft.present(viewport, opts): stage "show this subject in that viewport".
 __attribute__((import_module("weft"), import_name("qjs_present")))
 extern void host_present(const char *viewport, int viewport_len,
-                         const char *subject, int subject_len);
+                         const char *subject, int subject_len,
+                         const char *command, int command_len);
 
 #define WEFT_VP_CYCLES (1 << 0)
 #define WEFT_VP_PERSISTENT (1 << 1)
 #define WEFT_VP_FOCUS_SOURCE (1 << 2)
+#define WEFT_VP_TAKES_FOCUS (1 << 3)
+#define WEFT_VP_STATUS_LINE (1 << 4)
+#define WEFT_VP_EXTENT_ROWS (1 << 5)
 
 // The result an i32-returning effect import answers when this plugin holds no
 // grant for the capability it needs (core/membrane/qjs_contract.zig's
@@ -630,7 +634,8 @@ static int opt_bool(JSContext *ctx, JSValueConst opts, const char *key, int dflt
 // weft.viewport(name, opts) — declare a viewport by its ATTRIBUTES
 // (doc/cwa-config-decisions.md D1). `opts.edge` docks it ("left"/"right"/
 // "top"/"bottom"; omitted means tiled), `opts.extent` is its share of the
-// frame, and cycles/persistent/followFocus are the remaining attributes.
+// frame (a number) or `{rows: n}` text rows, and cycles/persistent/
+// followFocus/takesFocus/statusLine are the remaining attributes.
 // "sidebar" is a fragment that sets these — never a kind this shim knows.
 static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
@@ -642,18 +647,33 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     const char *edge = NULL;
     size_t el = 0;
     double extent = 0.25;
+    int flags = 0;
+    int extent_arg = 0;
     JSValue jedge = JS_UNDEFINED, jextent = JS_UNDEFINED;
     if (JS_IsObject(opts)) {
         jedge = JS_GetPropertyStr(ctx, opts, "edge");
         if (JS_IsString(jedge)) edge = JS_ToCStringLen(ctx, &el, jedge);
         jextent = JS_GetPropertyStr(ctx, opts, "extent");
-        if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) JS_ToFloat64(ctx, &extent, jextent);
+        if (JS_IsObject(jextent)) {
+            // `{rows: n}`: whole text rows, resolved to pixels by the layout
+            // from the view's row height — never a share of the frame.
+            JSValue jrows = JS_GetPropertyStr(ctx, jextent, "rows");
+            int32_t rows = 1;
+            if (!JS_IsUndefined(jrows) && !JS_IsNull(jrows)) JS_ToInt32(ctx, &rows, jrows);
+            JS_FreeValue(ctx, jrows);
+            flags |= WEFT_VP_EXTENT_ROWS;
+            extent_arg = rows < 1 ? 1 : rows;
+        } else if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) {
+            JS_ToFloat64(ctx, &extent, jextent);
+        }
     }
-    int flags = 0;
+    if (!(flags & WEFT_VP_EXTENT_ROWS)) extent_arg = (int)(extent * 1000);
     if (opt_bool(ctx, opts, "cycles", 1)) flags |= WEFT_VP_CYCLES;
     if (opt_bool(ctx, opts, "persistent", 0)) flags |= WEFT_VP_PERSISTENT;
     if (opt_bool(ctx, opts, "followFocus", 1)) flags |= WEFT_VP_FOCUS_SOURCE;
-    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, (int)(extent * 1000));
+    if (opt_bool(ctx, opts, "takesFocus", 1)) flags |= WEFT_VP_TAKES_FOCUS;
+    if (opt_bool(ctx, opts, "statusLine", 1)) flags |= WEFT_VP_STATUS_LINE;
+    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, extent_arg);
     JS_FreeCString(ctx, name);
     if (edge) JS_FreeCString(ctx, edge);
     JS_FreeValue(ctx, jedge);
@@ -664,28 +684,36 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
 // weft.present(viewport, opts) — "present resource R in viewport V" (§7) as
 // a declaration. Separate from `viewport` because presenting is an ordinary
 // operation on a live viewport, not part of what the viewport is.
+// `opts.subject` is opened with `open`; `opts.command` names another command
+// that presents (with `subject` as its argument when there is one) — how a
+// plugin's own entry, which has no path to open, reaches a viewport.
 static JSValue js_present(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject})");
-    size_t vl, sl = 0;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject | command})");
+    size_t vl, sl = 0, cl = 0;
     const char *vp = JS_ToCStringLen(ctx, &vl, argv[0]);
     if (!vp) return JS_EXCEPTION;
-    const char *subject = NULL;
-    JSValue jsubject = JS_UNDEFINED;
+    const char *subject = NULL, *command = NULL;
+    JSValue jsubject = JS_UNDEFINED, jcommand = JS_UNDEFINED;
     if (JS_IsObject(argv[1])) {
         jsubject = JS_GetPropertyStr(ctx, argv[1], "subject");
         if (JS_IsString(jsubject)) subject = JS_ToCStringLen(ctx, &sl, jsubject);
+        jcommand = JS_GetPropertyStr(ctx, argv[1], "command");
+        if (JS_IsString(jcommand)) command = JS_ToCStringLen(ctx, &cl, jcommand);
     }
-    if (!subject) {
-        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject}): subject must be a string naming what to show");
+    if (!subject && !command) {
+        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject | command}): name what to show, or the command that shows it");
         JS_FreeCString(ctx, vp);
         JS_FreeValue(ctx, jsubject);
+        JS_FreeValue(ctx, jcommand);
         return exc;
     }
-    host_present(vp, (int)vl, subject, (int)sl);
+    host_present(vp, (int)vl, subject ? subject : "", (int)sl, command ? command : "", (int)cl);
     JS_FreeCString(ctx, vp);
-    JS_FreeCString(ctx, subject);
+    if (subject) JS_FreeCString(ctx, subject);
+    if (command) JS_FreeCString(ctx, command);
     JS_FreeValue(ctx, jsubject);
+    JS_FreeValue(ctx, jcommand);
     return JS_UNDEFINED;
 }
 
