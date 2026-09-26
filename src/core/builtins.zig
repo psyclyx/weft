@@ -521,6 +521,12 @@ fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+fn cBufferPrevious(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.prevId(), ctx.head, ctx.keymap);
+    return ok;
+}
+
 /// Return to the previously active buffer — where a tool's `q` lands you (back
 /// where you came from, in that buffer's own mode). Generic: the tool binds `q`
 /// here; the core decides where "back" is.
@@ -733,6 +739,7 @@ const table = [_]command.Command{
     command.define("explain-binding", "Explain which Container binding wins an action slot for the active buffer's facts.", cExplainBinding),
     command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
     command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
+    command.define("buffer-previous", "Focus the previous buffer (cyclic).", cBufferPrevious),
     command.define("buffer-back", "Return to the previously active buffer (tool `q`).", cBufferBack),
     command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
     command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),

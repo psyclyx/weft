@@ -653,6 +653,16 @@ pub fn nextId(self: *const Buffers) Id {
     return self.active_id;
 }
 
+/// The live buffer before the active one, cyclically (`nextId` reversed).
+pub fn prevId(self: *const Buffers) Id {
+    const n = self.slots.items.len;
+    var i = (self.active_id + n - 1) % n;
+    while (i != self.active_id) : (i = (i + n - 1) % n) {
+        if (self.slots.items[i] != null) return @intCast(i);
+    }
+    return self.active_id;
+}
+
 /// Close a buffer. Closing the active buffer focuses the next one;
 /// closing the last replaces it with a fresh scratch. Dirty checks are
 /// the caller's policy.
