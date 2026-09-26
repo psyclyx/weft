@@ -75,6 +75,8 @@ const posRequest = request.posRequest;
 const base_cmds = [_]weft.CommandEntry{
     .{ .name = "hover", .call = cmdHover, .summary = "describe the symbol under the cursor" },
     .{ .name = "goto-definition", .call = cmdDefinition, .summary = "jump to the definition" },
+    .{ .name = "goto-type-definition", .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
+    .{ .name = "goto-implementation", .call = cmdImplementation, .summary = "jump to the implementation" },
     .{ .name = "references", .call = cmdReferences, .summary = "list references to the symbol" },
     .{ .name = "symbols", .call = cmdSymbols, .summary = "pick a symbol in this file" },
     .{ .name = "next-diagnostic", .call = cmdNextDiag, .summary = "go to the next diagnostic" },
@@ -268,6 +270,12 @@ fn cmdHover() void {
 }
 fn cmdDefinition() void {
     fire(.definition);
+}
+fn cmdTypeDefinition() void {
+    fire(.type_definition);
+}
+fn cmdImplementation() void {
+    fire(.implementation);
 }
 fn cmdReferences() void {
     fire(.references);
@@ -485,7 +493,7 @@ fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
     p.id = 0; // answered
     switch (kind) {
         .hover => presentHover(p, result),
-        .definition => presentDefinition(s, result),
+        .definition, .type_definition, .implementation => presentDefinition(s, result),
         .references => presentLocations(s, result, "reference"),
         .symbols => presentSymbols(result),
         .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),

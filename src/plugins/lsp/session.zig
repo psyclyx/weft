@@ -524,7 +524,7 @@ pub fn buildUri() ?[]u8 {
 // ── Request identity: what a session has in flight ────────────────────
 
 // ── Request identities ───────────────────────────────────────────────
-pub const Kind = enum { hover, definition, references, symbols, format, rename, signature, inlay, codeaction, completion };
+pub const Kind = enum { hover, definition, type_definition, implementation, references, symbols, format, rename, signature, inlay, codeaction, completion };
 pub const kind_count = std.meta.fields(Kind).len;
 
 /// One ask. `id` 0 means ARMED: built, but not yet on the wire (the handshake

@@ -126,6 +126,8 @@ pub fn requestOf(s: *Session, kind: Kind, pos: Pos) i64 {
     return switch (kind) {
         .hover => posRequest(s, "textDocument/hover", pos, ""),
         .definition => posRequest(s, "textDocument/definition", pos, ""),
+        .type_definition => posRequest(s, "textDocument/typeDefinition", pos, ""),
+        .implementation => posRequest(s, "textDocument/implementation", pos, ""),
         .references => posRequest(s, "textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
         .signature => posRequest(s, "textDocument/signatureHelp", pos, ""),
         .completion => posRequest(s, "textDocument/completion", pos, ""),
