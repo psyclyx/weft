@@ -87,6 +87,13 @@ pub fn registerCursorCommands(
         .handler = cursor_config.setCursorHandler,
         .data = cursor_cfg,
     });
+    _ = try commands.bind(gpa, "cursor-place", .{
+        .name = "cursor-place",
+        .summary = "Draw the caret at the selection's head, or inside it on its last character (head|inside), for a mode.",
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "place", .type = .string } },
+        .handler = cursor_config.cursorPlaceHandler,
+        .data = cursor_cfg,
+    });
     _ = try commands.bind(gpa, "cursor-blink", .{
         .name = "cursor-blink",
         .summary = "Toggle caret blink (on|off) for a mode.",

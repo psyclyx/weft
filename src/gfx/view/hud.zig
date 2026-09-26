@@ -20,6 +20,15 @@ const InlineAttr = core.capability.InlineAttr;
 /// `bar`/`underline` sit beside/under it and never recolor the glyph.
 pub const CursorStyle = enum { block, bar, underline };
 
+/// Where the caret draws relative to its selection, declared per mode like
+/// the style. `head` (the default) draws at the head offset — one past the
+/// last selected character of a forward selection, which is where typing
+/// lands. `inside` draws ON that last character instead, so the caret never
+/// leaves the selection: helix's cursor, where a selection always covers the
+/// character under it. A caret, or a backward selection, draws at its head
+/// either way.
+pub const CaretPlace = enum { head, inside };
+
 /// Per-byte markdown styling over a source window, published by the
 /// markdown runtime and consumed here. `attrs[i]` styles byte `base + i`.
 pub const MdInline = struct {
@@ -126,6 +135,7 @@ pub const Hud = struct {
     hover: ?struct { text: []const u8, offset: usize } = null,
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
+    caret_place: CaretPlace = .head,
     cursor_on: bool = true,
     /// Retained plugin overlays (which-key/files/git) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the

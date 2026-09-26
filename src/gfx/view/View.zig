@@ -82,6 +82,18 @@ pub const Run = struct {
 /// extracted submodules only (see `Run`).
 pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 
+/// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
+/// head, or — `inside`, on a forward selection — the start of the last
+/// character it covers.
+pub fn caretDrawOffset(ed: *const core.Editor, i: usize, place: hud_mod.CaretPlace) usize {
+    const ends = ed.selectionEnds(i);
+    if (place == .head or ends.head <= ends.anchor) return ends.head;
+    const rope = ed.text();
+    var off = ends.head - 1;
+    while (off > ends.anchor and rope.byteAt(off) & 0xc0 == 0x80) off -= 1;
+    return off;
+}
+
 gpa: Allocator,
 face_set: fonts.FaceSet,
 theme: Theme,
@@ -394,7 +406,7 @@ pub fn build(
     self.md_active = hud.semantic_view == null and hud.md_inline != null;
 
     const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
-    const cursor_off = if (editor) |ed| ed.cursorOffset() else 0;
+    const cursor_off = if (editor) |ed| caretDrawOffset(ed, ed.primary, hud.caret_place) else 0;
 
     var runs: std.ArrayList(Run) = .empty;
     defer {
@@ -469,9 +481,9 @@ pub fn build(
         for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
         if (hud.cursor_on) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
-            for (ed.selections.items, 0..) |sel, i| {
+            for (0..ed.selections.items.len) |i| {
                 if (i == ed.primary) continue;
-                try decoration.caretRect(self, scratch, &rects, ed.doc.anchorOffset(sel.head), hud.cursor_style, self.theme.cursor);
+                try decoration.caretRect(self, scratch, &rects, caretDrawOffset(ed, i, hud.caret_place), hud.cursor_style, self.theme.cursor);
             }
         }
         if (hud.presence_layer) |pl| {

@@ -605,6 +605,7 @@ pub const FrameBuilder = struct {
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
             .md_inline = md_inline,
             .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
+            .caret_place = fx.cursor_cfg.placeFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
             .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode()))) act.blink_on else true,
             .statusline_segs = statusline_segs,
             .gutter = gutter_frame,
