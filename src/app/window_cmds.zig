@@ -303,12 +303,12 @@ pub fn materializeViewports(
             continue;
         }
         // A pending take, only while its entry is still open.
-        const take: ?core.Buffers.Id = if (decl.take) |id| (if (buffers.get(id) != null) id else null) else null;
+        const take: ?core.Buffers.Id = if (decl.take) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
         decl.take = null;
         if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
             // Dock showing what it showed last (or is being handed), never a
             // second view of the active document when there is one.
-            const kept: ?core.Buffers.Id = if (decl.entry) |id| (if (buffers.get(id) != null) id else null) else null;
+            const kept: ?core.Buffers.Id = if (decl.entry) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
             const first = take orelse kept orelse buffers.active_id;
             const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
             decl.pane = panel.leaf.id;
@@ -320,21 +320,27 @@ pub fn materializeViewports(
         const node = win_layout.paneById(decl.pane.?) orelse continue;
         if (take) |id| {
             takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
-            decl.entry = id;
+            decl.entry = heldRef(buffers, id);
             decl.presented = true; // what was taken replaces what was declared
             dirty = true;
             continue;
         }
         if (decl.presented or !decl.hasPresentation()) {
-            if (decl.entry == null) decl.entry = node.pane().buffer_id;
+            if (decl.entry == null) decl.entry = heldRef(buffers, node.pane().buffer_id);
             continue;
         }
         decl.presented = true;
         presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
-        decl.entry = node.pane().buffer_id;
+        decl.entry = heldRef(buffers, node.pane().buffer_id);
         dirty = true;
     }
     return dirty;
+}
+
+/// What a viewport remembers of the entry it shows: its generation-checked
+/// ref, so a slot reused after that entry closes is never taken for it.
+fn heldRef(buffers: *core.Buffers, id: core.Buffers.Id) ?core.Buffers.Ref {
+    return (buffers.get(id) orelse return null).ref();
 }
 
 /// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`

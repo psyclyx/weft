@@ -692,7 +692,7 @@ fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Va
 /// what it showed; the layout phase realizes the move.
 fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
-    registry.takeEntry(args.name, ctx.buffers.active_id) catch return .{ .string = "no viewport by that name" };
+    registry.takeEntry(args.name, ctx.buffers.active().ref()) catch return .{ .string = "no viewport by that name" };
     return ok;
 }
 

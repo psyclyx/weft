@@ -30,6 +30,7 @@
 //! gfx. The pane TREE (geometry, dock nodes) stays in gfx.
 
 const std = @import("std");
+const Buffers = @import("Buffers.zig");
 
 /// Which frame edge a docked viewport anchors to.
 pub const Edge = enum {
@@ -126,11 +127,13 @@ pub const Declaration = struct {
     /// into it, or what `take` put there. Kept across a hide, so showing it
     /// again brings the same entry back rather than whatever is active, and
     /// so the chrome can tell a docked companion's entry from a document
-    /// (`holdsEntry`).
-    entry: ?u32 = null,
+    /// (`holdsEntry`). A generation-checked `Buffers.Ref`, never a bare id:
+    /// the entry can close and its slot be reused by an unrelated entry, which
+    /// a bare id would then name — and the viewport would capture.
+    entry: ?Buffers.Ref = null,
     /// A pending `take`: put this entry in the viewport, show it, and focus
-    /// it, at the next layout phase.
-    take: ?u32 = null,
+    /// it, at the next layout phase. Generation-checked for the same reason.
+    take: ?Buffers.Ref = null,
 
     /// Whether there is anything to present: a subject to open, or a command
     /// that presents on its own.
@@ -205,7 +208,7 @@ pub const Registry = struct {
     /// layout phase, which owns the pane tree. What a plugin runs to bring its
     /// own entry (a terminal, a problems list) into a declared panel: the
     /// viewport shows one entry at a time, so this REPLACES what it showed.
-    pub fn takeEntry(self: *Registry, name: []const u8, entry: u32) error{UnknownViewport}!void {
+    pub fn takeEntry(self: *Registry, name: []const u8, entry: Buffers.Ref) error{UnknownViewport}!void {
         const d = self.find(name) orelse return error.UnknownViewport;
         d.take = entry;
         d.shown = true;
@@ -214,10 +217,11 @@ pub const Registry = struct {
     /// Whether `entry` is what some DOCKED viewport holds — a companion's
     /// entry (a file tree, a panel, a toolbar), which the chrome lists
     /// apart from the documents (never as a tab).
-    pub fn holdsEntry(self: *const Registry, entry: u32) bool {
+    pub fn holdsEntry(self: *const Registry, entry: Buffers.Ref) bool {
         for (self.list.items) |d| {
             if (d.attrs.dock == null) continue;
-            if (d.entry == entry) return true;
+            const held = d.entry orelse continue;
+            if (held.id == entry.id and held.generation == entry.generation) return true;
         }
         return false;
     }
@@ -349,16 +353,20 @@ test "viewport: a panel can start hidden, take an entry, and holds it as chrome"
     try t.expect(reg.find("panel").?.shown);
 
     reg.find("panel").?.shown = false;
-    try reg.takeEntry("panel", 7);
+    const seven: Buffers.Ref = .{ .id = 7, .generation = 1 };
+    const eight: Buffers.Ref = .{ .id = 8, .generation = 1 };
+    try reg.takeEntry("panel", seven);
     try t.expect(reg.find("panel").?.shown);
-    try t.expectEqual(@as(?u32, 7), reg.find("panel").?.take);
-    try t.expectError(error.UnknownViewport, reg.takeEntry("nope", 7));
+    try t.expectEqual(@as(?Buffers.Ref, seven), reg.find("panel").?.take);
+    try t.expectError(error.UnknownViewport, reg.takeEntry("nope", seven));
 
     // Only what a DOCKED viewport shows is chrome.
-    reg.find("panel").?.entry = 7;
-    try t.expect(reg.holdsEntry(7));
-    try t.expect(!reg.holdsEntry(8));
+    reg.find("panel").?.entry = seven;
+    try t.expect(reg.holdsEntry(seven));
+    try t.expect(!reg.holdsEntry(eight));
+    // Slot 7 reused by a later entry is not what the panel holds.
+    try t.expect(!reg.holdsEntry(.{ .id = 7, .generation = 2 }));
     try reg.declare(gpa, "tiled", .{}, .{ .fraction = 0.5 });
-    reg.find("tiled").?.entry = 8;
-    try t.expect(!reg.holdsEntry(8));
+    reg.find("tiled").?.entry = eight;
+    try t.expect(!reg.holdsEntry(eight));
 }

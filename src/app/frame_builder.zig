@@ -590,7 +590,7 @@ pub const FrameBuilder = struct {
             while (bit3.next()) |b| {
                 // A docked companion's entry (the file tree, a panel, a
                 // toolbar) is chrome, not a document: never a tab.
-                if (fx.viewports.holdsEntry(b.id)) continue;
+                if (fx.viewports.holdsEntry(b.ref())) continue;
                 const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
                 tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf, .id = b.id }) catch {};
             }

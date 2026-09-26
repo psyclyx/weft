@@ -65,7 +65,7 @@ test "e2e/panels: a tab click shows its file, a middle click and the close glyph
     const ids = ed.tabEntries(&ids_buf);
     const listing = ed.win_layout.dockedPanel(.left).?.pane().buffer_id;
     try t.expect(std.mem.indexOfScalar(u32, ids, listing) == null);
-    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(id));
+    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(ed.buffers.get(id).?.ref()));
     for ([_]u32{ a, b, c }) |want| try t.expect(std.mem.indexOfScalar(u32, ids, want) != null);
 
     // A click on a's tab puts a in front.
@@ -235,4 +235,37 @@ test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click
     ed.click(at);
     try t.expectEqual(core.pointer.Chrome.Of.status, ed.head.pointer.hit.chrome.?.kind);
     try t.expectEqual(fn_at, ide.textEd(ed).cursorOffset());
+}
+
+test "e2e/panels: a panel whose entry closed does not capture the next entry to reuse its slot" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "x.txt", "x\n");
+    ed.runStr("buffer-create", "held");
+    const held = ed.buffers.active_id;
+    ed.runStr("viewport-take", "panel");
+    ed.applyWindow();
+    try t.expectEqualStrings("held", (panelEntry(ed) orelse return error.PanelNotShown).name);
+
+    // Hidden, the panel remembers its entry; the entry then closes, and an
+    // unrelated one is created into the freed slot.
+    ed.press("C-j", "");
+    ed.applyWindow();
+    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    _ = try core.command.run(ed.commands, ed.ctx, "buffer-switch", &.{.{ .integer = held }});
+    ed.run("buffer-close");
+    try t.expect(ed.buffers.get(held) == null);
+    ed.runStr("buffer-create", "intruder");
+    try t.expectEqual(held, ed.buffers.active_id);
+    ed.runStr("open", "x.txt");
+
+    // Shown again, the panel must not claim the intruder as what it held.
+    ed.press("C-j", "");
+    ed.applyWindow();
+    const shown = panelEntry(ed) orelse return error.PanelNotShown;
+    try t.expect(!std.mem.eql(u8, shown.name, "intruder"));
 }
