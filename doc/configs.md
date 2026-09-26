@@ -253,7 +253,13 @@ Phases:
 - `surround` is a new plugin of operators (`surround.add/delete/replace`), with the pair
   chosen by an earlier `surround-pair <c> [r]`. helix captures the characters (`ms md mr`)
   and runs the operators per selection. vim's `ys ds cs` are not bound: vim has no capture
-  that feeds an operator yet.
+  that feeds an operator yet. `md`/`mr` over several selections PLAN first
+  (`surround.plan` per range finds each pair on the untouched text, a pair two ranges
+  share once) and then `surround.apply delete|replace` edits the plan, last first, as
+  one unit: per-range deletes found the next pair out once the first job removed the
+  shared one (`f((a b))` → `fa b`).
+- `putEach` is now the `put` plugin library (`src/plugin_lib/put`), which ide's transfer
+  and line keys share; helix's own sources (`r`, case, `&`) are `derive` callbacks.
 - Counts (`3w`, `5gg`, `2x`, `3C`) and registers (`"a`) live in the grammar and die with
   the command that used them (the manifest's `after` hook).
 - The new doors are commands, not ABI: `buffer-previous` (core) for `gp`, and
@@ -365,6 +371,16 @@ Built in the emacs mold: a resting mode `ide` that falls back to `default`, plus
 - Every operation goes through `std.*` intentions first, so the same keys act in the
   sidebar.
 
+**Every selection.** After C-d, C-S-l or C-click, every key acts at each selection:
+moves map over the set (`weft.step`, `run_range_each` for the word motions, then one
+`setSelections`; a lone caret's Up/Down stays core's for the sticky column). C-c/C-x
+yank one value per selection (only carets: each caret's line, linewise), and C-x, C-v,
+Tab/S-Tab, C-S-k and C-Return/C-S-Return are one `put` write per selection or line
+block, one undo unit. M-Up/Down alone collapse to the primary first, since two moved
+blocks could swap into each other. Word characters everywhere (C-d, `\b`, the word
+motions, text objects, helix's `*`) are the regex library's `isWordByte`: ASCII
+alphanumerics, `_`, and any byte of a non-ASCII character.
+
 ### 3.3 Clipboard — core-door plus plugin
 
 The system clipboard over `wl_data_device` is a door. Which register mirrors it is the
@@ -384,6 +400,11 @@ clipboard; primary selection is not bound). For the grammar lanes:
   `C-v`: if `weft.clipboardGet()` equals `weft.registerTextIn(0)`, paste slot 0 (keeps
   ferried identity), else insert the clipboard text.
 - the configs already `weft.grant("helix" | "ide", "clipboard")`.
+
+"Does the clipboard still hold my register?" is ONE SDK rule,
+`weft.clipboardPasteSource()` (`unavailable | empty | register | foreign`): the same
+bytes, or a linewise register's text plus the one line break a line is copied to the
+desktop with. ide's C-v, helix's `SPC p P R` and vim's `"+p` all paste by it.
 
 The jumplist and macros of §2 phase 5 are core too. Grammars call `weft.jumpPush()`
 before a jump (search, goto, big motion; core already records moves between entries)
@@ -412,6 +433,9 @@ library now jumps between the bytes a match can begin with (`Regex.first`). Meas
 ~1 MiB: ~5 ms per literal keystroke, ~22 ms for `\d`. The one core change: the window-
 bottom dock is carved for a plugin's `.bottom` surface too (`View.dockHeight`), not only
 for the picker. Before that, a plugin's bottom surface drew into a zero-height strip.
+A committed search (Enter, F3, Escape, a replace, M-Return) writes the shared `/`
+register as the regex it searched (`search.source`, with `(?i)` when the bar folds case
+the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
 
 ### 3.5 Action system doors — core-doors
 
@@ -580,10 +604,14 @@ The plugins:
   `diagnostics` signal, which `lsp` raises when a publish lands or a set is released.
   Return or a click opens the file at the line and column. The open lands in the
   editor pane, and the panel keeps the list.
-- **`terminal`** (C-`) is a LINE-MODE shell. It is the REPL session with `exec
-  "${SHELL:-sh}" -i` on the other end, plus a `terminal` mode that keeps the input
-  line, echoes it, and sends it on Return. It does no VT100 emulation: full-screen
-  programs do not work, and colors are stripped.
+- **`terminal`** (C-`) is a LINE-MODE shell. It is the REPL session with `$SHELL -i`
+  on the other end, plus a `terminal` mode that keeps the input line, echoes it, and
+  sends it on Return. It does no VT100 emulation: full-screen programs do not work, and
+  colors are stripped. Because it owns the line, a bare program in `shell` (or the
+  default `$SHELL`) starts with its own line editing off — bash `--noediting`, zsh
+  `+Z` — and `TERM=dumb`; a whole command line runs as written. A shell that exits is
+  noticed on the next C-` or keystroke through the `wl_repl_exited` door (SDK
+  `replExited`): the buffer says `[process exited N]` and a fresh shell starts.
 - **`breadcrumbs`** is a status-line provider for text entries. It shows ` › outer ›
   inner` after the path, from the outline, cached against the document's snapshot
   witness, so a caret move is a span scan and only an edit re-reads the outline. A
@@ -618,7 +646,8 @@ has no interrupt: C-c cannot reach a piped child as a signal.
   were already delivered as they were read; the prompt-less shots came from a test shell
   that was not interactive. A carriage return not followed by a newline now starts the
   line over, so zsh's end-of-output mark no longer runs into the prompt. bash with
-  readline echoes the input line a second time; `--noediting` avoids it.
+  readline echoes the input line a second time; `--noediting` avoids it, and the
+  terminal now passes it (zsh: `+Z`) to a shell it starts by name.
 - Every block caret flips the glyph under it to `cursor_text`, a label's included, not
   only the primary's.
 
