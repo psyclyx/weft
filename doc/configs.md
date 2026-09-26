@@ -246,6 +246,18 @@ and chrome that changes with what is possible.
    nodes can be activated by click and by keyboard through the same action reference.
 4. **Hit rects** for tabs, status segments and surface rows.
 
+Items 1-3 are done. The platform queues `PointerEvent`s through a shared
+gesture reducer (`platform/pointer.zig`: click counting, wheel steps). The
+shell names each one as a keyspec and dispatches it through `dispatchSpec`
+(`app/pointer.zig`). The grammar and the generic commands (`pointer-click`,
+`pointer-drag-select`, `pointer-extend-selection`, `pointer-activate`,
+`pointer-focus-pane`, `scroll-wheel-up/down`, `activate-focused-action`) live
+in `core/pointer.zig`, and `config/defaults.js` binds them. The hit facts sit
+on `Head.pointer`, which guests read through `wl_pointer` / `weft.pointer()`.
+Every pane's geometry from the last frame is hit-testable (`View.pane_maps`),
+so a click-through lands where it points. Pointer specs resolve in the
+focused pane's binding mode, not in the mode of the pane under the pointer.
+
 ### 3.2 The ide grammar — plugin `ide`
 
 Built in the emacs mold: a resting mode `ide` that falls back to `default`, plus

@@ -144,6 +144,12 @@ pub const Editor = struct {
     /// has no such hook; the demo recorder uses it only to pace the same input
     /// stream an ordinary E2E test drives.
     input_observer: ?InputObserver = null,
+    /// The pointer, driven the way a platform drives it: raw button/motion/
+    /// wheel facts into the same gesture reducer `platform/wayland.zig`
+    /// feeds, on a synthetic millisecond clock, so click counting is the
+    /// platform's and not the test's.
+    gestures: weft.platform.pointer.Gestures = .{},
+    pointer_ms: u32 = 0,
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
@@ -182,6 +188,8 @@ pub const Editor = struct {
         self.frame_noted_host_fp = null;
         self.input_observer = null;
         self.vulkan_head = null;
+        self.gestures = .{};
+        self.pointer_ms = 0;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init(gpa);
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
@@ -482,6 +490,95 @@ pub const Editor = struct {
         _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    // ── The pointer ──
+    // Positions are framebuffer pixels of the last built frame (the harness
+    // renders at buffer scale 1, so surface and framebuffer agree). Every
+    // gesture goes platform reducer → `Application.pointer` → the keymap,
+    // exactly the desktop's path, then one application wake.
+
+    pub const Mods = weft.platform.Mods;
+
+    fn drainPointer(self: *Editor) void {
+        while (self.gestures.next()) |ev| self.application.pointer(ev) catch {};
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    /// Move the pointer (a drag while a button is held).
+    pub fn pointerMove(self: *Editor, xy: [2]f32, mods: Mods) void {
+        self.pointer_ms += 16;
+        self.gestures.motion(xy[0], xy[1], mods);
+        self.drainPointer();
+    }
+
+    /// One button edge at the pointer's current position.
+    pub fn pointerButton(self: *Editor, button: u8, pressed: bool, mods: Mods) void {
+        self.gestures.button(button, pressed, self.pointer_ms, mods);
+        self.drainPointer();
+    }
+
+    /// A full click of `button` at `xy`: far enough in time from the last
+    /// press that it counts as a single click.
+    pub fn clickWith(self: *Editor, xy: [2]f32, button: u8, mods: Mods) void {
+        self.pointer_ms += weft.platform.pointer.multi_click_ms * 4;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(button, true, mods);
+        self.pointer_ms += 30;
+        self.pointerButton(button, false, mods);
+    }
+
+    pub fn click(self: *Editor, xy: [2]f32) void {
+        self.clickWith(xy, 1, .{});
+    }
+
+    /// Another primary click at `xy` inside the multi-click window of the
+    /// previous one — the second (or third) click of a double (triple) click.
+    pub fn clickAgain(self: *Editor, xy: [2]f32) void {
+        self.pointer_ms += 50;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(1, true, .{});
+        self.pointer_ms += 30;
+        self.pointerButton(1, false, .{});
+    }
+
+    /// Wheel steps at `xy` (positive scrolls toward the end).
+    pub fn wheel(self: *Editor, xy: [2]f32, steps: i32) void {
+        self.gestures.warp(xy[0], xy[1]);
+        self.gestures.axisDiscrete(.vertical, steps);
+        self.gestures.frame(.{});
+        self.drainPointer();
+    }
+
+    /// Where a click lands on byte `off` in the focused pane: just right of
+    /// its caret stop, mid-line. Null when it is scrolled off screen.
+    pub fn pointAt(self: *Editor, off: usize) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        return pointOn(v.frame_layout, off);
+    }
+
+    /// Like `pointAt`, in any pane of the last frame.
+    pub fn pointAtIn(self: *Editor, pane: u32, off: usize) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            if (m.pane == pane) return pointOn(m.lines, off);
+        }
+        return null;
+    }
+
+    fn pointOn(layout: anytype, off: usize) ?[2]f32 {
+        const caret = layout.pointAtOffset(off) orelse return null;
+        return .{ caret.x + 1, caret.y_top + caret.height / 2 };
+    }
+
+    /// The centre of a scene node's hit region in the last frame.
+    pub fn pointAtNode(self: *Editor, node: semantic_model.scene.NodeId) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.hits) |hit| if (hit.node == node)
+                return .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
+        }
+        return null;
     }
 
     /// The current transient echo line (what a plugin last reported to the user).

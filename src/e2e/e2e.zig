@@ -32,4 +32,5 @@ test {
     _ = @import("notes_test.zig");
     _ = @import("ide_test.zig");
     _ = @import("visual_aids_test.zig");
+    _ = @import("pointer_test.zig");
 }

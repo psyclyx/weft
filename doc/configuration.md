@@ -98,6 +98,15 @@ The existing verbs persist with their meanings — `weft.plugin(name, {grants})`
   editing.insert-line-break]`, and the end-state config would ship the §2.2
   bug intact. `scope` names an input-grammar state (a grammar-owned name, per
   viewport instance), not a global mode.
+- **A pointer gesture is a key.** `mouse-N` (button N down: 1 primary, 2
+  middle, 3 secondary), `double-mouse-N`/`triple-mouse-N` (the second and
+  third quick press), `drag-mouse-N` (motion with it held), `up-mouse-N` (its
+  release), and `wheel-up`/`-down`/`-left`/`-right` (one step), each with
+  `C-`/`M-`/`S-` in front. One press is exactly one key. Where it happened
+  (pane, byte offset, scene node) rides on the dispatch as facts: commands
+  read `ctx.head.pointer`, guests `wl_pointer` / `weft.pointer()`. The
+  everyday meanings are bindings in `config/defaults.js`; the grammar is
+  `src/core/pointer.zig`'s.
 - Bindings target **intentions**, not concrete plugin commands. Binding a
   concrete command remains possible only through the legacy allowlist
   (architecture §17) and disappears with it.
