@@ -17,6 +17,8 @@ const layers_mod = @import("../layers.zig");
 const subbuffer = @import("../subbuffer.zig");
 const GraphDoc = @import("../graph.zig");
 const TranscriptDoc = @import("../transcript.zig");
+/// Where a transcript fill announces a refusal; these tests read none.
+var test_status: @import("../status_feed.zig").Feed = .{};
 
 const session = @import("../session.zig");
 const Session = @import("Session.zig");
@@ -1217,7 +1219,7 @@ test "GraphDoc over the wire: transcript shares, joiner adopts, edits converge b
     defer doc_a.deinit(gpa);
     var subs_a: subbuffer.SubBuffers = .empty;
     defer subs_a.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &origin, &doc_a, &subs_a);
+    try TranscriptDoc.fill(gpa, &test_status, &origin, &doc_a, &subs_a);
     const text_a = try doc_a.text().toOwnedSlice(gpa);
     defer gpa.free(text_a);
     try t.expectEqualStrings("user: hello\nagent: hiXX there", text_a);
@@ -1226,7 +1228,7 @@ test "GraphDoc over the wire: transcript shares, joiner adopts, edits converge b
     defer doc_b.deinit(gpa);
     var subs_b: subbuffer.SubBuffers = .empty;
     defer subs_b.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &joiner, &doc_b, &subs_b);
+    try TranscriptDoc.fill(gpa, &test_status, &joiner, &doc_b, &subs_b);
     const text_b = try doc_b.text().toOwnedSlice(gpa);
     defer gpa.free(text_b);
     try t.expectEqualStrings(text_a, text_b);
@@ -1290,7 +1292,7 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
     defer doc_a.deinit(gpa);
     var subs_a: subbuffer.SubBuffers = .empty;
     defer subs_a.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &origin, &doc_a, &subs_a);
+    try TranscriptDoc.fill(gpa, &test_status, &origin, &doc_a, &subs_a);
     const row0_mid = "user: hell".len; // strictly inside the claimed body span
     try doc_a.insert(gpa, row0_mid, "!!!");
     const report = try TranscriptDoc.reconcileOnSave(gpa, &origin, &doc_a, &subs_a);
@@ -1324,7 +1326,7 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
     defer doc_b.deinit(gpa);
     var subs_b: subbuffer.SubBuffers = .empty;
     defer subs_b.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &joiner, &doc_b, &subs_b);
+    try TranscriptDoc.fill(gpa, &test_status, &joiner, &doc_b, &subs_b);
     const text_b = try doc_b.text().toOwnedSlice(gpa);
     defer gpa.free(text_b);
     try t.expectEqualStrings("user: hell!!!o", text_b);
@@ -1464,7 +1466,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     defer doc_r.deinit(gpa);
     var subs_r: subbuffer.SubBuffers = .empty;
     defer subs_r.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &remote, &doc_r, &subs_r); // the initial pull, matching a buffer just opened
+    try TranscriptDoc.fill(gpa, &test_status, &remote, &doc_r, &subs_r); // the initial pull, matching a buffer just opened
 
     // Grant: the remote observer may intervene ONLY on the first entry
     // (the identity-anchored subtree grant W6 adds) — never the whole
@@ -1488,13 +1490,13 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     defer doc_h.deinit(gpa);
     var subs_h: subbuffer.SubBuffers = .empty;
     defer subs_h.deinit(gpa);
-    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+    try TranscriptDoc.fill(gpa, &test_status, &home, &doc_h, &subs_h);
 
     _ = try home.append(gpa, "agent", 2, "Looking at ");
-    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h); // local append: immediate re-fill
+    try TranscriptDoc.fill(gpa, &test_status, &home, &doc_h, &subs_h); // local append: immediate re-fill
     const e1_text_obj = home.at(1).textObj();
     try home.editText(gpa, e1_text_obj, "Looking at ".len, "the module now.");
-    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h); // local stream chunk: immediate re-fill
+    try TranscriptDoc.fill(gpa, &test_status, &home, &doc_h, &subs_h); // local stream chunk: immediate re-fill
 
     // The remote converges on the new entry AND its own projected buffer
     // catches up — through nothing but `refillOnChange` fed by
@@ -1505,7 +1507,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     while (task.nowNs() < stream_deadline) {
         _ = try ca.tick();
         const changed = try cb.tick();
-        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, changed);
+        try TranscriptDoc.refillOnChange(gpa, &test_status, &remote, &doc_r, &subs_r, changed);
         if (remote.count() == 2) {
             const rt = try remote.at(1).text(gpa);
             defer gpa.free(rt);
@@ -1561,11 +1563,11 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     // checked HERE (before the OUT-OF-GRANT edit at the very end of this
     // test gives `remote` a real local divergence of its own, by design;
     // see that block's own note on why it has to come last).
-    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+    try TranscriptDoc.fill(gpa, &test_status, &home, &doc_h, &subs_h);
     {
         const text_h = try doc_h.text().toOwnedSlice(gpa);
         defer gpa.free(text_h);
-        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, true);
+        try TranscriptDoc.refillOnChange(gpa, &test_status, &remote, &doc_r, &subs_r, true);
         const text_r = try doc_r.text().toOwnedSlice(gpa);
         defer gpa.free(text_r);
         try t.expectEqualStrings(text_h, text_r);
@@ -1589,7 +1591,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     // all, so it needs no guard and no help from the wire layer noticing
     // anything: the daemon doesn't care whether anyone is watching.
     _ = try home.append(gpa, "user", 3, "keep going while I'm away");
-    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+    try TranscriptDoc.fill(gpa, &test_status, &home, &doc_h, &subs_h);
     {
         const got = try doc_h.text().toOwnedSlice(gpa);
         defer gpa.free(got);
@@ -1652,7 +1654,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     while (task.nowNs() < reattach_deadline) {
         _ = try ca.tick();
         const changed = try cb.tick();
-        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, changed);
+        try TranscriptDoc.refillOnChange(gpa, &test_status, &remote, &doc_r, &subs_r, changed);
         if (remote.count() == 3) {
             const rt = try remote.at(2).text(gpa);
             defer gpa.free(rt);

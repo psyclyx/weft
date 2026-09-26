@@ -50,7 +50,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
             results[0] = -1;
             return;
         },

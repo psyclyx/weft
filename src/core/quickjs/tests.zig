@@ -34,6 +34,8 @@ const task = @import("../task.zig");
 const kv = @import("../kv.zig");
 const Buffers = @import("../Buffers.zig");
 const subbuffer = @import("../subbuffer.zig");
+/// Where a transcript fill announces a refusal; these tests read none.
+var test_status: @import("../status_feed.zig").Feed = .{};
 const pick_mod = @import("../pick.zig");
 const grants_mod = @import("../grants.zig");
 const manifest_mod = @import("../manifest.zig");
@@ -588,7 +590,7 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         defer doc_check.deinit(gpa);
         var subs_check: subbuffer.SubBuffers = .empty;
         defer subs_check.deinit(gpa);
-        try TranscriptDoc.fill(gpa, &plugin.conversation("*t*").?.transcript, &doc_check, &subs_check);
+        try TranscriptDoc.fill(gpa, &test_status, &plugin.conversation("*t*").?.transcript, &doc_check, &subs_check);
         const full = try doc_check.text().toOwnedSlice(gpa);
         defer gpa.free(full);
         try t.expectEqualStrings(full, got);

@@ -672,7 +672,7 @@ pub const FrameBuilder = struct {
             .unfetched_pct = doc_status.unfetched_pct,
             .peers = doc_status.peers,
             .echo = if (fx.head.echo.items.len > 0) fx.head.echo.items else null,
-            .plugin_status = core.status_feed.get(),
+            .plugin_status = fx.buffers.status.get(),
             // Rendering P2: the picker's scene already went into
             // `hud.surfaces` (`pick_surface_storage`, above) — this field is
             // dead in production; see `View.build`'s doc.

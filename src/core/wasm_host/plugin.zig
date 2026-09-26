@@ -10,7 +10,6 @@ const Document = @import("../Document.zig");
 const wasm = @import("../wasm.zig");
 const grants_mod = @import("../grants.zig");
 const place_mod = @import("../place.zig");
-const status_feed = @import("../status_feed.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -527,10 +526,10 @@ pub fn resolveSpawnEnv(p: *WasmPlugin, gpa: std.mem.Allocator) ?std.process.Envi
 /// Surface a refusal the way a denied render already is: a host log line
 /// always, plus the status chip the status line renders, so a background
 /// refusal is visible without inventing a UI for it.
-pub fn noteSpawnRefusal(plugin: []const u8, why: []const u8) void {
+pub fn noteSpawnRefusal(ctx: *@import("../command.zig").Context, plugin: []const u8, why: []const u8) void {
     std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
     var buf: [128]u8 = undefined;
-    status_feed.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
+    ctx.buffers.status.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

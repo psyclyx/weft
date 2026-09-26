@@ -1543,7 +1543,7 @@ fn reformatTool(ed: *Editor, name: []const u8, body: []const u8) !void {
         if (!std.mem.eql(u8, b.name, name)) continue;
         const editor = b.textEditor().?;
         const end = editor.text().byteLen();
-        try core.command.renderInto(ed.gpa, &editor.doc, .plugin, "reformat", &.{
+        try core.command.renderInto(ed.gpa, &ed.buffers.status, &editor.doc, .plugin, "reformat", &.{
             .{ .range = .{ .start = 0, .end = end }, .bytes = body },
         });
         return;

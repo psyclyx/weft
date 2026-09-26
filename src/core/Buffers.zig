@@ -59,6 +59,10 @@ default_mode: []u8 = &.{},
 /// asking what tool it is looking at. Empty = undeclared, which falls back
 /// through `restingModeFor`.
 posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
+/// The status chip plugins publish (`weft.status`) and background refusals
+/// are announced on — this system's, beside its entries, so a second system
+/// in the process never shows this one's chip.
+status: @import("status_feed.zig").Feed = .{},
 
 pub const Id = u32;
 

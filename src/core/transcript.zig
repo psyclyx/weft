@@ -244,7 +244,7 @@ pub const node_fact = "node";
 /// `command.renderInto`, which (like `Context.render`) bypasses
 /// read-only by design: read-only blocks `edit` (interactive typing),
 /// never `render`/`renderInto` (model-driven production).
-pub fn fill(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
+pub fn fill(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
     const Span = struct { start: usize, end: usize, node: GraphDoc.ObjId };
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
@@ -264,7 +264,7 @@ pub fn fill(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, subs: *sub
     }
 
     const old_len = doc.text().byteLen();
-    try command.renderInto(gpa, doc, .plugin, projection_author, &.{
+    try command.renderInto(gpa, status, doc, .plugin, projection_author, &.{
         .{ .range = .{ .start = 0, .end = old_len }, .bytes = text.items },
     });
 
@@ -329,8 +329,8 @@ pub fn lastRowClaim(subs: *const subbuffer.SubBuffers, doc: *const Document) ?*s
 /// second admission path invented here — `changed` is already
 /// frame-driven, this just answers the one extra question a graph-backed
 /// projection needs answered before a redraw would show anything true.
-pub fn refillOnChange(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
-    if (changed) try fill(gpa, tr, doc, subs);
+pub fn refillOnChange(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
+    if (changed) try fill(gpa, status, tr, doc, subs);
 }
 
 // ── `on_save` reconciliation (§2.6's `ReconcileMode.on_save`, formalized) ──
@@ -573,7 +573,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // coarseness left imprecise, and drops the `stale` rows' now-inert
     // claims) — the same "re-gather after apply" discipline files's
     // `on_save_apply` follows.
-    try fill(gpa, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
+    try fill(gpa, &ctx.buffers.status, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
         ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
@@ -624,6 +624,8 @@ pub fn openBuffer(gpa: Allocator, buffers: *Buffers, display_name: []const u8) B
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+/// Where a fill in these tests announces a refusal; none reads it.
+var test_status: @import("status_feed.zig").Feed = .{};
 
 test "TranscriptDoc: append/read/edit" {
     const gpa = t.allocator;
@@ -698,7 +700,7 @@ test "Projection.fill: entries render to text; each row's subbuffer carries the 
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
 
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
 
     const got = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(got);
@@ -729,9 +731,9 @@ test "Projection.fill: a second append re-fills without losing the mapping" {
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
 
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
     const n1 = try tr.append(gpa, "agent", 2, "yo");
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
 
     const got = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(got);
@@ -759,14 +761,14 @@ test "refillOnChange: false is a true no-op (stale content untouched); true re-p
     defer doc.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
 
     // The model changes (as a remote merge would), but `changed=false` —
     // the "nothing to notice" case a quiet tick reports — must leave the
     // buffer exactly as stale as it already was: the whole point of a PUSH
     // trigger is that it never re-projects without being told to.
     _ = try tr.append(gpa, "agent", 2, "yo");
-    try refillOnChange(gpa, &tr, &doc, &subs, false);
+    try refillOnChange(gpa, &test_status, &tr, &doc, &subs, false);
     {
         const got = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(got);
@@ -776,7 +778,7 @@ test "refillOnChange: false is a true no-op (stale content untouched); true re-p
     // `changed=true` re-projects, picking up everything that accumulated
     // since the last `fill` — exactly what a collab tick's own bool would
     // report once the merge actually lands.
-    try refillOnChange(gpa, &tr, &doc, &subs, true);
+    try refillOnChange(gpa, &test_status, &tr, &doc, &subs, true);
     const got = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("user: hi\nagent: yo", got);
@@ -792,7 +794,7 @@ test "Projection.fill: merging a second replica's append updates the projection"
     defer doc.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
-    try fill(gpa, &origin, &doc, &subs);
+    try fill(gpa, &test_status, &origin, &doc, &subs);
 
     const bytes = try origin.graph.serialize(gpa);
     defer gpa.free(bytes);
@@ -807,7 +809,7 @@ test "Projection.fill: merging a second replica's append updates the projection"
     const changes = try origin.graph.merge(gpa, batch);
     defer gpa.free(changes);
 
-    try fill(gpa, &origin, &doc, &subs);
+    try fill(gpa, &test_status, &origin, &doc, &subs);
     const got = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("user: hi\nagent: yo", got);
@@ -832,7 +834,7 @@ test "reconcileOnSave: edit -> save -> model updated -> re-fill reflects it (rou
     defer doc.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
 
     // Edit entry 1's body IN THE PROJECTED BUFFER, like a user typing:
     // insert STRICTLY INSIDE its claimed span (never at either edge —
@@ -858,7 +860,7 @@ test "reconcileOnSave: edit -> save -> model updated -> re-fill reflects it (rou
     try t.expectEqualStrings("hi", b0);
 
     // Re-fill from the now-updated model reflects the save.
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
     const got = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("user: hi\nagent: y!!o", got);
@@ -876,7 +878,7 @@ test "reconcileOnSave: identity, not row position — a concurrent model deletio
     defer doc.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
     try t.expectEqual(@as(usize, 3), tr.count());
 
     // Edit row 1's body ("one" -> "oXYZne") STRICTLY INSIDE its claimed
@@ -922,7 +924,7 @@ test "reconcileOnSave: a structural edit (typing a whole new row) refuses the WH
     defer doc.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
-    try fill(gpa, &tr, &doc, &subs);
+    try fill(gpa, &test_status, &tr, &doc, &subs);
 
     // A brand-new line with no claim over it at all — no NodeRef, so
     // there is nothing to reconcile it BY.
@@ -971,7 +973,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
     const buf_id = try openBuffer(gpa, &buffers, "*transcript*");
     buffers.active_id = buf_id;
     const doc = &buffers.get(buf_id).?.textEditor().?.doc;
-    try fill(gpa, &tr, doc, &subs);
+    try fill(gpa, &test_status, &tr, doc, &subs);
 
     var bind: SaveBinding = .{ .tr = &tr, .subs = &subs };
     try install(gpa, &commands, &actions, &bind);
