@@ -133,6 +133,30 @@ fn makeEditor(gpa: std.mem.Allocator, pool: *core.task.Pool, text: []const u8) !
     return ed;
 }
 
+test "harness: renderer-neutral paths reach the raster backend" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const commands = [_]scene.PathCommand{
+        .{ .verb = .move, .points = .{ 10, 10, 0, 0, 0, 0 } },
+        .{ .verb = .line, .points = .{ 50, 10, 0, 0, 0, 0 } },
+        .{ .verb = .cubic, .points = .{ 60, 10, 60, 50, 50, 50 } },
+    };
+    var items = [_]scene.DrawItem{.{ .path = .{
+        .commands = &commands,
+        .x = 10,
+        .y = 10,
+        .scale = 1,
+        .stroke_width = 4,
+        .color = .{ 1, 0, 0, 1 },
+        .cap = .square,
+        .join = .round,
+    } }};
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
+    defer gpa.free(pixels);
+    try t.expect(hasContent(pixels, 80, 15, 15, 70, 70));
+}
+
 test "harness: a single pane renders text into the body" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });

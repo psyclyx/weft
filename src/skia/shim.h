@@ -60,6 +60,18 @@ void weft_skia_draw_rect(WeftSkia*, float x, float y, float w, float h,
 void weft_skia_draw_glyph(WeftSkia*, uint32_t font_id, uint32_t glyph_id,
                           float x, float y, float size,
                           float r, float g, float b, float a);
+typedef struct {
+    uint32_t verb;  // 0 move, 1 line, 2 cubic
+    float points[6];
+} WeftSkiaPathCommand;
+typedef struct {
+    float x, y, scale, stroke_width;
+    float r, g, b, a;
+    uint32_t cap;   // 0 butt, 1 round, 2 square
+    uint32_t join;  // 0 miter, 1 round, 2 bevel
+} WeftSkiaPathStyle;
+void weft_skia_draw_path(WeftSkia*, const WeftSkiaPathCommand*, size_t command_count,
+                         const WeftSkiaPathStyle*);
 
 // Flush + read back the frame. Returns a pointer to `height`*`*row_bytes` bytes
 // (the pixel format chosen at create), valid until the next begin/destroy, or

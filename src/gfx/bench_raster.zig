@@ -119,6 +119,7 @@ pub fn main() !void {
             for (built.items) |it| switch (it) {
                 .glyph => glyphs += 1,
                 .rect => {},
+                .path => {},
             };
 
             try renderer.begin(case.w, case.h, view.theme.background);

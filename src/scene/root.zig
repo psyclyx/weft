@@ -198,10 +198,34 @@ pub const GlyphItem = struct {
     color: Color,
 };
 
+pub const PathVerb = enum(u32) { move, line, cubic };
+pub const StrokeCap = enum(u32) { butt, round, square };
+pub const StrokeJoin = enum(u32) { miter, round, bevel };
+
+/// One renderer-neutral vector path command. Unused point slots are zero.
+pub const PathCommand = extern struct {
+    verb: PathVerb,
+    points: [6]f32,
+};
+
+/// A stroked vector path. Commands use local coordinates; placement and scale
+/// stay explicit so callers can reuse immutable geometry without allocation.
+pub const PathItem = struct {
+    commands: []const PathCommand,
+    x: f32,
+    y: f32,
+    scale: f32 = 1,
+    stroke_width: f32,
+    color: Color,
+    cap: StrokeCap = .butt,
+    join: StrokeJoin = .miter,
+};
+
 /// The complete renderer-neutral scene vocabulary currently needed by the UI.
 pub const DrawItem = union(enum) {
     rect: RectItem,
     glyph: GlyphItem,
+    path: PathItem,
 };
 
 /// One channel, sRGB-encoded → linear light.

@@ -1,6 +1,7 @@
 //! Zig binding for the Skia C++ shim and the renderer-neutral scene decoder.
-//! The view emits only explicit rectangles and positioned glyphs; this module
-//! translates them to SkCanvas calls and owns no editor or platform policy.
+//! The view emits explicit rectangles, positioned glyphs, and vector paths;
+//! this module translates them to SkCanvas calls and owns no editor or
+//! platform policy.
 
 const std = @import("std");
 const scene = @import("weft_scene");
@@ -29,6 +30,23 @@ extern fn weft_skia_begin(s: ?*Shim, width: u32, height: u32) c_int;
 extern fn weft_skia_clear(s: ?*Shim, r: f32, g: f32, b: f32, a: f32) void;
 extern fn weft_skia_draw_rect(s: ?*Shim, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) void;
 extern fn weft_skia_draw_glyph(s: ?*Shim, font_id: u32, glyph_id: u32, x: f32, y: f32, size: f32, r: f32, g: f32, b: f32, a: f32) void;
+const PathStyle = extern struct {
+    x: f32,
+    y: f32,
+    scale: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    cap: u32,
+    join: u32,
+};
+comptime {
+    std.debug.assert(@sizeOf(scene.PathCommand) == 28);
+    std.debug.assert(@sizeOf(PathStyle) == 40);
+}
+extern fn weft_skia_draw_path(s: ?*Shim, commands: [*]const scene.PathCommand, command_count: usize, style: *const PathStyle) void;
 extern fn weft_skia_end(s: ?*Shim, row_bytes: *usize) ?[*]const u8;
 
 /// A rasterized frame: pointer into the shim's buffer (valid until the next
@@ -81,9 +99,28 @@ pub const Skia = struct {
         var last_in: scene.Color = .{ -1, -1, -1, -1 }; // outside the domain
         var last_out: scene.Color = .{ 0, 0, 0, 0 };
         for (items) |item| {
+            if (item == .path) {
+                const path = item.path;
+                const color = scene.linearToSrgbColor(path.color);
+                const style: PathStyle = .{
+                    .x = path.x,
+                    .y = path.y,
+                    .scale = path.scale,
+                    .stroke_width = path.stroke_width,
+                    .r = color[0],
+                    .g = color[1],
+                    .b = color[2],
+                    .a = color[3],
+                    .cap = @intFromEnum(path.cap),
+                    .join = @intFromEnum(path.join),
+                };
+                weft_skia_draw_path(self.shim, path.commands.ptr, path.commands.len, &style);
+                continue;
+            }
             const in = switch (item) {
                 .rect => |rect| rect.color,
                 .glyph => |glyph| glyph.color,
+                .path => unreachable,
             };
             if (!std.mem.eql(f32, &in, &last_in)) {
                 last_in = in;
@@ -93,6 +130,7 @@ pub const Skia = struct {
             switch (item) {
                 .rect => |rect| weft_skia_draw_rect(self.shim, rect.x, rect.y, rect.w, rect.h, c[0], c[1], c[2], c[3]),
                 .glyph => |glyph| weft_skia_draw_glyph(self.shim, glyph.font_id, glyph.glyph_id, glyph.x, glyph.y, glyph.size, c[0], c[1], c[2], c[3]),
+                .path => unreachable,
             }
         }
     }

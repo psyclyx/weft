@@ -1,6 +1,6 @@
 // Skia C++ shim behind the C ABI in shim.h. Compiled with g++ (see build.zig
 // addSkia) and linked into the Zig exe. Renders the editor's per-pane content
-// (filled rects + positioned glyphs, decoded on the Zig side) onto
+// (filled rects + positioned glyphs + stroked paths, decoded on the Zig side) onto
 // an SkCanvas, then reads the pixels back for the Vulkan backend to copy into
 // its target image. Backends: Ganesh Vulkan (sharing weft's VkDevice) or,
 // when there is no real GPU / WEFT_SKIA_CPU is set, the CPU raster path.
@@ -19,6 +19,7 @@
 #include "core/SkFontTypes.h"
 #include "core/SkImageInfo.h"
 #include "core/SkPaint.h"
+#include "core/SkPathBuilder.h"
 #include "core/SkSurface.h"
 #include "core/SkTypeface.h"
 #include "ports/SkFontMgr_empty.h"
@@ -31,6 +32,9 @@
 #include "gpu/vk/VulkanBackendContext.h"
 #include "gpu/vk/VulkanExtensions.h"
 #include "third_party/vulkan/vulkan/vulkan_core.h"
+
+static_assert(sizeof(WeftSkiaPathCommand) == 28);
+static_assert(sizeof(WeftSkiaPathStyle) == 40);
 
 struct WeftSkia {
     bool gpu = false;
@@ -211,6 +215,38 @@ extern "C" void weft_skia_draw_glyph(WeftSkia* s, uint32_t font_id, uint32_t gly
     }
     s->run_gids.push_back(static_cast<SkGlyphID>(glyph_id));
     s->run_pos.push_back(SkPoint::Make(x, y));
+}
+
+extern "C" void weft_skia_draw_path(WeftSkia* s, const WeftSkiaPathCommand* commands,
+                                      size_t command_count, const WeftSkiaPathStyle* style) {
+    if (!s || !s->canvas || !commands || !style) return;
+    weftFlushGlyphs(s);
+    const auto px = [style](float value) { return style->x + value * style->scale; };
+    const auto py = [style](float value) { return style->y + value * style->scale; };
+    SkPathBuilder path;
+    for (size_t i = 0; i < command_count; ++i) {
+        const WeftSkiaPathCommand& command = commands[i];
+        switch (command.verb) {
+            case 0: path.moveTo(px(command.points[0]), py(command.points[1])); break;
+            case 1: path.lineTo(px(command.points[0]), py(command.points[1])); break;
+            case 2:
+                path.cubicTo(px(command.points[0]), py(command.points[1]),
+                             px(command.points[2]), py(command.points[3]),
+                             px(command.points[4]), py(command.points[5]));
+                break;
+            default: return;
+        }
+    }
+    SkPaint paint;
+    paint.setColor4f(SkColor4f{style->r, style->g, style->b, style->a}, nullptr);
+    paint.setStyle(SkPaint::kStroke_Style);
+    paint.setStrokeWidth(style->stroke_width * style->scale);
+    paint.setStrokeCap(style->cap == 1 ? SkPaint::kRound_Cap :
+                       style->cap == 2 ? SkPaint::kSquare_Cap : SkPaint::kButt_Cap);
+    paint.setStrokeJoin(style->join == 1 ? SkPaint::kRound_Join :
+                        style->join == 2 ? SkPaint::kBevel_Join : SkPaint::kMiter_Join);
+    paint.setAntiAlias(true);
+    s->canvas->drawPath(path.detach(), paint);
 }
 
 extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
