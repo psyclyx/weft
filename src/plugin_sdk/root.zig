@@ -234,6 +234,28 @@ pub fn lineAt(offset: usize) Range {
     e.wl_line_at(@intCast(offset), p(&pair));
     return .{ .start = pair[0], .end = pair[1] };
 }
+/// The offset where 1-based line `number` starts, clamped to the last line
+/// (line 0 is line 1) — what "go to line N" means in every grammar (ide's
+/// C-g, helix's `<n>gg`, the `:N` of vim's and helix's command line).
+/// Reads through the shared scratch.
+pub fn lineStart(number: usize) usize {
+    var need = number -| 1; // line breaks to pass
+    var last: usize = 0; // where the last line seen starts
+    var pos: usize = 0;
+    const total = byteLen();
+    while (need > 0 and pos < total) {
+        const chunk = slice(pos, total);
+        if (chunk.len == 0) break;
+        for (chunk, pos..) |c, at| {
+            if (c != '\n') continue;
+            last = at + 1;
+            need -= 1;
+            if (need == 0) break;
+        }
+        pos += chunk.len;
+    }
+    return last;
+}
 /// The current selection range, or null.
 pub fn selection() ?Range {
     var pair: [2]u32 = undefined;

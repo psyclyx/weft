@@ -682,15 +682,7 @@ fn gotoLine() void {
 /// leaving a jump where it was.
 fn jumpToLine(number: usize) void {
     weft.jumpPush();
-    var off: usize = 0;
-    var line: usize = 1;
-    const len = weft.byteLen();
-    while (line < number) : (line += 1) {
-        const l = weft.lineAt(off);
-        if (l.end >= len) break;
-        off = l.end + 1;
-    }
-    _ = weft.setSelections(&.{caret(off)}, 0);
+    _ = weft.setSelections(&.{caret(weft.lineStart(number))}, 0);
 }
 
 /// C-b: show or hide the docked viewport this config names (`weft.set("ide",

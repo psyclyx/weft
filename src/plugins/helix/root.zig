@@ -176,10 +176,7 @@ fn gotoLine(comptime mode: sel.Mode) fn () void {
             const target = struct {
                 var n: u32 = 1;
                 fn f(_: usize) ?usize {
-                    var l = weft.lineAt(0);
-                    var k = n;
-                    while (k > 1 and l.end < text.len()) : (k -= 1) l = weft.lineAt(l.end + 1);
-                    return l.start;
+                    return weft.lineStart(n);
                 }
             };
             target.n = line;
