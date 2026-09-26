@@ -243,8 +243,9 @@ fn applyPlacement(
     if (decision == .source) return false;
     if (decision == .none) {
         // Opened, but given no viewport: put the acting pane's own entry back
-        // in front so the mirror below does not show it anyway.
-        buffers.switchTo(gpa, focused.pane().buffer_id, head, keymap) catch {};
+        // in front so the mirror below does not show it anyway. Putting it
+        // back is not navigation: no jump.
+        core.Buffers.quietly(head, core.Buffers.switchTo, .{ buffers, gpa, focused.pane().buffer_id, head, keymap }) catch {};
         return true;
     }
     const primary = win_layout.primaryPane() orelse return false;
@@ -402,13 +403,30 @@ pub fn presentBy(
     subject: []const u8,
 ) void {
     const node = win_layout.paneById(pane) orelse return;
+    // The head goes and comes back: a presentation, not navigation, so
+    // neither switch is a jump (nor is `buffer-back`'s entry disturbed).
+    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject });
+}
+
+fn presentRoundTrip(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: anytype,
+    command: []const u8,
+    subject: []const u8,
+) void {
     const restore = buffers.active_id;
+    const prev = buffers.prev_id;
     const arg = [_]core.command.Value{.{ .string = subject }};
     _ = core.command.run(ctx.commands, ctx, command, if (subject.len > 0) &arg else &.{}) catch return;
     node.pane().buffer_id = buffers.active_id;
     node.pane().top_row = 0;
-    if (buffers.active_id != restore)
-        buffers.switchTo(gpa, restore, head, keymap) catch {};
+    if (buffers.active_id == restore) return;
+    buffers.switchTo(gpa, restore, head, keymap) catch return;
+    buffers.prev_id = prev;
 }
 
 /// Publish this head's focused viewport on the primary-focus feed (§7). The

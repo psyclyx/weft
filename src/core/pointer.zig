@@ -326,15 +326,15 @@ fn runLine(ctx: *Context, line: []const u8) !void {
 }
 
 /// Close `entry` through the ordinary `buffer-close` (which refuses a dirty
-/// one), coming back to the entry that was active when it was another one.
+/// one), coming back to the entry that was active when it was another one —
+/// a borrow (`Buffers.withEntry`), so the round trip records no jump.
 fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
-    const was = ctx.buffers.active_id;
-    if (entry != was) _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = entry }});
-    if (ctx.buffers.active_id != entry) return ok;
-    const result = try command.run(ctx.commands, ctx, "buffer-close", &.{});
-    if (entry != was and ctx.buffers.get(was) != null)
-        _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = was }});
-    return result;
+    if (ctx.buffers.get(entry) == null) return ok;
+    return try ctx.buffers.withEntry(ctx.gpa, entry, ctx.head, ctx.keymap, closeActive, .{ctx});
+}
+
+fn closeActive(ctx: *Context) anyerror!Value {
+    return command.run(ctx.commands, ctx, "buffer-close", &.{});
 }
 
 /// Close the tab under the pointer, wherever on the tab it is (a middle

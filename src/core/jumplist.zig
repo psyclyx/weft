@@ -45,9 +45,10 @@ pub const JumpList = struct {
     /// The entry `back` steps from: `items.len` at the tip, else the index of
     /// the position the last `back`/`forward` landed on.
     pos: usize = 0,
-    /// Set while the list itself is moving the head, so the entry switch that
-    /// travel causes is not recorded as a new jump.
-    traveling: bool = false,
+    /// Nonzero while the head moves in a way that is not navigation — the
+    /// list's own travel, or a borrow (`Buffers.withEntry`, `quietly`) — so
+    /// the entry switches it causes are not recorded as jumps.
+    muted: u32 = 0,
 
     pub const empty: JumpList = .{};
 
@@ -93,27 +94,30 @@ fn same(buffers: *Buffers, jump: Jump, at: Here) bool {
 /// newest entry is a no-op, so pressing `n` on the only match does not fill
 /// the list with one position.
 pub fn push(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocator.Error!void {
-    if (list.traveling) return;
+    if (list.muted > 0) return;
     // Part-way back, the entry the head stands on stays; what is after it goes.
     const keep = @min(list.pos + 1, list.items.items.len);
     while (list.items.items.len > keep) release(buffers, list.items.pop().?);
-    try append(list, gpa, buffers, at);
+    _ = try append(list, gpa, buffers, at);
     list.pos = list.items.items.len;
 }
 
-fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocator.Error!void {
-    if (list.items.getLastOrNull()) |last| if (same(buffers, last, at)) return;
-    const b = buffers.resolve(at.entry) orelse return;
+/// Append `at` (unless it is the newest entry already). Answers how many
+/// entries fell off the front to keep the list at `cap`: every index a caller
+/// holds into the list moves down by that much.
+fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocator.Error!usize {
+    if (list.items.getLastOrNull()) |last| if (same(buffers, last, at)) return 0;
+    const b = buffers.resolve(at.entry) orelse return 0;
     var jump: Jump = .{ .entry = at.entry };
     if (at.offset) |off| if (b.textEditor()) |ed| {
         jump.anchor = try ed.doc.addAnchor(gpa, @min(off, ed.text().byteLen()), .left);
     };
     errdefer if (jump.anchor) |a| b.textEditor().?.doc.removeAnchor(a);
     try list.items.append(gpa, jump);
-    if (list.items.items.len > cap) {
-        release(buffers, list.items.orderedRemove(0));
-        if (list.pos > 0) list.pos -= 1;
-    }
+    if (list.items.items.len <= cap) return 0;
+    release(buffers, list.items.orderedRemove(0));
+    if (list.pos > 0) list.pos -= 1;
+    return 1;
 }
 
 pub const Direction = enum { back, forward };
@@ -134,7 +138,7 @@ pub fn travel(
     const now = here(buffers);
     if (dir == .back and list.pos >= list.items.items.len) {
         // Leaving the tip: remember it, so `forward` can come back.
-        try append(list, gpa, buffers, now);
+        _ = try append(list, gpa, buffers, now); // pos is re-read from the length below
         list.pos = list.items.items.len -| 1;
     }
     var i = list.pos;
@@ -161,18 +165,23 @@ pub fn travel(
 pub fn travelTo(list: *JumpList, gpa: Allocator, buffers: *Buffers, head: *Head, keymap: *const Keymap, index: usize) !bool {
     if (index >= list.items.items.len) return false;
     if (resolve(buffers, list.items.items[index]) == null) return false;
+    var at = index;
     if (list.pos >= list.items.items.len) {
-        try append(list, gpa, buffers, here(buffers));
+        // Leaving the tip records it; at the cap that evicts the oldest entry,
+        // and the chosen one moves down with the rest.
+        const shifted = try append(list, gpa, buffers, here(buffers));
+        if (at < shifted) return false; // the choice itself fell off
+        at -= shifted;
     }
-    list.pos = index;
-    try goTo(list, gpa, buffers, head, keymap, list.items.items[index]);
+    list.pos = at;
+    try goTo(list, gpa, buffers, head, keymap, list.items.items[at]);
     return true;
 }
 
 fn goTo(list: *JumpList, gpa: Allocator, buffers: *Buffers, head: *Head, keymap: *const Keymap, jump: Jump) !void {
     const r = resolve(buffers, jump) orelse return;
-    list.traveling = true;
-    defer list.traveling = false;
+    list.muted += 1;
+    defer list.muted -= 1;
     if (r.buffer.id != buffers.active_id) try buffers.switchTo(gpa, r.buffer.id, head, keymap);
     if (r.offset) |off| if (r.buffer.textEditor()) |ed| ed.placeCursor(off);
 }
@@ -388,6 +397,34 @@ test "jumplist: push, back and forward within one entry" {
     try t.expect(!try f.forward());
 }
 
+test "jumplist: choosing an entry from the tip of a full list lands on that entry, not the one after" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var text: [2 * (cap + 2)]u8 = undefined;
+    for (0..cap + 2) |i| {
+        text[2 * i] = 'x';
+        text[2 * i + 1] = '\n';
+    }
+    try f.fill(0, &text);
+    // A full list: line i's start remembered as entry i.
+    for (0..cap) |i| {
+        f.at(2 * i);
+        try f.remember();
+    }
+    try t.expectEqual(@as(usize, cap), f.head.jumps.items.items.len);
+    // From one line further on (the tip, not yet an entry), choose entry 50:
+    // recording the tip evicts entry 0, and entry 50 must still be line 50.
+    f.at(2 * cap);
+    const want = 2 * 50;
+    try t.expect(try travelTo(&f.head.jumps, t.allocator, &f.bufs, &f.head, &f.km, 50));
+    try t.expectEqual(@as(usize, want), f.cursor());
+    // Choosing the oldest one, which the tip's record pushed out, is refused.
+    f.head.jumps.pos = f.head.jumps.items.items.len;
+    f.at(2 * cap + 2);
+    try t.expect(!try travelTo(&f.head.jumps, t.allocator, &f.bufs, &f.head, &f.km, 0));
+}
+
 test "jumplist: an edit above a remembered spot moves the spot with it" {
     var f: Fixture = undefined;
     try f.init();
@@ -428,6 +465,38 @@ test "jumplist: switching entries records where you were; closed entries are ski
     try f.bufs.close(t.allocator, a, &f.head, &f.km);
     try t.expect(try f.forward());
     try t.expectEqual(b, f.bufs.active_id);
+}
+
+test "jumplist: a borrow (withEntry) goes and comes back without recording a jump" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.fill(0, "scratch text\n");
+    const a = try f.bufs.create(t.allocator, "a.zig");
+    const b = try f.bufs.create(t.allocator, "b.zig");
+    try f.bufs.switchTo(t.allocator, a, &f.head, &f.km); // one real jump
+    const jumps = f.head.jumps.items.items.len;
+    const prev = f.bufs.prev_id;
+
+    const Probe = struct {
+        fn activeIs(bufs: *Buffers, want: Buffers.Id) bool {
+            return bufs.active_id == want;
+        }
+    };
+    try t.expect(try f.bufs.withEntry(t.allocator, b, &f.head, &f.km, Probe.activeIs, .{ &f.bufs, b }));
+    try t.expectEqual(a, f.bufs.active_id);
+    try t.expectEqual(jumps, f.head.jumps.items.items.len);
+    try t.expectEqual(prev, f.bufs.prev_id);
+
+    // Closing the borrowed entry still comes home.
+    const Close = struct {
+        fn run(bufs: *Buffers, id: Buffers.Id, head: *Head, km: *const Keymap) !void {
+            try bufs.close(t.allocator, id, head, km);
+        }
+    };
+    try (try f.bufs.withEntry(t.allocator, b, &f.head, &f.km, Close.run, .{ &f.bufs, b, &f.head, &f.km }));
+    try t.expectEqual(a, f.bufs.active_id);
+    try t.expectEqual(jumps, f.head.jumps.items.items.len);
 }
 
 test "jumplist: a push part-way back drops the forward half" {

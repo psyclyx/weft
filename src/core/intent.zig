@@ -508,12 +508,9 @@ pub const Plane = struct {
     ) Invocation {
         const scope = scopeOf(ctx, where);
         if (scope.live) return self.invokeNamed(ctx, name, buf);
-        const home = ctx.buffers.active_id;
-        ctx.buffers.switchTo(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap) catch |err|
-            return refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
-        defer if (ctx.buffers.active_id == scope.entry_id)
-            ctx.buffers.switchTo(ctx.gpa, home, ctx.head, ctx.keymap) catch {};
-        return self.invokeNamed(ctx, name, buf);
+        // A borrow, not navigation: the round trip records no jump.
+        return ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, invokeNamed, .{ self, ctx, name, buf }) catch |err|
+            refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
     }
 };
 

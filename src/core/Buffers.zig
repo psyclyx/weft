@@ -525,7 +525,8 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     const old = self.active();
     // Moving between entries is a jump, and only here does core see every
     // one: remember where this head was (`jumplist.zig`). Travel along the
-    // list itself is suppressed there.
+    // list itself, and a borrow that puts the head back (`withEntry`,
+    // `quietly`), is muted there.
     try jumplist.push(&head.jumps, gpa, self, jumplist.here(self));
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
@@ -589,6 +590,50 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         }
     }
     self.active_id = id;
+}
+
+/// Borrow entry `id` for one call that is NOT navigation — a toolbar verb
+/// acting on the editor it describes, a tab's close glyph: bring it to
+/// `head`, run `f(args)`, and put the head back. Neither switch records a
+/// jump, and the entry `buffer-back` returns to is left as it was, so the
+/// round trip leaves no trace in the head's history. The head goes back
+/// unless `f` moved it on from the borrowed entry to another live one (an
+/// open the verb performed stands, and records its own jump); when `f`
+/// closed the borrowed entry, it goes back all the same.
+pub fn withEntry(
+    self: *Buffers,
+    gpa: Allocator,
+    id: Id,
+    head: *Head,
+    keymap: *const Keymap,
+    comptime f: anytype,
+    args: anytype,
+) Error!@typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    if (id == self.active_id) return @call(.auto, f, args);
+    const home = self.active_id;
+    const home_prev = self.prev_id;
+    const borrowed = (self.get(id) orelse return @call(.auto, f, args)).ref();
+    try self.switchQuietly(gpa, id, head, keymap);
+    defer if (self.active_id == id or self.resolve(borrowed) == null) {
+        if (self.get(home) != null) self.switchQuietly(gpa, home, head, keymap) catch {};
+        if (self.active_id == home) self.prev_id = home_prev;
+    };
+    return @call(.auto, f, args);
+}
+
+/// Run `f(args)` with `head`'s jump recording muted: whatever entry switches
+/// it makes are not navigation (a presentation into another viewport that
+/// puts the head back).
+pub fn quietly(head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    head.jumps.muted += 1;
+    defer head.jumps.muted -= 1;
+    return @call(.auto, f, args);
+}
+
+fn switchQuietly(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
+    head.jumps.muted += 1;
+    defer head.jumps.muted -= 1;
+    try self.switchTo(gpa, id, head, keymap);
 }
 
 /// Turn the view currently focused on `head` into (or reattach it to) a
@@ -674,14 +719,15 @@ pub fn prevId(self: *const Buffers) Id {
 
 /// Close a buffer. Closing the active buffer focuses the next one;
 /// closing the last replaces it with a fresh scratch. Dirty checks are
-/// the caller's policy.
+/// the caller's policy. Leaving an entry that is about to die is no jump: a
+/// position in it could never be returned to.
 pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const b = self.get(id) orelse return;
     if (self.count() == 1) {
         const fresh = try self.create(gpa, "*scratch*");
-        try self.switchTo(gpa, fresh, head, keymap);
+        try self.switchQuietly(gpa, fresh, head, keymap);
     } else if (id == self.active_id) {
-        try self.switchTo(gpa, self.nextId(), head, keymap);
+        try self.switchQuietly(gpa, self.nextId(), head, keymap);
     }
     self.slots.items[id] = null;
     self.destroyBuffer(gpa, b);

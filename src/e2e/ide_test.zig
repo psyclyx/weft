@@ -609,6 +609,34 @@ test "e2e/ide: after C-S-l, a find selects its match as THE selection — no str
     try t.expectEqual(@as(usize, 1), try occurrences(ed, "!"));
 }
 
+test "e2e/ide: closing a background tab is no navigation — the jumplist and buffer-back are untouched" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "a.txt", "alpha\n");
+    const a = ed.buffers.active_id;
+    try openFile(ed, "b.txt", "beta\n");
+    const b = ed.buffers.active_id;
+    try openFile(ed, "c.txt", "gamma\n");
+    var pixels = try ed.renderComposite();
+    gpa.free(pixels);
+    ed.click(ed.pointAtTab(a, .body) orelse return error.NoTab);
+    try t.expectEqual(a, ed.buffers.active_id);
+    const jumps = ed.head.jumps.items.items.len;
+    const prev = ed.buffers.prev_id;
+
+    // A middle click borrows b to close it and comes straight back to a.
+    pixels = try ed.renderComposite();
+    gpa.free(pixels);
+    ed.clickWith(ed.pointAtTab(b, .body) orelse return error.NoTab, 2, .{});
+    try t.expect(ed.buffers.get(b) == null);
+    try t.expectEqual(a, ed.buffers.active_id);
+    try t.expectEqual(jumps, ed.head.jumps.items.items.len);
+    try t.expectEqual(prev, ed.buffers.prev_id);
+}
+
 test "e2e/ide: a double click selects a word, a triple click the line, and C-click adds a caret" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
