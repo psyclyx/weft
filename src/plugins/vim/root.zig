@@ -227,7 +227,7 @@ fn applyOpRange(hnd: u32) void {
     } else {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
         weft.jump(r.start);
-        weft.setMode("normal");
+        weft.exitToResting();
     }
 }
 
@@ -278,7 +278,7 @@ fn chooseRegister(comptime index: u8) fn () void {
     return struct {
         fn h() void {
             selected_register = index;
-            weft.setMode("normal");
+            weft.exitToResting();
         }
     }.h;
 }
@@ -800,7 +800,7 @@ fn visualDelete() void {
             if (semanticDid(semantic_action.delete, 0)) {
                 weft.run("clear-selection");
                 visual_linewise = false;
-                weft.setMode("normal");
+                weft.exitToResting();
                 return;
             }
         }
@@ -814,7 +814,7 @@ fn visualDelete() void {
     }
     weft.run("clear-selection");
     visual_linewise = false;
-    weft.setMode("normal");
+    weft.exitToResting();
 }
 fn visualYank() void {
     if (weft.posture() == .field) {
@@ -822,7 +822,7 @@ fn visualYank() void {
         if (semanticDid(semantic_action.copy, slot)) {
             weft.run("clear-selection");
             visual_linewise = false;
-            weft.setMode("normal");
+            weft.exitToResting();
             return;
         }
         selected_register = slot;
@@ -834,7 +834,7 @@ fn visualYank() void {
     }
     weft.run("clear-selection");
     visual_linewise = false;
-    weft.setMode("normal");
+    weft.exitToResting();
 }
 
 /// `c` in visual: change the selection — delete it and drop into insert (like
@@ -874,7 +874,7 @@ fn visualOp(comptime cmd: []const u8) fn () void {
             }
             weft.run("clear-selection");
             visual_linewise = false;
-            weft.setMode("normal");
+            weft.exitToResting();
         }
     }.h;
 }
@@ -1081,7 +1081,7 @@ fn enterOpDedent() void {
 }
 fn opCancel() void {
     selected_register = 0;
-    weft.setMode("normal");
+    weft.exitToResting();
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
@@ -1092,7 +1092,7 @@ fn opLine() void {
     // the name a key would reach it by.
     if (op_copies and transferred(std_yank, semantic_action.copy)) {
         const semantic_edit = op_edit_cmd orelse {
-            weft.setMode("normal");
+            weft.exitToResting();
             return;
         };
         if (std.mem.eql(u8, semantic_edit, "op.delete")) weft.run("selection-delete");
@@ -1102,7 +1102,7 @@ fn opLine() void {
     const l = weft.lineAt(weft.cursor());
     if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
-        weft.setMode("normal"); // yy: yank the line, nothing to edit
+        weft.exitToResting(); // yy: yank the line, nothing to edit
         return;
     };
     // A non-delete line operator (gcc) toggles over the line's content in place.
@@ -1122,7 +1122,7 @@ fn opLine() void {
         const end = @min(l.end + 1, weft.byteLen());
         if (weft.anchorRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(l.start);
-        weft.setMode("normal");
+        weft.exitToResting();
     }
 }
 
@@ -1136,68 +1136,71 @@ fn openChosen(choice: []const u8) void {
     weft.runStr("open", choice);
 }
 
-// ── Leader / prefix chords (bound as SEQUENCES; the leaves run from normal) ──
+// ── Leader / prefix chords (bound as mode-preserving SEQUENCES) ──
 /// Escape out of the f/F/t/T char-capture modes (their only menu-ish remnant).
 fn leaderCancel() void {
-    weft.setMode("normal");
+    weft.exitToResting();
 }
-fn thenNormal(cmd: []const u8) void {
-    weft.setMode("normal");
+/// Run a workspace command without changing the caller's resting mode.
+/// These commands used to be leaves of real leader/window menu modes, where
+/// forcing normal was the menu-exit mechanism. They are key sequences now;
+/// picker and buffer-switch lifecycles already preserve or select the right
+/// mode, and an inherited/global sequence may be invoked from a tool.
+fn runWorkspace(cmd: []const u8) void {
     weft.run(cmd);
 }
 fn vimFindFile() void {
-    thenNormal("find-file");
+    runWorkspace("find-file");
 }
 fn vimShare() void {
-    thenNormal("share");
+    runWorkspace("share");
 }
 fn vimPalette() void {
-    thenNormal("pick-commands");
+    runWorkspace("pick-commands");
 }
 fn vimSplit() void {
-    thenNormal("window-split");
+    runWorkspace("window-split");
 }
 fn vimVsplit() void {
-    thenNormal("window-vsplit");
+    runWorkspace("window-vsplit");
 }
 fn vimFocusOther() void {
-    thenNormal("focus-other"); // cycle to the next window
+    runWorkspace("focus-other"); // cycle to the next window
 }
 fn vimUnsplit() void {
-    thenNormal("window-close");
+    runWorkspace("window-close");
 }
 // Directional focus (C-w h/j/k/l or the arrows) and move/swap (C-w H/J/K/L
-// or shifted arrows), each a one-shot out of the `window` menu mode.
+// or shifted arrows). These global sequences preserve the caller's mode.
 fn vimWinLeft() void {
-    thenNormal("window-focus-left");
+    runWorkspace("window-focus-left");
 }
 fn vimWinRight() void {
-    thenNormal("window-focus-right");
+    runWorkspace("window-focus-right");
 }
 fn vimWinUp() void {
-    thenNormal("window-focus-up");
+    runWorkspace("window-focus-up");
 }
 fn vimWinDown() void {
-    thenNormal("window-focus-down");
+    runWorkspace("window-focus-down");
 }
 fn vimWinMoveLeft() void {
-    thenNormal("window-move-left");
+    runWorkspace("window-move-left");
 }
 fn vimWinMoveRight() void {
-    thenNormal("window-move-right");
+    runWorkspace("window-move-right");
 }
 fn vimWinMoveUp() void {
-    thenNormal("window-move-up");
+    runWorkspace("window-move-up");
 }
 fn vimWinMoveDown() void {
-    thenNormal("window-move-down");
+    runWorkspace("window-move-down");
 }
 fn vimGotoTop() void {
-    weft.setMode("normal");
     weft.jump(0);
 }
 fn vimCenter() void {
-    thenNormal("center-line");
+    runWorkspace("center-line");
 }
 
 // ── f/F/t/T target search ────────────────────────────────────────────
@@ -1230,7 +1233,7 @@ var last_find_dir: u8 = 0;
 var last_find_char: u8 = 0;
 
 fn doFind(dir: u8) void {
-    weft.setMode("normal");
+    weft.exitToResting();
     if (weft.argStr(0)) |ch| {
         if (ch.len > 0) {
             last_find_dir = dir;
@@ -1289,7 +1292,7 @@ fn enterReplaceChar() void {
 /// now — a multibyte target/replacement is the same corner comment.zig's token
 /// carries. Cursor lands on the last replaced char, as in vim.
 fn doReplaceChar() void {
-    weft.setMode("normal");
+    weft.exitToResting();
     const ch = weft.argStr(0) orelse return;
     if (ch.len == 0) return;
     const cur = weft.cursor();
