@@ -2651,10 +2651,17 @@ pub const App = struct {
 /// replaces by name, so that collapses instead of accumulating.
 fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
-    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
-    try rt.add(gpa, .{ .extensions = ".fnl", .grammar = "fennel", .symbol = "tree_sitter_fennel" });
-    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
+    // The same explicit query files config/plugins/languages.js passes:
+    // upstream packages carry no outline query and fennel no highlights.
+    const q = struct {
+        fn path(comptime name: []const u8) []const u8 {
+            return @import("build_options").query_root ++ "/" ++ name ++ ".scm";
+        }
+    }.path;
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig", .outline = q("zig-outline") });
+    try rt.add(gpa, .{ .extensions = ".fnl", .grammar = "fennel", .symbol = "tree_sitter_fennel", .query = q("fennel-highlights") });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua", .outline = q("lua-outline") });
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
-    try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
+    try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = q("javascript-outline") });
     try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
 }

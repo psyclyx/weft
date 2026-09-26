@@ -16,7 +16,7 @@ let
     "html"
   ];
   # The shell names upstream parser packages for the sample config. Query
-  # selection stays in config/defaults.js, which passes its own files to
+  # selection lives in config/plugins/languages.js, which passes its own files to
   # grammar-add where an upstream package does not supply the desired query.
   grammarDir = pkgs.linkFarm "weft-grammars" (
     map (n: {

@@ -36,11 +36,18 @@ fn ownedText(gpa: Allocator, doc: *const Document) ![]u8 {
 /// test that wants zig has to ask for zig, exactly like a user's config. The
 /// search path comes from the build (the nix shell's `WEFT_GRAMMAR_PATH`),
 /// which is the only thing the test knows that a user wouldn't.
+/// One of weft's own query files, by absolute path. Upstream grammar
+/// packages carry no outline query; config/plugins/languages.js supplies
+/// these explicitly, so a test that wants symbols does the same.
+fn weftQuery(comptime name: []const u8) []const u8 {
+    return @import("build_options").query_root ++ "/" ++ name ++ ".scm";
+}
+
 fn testRuntime(gpa: Allocator) !core.syntax.Runtime {
     var rt: core.syntax.Runtime = .empty;
     errdefer rt.deinit(gpa);
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
-    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig", .outline = weftQuery("zig-outline") });
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
     return rt;
 }
@@ -1541,9 +1548,9 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
     var rt: core.syntax.Runtime = .empty;
     defer rt.deinit(gpa);
     try rt.setSearchPath(gpa, @import("build_options").grammar_path);
-    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig" });
-    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua" });
-    try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript" });
+    try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig", .outline = weftQuery("zig-outline") });
+    try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua", .outline = weftQuery("lua-outline") });
+    try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = weftQuery("javascript-outline") });
 
     const Case = struct { path: []const u8, src: []const u8, want: []const []const u8 };
     const cases = [_]Case{

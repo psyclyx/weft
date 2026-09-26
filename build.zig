@@ -1637,6 +1637,11 @@ fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
         // this is only what a build inside the nix shell falls back to.
         o.addOption([]const u8, "grammar_path", b.graph.environ_map.get("WEFT_GRAMMAR_PATH") orelse
             @panic("WEFT_GRAMMAR_PATH not set — build inside the nix shell"));
+        // Absolute directory of weft's own .scm files — the `languages.query-root`
+        // that config/plugins/languages.js reads. Tests that register grammars
+        // without booting config pass the same explicit query paths from here;
+        // absolute because the e2e harness runs inside a temp project dir.
+        o.addOption([]const u8, "query_root", b.pathFromRoot("assets"));
         // `createModule` once, not `addOptions` per module: `addOptions` wraps
         // the options in a FRESH module every call, which is what puts two
         // module names on one content-addressed file.
