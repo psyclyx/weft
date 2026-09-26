@@ -1733,10 +1733,49 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
 
     // The keys that used to be dead under helix, by name.
     try t.expectEqualStrings("find-file", ed.keymap.resolveExact("helix-normal", "space space").?);
-    try t.expectEqualStrings("hx-goto-start", ed.keymap.resolveExact("helix-normal", "g g").?);
-    try t.expectEqualStrings("hx-goto-end", ed.keymap.resolveExact("helix-normal", "g e").?);
-    try t.expectEqualStrings("hx-delete-line", ed.keymap.resolveExact("helix-op", "d").?);
+    try t.expectEqualStrings("hx/n/goto-line", ed.keymap.resolveExact("helix-normal", "g g").?);
+    try t.expectEqualStrings("hx/n/last-line", ed.keymap.resolveExact("helix-normal", "g e").?);
     try t.expectEqualStrings("hx-select-line", ed.keymap.resolveExact("helix-normal", "x").?);
+    // Helix's minor modes, laid out as Helix's own: space mode's leaves, `[`/`]`
+    // pairs, `z` view and the sticky `Z`, `m` match.
+    const Key = struct { mode: []const u8 = "helix-normal", key: []const u8, cmd: []const u8 };
+    const minor = [_]Key{
+        .{ .key = "space f", .cmd = "find-file" },
+        .{ .key = "space b", .cmd = "buf-pick" },
+        .{ .key = "space s", .cmd = "symbols" },
+        .{ .key = "space a", .cmd = "code-actions" },
+        .{ .key = "space k", .cmd = "hover" },
+        .{ .key = "space r", .cmd = "rename" },
+        .{ .key = "space slash", .cmd = "grep" },
+        .{ .key = "space question", .cmd = "pick-commands" },
+        .{ .key = "space w v", .cmd = "window-vsplit" },
+        .{ .key = "bracketright d", .cmd = "next-diagnostic" },
+        .{ .key = "bracketleft d", .cmd = "prev-diagnostic" },
+        .{ .key = "bracketright f", .cmd = "hx-function-next" },
+        .{ .key = "g d", .cmd = "goto-definition" },
+        .{ .key = "g y", .cmd = "goto-type-definition" },
+        .{ .key = "g i", .cmd = "goto-implementation" },
+        .{ .key = "g r", .cmd = "references" },
+        .{ .key = "g p", .cmd = "buffer-previous" },
+        .{ .key = "z z", .cmd = "center-line" },
+        .{ .key = "z t", .cmd = "scroll-line-to-top" },
+        .{ .key = "z j", .cmd = "scroll-line-down" },
+        .{ .key = "Z", .cmd = "hx-view-sticky" },
+        .{ .mode = "helix-view", .key = "j", .cmd = "scroll-line-down" },
+        .{ .key = "m m", .cmd = "hx/n/match" },
+        .{ .key = "m i parenleft", .cmd = "hx/mi/paren" },
+        .{ .key = "m s", .cmd = "hx-surround-add" },
+        .{ .key = "M-o", .cmd = "hx-expand" },
+        .{ .mode = "helix-select", .key = "w", .cmd = "hx/x/word-next" },
+    };
+    for (minor) |row| {
+        const arms = ed.keymap.resolveExactArms(row.mode, row.key) orelse {
+            std.debug.print("[e2e/helix] unbound: {s} {s}\n", .{ row.mode, row.key });
+            return error.TestUnexpectedResult;
+        };
+        try t.expectEqualStrings(row.cmd, arms[arms.len - 1]);
+    }
+    try t.expect(ed.keymap.modeHasTag("helix-view", "menu"));
     const Arms = struct { key: []const u8, arms: []const []const u8 };
     const intended = [_]Arms{
         .{ .key = "y", .arms = &.{ "std.transfer.yank", "hx-yank" } },
@@ -1744,9 +1783,9 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
         .{ .key = "d", .arms = &.{ "std.transfer.delete-to-register", "hx-delete" } },
         .{ .key = "u", .arms = &.{ "std.history.undo", "undo" } },
         .{ .key = "U", .arms = &.{ "std.history.redo", "redo" } },
-        .{ .key = "j", .arms = &.{ "std.navigation.down", "hx/n/motion.down" } },
-        .{ .key = "k", .arms = &.{ "std.navigation.up", "hx/n/motion.up" } },
-        .{ .key = "space f s", .arms = &.{ "std.persistence.save", "save" } },
+        .{ .key = "j", .arms = &.{ "std.navigation.down", "hx/n/down" } },
+        .{ .key = "k", .arms = &.{ "std.navigation.up", "hx/n/up" } },
+        .{ .key = "space O s", .arms = &.{ "std.persistence.save", "save" } },
         .{ .key = "C-o", .arms = &.{ "std.navigation.back", "navigate-back" } },
     };
     for (intended) |row| {
@@ -1767,7 +1806,7 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
     try t.expectEqualStrings("helix-normal", ed.ctx.bindingMode());
     authorFile(&ed, "main.zig", "const x = 1;\n");
     try t.expectEqualStrings("helix-source", ed.ctx.bindingMode());
-    try t.expectEqualStrings("goto-definition", ed.keymap.resolveExact("helix-source", "g d").?);
+    try t.expectEqualStrings("format", ed.keymap.resolveExact("helix-source", "space i f").?);
 }
 
 /// The generic retained scene config.js's structured-view gate drives, as a
@@ -1884,7 +1923,7 @@ test "e2e/config: under helix.js, helix's own keys and SPC v drive a listing and
     // directory and `-` back out — helix binds the two intentions and nothing
     // about files.
     _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
-    ed.chord("SPC f d");
+    ed.chord("SPC e");
     const listing = ed.toolView().?;
     try t.expectEqualStrings("files", ed.session.system.semantic.views.get(listing).?.scene.role);
     try t.expectEqualStrings("helix-normal", ed.mode());
@@ -1958,7 +1997,7 @@ test "e2e/config: under helix.js, helix's own keys and SPC v drive a listing and
 
 // The git spine's key-level contract, under helix.js: the status projection
 // keeps its own keys, its menus return to it, and the commit draft is an
-// ordinary entry in HELIX's modes whose `SPC f s` commits.
+// ordinary entry in HELIX's modes whose `SPC O s` commits.
 test "e2e/config: under helix.js, a git status buffer and its commit draft work by key" {
     const gpa = t.allocator;
     var proj: Project = undefined;
@@ -1981,7 +2020,7 @@ test "e2e/config: under helix.js, a git status buffer and its commit draft work 
         const out = try proj.oracle(cmd);
         gpa.free(out);
     }
-    ed.chord("SPC g g");
+    ed.chord("SPC g");
     try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
     try t.expectEqualStrings("git", ed.mode());
     ed.press("b", "");
@@ -2003,6 +2042,6 @@ test "e2e/config: under helix.js, a git status buffer and its commit draft work 
     ed.press("Escape", "");
     try t.expectEqualStrings("helix-normal", ed.mode());
     // The persistence intention, answered by the draft's own provider.
-    ed.chord("SPC f s");
+    ed.chord("SPC O s");
     try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "helix: commit by key"));
 }

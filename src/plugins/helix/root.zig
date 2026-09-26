@@ -1,32 +1,44 @@
 //! helix — a SECOND modal editor, as a plugin, to stress-test the plugin ABI's
 //! decoupling. It uses its OWN mode namespace (`helix-normal`/`helix-insert`/…),
-//! its own cursor config, and composes the SAME shared `motions`/`operators`/
-//! core commands vim does. If core (or any plugin) assumed vim's `normal` mode,
-//! helix would break — it doesn't, which is the point: modal editing is not
-//! privileged, it's a plugin over data.
+//! its own cursor config, and composes the SAME shared `textobjects`/`ts`/
+//! `surround`/`lsp` commands and core scroll/buffer commands vim does. If core
+//! (or any plugin) assumed vim's `normal` mode, helix would break — it doesn't,
+//! which is the point: modal editing is not privileged, it's a plugin over data.
 //!
 //! Load it INSTEAD of vim for a whole editor (config/helix.js), or alongside
 //! vim and switch a buffer between `normal` and `helix-normal` — the keymap
 //! mode is per-buffer, so they coexist.
 //!
-//! SELECTION-FIRST, on one selection. Helix acts on selections: `x` selects
-//! the line, then `d`/`c`/`y` act on it. Core holds one cursor and one mark
-//! today, so the selection here is that pair — `span()` is "the selection,
-//! else the character under the cursor", which is exactly helix's rule that a
-//! selection covers at least one character. Every verb reads `span()` and
-//! nothing else, so running them once per selection is the whole change when
-//! core grows several (doc/configs.md §2 phase 2). Motions collapse the
-//! selection and move; they do not select yet (phase 2 too).
+//! SELECTION-FIRST, on every selection (doc/configs.md §2). A motion selects
+//! (`w` selects the word ahead) in `helix-normal` and extends in
+//! `helix-select` (`v`); `x`, `%`, `C`, `A-o` and friends reshape the set; the
+//! verbs `d c y p P R r ~ J > <` act on every selection as one undo unit.
+//! `selection.zig` holds the set and what reshapes it, `edit.zig` what edits
+//! it, `text.zig` the pure motions. There is no operator-pending mode: a verb
+//! acts on what is selected, which is the whole of helix's grammar.
+//!
+//! The minor modes are key SEQUENCES in `helix-normal` — `g` goto, `m` match,
+//! `z` view, `[`/`]` pairs, `space` — completed by which-key; `Z` is the one
+//! sticky view mode. Keys whose next key is arbitrary text (`r` `f` `t` `"`
+//! `ms` `md` `mr`) are single-key capture modes. Counts (`3w`, `5gg`) and
+//! registers (`"a`) are the grammar's own prefixes (`state.zig`).
 //!
 //! Where a standard intention names what a key does, the key binds it FIRST
 //! with helix's text behaviour as the fallback arm — so in a files listing or
 //! a git buffer `j`/`k`/`y`/`p`/`d`/`Return`/`-` do the structural thing, and
 //! helix carries no files- or git-specific code at all.
+//!
+//! Not here yet: search and regex selection (`s S K / n N *`, phase 4, on the
+//! regex library), `gw` (goto word labels, on the overlay door), `&` (align),
+//! macros and the jumplist (phase 5).
 
 const std = @import("std");
 const weft = @import("weft");
 const ex_mod = @import("weft_ex");
-const semantic_action = weft.semantic.action.standard;
+const text = @import("text.zig");
+const sel = @import("selection.zig");
+const edit = @import("edit.zig");
+const state = @import("state.zig");
 
 /// The `:` command line, in helix's own mode namespace (`helix-normal` resting,
 /// `helix-ex` the command line). Same shared engine vim uses: helix gets the
@@ -36,107 +48,405 @@ const ex = ex_mod.Ex("helix-normal", "helix-ex");
 
 const file_pick = 0;
 
-/// Motion keys shared with the `motions` plugin. Each binds the standard
-/// navigation intention where one names it (a listing answers `j` with its
-/// next row), with helix's own move as the fallback. `op` motions also get a
-/// delete form (`d<key>`) in `helix-op`.
-const Motion = struct {
-    key: []const u8,
-    motion: []const u8,
-    intention: ?[]const u8 = null,
-    op: bool = false,
-};
-const mtable = [_]Motion{
-    .{ .key = "h", .motion = "motion.left", .intention = "std.navigation.left" },
-    .{ .key = "l", .motion = "motion.right", .intention = "std.navigation.right" },
-    .{ .key = "j", .motion = "motion.down", .intention = "std.navigation.down" },
-    .{ .key = "k", .motion = "motion.up", .intention = "std.navigation.up" },
-    .{ .key = "Left", .motion = "motion.left", .intention = "std.navigation.left" },
-    .{ .key = "Right", .motion = "motion.right", .intention = "std.navigation.right" },
-    .{ .key = "Down", .motion = "motion.down", .intention = "std.navigation.down" },
-    .{ .key = "Up", .motion = "motion.up", .intention = "std.navigation.up" },
-    .{ .key = "w", .motion = "motion.word-fwd", .intention = "std.navigation.word-next", .op = true },
-    .{ .key = "b", .motion = "motion.word-back", .intention = "std.navigation.word-previous", .op = true },
-    .{ .key = "e", .motion = "motion.word-end", .intention = "std.navigation.word-end", .op = true },
-    .{ .key = "W", .motion = "motion.WORD-fwd", .intention = "std.navigation.big-word-next", .op = true },
-    .{ .key = "B", .motion = "motion.WORD-back", .intention = "std.navigation.big-word-previous", .op = true },
-    .{ .key = "E", .motion = "motion.WORD-end", .intention = "std.navigation.big-word-end", .op = true },
-    .{ .key = "0", .motion = "motion.line-start", .intention = "std.navigation.line-start", .op = true },
-    .{ .key = "dollar", .motion = "motion.line-end", .intention = "std.navigation.line-end", .op = true },
-    // Helix's goto-mode spellings of the same three line motions.
-    .{ .key = "Home", .motion = "motion.line-start", .intention = "std.navigation.line-start" },
-    .{ .key = "End", .motion = "motion.line-end", .intention = "std.navigation.line-end" },
-    .{ .key = "g h", .motion = "motion.line-start", .intention = "std.navigation.line-start" },
-    .{ .key = "g l", .motion = "motion.line-end", .intention = "std.navigation.line-end" },
-    .{ .key = "g s", .motion = "motion.first-non-blank", .intention = "std.navigation.first-non-blank" },
-};
+// ── Motions ─────────────────────────────────────────────────────────────
 
-/// One generated command per distinct motion (several keys share one).
-const motions = blk: {
-    var names: [mtable.len][]const u8 = undefined;
-    var n: usize = 0;
-    for (mtable) |m| {
-        for (names[0..n]) |seen| {
-            if (std.mem.eql(u8, seen, m.motion)) break;
-        } else {
-            names[n] = m.motion;
-            n += 1;
+fn left(h: usize) ?usize {
+    return weft.step(h, .back, .char);
+}
+fn right(h: usize) ?usize {
+    return weft.step(h, .fwd, .char);
+}
+fn down(h: usize) ?usize {
+    return weft.step(h, .fwd, .line);
+}
+fn up(h: usize) ?usize {
+    return weft.step(h, .back, .line);
+}
+fn lineStart(h: usize) ?usize {
+    return weft.lineAt(h).start;
+}
+fn lineEnd(h: usize) ?usize {
+    return weft.lineAt(h).end;
+}
+fn firstNonBlank(h: usize) ?usize {
+    return text.firstNonBlank(h);
+}
+/// `ge`: the last line — the one before a final newline, not the empty
+/// line after it.
+fn lastLine(_: usize) ?usize {
+    const n = text.len();
+    const last = if (n > 0 and text.at(n - 1) == '\n') n - 1 else n;
+    return weft.lineAt(last).start;
+}
+
+fn word(comptime f: fn (weft.Selection, bool) ?weft.Selection, comptime big: bool) sel.Motion {
+    return struct {
+        fn m(s: weft.Selection) ?weft.Selection {
+            return f(s, big);
         }
-    }
-    const out = names[0..n].*;
-    break :blk out;
+    }.m;
+}
+
+/// One motion, named once; every key that runs it lists it by name.
+const MotionDef = struct { name: []const u8, motion: sel.Motion };
+const motion_defs = [_]MotionDef{
+    .{ .name = "left", .motion = sel.point(left) },
+    .{ .name = "right", .motion = sel.point(right) },
+    .{ .name = "down", .motion = sel.point(down) },
+    .{ .name = "up", .motion = sel.point(up) },
+    .{ .name = "word-next", .motion = word(text.nextWordStart, false) },
+    .{ .name = "word-prev", .motion = word(text.prevWordStart, false) },
+    .{ .name = "word-end", .motion = word(text.nextWordEnd, false) },
+    .{ .name = "WORD-next", .motion = word(text.nextWordStart, true) },
+    .{ .name = "WORD-prev", .motion = word(text.prevWordStart, true) },
+    .{ .name = "WORD-end", .motion = word(text.nextWordEnd, true) },
+    .{ .name = "line-start", .motion = sel.point(lineStart) },
+    .{ .name = "line-end", .motion = sel.point(lineEnd) },
+    .{ .name = "first-non-blank", .motion = sel.point(firstNonBlank) },
+    .{ .name = "last-line", .motion = sel.point(lastLine) },
+    .{ .name = "paragraph-next", .motion = text.nextParagraph },
+    .{ .name = "paragraph-prev", .motion = text.prevParagraph },
 };
 
-/// Run a motion and jump to its far end (direction-carrying). A motion in
-/// normal mode REPLACES the selection in helix; with one selection that is
-/// collapse-then-move.
-fn moveByMotion(comptime motion: []const u8) fn () void {
+/// Motion keys. Each binds the standard navigation intention where one names
+/// it (a listing answers `j` with its next row), with helix's own motion as
+/// the fallback arm — in `helix-normal` a move, in `helix-select` an extend.
+const MotionKey = struct { key: []const u8, motion: []const u8, intention: ?[]const u8 = null };
+const motion_keys = [_]MotionKey{
+    .{ .key = "h", .motion = "left", .intention = "std.navigation.left" },
+    .{ .key = "l", .motion = "right", .intention = "std.navigation.right" },
+    .{ .key = "j", .motion = "down", .intention = "std.navigation.down" },
+    .{ .key = "k", .motion = "up", .intention = "std.navigation.up" },
+    .{ .key = "Left", .motion = "left", .intention = "std.navigation.left" },
+    .{ .key = "Right", .motion = "right", .intention = "std.navigation.right" },
+    .{ .key = "Down", .motion = "down", .intention = "std.navigation.down" },
+    .{ .key = "Up", .motion = "up", .intention = "std.navigation.up" },
+    .{ .key = "w", .motion = "word-next", .intention = "std.navigation.word-next" },
+    .{ .key = "b", .motion = "word-prev", .intention = "std.navigation.word-previous" },
+    .{ .key = "e", .motion = "word-end", .intention = "std.navigation.word-end" },
+    .{ .key = "W", .motion = "WORD-next", .intention = "std.navigation.big-word-next" },
+    .{ .key = "B", .motion = "WORD-prev", .intention = "std.navigation.big-word-previous" },
+    .{ .key = "E", .motion = "WORD-end", .intention = "std.navigation.big-word-end" },
+    .{ .key = "Home", .motion = "line-start", .intention = "std.navigation.line-start" },
+    .{ .key = "End", .motion = "line-end", .intention = "std.navigation.line-end" },
+    .{ .key = "g h", .motion = "line-start", .intention = "std.navigation.line-start" },
+    .{ .key = "g l", .motion = "line-end", .intention = "std.navigation.line-end" },
+    .{ .key = "g s", .motion = "first-non-blank", .intention = "std.navigation.first-non-blank" },
+    .{ .key = "g j", .motion = "down" },
+    .{ .key = "g k", .motion = "up" },
+    .{ .key = "g e", .motion = "last-line" },
+    .{ .key = "bracketright p", .motion = "paragraph-next" },
+    .{ .key = "bracketleft p", .motion = "paragraph-prev" },
+};
+
+fn motionCmd(comptime m: sel.Motion, comptime mode: sel.Mode) fn () void {
     return struct {
         fn h() void {
-            weft.run("clear-selection");
-            const cur = weft.cursor();
-            const hnd = weft.runRange(motion) orelse return;
-            const r = weft.rangeEnds(hnd) orelse return;
-            weft.jump(if (r.end == cur) r.start else r.end);
+            sel.applyMotion(m, mode, state.takeCount());
         }
     }.h;
 }
 
-/// Delete over a motion's range (`d` then a motion, with nothing selected),
-/// via the operators plugin's gated edit, then land at the range start.
-fn deleteByMotion(comptime motion: []const u8) fn () void {
+/// `hx/n/<motion>` (move) and `hx/x/<motion>` (extend) for every motion.
+const motion_cmds = blk: {
+    var arr: [motion_defs.len * 2]weft.CommandEntry = undefined;
+    for (motion_defs, 0..) |d, i| {
+        arr[2 * i] = .{ .name = "hx/n/" ++ d.name, .call = motionCmd(d.motion, .move) };
+        arr[2 * i + 1] = .{ .name = "hx/x/" ++ d.name, .call = motionCmd(d.motion, .extend) };
+    }
+    break :blk arr;
+};
+
+/// `gg` / `<n>gg`: the first line, or line n.
+fn gotoLine(comptime mode: sel.Mode) fn () void {
     return struct {
         fn h() void {
-            const hnd = weft.runRange(motion) orelse return;
-            const r = weft.rangeEnds(hnd) orelse return;
-            weft.yankRange(r.start, r.end, false);
-            weft.runRangeArg("op.delete", hnd);
-            weft.jump(r.start);
-            weft.exitToResting();
+            const line = state.takeRawCount() orelse 1;
+            const target = struct {
+                var n: u32 = 1;
+                fn f(_: usize) ?usize {
+                    var l = weft.lineAt(0);
+                    var k = n;
+                    while (k > 1 and l.end < text.len()) : (k -= 1) l = weft.lineAt(l.end + 1);
+                    return l.start;
+                }
+            };
+            target.n = line;
+            sel.applyMotion(sel.point(target.f), mode, 1);
         }
     }.h;
+}
+
+/// `mm`: the matching bracket, per selection (the `motions` plugin's pair
+/// scan, run at each head).
+fn matchPair(comptime mode: sel.Mode) fn () void {
+    return struct {
+        fn h() void {
+            sel.applyCursorMotion("motion.match-pair", mode);
+        }
+    }.h;
+}
+
+// ── f / t / F / T ───────────────────────────────────────────────────────
+
+var find_how: text.Find = .to;
+var find_mode: sel.Mode = .move;
+var find_count: u32 = 1;
+
+fn findEnter(comptime how: text.Find, comptime mode: sel.Mode) fn () void {
+    return struct {
+        fn h() void {
+            find_how = how;
+            find_mode = mode;
+            find_count = state.takeCount();
+            weft.setMode("helix-find");
+        }
+    }.h;
+}
+
+fn findChar() void {
+    const ch = weft.argStr(0) orelse "";
+    if (find_mode == .extend) weft.setMode("helix-select") else weft.exitToResting();
+    if (ch.len != 1) return;
+    // A count finds the nth occurrence: the selection runs from the cursor to
+    // it, not from the one before.
+    const target = struct {
+        var c: u8 = 0;
+        var n: u32 = 1;
+        fn f(s: weft.Selection) ?weft.Selection {
+            const first = text.findChar(s, c, find_how) orelse return null;
+            var cur = first;
+            var k = n;
+            while (k > 1) : (k -= 1) cur = text.findChar(cur, c, find_how) orelse break;
+            return .{ .anchor = first.anchor, .head = cur.head };
+        }
+    };
+    target.c = ch[0];
+    target.n = find_count;
+    sel.applyMotion(target.f, find_mode, 1);
+}
+
+const find_cmds = [_]weft.CommandEntry{
+    .{ .name = "hx/n/find-to", .call = findEnter(.to, .move) },
+    .{ .name = "hx/n/find-till", .call = findEnter(.till, .move) },
+    .{ .name = "hx/n/find-back-to", .call = findEnter(.back_to, .move) },
+    .{ .name = "hx/n/find-back-till", .call = findEnter(.back_till, .move) },
+    .{ .name = "hx/x/find-to", .call = findEnter(.to, .extend) },
+    .{ .name = "hx/x/find-till", .call = findEnter(.till, .extend) },
+    .{ .name = "hx/x/find-back-to", .call = findEnter(.back_to, .extend) },
+    .{ .name = "hx/x/find-back-till", .call = findEnter(.back_till, .extend) },
+    .{ .name = "hx-find-char", .call = findChar },
+    .{ .name = "hx/n/goto-line", .call = gotoLine(.move) },
+    .{ .name = "hx/x/goto-line", .call = gotoLine(.extend) },
+    .{ .name = "hx/n/match", .call = matchPair(.move) },
+    .{ .name = "hx/x/match", .call = matchPair(.extend) },
+};
+
+// ── `mi` / `ma`: text objects, per selection ────────────────────────────
+
+/// Helix's object keys → the `textobjects` plugin's object names.
+const Obj = struct { keys: []const []const u8, obj: []const u8 };
+const objects = [_]Obj{
+    .{ .keys = &.{"w"}, .obj = "word" },
+    .{ .keys = &.{"W"}, .obj = "WORD" },
+    .{ .keys = &.{"p"}, .obj = "paragraph" },
+    .{ .keys = &.{ "parenleft", "parenright" }, .obj = "paren" },
+    .{ .keys = &.{ "bracketleft", "bracketright" }, .obj = "bracket" },
+    .{ .keys = &.{ "braceleft", "braceright" }, .obj = "brace" },
+    .{ .keys = &.{"quotedbl"}, .obj = "quote-double" },
+    .{ .keys = &.{"apostrophe"}, .obj = "quote-single" },
+    .{ .keys = &.{"grave"}, .obj = "quote-back" },
+    .{ .keys = &.{"f"}, .obj = "function" },
+    .{ .keys = &.{"t"}, .obj = "class" },
+};
+
+fn rangeCmd(comptime cmd: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            sel.applyRangeCommand(cmd, .move);
+        }
+    }.h;
+}
+
+const object_cmds = blk: {
+    var arr: [objects.len * 2]weft.CommandEntry = undefined;
+    for (objects, 0..) |o, i| {
+        arr[2 * i] = .{ .name = "hx/mi/" ++ o.obj, .call = rangeCmd("textobj.inner-" ++ o.obj) };
+        arr[2 * i + 1] = .{ .name = "hx/ma/" ++ o.obj, .call = rangeCmd("textobj.a-" ++ o.obj) };
+    }
+    break :blk arr;
+};
+
+// ── Captures: the key after `r`, `"`, `ms`, `md`, `mr` ──────────────────
+
+fn enter(comptime mode: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            weft.setMode(mode);
+        }
+    }.h;
+}
+
+/// A capture's typed character, copied out of the arg scratch.
+var captured: [4]u8 = undefined;
+fn capture() ?[]const u8 {
+    const ch = weft.argStr(0) orelse return null;
+    if (ch.len == 0 or ch.len > captured.len) return null;
+    @memcpy(captured[0..ch.len], ch);
+    return captured[0..ch.len];
+}
+
+fn replaceChar() void {
+    weft.exitToResting();
+    edit.replaceWith(capture() orelse return);
+}
+
+fn registerChar() void {
+    weft.exitToResting();
+    const ch = capture() orelse return;
+    state.register = state.slotOf(ch[0]);
+}
+
+fn surroundAdd() void {
+    weft.exitToResting();
+    edit.surround("surround.add", capture() orelse return, null);
+}
+fn surroundDelete() void {
+    weft.exitToResting();
+    edit.surround("surround.delete", capture() orelse return, null);
+}
+/// `mr<a><b>`: the first key names the pair to find, the second its
+/// replacement.
+var surround_from: [4]u8 = undefined;
+var surround_from_len: usize = 0;
+fn surroundFrom() void {
+    const ch = capture() orelse return weft.exitToResting();
+    @memcpy(surround_from[0..ch.len], ch);
+    surround_from_len = ch.len;
+    weft.setMode("helix-surround-to");
+}
+fn surroundTo() void {
+    weft.exitToResting();
+    const ch = capture() orelse return;
+    edit.surround("surround.replace", surround_from[0..surround_from_len], ch);
+}
+
+const captures = [_][2][]const u8{
+    .{ "helix-replace", "hx-replace-with" },
+    .{ "helix-find", "hx-find-char" },
+    .{ "helix-register", "hx-register-char" },
+    .{ "helix-surround-add", "hx-surround-add-char" },
+    .{ "helix-surround-delete", "hx-surround-delete-char" },
+    .{ "helix-surround-from", "hx-surround-from-char" },
+    .{ "helix-surround-to", "hx-surround-to-char" },
+};
+
+// ── Counts ──────────────────────────────────────────────────────────────
+
+fn countDigit(comptime d: u32) fn () void {
+    return struct {
+        fn h() void {
+            state.digit(d);
+        }
+    }.h;
+}
+
+const count_cmds = blk: {
+    var arr: [10]weft.CommandEntry = undefined;
+    for (0..10) |d| arr[d] = .{ .name = std.fmt.comptimePrint("hx-count-{d}", .{d}), .call = countDigit(d) };
+    break :blk arr;
+};
+
+// ── The command table ───────────────────────────────────────────────────
+
+fn thunk(comptime f: anytype, comptime arg: anytype) fn () void {
+    return struct {
+        fn h() void {
+            f(arg);
+        }
+    }.h;
+}
+
+fn withCount(comptime f: fn (bool, u32) void, comptime arg: bool) fn () void {
+    return struct {
+        fn h() void {
+            f(arg, state.takeCount());
+        }
+    }.h;
+}
+
+fn selectLines() void {
+    sel.selectLines(state.takeCount());
 }
 
 const base_cmds = [_]weft.CommandEntry{
     .{ .name = "helix-mode", .call = enterHelix },
-    .{ .name = "hx-insert", .call = hxInsert },
-    .{ .name = "hx-append", .call = hxAppend },
-    .{ .name = "hx-insert-line-start", .call = hxInsertLineStart },
-    .{ .name = "hx-append-line-end", .call = hxAppendLineEnd },
-    .{ .name = "hx-open-below", .call = hxOpenBelow },
-    .{ .name = "hx-open-above", .call = hxOpenAbove },
     .{ .name = "hx-normal", .call = hxNormal },
-    .{ .name = "hx-delete-op", .call = enterDeleteOp },
-    .{ .name = "hx-select-line", .call = hxSelectLine },
-    .{ .name = "hx-collapse", .call = hxCollapse },
-    .{ .name = "hx-delete", .call = hxDelete },
-    .{ .name = "hx-change", .call = hxChange },
-    .{ .name = "hx-yank", .call = hxYank },
-    .{ .name = "hx-paste", .call = hxPaste },
-    .{ .name = "hx-paste-before", .call = hxPasteBefore },
-    .{ .name = "hx-delete-line", .call = hxDeleteLine },
-    .{ .name = "hx-goto-start", .call = hxGotoStart },
-    .{ .name = "hx-goto-end", .call = hxGotoEnd },
+    .{ .name = "hx-insert-exit", .call = hxInsertExit },
+    .{ .name = "hx-select", .call = enter("helix-select") },
+    .{ .name = "hx-insert", .call = thunk(edit.insertAt, .before) },
+    .{ .name = "hx-append", .call = thunk(edit.insertAt, .after) },
+    .{ .name = "hx-insert-line-start", .call = thunk(edit.insertAt, .line_start) },
+    .{ .name = "hx-append-line-end", .call = thunk(edit.insertAt, .line_end) },
+    .{ .name = "hx-open-below", .call = thunk(edit.openLine, true) },
+    .{ .name = "hx-open-above", .call = thunk(edit.openLine, false) },
+    // Reshaping the selections.
+    .{ .name = "hx-select-line", .call = selectLines },
+    .{ .name = "hx-line-bounds", .call = sel.toLineBounds },
+    .{ .name = "hx-select-all", .call = sel.selectAll },
+    .{ .name = "hx-collapse", .call = sel.collapse },
+    .{ .name = "hx-flip", .call = sel.flip },
+    .{ .name = "hx-forward", .call = sel.ensureForward },
+    .{ .name = "hx-keep-primary", .call = sel.keepPrimary },
+    .{ .name = "hx-remove-primary", .call = sel.removePrimary },
+    .{ .name = "hx-rotate-next", .call = thunk(sel.rotate, true) },
+    .{ .name = "hx-rotate-prev", .call = thunk(sel.rotate, false) },
+    .{ .name = "hx-copy-next-line", .call = withCount(sel.copyToLine, true) },
+    .{ .name = "hx-copy-prev-line", .call = withCount(sel.copyToLine, false) },
+    .{ .name = "hx-trim", .call = sel.trim },
+    .{ .name = "hx-split-lines", .call = sel.splitLines },
+    .{ .name = "hx-expand", .call = sel.expand },
+    .{ .name = "hx-shrink", .call = sel.shrink },
+    .{ .name = "hx-sibling-next", .call = rangeCmd("ts.sibling-next") },
+    .{ .name = "hx-sibling-prev", .call = rangeCmd("ts.sibling-prev") },
+    .{ .name = "hx-function-next", .call = rangeCmd("ts.function-next") },
+    .{ .name = "hx-function-prev", .call = rangeCmd("ts.function-prev") },
+    // Editing the selections.
+    .{ .name = "hx-delete", .call = thunk(edit.delete, false) },
+    .{ .name = "hx-delete-keep", .call = thunk(edit.delete, true) },
+    .{ .name = "hx-change", .call = thunk(edit.change, false) },
+    .{ .name = "hx-change-keep", .call = thunk(edit.change, true) },
+    .{ .name = "hx-yank", .call = edit.yank },
+    .{ .name = "hx-paste", .call = thunk(edit.paste, true) },
+    .{ .name = "hx-paste-before", .call = thunk(edit.paste, false) },
+    .{ .name = "hx-replace-register", .call = edit.replaceWithRegister },
+    .{ .name = "hx-replace", .call = enter("helix-replace") },
+    .{ .name = "hx-replace-with", .call = replaceChar },
+    .{ .name = "hx-case-toggle", .call = thunk(edit.setCase, .toggle) },
+    .{ .name = "hx-case-lower", .call = thunk(edit.setCase, .lower) },
+    .{ .name = "hx-case-upper", .call = thunk(edit.setCase, .upper) },
+    .{ .name = "hx-join", .call = edit.join },
+    .{ .name = "hx-indent", .call = thunk(edit.onLines, "op.indent") },
+    .{ .name = "hx-dedent", .call = thunk(edit.onLines, "op.dedent") },
+    .{ .name = "hx-comment", .call = thunk(edit.onLines, "op.comment") },
+    .{ .name = "hx-add-line-below", .call = thunk(edit.addBlankLine, true) },
+    .{ .name = "hx-add-line-above", .call = thunk(edit.addBlankLine, false) },
+    .{ .name = "hx-goto-last-edit", .call = edit.gotoLastEdit },
+    .{ .name = "hx-goto-file", .call = gotoFile },
+    .{ .name = "hx-view-sticky", .call = enter("helix-view") },
+    // Captures.
+    .{ .name = "hx-register", .call = enter("helix-register") },
+    .{ .name = "hx-register-char", .call = registerChar },
+    .{ .name = "hx-surround-add", .call = enter("helix-surround-add") },
+    .{ .name = "hx-surround-add-char", .call = surroundAdd },
+    .{ .name = "hx-surround-delete", .call = enter("helix-surround-delete") },
+    .{ .name = "hx-surround-delete-char", .call = surroundDelete },
+    .{ .name = "hx-surround-replace", .call = enter("helix-surround-from") },
+    .{ .name = "hx-surround-from-char", .call = surroundFrom },
+    .{ .name = "hx-surround-to-char", .call = surroundTo },
+    // The operators the verbs run per selection (not for binding).
+    .{ .name = "hx-op-put", .call = edit.opPut },
+    .{ .name = "hx-op-join", .call = edit.opJoin },
     // The same file picker vim and emacs register under this name, so a
     // config's `find-file` bind means the same thing under every grammar.
     .{ .name = "find-file", .call = findFile },
@@ -154,35 +464,34 @@ const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
     break :blk arr;
 };
 
-/// Generated: `hx/n/<motion>` (move) for every motion, `hx/d/<motion>` (delete)
-/// for the `op` ones. Names exist only for key binding.
-const gen_cmds = blk: {
-    var n: usize = motions.len;
-    for (motions) |name| {
-        for (mtable) |m| {
-            if (m.op and std.mem.eql(u8, m.motion, name)) {
-                n += 1;
-                break;
-            }
-        }
-    }
-    var arr: [n]weft.CommandEntry = undefined;
-    var i: usize = 0;
-    for (motions) |name| {
-        arr[i] = .{ .name = "hx/n/" ++ name, .call = moveByMotion(name) };
-        i += 1;
-        for (mtable) |m| {
-            if (m.op and std.mem.eql(u8, m.motion, name)) {
-                arr[i] = .{ .name = "hx/d/" ++ name, .call = deleteByMotion(name) };
-                i += 1;
-                break;
-            }
-        }
+const cmds = base_cmds ++ ex_cmds ++ motion_cmds ++ find_cmds ++ object_cmds ++ count_cmds;
+
+/// Commands that keep a pending count or register instead of clearing it:
+/// the prefixes themselves (a digit, `"` and its key) and the operators a
+/// verb runs per selection, which dispatch while that verb is still running.
+/// Every other command clears both after it runs (`settle`).
+const preserves = blk: {
+    @setEvalBranchQuota(20000);
+    var arr: [cmds.len]bool = @splat(false);
+    for (cmds, 0..) |c, i| {
+        arr[i] = std.mem.startsWith(u8, c.name, "hx-count-") or
+            std.mem.startsWith(u8, c.name, "hx-register") or
+            std.mem.startsWith(u8, c.name, "hx-op-");
     }
     break :blk arr;
 };
 
-const cmds = base_cmds ++ ex_cmds ++ gen_cmds;
+fn settle(index: usize) void {
+    if (preserves[index]) return;
+    state.count = 0;
+    state.register = 0;
+}
+
+// ── Keys ────────────────────────────────────────────────────────────────
+
+fn bindMotion(mode: []const u8, key: []const u8, intention: ?[]const u8, cmd: []const u8) void {
+    if (intention) |i| weft.bindKeys(mode, key, &.{ i, cmd }) else weft.bindKey(mode, key, cmd);
+}
 
 fn initExtra() void {
 
@@ -190,15 +499,37 @@ fn initExtra() void {
     // nothing, so nothing can leak into it. `helix-insert` falls back to the
     // core `default` floor for its BINDINGS (Return -> insert-newline, the
     // std.editing.insert-line-break arm; Backspace, Tab-as-indent) the same
-    // way vim's `insert` mode does.
+    // way vim's `insert` mode does. Typing inserts at every caret (core's
+    // `editEach`), so `i` after `C` types on both lines.
     weft.setFallback("helix-insert", "default");
     weft.textInput("helix-insert", "insert-text");
 
-    // Movement: every motion key leads with its navigation intention.
-    inline for (mtable) |m| {
-        if (m.intention) |intent| {
-            weft.bindKeys("helix-normal", m.key, &.{ intent, "hx/n/" ++ m.motion });
-        } else weft.bindKey("helix-normal", m.key, "hx/n/" ++ m.motion);
+    // Select mode: helix-normal with motions that EXTEND. Everything else
+    // falls through to helix-normal.
+    weft.setFallback("helix-select", "helix-normal");
+
+    // Motions: move in normal, extend in select.
+    inline for (motion_keys) |m| {
+        bindMotion("helix-normal", m.key, m.intention, "hx/n/" ++ m.motion);
+        bindMotion("helix-select", m.key, m.intention, "hx/x/" ++ m.motion);
+    }
+    const finds = [_][2][]const u8{ .{ "f", "find-to" }, .{ "t", "find-till" }, .{ "F", "find-back-to" }, .{ "T", "find-back-till" } };
+    for (finds) |f| {
+        var nb: [32]u8 = undefined;
+        var xb: [32]u8 = undefined;
+        weft.bindKey("helix-normal", f[0], std.fmt.bufPrint(&nb, "hx/n/{s}", .{f[1]}) catch continue);
+        weft.bindKey("helix-select", f[0], std.fmt.bufPrint(&xb, "hx/x/{s}", .{f[1]}) catch continue);
+    }
+    weft.bindKey("helix-normal", "g g", "hx/n/goto-line");
+    weft.bindKey("helix-select", "g g", "hx/x/goto-line");
+    weft.bindKey("helix-normal", "m m", "hx/n/match");
+    weft.bindKey("helix-select", "m m", "hx/x/match");
+
+    // Counts: digits accumulate, the next verb or motion repeats.
+    for (0..10) |d| {
+        var kb: [2]u8 = .{ '0' + @as(u8, @intCast(d)), 0 };
+        var cb: [16]u8 = undefined;
+        weft.bindKey("helix-normal", kb[0..1], std.fmt.bufPrint(&cb, "hx-count-{d}", .{d}) catch continue);
     }
 
     // Shared intentions (doc/contextual-workspace-architecture.md §10.2), same
@@ -207,8 +538,7 @@ fn initExtra() void {
     // meaning over text, so the intention IS the whole binding: an unoffered
     // intention does nothing, which is what helix does with those keys. (The
     // line-break arm of Return lives in `helix-insert`, via `default`.) `q`
-    // keeps NO binding: real Helix records macros there, and binding vim's
-    // back semantics onto it would misrepresent helix's own feel.
+    // keeps NO binding: real Helix records macros there (phase 5).
     const intended = [_][3][]const u8{
         .{ "u", "std.history.undo", "undo" },
         .{ "U", "std.history.redo", "redo" },
@@ -220,16 +550,6 @@ fn initExtra() void {
     weft.bindKeys("helix-normal", "KP_Enter", &.{"std.target.activate"});
     weft.bindKeys("helix-normal", "minus", &.{"std.hierarchy.step-out"});
 
-    const nb = [_][2][]const u8{
-        .{ "i", "hx-insert" },            .{ "a", "hx-append" },
-        .{ "I", "hx-insert-line-start" }, .{ "A", "hx-append-line-end" },
-        .{ "o", "hx-open-below" },        .{ "O", "hx-open-above" },
-        .{ "x", "hx-select-line" },       .{ "semicolon", "hx-collapse" },
-        .{ "c", "hx-change" },            .{ "P", "hx-paste-before" },
-        .{ "colon", "helix-ex" },
-    };
-    for (nb) |b| weft.bindKey("helix-normal", b[0], b[1]);
-
     // Transfer: `y` captures, `p` places, and `d` takes the selection WITH it.
     // Each leads with the standard word and keeps its text behaviour as the
     // fallback arm.
@@ -237,38 +557,118 @@ fn initExtra() void {
     weft.bindKeys("helix-normal", "p", &.{ "std.transfer.paste", "hx-paste" });
     weft.bindKeys("helix-normal", "d", &.{ "std.transfer.delete-to-register", "hx-delete" });
 
-    // `d` with nothing selected waits for what to delete (a tiny
-    // operator-pending mode): a motion, or `d` again for the line. The
-    // one-selection stand-in for select-then-act, until motions select.
-    weft.menuMode("helix-op");
-    weft.setFallback("helix-op", "helix-normal");
-    weft.bindKey("helix-op", "Escape", "hx-normal");
-    inline for (mtable) |m| if (m.op) weft.bindKey("helix-op", m.key, "hx/d/" ++ m.motion);
-    weft.bindKey("helix-op", "d", "hx-delete-line"); // dd
+    const normal = [_][2][]const u8{
+        .{ "i", "hx-insert" },               .{ "a", "hx-append" },
+        .{ "I", "hx-insert-line-start" },    .{ "A", "hx-append-line-end" },
+        .{ "o", "hx-open-below" },           .{ "O", "hx-open-above" },
+        .{ "v", "hx-select" },               .{ "colon", "helix-ex" },
+        .{ "x", "hx-select-line" },          .{ "X", "hx-line-bounds" },
+        .{ "percent", "hx-select-all" },     .{ "semicolon", "hx-collapse" },
+        .{ "M-semicolon", "hx-flip" },       .{ "M-colon", "hx-forward" },
+        .{ "comma", "hx-keep-primary" },     .{ "M-comma", "hx-remove-primary" },
+        .{ "parenright", "hx-rotate-next" }, .{ "parenleft", "hx-rotate-prev" },
+        .{ "C", "hx-copy-next-line" },       .{ "M-C", "hx-copy-prev-line" },
+        .{ "underscore", "hx-trim" },        .{ "M-s", "hx-split-lines" },
+        .{ "M-d", "hx-delete-keep" },        .{ "c", "hx-change" },
+        .{ "M-c", "hx-change-keep" },        .{ "P", "hx-paste-before" },
+        .{ "R", "hx-replace-register" },     .{ "r", "hx-replace" },
+        .{ "asciitilde", "hx-case-toggle" }, .{ "grave", "hx-case-lower" },
+        .{ "M-grave", "hx-case-upper" },     .{ "J", "hx-join" },
+        .{ "greater", "hx-indent" },         .{ "less", "hx-dedent" },
+        .{ "quotedbl", "hx-register" },      .{ "Z", "hx-view-sticky" },
+        // Tree-sitter selection (phase 6), per selection over the `ts` plugin.
+        .{ "M-o", "hx-expand" },             .{ "M-Up", "hx-expand" },
+        .{ "M-i", "hx-shrink" },             .{ "M-Down", "hx-shrink" },
+        .{ "M-n", "hx-sibling-next" },       .{ "M-Right", "hx-sibling-next" },
+        .{ "M-p", "hx-sibling-prev" },       .{ "M-Left", "hx-sibling-prev" },
+        // Scrolling, straight to core's viewport commands.
+        .{ "C-d", "scroll-half-down" },      .{ "C-u", "scroll-half-up" },
+        .{ "C-f", "scroll-page-down" },      .{ "C-b", "scroll-page-up" },
+    };
+    for (normal) |b| weft.bindKey("helix-normal", b[0], b[1]);
+    weft.bindKey("helix-select", "v", "hx-normal");
+    weft.bindKey("helix-select", "Escape", "hx-normal");
+    weft.bindKey("helix-insert", "Escape", "hx-insert-exit");
 
-    // Insert mode: Escape back to normal.
-    weft.bindKey("helix-insert", "Escape", "hx-normal");
+    // `g` goto: the motions above, plus the places that are not motions.
+    const goto = [_][2][]const u8{
+        .{ "g f", "hx-goto-file" },            .{ "g period", "hx-goto-last-edit" },
+        .{ "g t", "scroll-goto-view-top" },    .{ "g c", "scroll-goto-view-middle" },
+        .{ "g b", "scroll-goto-view-bottom" }, .{ "g d", "goto-definition" },
+        .{ "g y", "goto-type-definition" },    .{ "g r", "references" },
+        .{ "g i", "goto-implementation" },     .{ "g a", "buffer-back" },
+        .{ "g n", "buffer-next" },             .{ "g p", "buffer-previous" },
+    };
+    for (goto) |b| weft.bindKey("helix-normal", b[0], b[1]);
 
-    // Leader + goto as key SEQUENCES in helix-normal (no menu modes): `space` /
-    // `g` are just the first key of chords which-key completes. A config
-    // (helix.js) layers a fuller `space …` tree at prio_config.
-    weft.bindKey("helix-normal", "space space", "pick-commands"); // SPC SPC — M-x
-    weft.bindKey("helix-normal", "space f f", "find-file");
-    weft.bindKey("helix-normal", "space b b", "buf-pick"); // if buffers loaded
-    weft.bindKey("helix-normal", "space g g", "git-status"); // if git loaded
-    weft.bindKey("helix-normal", "g g", "hx-goto-start");
-    weft.bindKey("helix-normal", "g e", "hx-goto-end");
+    // `m` match: `mm` above; `mi`/`ma` + an object over `textobjects`; and
+    // `ms`/`md`/`mr` + characters over the `surround` plugin.
+    inline for (objects) |o| inline for (o.keys) |k| {
+        weft.bindKey("helix-normal", "m i " ++ k, "hx/mi/" ++ o.obj);
+        weft.bindKey("helix-normal", "m a " ++ k, "hx/ma/" ++ o.obj);
+    };
+    weft.bindKey("helix-normal", "m s", "hx-surround-add");
+    weft.bindKey("helix-normal", "m d", "hx-surround-delete");
+    weft.bindKey("helix-normal", "m r", "hx-surround-replace");
+
+    // Single-key captures: the next key is the argument, whatever it is.
+    for (captures) |c| {
+        weft.textInput(c[0], c[1]);
+        weft.bindKey(c[0], "Escape", "hx-normal");
+    }
+
+    // `[` / `]` pairs (paragraph motions are in the motion table).
+    const pairs = [_][2][]const u8{
+        .{ "bracketright d", "next-diagnostic" },       .{ "bracketleft d", "prev-diagnostic" },
+        .{ "bracketright f", "hx-function-next" },      .{ "bracketleft f", "hx-function-prev" },
+        .{ "bracketright space", "hx-add-line-below" }, .{ "bracketleft space", "hx-add-line-above" },
+    };
+    for (pairs) |b| weft.bindKey("helix-normal", b[0], b[1]);
+
+    // `z` view (one key, then back) and `Z` (sticky: stays until Escape).
+    weft.stickyMenu("helix-view");
+    const view = [_][2][]const u8{
+        .{ "z", "center-line" },              .{ "c", "center-line" },
+        .{ "t", "scroll-line-to-top" },       .{ "b", "scroll-line-to-bottom" },
+        .{ "j", "scroll-line-down" },         .{ "k", "scroll-line-up" },
+        .{ "Down", "scroll-line-down" },      .{ "Up", "scroll-line-up" },
+        .{ "C-f", "scroll-page-down" },       .{ "C-b", "scroll-page-up" },
+        .{ "Page_Down", "scroll-page-down" }, .{ "Page_Up", "scroll-page-up" },
+        .{ "C-d", "scroll-half-down" },       .{ "C-u", "scroll-half-up" },
+    };
+    for (view) |b| {
+        var kb: [32]u8 = undefined;
+        weft.bindKey("helix-normal", std.fmt.bufPrint(&kb, "z {s}", .{b[0]}) catch continue, b[1]);
+        weft.bindKey("helix-view", b[0], b[1]);
+    }
+
+    // Space mode, laid out as Helix's own. A config (helix.js) layers the
+    // rest of its leader over it at prio_config. The clipboard keys use the
+    // selected register until a clipboard door exists (doc/configs.md §3.3).
+    const space = [_][2][]const u8{
+        .{ "space f", "find-file" },            .{ "space F", "find-file" },
+        .{ "space b", "buf-pick" },             .{ "space e", "files" },
+        .{ "space k", "hover" },                .{ "space s", "symbols" },
+        .{ "space a", "code-actions" },         .{ "space r", "rename" },
+        .{ "space h", "references" },           .{ "space c", "hx-comment" },
+        .{ "space g", "git-status" },           .{ "space slash", "grep" },
+        .{ "space question", "pick-commands" }, .{ "space y", "hx-yank" },
+        .{ "space p", "hx-paste" },             .{ "space P", "hx-paste-before" },
+        .{ "space R", "hx-replace-register" },
+    };
+    for (space) |b| weft.bindKey("helix-normal", b[0], b[1]);
 
     // The `:` command line (helix mode namespace). Same shape as vim's `ex`:
     // printable → hx-ex-type, Backspace/Enter/Escape edit/run/cancel.
     ex.install();
 
-    // Cursor: block in normal, bar in insert — helix's own config, by ITS mode
-    // names (proving set-cursor doesn't assume vim's).
+    // Cursor: block in normal and select, bar in insert — helix's own config,
+    // by ITS mode names (proving set-cursor doesn't assume vim's).
     weft.runStr2("set-cursor", "helix-normal", "block");
+    weft.runStr2("set-cursor", "helix-select", "block");
     weft.runStr2("set-cursor", "helix-insert", "bar");
-    weft.runStr2("set-cursor", "helix-op", "underline");
     weft.runStr2("cursor-blink", "helix-insert", "on");
+    for (captures) |c| weft.runStr2("set-cursor", c[0], "underline");
 
     // §10.4: helix's answer for each posture (and, implicitly, that
     // `helix-normal` is a mode a buffer rests in). Like vim's `normal`,
@@ -289,156 +689,12 @@ fn initExtra() void {
     weft.setMode("helix-normal");
 }
 
-// ── The selection ───────────────────────────────────────────────────────
-
-/// Helix's unit of action: the selection, or the one character under the
-/// cursor when nothing is selected (a helix selection is never empty). The
-/// ONE place the verbs read what they act on — one selection now, each of
-/// several once core holds them.
-fn span() weft.Range {
-    if (weft.selection()) |s| if (s.end > s.start) return s;
-    const cur = weft.cursor();
-    return .{ .start = cur, .end = @min(cur + 1, weft.byteLen()) };
-}
-
-/// Whether `r` is whole lines: from a line start through a line's newline
-/// (or the end of the buffer). A yank of one pastes linewise.
-fn isLinewise(r: weft.Range) bool {
-    if (r.end <= r.start) return false;
-    if (weft.lineAt(r.start).start != r.start) return false;
-    if (r.end == weft.byteLen()) return true;
-    return weft.lineAt(r.end - 1).end + 1 == r.end;
-}
-
-fn hasSelection() bool {
-    const s = weft.selection() orelse return false;
-    return s.end > s.start;
-}
-
-/// `x`: select the cursor's line, newline included. On a selection that is
-/// already whole lines, extend it by the next line — so `x x d` takes two.
-fn hxSelectLine() void {
-    const len = weft.byteLen();
-    if (weft.selection()) |s| {
-        if (isLinewise(s) and s.end < len) {
-            const next = weft.lineAt(s.end);
-            weft.setSelection(.{ .start = s.start, .end = @min(next.end + 1, len) });
-            return;
-        }
-    }
-    const l = weft.lineAt(weft.cursor());
-    weft.setSelection(.{ .start = l.start, .end = @min(l.end + 1, len) });
-}
-
-/// `;`: collapse the selection onto the cursor.
-fn hxCollapse() void {
-    weft.run("clear-selection");
-}
-
-/// `d`'s text arm: take the selection into the register and delete it. With
-/// nothing selected, wait for a motion (`helix-op`).
-fn hxDelete() void {
-    if (!hasSelection()) return enterDeleteOp();
-    const s = span();
-    weft.yankRange(s.start, s.end, isLinewise(s));
-    weft.run("clear-selection");
-    weft.edit(s, "");
-    weft.jump(s.start);
-}
-
-/// `c`: delete the selection (or the character under the cursor) into the
-/// register, then insert where it was.
-fn hxChange() void {
-    const s = span();
-    if (onText() and s.end > s.start) {
-        weft.yankRange(s.start, s.end, false);
-        weft.run("clear-selection");
-        weft.edit(s, "");
-        weft.jump(s.start);
-    }
-    enterInsert();
-}
-
-/// `y`'s text arm: capture the selection (or the character under the
-/// cursor). The selection stays, as in helix.
-fn hxYank() void {
-    const s = span();
-    if (s.end <= s.start) return;
-    weft.yankRange(s.start, s.end, isLinewise(s));
-    weft.flash(s.start, s.end);
-}
-
-var paste_buf: [(1 << 16) + 1]u8 = undefined;
-
-/// `p`'s text arm: place the register AFTER the selection. A linewise
-/// register lands on the line after it.
-fn hxPaste() void {
-    const s = span();
-    const r = weft.registerText();
-    if (weft.registerLinewiseIn(0)) {
-        const l = weft.lineAt(if (s.end > s.start) s.end - 1 else s.start);
-        if (l.end >= weft.byteLen()) {
-            // The last line has no newline to land after: synthesize one.
-            if (r.len + 1 > paste_buf.len) return;
-            paste_buf[0] = '\n';
-            @memcpy(paste_buf[1 .. 1 + r.len], r);
-            weft.edit(.{ .start = l.end, .end = l.end }, paste_buf[0 .. 1 + r.len]);
-            weft.pasteAt(l.end + 1);
-            return;
-        }
-        return placeAt(l.end + 1, r);
-    }
-    placeAt(s.end, r);
-}
-
-/// `P`: place the register BEFORE the selection — the focused view's own
-/// paste-before where one answers, since no standard word names placement.
-fn hxPasteBefore() void {
-    switch (weft.semanticAction(semantic_action.paste_before)) {
-        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => return,
-        .unavailable, .failed, _ => {},
-    }
-    const s = span();
-    const r = weft.registerText();
-    placeAt(if (weft.registerLinewiseIn(0)) weft.lineAt(s.start).start else s.start, r);
-}
-
-/// Insert register text at `off` and re-stamp any ferried identity over it,
-/// so a `d` then `p` of a projection row is a move.
-fn placeAt(off: usize, r: []const u8) void {
-    if (r.len == 0) return;
-    weft.run("clear-selection");
-    weft.edit(.{ .start = off, .end = off }, r);
-    weft.pasteAt(off);
-    weft.flash(off, off + r.len);
-}
-
-/// `dd` (from `helix-op`): delete the line and its newline, linewise.
-fn hxDeleteLine() void {
-    const len = weft.byteLen();
-    const l = weft.lineAt(weft.cursor());
-    const end = @min(l.end + 1, len);
-    weft.yankRange(l.start, end, true);
-    if (weft.anchorRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
-    weft.jump(l.start);
-    weft.exitToResting();
-}
-
-/// `gg` / `ge`: the first line, the last line.
-fn hxGotoStart() void {
-    weft.run("clear-selection");
-    weft.jump(0);
-}
-fn hxGotoEnd() void {
-    weft.run("clear-selection");
-    weft.jump(weft.lineAt(weft.byteLen()).start);
-}
-
 // ── Modes ───────────────────────────────────────────────────────────────
 
 fn enterHelix() void {
     weft.setMode("helix-normal");
 }
+
 /// Escape RETURNS to the entry's declared resting state (§10.4) — it never
 /// picks one, so a projection's own resting mode survives an edit + Escape.
 fn hxNormal() void {
@@ -446,65 +702,35 @@ fn hxNormal() void {
     weft.exitToResting();
 }
 
-/// The ONE door into helix's insert-like state. An entry that declared a
-/// non-`text` posture does not take it: the grammar declines instead of
-/// parking the user where every key would be refused (§10.4).
-fn enterInsert() void {
-    switch (weft.posture()) {
-        .text, .field => weft.setMode("helix-insert"),
-        .structural, .capture => weft.echo("this entry takes no text"),
-    }
-}
-/// Whether the entry's own text is what the keys edit. A focused field or a
-/// listing owns its caret; helix moves only a caret it holds.
-fn onText() bool {
-    return weft.posture() == .text;
-}
-/// Collapse the selection to one place, then type there: `i` before it, `a`
-/// after it, `I`/`A` at the line's ends.
-fn insertAt(offset: usize) void {
-    if (onText()) {
-        weft.run("clear-selection");
-        weft.jump(offset);
-    }
-    enterInsert();
-}
-fn hxInsert() void {
-    insertAt(span().start);
-}
-fn hxAppend() void {
-    insertAt(span().end);
-}
-fn hxInsertLineStart() void {
-    insertAt(weft.lineAt(weft.cursor()).start);
-}
-fn hxAppendLineEnd() void {
-    insertAt(weft.lineAt(weft.cursor()).end);
-}
-/// `o`/`O`: a structured view answers the insertion intention (a new row);
-/// text opens a line.
-fn hxOpenBelow() void {
-    if (weft.invokeIntention("std.editing.insert-after") == .invoked) return enterInsert();
-    if (!onText()) return enterInsert();
-    weft.run("clear-selection");
-    weft.jump(weft.lineAt(weft.cursor()).end);
-    weft.run("insert-newline");
-    enterInsert();
-}
-fn hxOpenAbove() void {
-    if (weft.invokeIntention("std.editing.insert-before") == .invoked) return enterInsert();
-    if (!onText()) return enterInsert();
-    weft.run("clear-selection");
-    weft.jump(weft.lineAt(weft.cursor()).start);
-    weft.run("insert-newline");
-    weft.run("cursor-up");
-    enterInsert();
-}
-fn enterDeleteOp() void {
-    weft.setMode("helix-op");
+/// Leaving insert: the same, and mark where the typing ended (`g.`).
+fn hxInsertExit() void {
+    edit.noteEdit();
+    hxNormal();
 }
 
 // ── Files ───────────────────────────────────────────────────────────────
+
+/// `gf`: open the file the primary selection names (or, with a caret, the
+/// path-like run around it).
+fn gotoFile() void {
+    if (!sel.load()) return;
+    const s = sel.items[sel.primary];
+    var r = s.range();
+    if (r.end == r.start) {
+        const isPath = struct {
+            fn f(c: u8) bool {
+                return !(c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '\'' or c == '(' or c == ')' or c == '<' or c == '>');
+            }
+        }.f;
+        while (r.start > 0 and isPath(text.at(r.start - 1) orelse ' ')) r.start -= 1;
+        while (isPath(text.at(r.end) orelse ' ')) r.end += 1;
+    }
+    if (r.end == r.start) return;
+    var buf: [1024]u8 = undefined;
+    const name = weft.slice(r.start, @min(r.end, r.start + buf.len));
+    @memcpy(buf[0..name.len], name);
+    weft.runStr("open", buf[0..name.len]);
+}
 
 fn findFile() void {
     weft.pickCategory("file");
@@ -523,5 +749,5 @@ fn onPickAccept(pick_id: u32) void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept }).exportAll();
 }

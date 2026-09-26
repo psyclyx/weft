@@ -785,20 +785,21 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
     try t.expectEqualStrings("hx-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
     // A motion leads with its navigation intention (a listing answers it) and
-    // falls back to helix's generated move wrapper over the shared `motions`.
+    // falls back to helix's own selecting motion (`hx/n/…`); select mode binds
+    // the extending twin (`hx/x/…`) of the same key.
     const left = env.keymap.lookupArms(env.head.currentMode(), "h").?;
     try t.expectEqualStrings("std.navigation.left", left[0]);
-    try t.expectEqualStrings("hx/n/motion.left", left[1]);
+    try t.expectEqualStrings("hx/n/left", left[1]);
     const word = env.keymap.lookupArms(env.head.currentMode(), "w").?;
     try t.expectEqualStrings("std.navigation.word-next", word[0]);
-    try t.expectEqualStrings("hx/n/motion.word-fwd", word[1]);
-    // op-pending stays a menu mode (which-key renders its motions), but the
-    // leader is now a key SEQUENCE — no `helix-leader` mode: `space` opens a
-    // chord and `space g g` completes to git-status through the sequence engine.
+    try t.expectEqualStrings("hx/n/word-next", word[1]);
+    try t.expectEqualStrings("hx/x/word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
+    // No operator-pending mode: a verb acts on the selection. `Z` is the one
+    // sticky menu; the leader is a key SEQUENCE — no `helix-leader` mode:
+    // `space` opens a chord and `space g` completes to git-status.
     try t.expect(!env.keymap.modeHasTag("helix-leader", "menu"));
-    try t.expect(env.keymap.modeHasTag("helix-op", "menu"));
+    try t.expect(env.keymap.modeHasTag("helix-view", "menu"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
-    try t.expect((try env.head.feed(gpa, &env.keymap, "g")) == .pending);
     try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
 }
 
