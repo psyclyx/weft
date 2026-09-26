@@ -41,6 +41,7 @@ weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " while typing
 weft.plugin("consult");     // fuzzy-jump navigation (consult-line, imenu)
+weft.plugin("find");        // the incremental find/replace bar (C-f, C-h, F3)
 weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
@@ -136,9 +137,14 @@ bindWorkspace("C-w", "close");
 bindWorkspace("C-Tab", "buffer-next");
 bindWorkspace("C-b", "ide-toggle-sidebar");
 
-// Search and jump. C-f is in-buffer fuzzy search until the find bar lands
-// (doc/configs.md §3.4).
-weft.bind("ide", "C-f", "consult-line");
+// Search and jump. C-f opens the find bar and C-h the same bar with a
+// replacement field (doc/configs.md §3.4); F3 / S-F3 step through the last
+// search's matches whether the bar is open or not. The bar's own keys
+// (Enter, M-r/M-c/M-w, M-Return, C-M-Return, Escape) are the `find` mode's.
+weft.bind("ide", "C-f", "find");
+weft.bind("ide", "C-h", "find-replace");
+weft.bind("ide", "F3", "find-next");
+weft.bind("ide", "S-F3", "find-prev");
 weft.bind("ide", "C-g", "goto-line");
 
 // The language server, in source.

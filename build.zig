@@ -463,6 +463,8 @@ const guests = [_]Guest{
     .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
     // Jump labels on f/F/t/T over the visible range; composes with operators.
     .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
+    // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
+    .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.regex} },
 };
 
 pub fn build(b: *std.Build) void {
@@ -1110,6 +1112,18 @@ pub fn build(b: *std.Build) void {
     });
     const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
     test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
+
+    // The find bar's pure half (query → regex, the prefilter, the match
+    // planning) imports nothing but `weft_regex`, so it too runs natively —
+    // against the same library module the tests above exercise.
+    const find_search = b.createModule(.{
+        .root_source_file = b.path("src/plugins/find/search.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    find_search.addImport("weft_regex", regex_lib);
+    const find_search_tests = b.addTest(.{ .root_module = find_search });
+    test_step.dependOn(&b.addRunArtifact(find_search_tests).step);
 
     // ── The recordable instruments ──
     // The dispatch-latency baseline and the popup-layout goldens share ONE

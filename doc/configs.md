@@ -282,6 +282,22 @@ grammar's choice: ide mirrors the unnamed register, and vim keeps `"+`.
 An incremental find bar (a bottom surface) on the 0.2 regex: C-f, F3/S-F3, C-h replace,
 and highlight of every match. Before 0.2 lands, C-f falls back to `consult-line`.
 
+**Built.** `src/plugins/find`: a `find` text-input mode plus a `.bottom` surface. Each
+keystroke re-searches and selects the first match at or after where the search began,
+paints the matches around it on a `find` annotation layer (closed with the bar), and
+shows `n/m`. Enter/F3 and S-Enter/S-F3 step and wrap; M-r, M-c (smart → on → off) and
+M-w toggle regex, case and whole word; Up/Down walk the history. C-h adds the
+replacement field (`$0`–`$9` in regex mode): Enter replaces one, C-M-Return replaces all
+as one undo unit, and M-Return makes every match a selection. The pure half
+(`search.zig`) is tested natively. Speed on 1 MiB comes from not re-reading the
+document per keystroke (one copy, refreshed when a snapshot witness says it moved) and
+from not stepping the VM per byte: the plugin prefilters on a pattern's literal lead
+with a substring search and asks the library's new anchored `Regex.matchAt`, and the
+library now jumps between the bytes a match can begin with (`Regex.first`). Measured on
+~1 MiB: ~5 ms per literal keystroke, ~22 ms for `\d`. The one core change: the window-
+bottom dock is carved for a plugin's `.bottom` surface too (`View.dockHeight`), not only
+for the picker. Before that, a plugin's bottom surface drew into a zero-height strip.
+
 ### 3.5 Action system doors — core-doors
 
 1. Config `weft.provide` accepts `role`, `tool` and `locality` predicates, not only

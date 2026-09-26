@@ -33,4 +33,5 @@ test {
     _ = @import("ide_test.zig");
     _ = @import("visual_aids_test.zig");
     _ = @import("pointer_test.zig");
+    _ = @import("find_test.zig");
 }
