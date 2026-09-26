@@ -237,6 +237,32 @@ test "e2e/find: M-Return turns every match into a selection" {
     try expectText(ed, "owl dog owl\nowl bird\n");
 }
 
+/// The `/` register's text: what the last search, by any grammar, set.
+fn searchRegister(ed: *Editor) []const u8 {
+    return (ed.register.get(core.register.Bank.search) orelse return "").slice();
+}
+
+test "e2e/find: a committed search writes the shared / register, as the regex it searched for" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "r.txt", "a.b axb a.b\n");
+
+    // Typing alone commits nothing; Enter does. A literal query is escaped,
+    // so helix's `n` (which reads `/` as a regex) finds the same text.
+    ed.press("C-f", "");
+    ed.typeText("a.b");
+    try t.expectEqualStrings("", searchRegister(ed));
+    ed.press("Return", "\n");
+    try t.expectEqualStrings("a\\.b", searchRegister(ed));
+    // Escape commits too, with the options the bar had: whole word wraps it.
+    ed.press("M-w", "");
+    ed.press("Escape", "");
+    try t.expectEqualStrings("\\b(?:a\\.b)\\b", searchRegister(ed));
+}
+
 test "e2e/find: a one-megabyte buffer is searched and counted within a keystroke" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

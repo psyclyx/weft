@@ -20,7 +20,9 @@
 //! session's search history. C-h adds the replacement field: Enter there
 //! replaces the current match and moves on, C-M-Return replaces every
 //! match as ONE undo unit, and M-Return turns every match into a selection.
-//! F3 and friends keep working after the bar closes, from the caret.
+//! F3 and friends keep working after the bar closes, from the caret. A
+//! committed search (Enter, F3, Escape, a replace, M-Return) is also the `/`
+//! register every grammar shares, so helix's `n` goes on from it.
 //!
 //! LARGE BUFFERS. The search needs the whole document on every keystroke
 //! (the count is over all of it), so the plugin keeps ONE copy and re-reads
@@ -324,15 +326,36 @@ fn toggleWord() void {
 
 // ── History ──────────────────────────────────────────────────────────
 
-/// Keep the query for Up to find later — once, newest first.
+/// Keep the query for Up to find later — once, newest first — and publish
+/// it as the last search every grammar shares.
 fn remember() void {
     if (query.len == 0) return;
+    publish();
     if (history_len > 0 and std.mem.eql(u8, history[0].text(), query.text())) return;
     const keep = @min(history_len, history_cap - 1);
     var i = keep;
     while (i > 0) : (i -= 1) history[i] = history[i - 1];
     history[0] = query;
     history_len = keep + 1;
+}
+
+/// Write the committed search to core's `/` register (`register.Bank.search`)
+/// as the REGEX it searched for: a literal query escaped, whole word wrapped
+/// — `search.source`, the same translation the bar compiled. Everyone reads
+/// that register as a smart-case regex (helix's `n`, vim's `"/p`), so a bar
+/// folding case the pattern alone would not gets a leading `(?i)`. The one
+/// setting that cannot travel is case-sensitive over an all-lowercase query:
+/// the register has no spelling for "do not fold".
+fn publish() void {
+    const src = search.source(gpa, query.text(), opts) catch return;
+    defer gpa.free(src);
+    const read_as: search.Options = .{ .regex = true, .case = .smart };
+    if (search.folds(query.text(), opts) and !search.folds(src, read_as)) {
+        const folded = std.mem.concat(gpa, u8, &.{ "(?i)", src }) catch return;
+        defer gpa.free(folded);
+        return weft.registerSet(weft.register_search, folded);
+    }
+    weft.registerSet(weft.register_search, src);
 }
 
 fn historyOlder() void {
