@@ -262,6 +262,7 @@ pub extern "weft:abi/1" fn wl_shell_insert(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_repl_quit(handle: u32) void;
+pub extern "weft:abi/1" fn wl_repl_exited(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;

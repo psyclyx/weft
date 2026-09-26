@@ -93,6 +93,21 @@ pub fn hReplQuit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     p.resources.sessions.close(args[0]);
 }
 
+/// `repl_exited(handle) -> code`: how a REPL session's child ended — its
+/// exit code, or 128 + the signal that killed it — once everything it printed
+/// is in its buffer; -1 while it runs, and for a handle naming no session. A
+/// fact, not a policy: what an exit means (say so, start another) is the
+/// plugin's.
+pub fn hReplExited(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const s = p.resources.sessions.at(args[0]) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = if (s.exitCode()) |code| code else -1;
+}
+
 /// Frame-thread: drain every session's streamed output into its buffer.
 /// Returns true if anything was written (the view repaints).
 pub fn drainReplSessions(p: *WasmPlugin) bool {

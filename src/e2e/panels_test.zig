@@ -200,6 +200,113 @@ fn countDocked(ed: *Editor, edge: core.viewport.Edge) usize {
     return if (ed.win_layout.dockedPanel(edge) != null) 1 else 0;
 }
 
+/// Press C-` until the terminal shows `needle`. The shell's exit is noticed
+/// on the next C-` (or keystroke), and the child takes however long it takes
+/// to go, so each round settles the frame and asks again.
+fn pressUntilTerminalShows(ed: *Editor, needle: []const u8) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.press("C-grave", "");
+        ed.settle(1);
+        const text = h.toolText(ed, "*terminal*") orelse continue;
+        defer ed.gpa.free(text);
+        if (std.mem.indexOf(u8, text, needle) != null) return true;
+    }
+    return false;
+}
+
+test "e2e/panels: a shell that exits says so, and C-` starts a fresh one" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "x.txt", "x\n");
+    // A whole command line (it has a space): run as written — a shell with
+    // no prompt, so nothing interleaves with what the test waits for.
+    try ed.setConfig("terminal", "shell", "exec /bin/sh");
+    ed.press("C-grave", "");
+    ed.typeText("echo up");
+    ed.press("Return", "");
+    try t.expect(h.drainToolContains(ed, "*terminal*", "echo up\nup\n"));
+
+    ed.typeText("exit 3");
+    ed.press("Return", "");
+    try t.expect(pressUntilTerminalShows(ed, "[process exited 3]"));
+
+    // The next line goes to the NEW shell, not the dead one.
+    ed.typeText("echo again");
+    ed.press("Return", "");
+    try t.expect(h.drainToolContains(ed, "*terminal*", "echo again\nagain\n"));
+}
+
+/// Run `echo $((6*7)) >&2` in the terminal started by `shell` (null: the
+/// default, `$SHELL`) and say how many times the typed line shows. The answer
+/// goes to stderr — the stream a line editor echoes on — so it cannot
+/// overtake an echo of the line from the other pipe. Null when that shell is
+/// not installed (it exits 127 before answering).
+fn typedLineShows(ed: *Editor, shell: ?[]const u8) !?usize {
+    try ide.openFile(ed, "x.txt", "x\n");
+    if (shell) |s| try ed.setConfig("terminal", "shell", s);
+    ed.press("C-grave", "");
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    // Type at the prompt, as a person does: what the shell prints while it
+    // starts would otherwise land in the middle of the echoed line. A prompt
+    // is the last line, unfinished, ending in a space (`bash-5.3$ `, `% `).
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        const text = h.toolText(ed, "*terminal*") orelse continue;
+        defer ed.gpa.free(text);
+        if (std.mem.indexOf(u8, text, "[process exited 127]") != null) return null;
+        if (text.len > 0 and text[text.len - 1] == ' ') break;
+        // A shell that is not there reports its exit on the next C-`.
+        ed.press("C-grave", "");
+    }
+    ed.typeText("echo $((6*7)) >&2");
+    ed.press("Return", "");
+    while (core.task.nowNs() < deadline) {
+        // C-` again each round: a shell that is not there reports its exit.
+        ed.press("C-grave", "");
+        ed.settle(1);
+        const text = h.toolText(ed, "*terminal*") orelse continue;
+        defer ed.gpa.free(text);
+        if (std.mem.indexOf(u8, text, "[process exited 127]") != null) return null;
+        if (std.mem.indexOf(u8, text, "\n42\n") == null) continue;
+        const shows = std.mem.count(u8, text, "echo $((6*7)) >&2");
+        if (shows != 1) std.debug.print("[e2e/panels] the terminal reads:\n{s}\n", .{text});
+        return shows;
+    }
+    if (h.toolText(ed, "*terminal*")) |text| {
+        defer ed.gpa.free(text);
+        std.debug.print("[e2e/panels] no answer; the terminal reads:\n{s}\n", .{text});
+    }
+    return error.TerminalNeverAnswered;
+}
+
+test "e2e/panels: the default shell does not echo a typed line a second time" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    // `$SHELL` interactive, as ide.js runs it: the plugin echoes the line,
+    // so the shell's own line editor must not echo it again.
+    const shows = (try typedLineShows(&app.ed, null)) orelse return error.SkipZigTest;
+    try t.expectEqual(@as(usize, 1), shows);
+}
+
+test "e2e/panels: bash and zsh started by name edit no line of their own" {
+    const gpa = t.allocator;
+    for ([_][]const u8{ "bash", "zsh" }) |shell| {
+        var app: IdeApp = undefined;
+        try app.init(gpa);
+        defer app.deinit();
+        const shows = (try typedLineShows(&app.ed, shell)) orelse continue; // not installed
+        errdefer std.debug.print("[e2e/panels] {s} showed the typed line {d} times\n", .{ shell, shows });
+        try t.expectEqual(@as(usize, 1), shows);
+    }
+}
+
 test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click on one jumps there" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

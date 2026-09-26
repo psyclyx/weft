@@ -369,6 +369,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_repl_start", .handler = sessions.hReplStart },
     .{ .name = "wl_repl_send", .handler = sessions.hReplSend },
     .{ .name = "wl_repl_quit", .handler = sessions.hReplQuit },
+    .{ .name = "wl_repl_exited", .handler = sessions.hReplExited },
     .{ .name = "wl_net_connect", .handler = sessions.hNetConnect },
     .{ .name = "wl_net_send", .handler = sessions.hNetSend },
     .{ .name = "wl_net_close", .handler = sessions.hNetClose },

@@ -7,6 +7,7 @@
 //! the reader hits EOF, then JOINS it before freeing — never a use-after-free.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
@@ -188,6 +189,8 @@ pub const Session = struct {
     /// escape sequence may be split across reads.
     controls: Controls = .text,
     reader: task.Handle(void),
+    /// The child's exit code once `exitCode` has seen it end.
+    exit_code: ?u8 = null,
 
     /// Spawn `argv` as a persistent child with piped stdio and start its reader.
     pub fn start(
@@ -283,6 +286,35 @@ pub const Session = struct {
         };
         s.out_buf.clearRetainingCapacity();
         return true;
+    }
+
+    /// Frame thread: how the child ended — its exit code, or 128 + the signal
+    /// that killed it — or null while it runs. Also null until everything it
+    /// printed has been delivered (the reader saw end-of-stream and the
+    /// accumulator is drained), so whoever reports the exit reports it after
+    /// the last output, never in the middle of it. The child is only PEEKED
+    /// at (`WNOWAIT`): `deinit` still reaps it, without blocking.
+    pub fn exitCode(s: *Session) ?u8 {
+        if (s.exit_code) |c| return c;
+        if (builtin.os.tag != .linux) return null;
+        if (!s.reader.residentExited()) return null;
+        {
+            s.out_mutex.lock();
+            defer s.out_mutex.unlock();
+            if (s.out_buf.items.len > 0) return null;
+        }
+        const pid = s.child.id orelse return null;
+        const linux = std.os.linux;
+        var info = std.mem.zeroes(linux.siginfo_t);
+        const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
+        if (linux.errno(rc) != .SUCCESS or info.fields.common.first.piduid.pid == 0) return null;
+        const status: u8 = @truncate(@as(u32, @bitCast(info.fields.common.second.sigchld.status)));
+        s.exit_code = switch (@as(linux.CLD, @enumFromInt(info.code))) {
+            .EXITED => status,
+            .KILLED, .DUMPED => 128 +| status,
+            else => return null,
+        };
+        return s.exit_code;
     }
 
     /// Frame thread: write `line` (a newline is appended if absent) to stdin.

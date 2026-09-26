@@ -2569,6 +2569,13 @@ pub fn replSend(handle: u32, line: []const u8) void {
 pub fn replQuit(handle: u32) void {
     e.wl_repl_quit(handle);
 }
+/// How a REPL session's child ended — its exit code, or 128 + the signal
+/// that killed it — once everything it printed is in its buffer; null while
+/// it runs (or for a handle that names no session).
+pub fn replExited(handle: u32) ?u8 {
+    const code = e.wl_repl_exited(handle);
+    return if (code < 0) null else @intCast(code);
+}
 
 /// Spawn a persistent subprocess whose stdout comes BACK to the guest (via
 /// `procRead`), for an in-guest protocol client. Returns a handle, or null.

@@ -454,6 +454,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_repl_start", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .proc_timer, .doc = "start a persistent REPL streaming into a named comint buffer" },
     .{ .name = "wl_repl_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write a line to a REPL session's stdin" },
     .{ .name = "wl_repl_quit", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "quit a REPL session (kill+join; handle stays valid but dead)" },
+    .{ .name = "wl_repl_exited", .params = &.{.u32}, .results = &.{.i32}, .group = .sessions, .doc = "how a REPL session's child ended: its exit code (128 + a killing signal) once its output is delivered, else -1" },
     .{ .name = "wl_net_connect", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .net, .doc = "dial `host:port` (TCP/TLS), streaming into a named buffer" },
     .{ .name = "wl_net_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write bytes to a connected net session" },
     .{ .name = "wl_net_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "close a net session" },
@@ -595,9 +596,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 255;
+const max_import_count: usize = 256;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 275;
+const max_semantic_operation_count: usize = 276;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -752,7 +753,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 255), census.imports);
+    try t.expectEqual(@as(usize, 256), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 275), census.semantic_operations);
+    try t.expectEqual(@as(usize, 276), census.semantic_operations);
 }
