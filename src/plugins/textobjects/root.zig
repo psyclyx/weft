@@ -21,6 +21,8 @@ const object_names = [_][]const u8{
     "word",       "WORD",     "quote-double", "quote-single",
     "quote-back", "paren",    "bracket",      "brace",
     "paragraph",  "function", "class",        "call",
+    "angle",      "pair",     "argument",     "comment",
+    "test",
 };
 const cmds = blk: {
     var arr: [object_names.len * 2]weft.CommandEntry = undefined;
@@ -52,6 +54,8 @@ fn compute(comptime obj: []const u8, around: bool) ?Obj {
     if (comptime std.mem.eql(u8, obj, "paren")) return pairObj('(', ')', around);
     if (comptime std.mem.eql(u8, obj, "bracket")) return pairObj('[', ']', around);
     if (comptime std.mem.eql(u8, obj, "brace")) return pairObj('{', '}', around);
+    if (comptime std.mem.eql(u8, obj, "angle")) return pairObj('<', '>', around);
+    if (comptime std.mem.eql(u8, obj, "pair")) return closestPair(around);
     if (comptime std.mem.eql(u8, obj, "paragraph")) return paraObj(around);
     // Tree-backed objects (need a grammar; degrade to null without one). Both
     // inner and `a` return the enclosing node for now — precise inner bodies
@@ -59,7 +63,53 @@ fn compute(comptime obj: []const u8, around: bool) ?Obj {
     if (comptime std.mem.eql(u8, obj, "function")) return treeObj(&.{ "function", "fn_", "method" });
     if (comptime std.mem.eql(u8, obj, "class")) return treeObj(&.{ "class", "struct", "enum", "interface", "trait" });
     if (comptime std.mem.eql(u8, obj, "call")) return treeObj(&.{ "call", "invocation" });
+    if (comptime std.mem.eql(u8, obj, "comment")) return treeObj(&.{"comment"});
+    if (comptime std.mem.eql(u8, obj, "test")) return treeObj(&.{"test"});
+    if (comptime std.mem.eql(u8, obj, "argument")) return argumentObj();
     return null;
+}
+
+/// The argument (or parameter) around the cursor: the node that sits
+/// directly in an argument or parameter list, or a node that calls itself a
+/// parameter. Grammar-agnostic by kind name, like `treeObj`.
+fn argumentObj() ?Obj {
+    const cur = weft.cursor();
+    var node = weft.nodeEnclosing(.{ .start = cur, .end = cur }) orelse return null;
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        const self_param = std.mem.indexOf(u8, node.kind, "parameter") != null and !isList(node.kind);
+        const here: Obj = .{ .s = node.start, .e = node.end };
+        if (self_param) return here;
+        const parent = weft.nodeEnclosing(.{ .start = here.s, .end = here.e }) orelse return null;
+        if (isList(parent.kind)) return here;
+        node = parent;
+    }
+    return null;
+}
+
+fn isList(kind: []const u8) bool {
+    for ([_][]const u8{ "arguments", "parameters", "argument_list", "parameter_list" }) |k| {
+        if (std.mem.indexOf(u8, kind, k) != null) return true;
+    }
+    return false;
+}
+
+/// The nearest pair of any kind around the cursor — brackets of every
+/// shape, and quotes on its line: the innermost one wins.
+fn closestPair(around: bool) ?Obj {
+    const candidates = [_]?Obj{
+        pairObj('(', ')', true), pairObj('[', ']', true), pairObj('{', '}', true),
+        pairObj('<', '>', true), quoteObj('"', true),     quoteObj('\'', true),
+        quoteObj('`', true),
+    };
+    var best: ?Obj = null;
+    for (candidates) |c| {
+        const o = c orelse continue;
+        if (best) |b| if (o.s < b.s or (o.s == b.s and o.e >= b.e)) continue;
+        best = o;
+    }
+    const o = best orelse return null;
+    return if (around) o else .{ .s = o.s + 1, .e = o.e - 1 };
 }
 
 /// The nearest enclosing tree-sitter node whose KIND contains any needle
