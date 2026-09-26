@@ -122,6 +122,9 @@ build_hits: []const semantic.Hit = &.{},
 /// The last `build`'s CHROME hit regions — tab parts and status segments —
 /// filed with the pane by `recordPane` like `build_hits`. Arena-backed.
 build_chrome: []const hud_mod.ChromeHit = &.{},
+/// The box the last `build`'s floating overlay drew in, which may reach past
+/// the pane's own rect; `recordPane` files it with the pane.
+build_float: ?region.Rect = null,
 /// Every pane's hit geometry from the last frame, so the pointer can ask
 /// what is under it in ANY pane, not only the focused one — a click in an
 /// unfocused pane must land where it points. Arena-backed like
@@ -308,6 +311,9 @@ pub const PaneMap = struct {
     /// The pane's chrome regions (tab parts, status segments). A point on
     /// one of these is on the chrome, not on the text or scene beneath.
     chrome: []const hud_mod.ChromeHit = &.{},
+    /// The pane's floating overlay box (a menu), wherever it lies in the
+    /// frame. A point inside it is the pane's, whichever pane is beneath.
+    float: ?region.Rect = null,
 
     /// The chrome region (a tab part, a status segment) under (x, y).
     pub fn chromeAt(self: *const PaneMap, x: f32, y: f32) ?hud_mod.ChromeHit {
@@ -342,6 +348,7 @@ pub fn recordPane(self: *View, pane: u32, rect: region.Rect) void {
         .lines = self.frame_layout,
         .hits = self.build_hits,
         .chrome = self.build_chrome,
+        .float = self.build_float,
     };
     self.pane_map_count += 1;
 }
@@ -356,8 +363,10 @@ pub fn cellsRect(self: *const View, y: f32, col: usize, cols: usize) region.Rect
     };
 }
 
-/// The pane whose last-built rect contains (x, y).
+/// The pane under (x, y): the one whose floating overlay covers the point
+/// (it paints on top), else the one whose last-built rect contains it.
 pub fn paneAtPoint(self: *const View, x: f32, y: f32) ?*const PaneMap {
+    for (self.pane_maps[0..self.pane_map_count]) |*m| if (m.float) |f| if (f.contains(x, y)) return m;
     for (self.pane_maps[0..self.pane_map_count]) |*m| if (m.rect.contains(x, y)) return m;
     return null;
 }
@@ -559,6 +568,25 @@ pub fn build(
 
     if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa });
     self.build_chrome = chrome.items;
+    self.build_float = null;
+
+    // Thin pane dividers: a 1px line on each internal (shared) edge of
+    // the pane's frame. Drawn on the frame boundary — outside the
+    // `content` inset — so it never touches a glyph. Subtle: the dim
+    // status grey, like the very slight lines between vim splits.
+    {
+        const bd = hud.pane_border;
+        const c = self.theme.status;
+        const th: f32 = 1;
+        if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
+        if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
+        if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
+        if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
+    }
+
+    // Everything from here on floats: it paints after the pane's text, so
+    // a popup's own fill hides what is beneath it.
+    const float: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
     // Floating surfaces (which-key popup, files/git, a guest's caret
     // popup like the `lsp` plugin's hover) float within the BODY region —
     // never over the status/tab/panel rects, which are carved out. Hand the
@@ -593,33 +621,23 @@ pub fn build(
     }
     // A dialog is the active head-local interaction and therefore paints
     // above passive/legacy surfaces. Its keys still route through the
-    // interaction stack, not through an editor mode or which-key.
+    // interaction stack, not through an editor mode or which-key. One hung
+    // at a point floats in `float_bounds` (the frame), over other panes; the
+    // pane is built last, so it paints over them too.
     if (hud.semantic_overlay) |overlay| {
         self.semantic_active = true;
         const caret_at: ?[2]f32 = if (self.frame_layout.lineForOffset(cursor_off)) |li| blk: {
             const c = self.frame_layout.lines[li].caretAt(cursor_off);
             break :blk .{ c.x, c.y_top + c.height };
         } else null;
-        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect, caret_at);
+        const drawn = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect, hud.float_bounds orelse body_rect, caret_at);
+        self.semantic_hits = drawn.hits;
+        self.build_float = drawn.box;
         // The dialog is on top: it is what a click on this pane reaches.
         self.build_hits = self.semantic_hits;
     }
 
-    // Thin pane dividers: a 1px line on each internal (shared) edge of
-    // the pane's frame. Drawn on the frame boundary — outside the
-    // `content` inset — so it never touches a glyph. Subtle: the dim
-    // status grey, like the very slight lines between vim splits.
-    {
-        const bd = hud.pane_border;
-        const c = self.theme.status;
-        const th: f32 = 1;
-        if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
-        if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
-    }
-
-    var built = try render.render(self, world_to_pixel, runs.items, rects.items);
+    var built = try render.render(self, world_to_pixel, runs.items, rects.items, float);
     if (hud.brand_mark) if (dashboardMarkSize(self, body_rect)) |size| {
         const first = built.items.len;
         built.items = try self.gpa.realloc(built.items, first + 2);

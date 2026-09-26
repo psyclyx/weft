@@ -788,6 +788,7 @@ pub const FrameBuilder = struct {
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
+        fhud.float_bounds = frame_rect;
         if (tabs_pane != focused.pane().id) fhud.tabs = null;
         fhud.status_line = focused.pane().attrs.status_line;
         if (act.attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);

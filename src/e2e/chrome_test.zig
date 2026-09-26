@@ -355,10 +355,12 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     ed.typeText(" ");
     ed.applyWindow();
 
-    // Over the text: the editor's offers, the history words included, and
-    // the source actions ide.js provides for Zig.
+    // Over the text: the editor's offers, and the source actions ide.js
+    // provides for Zig. Undo can run, Redo cannot, so only Undo is listed;
+    // the lone words join the group before them instead of each sitting
+    // between two rules.
     rightClick(ed, ed.pointAt(3).?);
-    try expectMenu(ed, "Build Test Debug | Format Rename | Undo Redo~ | Save");
+    try expectMenu(ed, "Build Test Debug | Format Rename Undo Save");
     app.proj.shot(ed, "chrome-contextmenu-text");
     // Escape closes it, and the key goes no further.
     ed.press("Escape", "");
@@ -373,20 +375,27 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try ide.expectText(ed, "const y = 2;\n");
 
     // Over a sidebar row: the listing's offers for THAT row, node actions
-    // included — a different menu from the same key.
+    // included — a different menu from the same key. Opened at the sidebar's
+    // right edge, it floats over the editor beside it rather than being
+    // squeezed into (and clipped by) the narrow pane it opened over.
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const view = try ed.ensureView();
-    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
+    const sidebar_rect, const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
         if (m.pane != panel.pane().id) continue;
         if (m.hits.len == 0) return error.SidebarRowsNotDrawn;
-        break m.hits[m.hits.len - 1]; // the listing's last row: c.zig
+        break .{ m.rect, m.hits[m.hits.len - 1] }; // the listing's last row: c.zig
     } else return error.SidebarNotDrawn;
-    rightClick(ed, .{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    const sidebar_right = sidebar_rect.x + sidebar_rect.w;
+    rightClick(ed, .{ sidebar_right - 4, row.rect.y + row.rect.h / 2 });
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
-    try expectMenu(ed, "Up to Parent | Open | Copy Paste Cut | Rename | Insert Before Insert After | Undo~ Redo~ | Save | Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Apply draft Revert draft | Use as working target");
+    // No greyed words (a menu lists what can run here), and no rule around
+    // a lone item.
+    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Save Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Apply draft Revert draft Use as working target");
     app.proj.shot(ed, "chrome-contextmenu-row");
 
-    // Click Copy: the row goes to the transfer register, the menu closes.
+    // Click Copy — drawn over the editor pane, past the sidebar's edge: the
+    // click is the menu's, the row goes to the transfer register, the menu
+    // closes.
     try t.expect(ed.ctx.semantic.?.transfer == null);
     var items_buf: [64]*const Node = undefined;
     const items = menuItems(&items_buf, menuView(ed).?);
@@ -394,6 +403,7 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
         if (std.mem.eql(u8, item.content.action.label, "Copy")) break item.id;
     } else return error.NoCopy;
     const at = pointAtNodeIn(ed, panel.pane().id, copy) orelse return error.MenuItemNotDrawn;
+    try t.expect(at[0] > sidebar_right);
     ed.click(at);
     try t.expect(ed.head.interactions.active() == null);
     try t.expect(ed.ctx.semantic.?.transfer != null);
@@ -417,7 +427,7 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
     ed.applyWindow();
     ed.press("S-F10", "");
     ed.applyWindow();
-    try expectMenu(ed, "Run line | Format Rename | Undo~ Redo~ | Save");
+    try expectMenu(ed, "Run line Format Rename Save");
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);
     try t.expectEqualStrings("ide", ed.mode());

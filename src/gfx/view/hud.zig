@@ -150,6 +150,10 @@ pub const Hud = struct {
     /// The active head-local interaction, rendered above the document. Local
     /// bindings are resolved by the interaction stack, not global which-key.
     semantic_overlay: ?semantic_data.Overlay = null,
+    /// Where an overlay hung at a point (`pointer`, `caret`) may float: the
+    /// whole frame, not this pane's body, so a menu opened over a narrow
+    /// sidebar is not clipped to it. Null = the body.
+    float_bounds: ?region.Rect = null,
     /// Which edges of this pane's frame are internal (shared with a
     /// neighbor) and get a 1px divider line. Empty for a single pane.
     pane_border: region.Edges = .{},

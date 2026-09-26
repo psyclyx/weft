@@ -19,7 +19,10 @@
 //! What is listed is every offer except the words that only make sense as
 //! keys (moving, a line break, leaving a posture) — `weft.set("contextmenu",
 //! "hide", [...])` replaces that list of name prefixes. A disabled offer is
-//! listed, greyed, with its reason, and choosing it echoes the refusal.
+//! left out: a menu lists what can be done here (the toolbar, a fixed strip,
+//! keeps its buttons and greys them instead). Groups are separated, except
+//! that a group of one never stands alone between two rules: it joins its
+//! neighbours, so a menu of mostly single words is not a ladder of rules.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -48,8 +51,8 @@ const Item = struct {
     intention: []const u8,
     label: []const u8,
     group: []const u8,
-    /// The reason it cannot run now; empty when it can.
-    reason: []const u8,
+    /// A rule is drawn above it.
+    rule: bool = false,
 };
 
 var arena: std.heap.ArenaAllocator = undefined;
@@ -108,11 +111,6 @@ fn openMenu(where: []const u8) void {
         weft.echo("nothing to offer here");
         return;
     }
-    // Land on the first thing that can run.
-    for (items.items, 0..) |it, i| if (it.reason.len == 0) {
-        selected = i;
-        break;
-    };
     publish() catch return;
     interaction = weft.semanticInteractionOpen(.{
         .role = .popup,
@@ -149,22 +147,34 @@ fn collect(a: std.mem.Allocator) !void {
     var arrange: std.ArrayList(affordances.Item) = .empty;
     var offers = weft.offersIn(.active);
     while (offers.next()) |o| {
-        if (hidden(o.intention)) continue;
+        if (hidden(o.intention) or o.availability != .enabled) continue;
         if (found.items.len >= affordances.max_items) break;
         const seq: u32 = @intCast(found.items.len);
         try found.append(a, .{
             .intention = try a.dupe(u8, o.intention),
             .label = try a.dupe(u8, o.label),
             .group = try a.dupe(u8, o.group),
-            .reason = switch (o.availability) {
-                .enabled => "",
-                else => try a.dupe(u8, if (o.reason.len > 0) o.reason else "unavailable"),
-            },
         });
         try arrange.append(a, .{ .group = found.items[seq].group, .order = o.order, .seq = seq });
     }
     affordances.arrange(arrange.items);
     for (arrange.items) |it| try items.append(a, found.items[it.seq]);
+    placeRules(items.items);
+}
+
+/// A rule opens a group of two or more, and only once what is above it since
+/// the last rule is two or more as well; a lone item joins its neighbours.
+fn placeRules(list: []Item) void {
+    var section: usize = 0;
+    var start: usize = 0;
+    while (start < list.len) {
+        var end = start + 1;
+        while (end < list.len and std.mem.eql(u8, list[end].group, list[start].group)) end += 1;
+        const size = end - start;
+        list[start].rule = start > 0 and size >= 2 and section >= 2;
+        section = if (list[start].rule) size else section + size;
+        start = end;
+    }
 }
 
 /// Publish (or replace) the menu's view. Only the selected item is in the
@@ -174,28 +184,20 @@ fn publish() !void {
     const a = arena.allocator();
     var rows: std.ArrayList(Node) = .empty;
     for (items.items, 0..) |it, i| {
-        if (i > 0 and !std.mem.eql(u8, items.items[i - 1].group, it.group))
+        if (it.rule)
             try rows.append(a, .{ .id = @enumFromInt(sep_base + i), .facts = &.{.{ .name = "tone", .value = "muted" }}, .layout = .{ .column = 0 }, .content = .{ .label = "──" } });
-        var facts: std.ArrayList(Fact) = .empty;
-        try facts.append(a, .{ .name = "name", .value = it.intention });
-        if (it.reason.len > 0) try facts.append(a, .{ .name = "tone", .value = "muted" });
-        var cells: std.ArrayList(Node) = .empty;
-        try cells.append(a, .{
+        const cells = try a.alloc(Node, 1);
+        cells[0] = .{
             .id = @enumFromInt(item_base + i),
             .role = "contextmenu.item",
-            .facts = try facts.toOwnedSlice(a),
+            .facts = try a.dupe(Fact, &.{.{ .name = "name", .value = it.intention }}),
             .layout = .{ .column = 0 },
             .focusable = i == selected,
             .content = .{ .action = .{ .action = act_choose, .label = it.label } },
-        });
-        if (it.reason.len > 0) try cells.append(a, .{
-            .id = @enumFromInt(row_base + (1 << 16) + i),
-            .facts = &.{.{ .name = "tone", .value = "muted" }},
-            .content = .{ .label = it.reason },
-        });
+        };
         try rows.append(a, .{
             .id = @enumFromInt(row_base + i),
-            .content = .{ .container = .{ .axis = .horizontal, .children = try cells.toOwnedSlice(a) } },
+            .content = .{ .container = .{ .axis = .horizontal, .children = cells } },
         });
     }
     const root: Node = .{

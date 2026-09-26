@@ -14,12 +14,27 @@ const Run = view.Run;
 const Rect = view.Rect;
 const Built = view.Built;
 
-pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect) !Built {
+/// Where the floating layer starts in each list: everything a build appended
+/// from these indices on (a popup, a menu) paints after the whole base layer,
+/// so a popup's fill covers the text beneath it instead of the text showing
+/// through (rects all paint before glyphs within one layer).
+pub const Layers = struct { rects: usize, runs: usize };
+
+pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect, float: Layers) !Built {
     var count = rects.len;
     for (runs) |run| count += run.shaped.glyphs.len;
     const items = try v.gpa.alloc(scene.DrawItem, count);
     errdefer v.gpa.free(items);
 
+    var at: usize = 0;
+    at += try place(v, world_to_pixel, items[at..], runs[0..float.runs], rects[0..float.rects]);
+    at += try place(v, world_to_pixel, items[at..], runs[float.runs..], rects[float.rects..]);
+    std.debug.assert(at == items.len);
+    return .{ .items = items };
+}
+
+/// One layer: its rects, then its glyphs.
+fn place(v: *View, world_to_pixel: scene.Transform2D, items: []scene.DrawItem, runs: []Run, rects: []const Rect) !usize {
     var at: usize = 0;
     for (rects) |rect| {
         items[at] = .{ .rect = .{
@@ -46,8 +61,7 @@ pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: [
             }),
         };
     }
-    std.debug.assert(at == items.len);
-    return .{ .items = items };
+    return at;
 }
 
 const CellPlacement = struct {

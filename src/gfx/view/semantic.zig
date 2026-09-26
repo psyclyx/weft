@@ -188,15 +188,19 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
     return hits.toOwnedSlice(hit_arena);
 }
 
+/// What `drawOverlay` drew: its scene hit regions and the box they sit in.
+pub const Drawn = struct { hits: []const Hit, box: ?region.Rect = null };
+
 /// Render the active head-local interaction above its underlying view. The
 /// presentation string is an open hint consumed only by this presenter:
 /// `bottom`, `corner`, and — for a menu — `pointer` and `caret`, which hang
 /// the box below that point (flipped above it when it would not fit),
-/// clamped into the body. `caret_at` is the focused pane's caret, bottom-
-/// left, when the body shows text.
-pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, caret_at: ?[2]f32) ![]const Hit {
+/// clamped into `bounds` (the frame: a menu floats over every pane, not only
+/// the one it opened over). The others place within the body. `caret_at` is
+/// the focused pane's caret, bottom-left, when the body shows text.
+pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, bounds: region.Rect, caret_at: ?[2]f32) !Drawn {
     const rows = try rowsFor(scratch, overlay.document);
-    if (rows.len == 0) return &.{};
+    if (rows.len == 0) return .{ .hits = &.{} };
     var widest: usize = 1;
     for (rows) |row| {
         var occupied: usize = 0;
@@ -206,36 +210,37 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
         }
         widest = @max(widest, occupied);
     }
-    const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)) -| 1));
-    const pad_x = v.cell_w;
-    const pad_y = v.line_h * 0.5;
-    const box_w = @min(body.w, @as(f32, @floatFromInt(widest + 2)) * v.cell_w);
-    const box_h = @min(body.h, @as(f32, @floatFromInt(visible_rows)) * v.line_h + 2 * pad_y);
     const anchor: ?[2]f32 = if (std.mem.eql(u8, overlay.presentation, "pointer"))
         overlay.pointer orelse caret_at
     else if (std.mem.eql(u8, overlay.presentation, "caret"))
         caret_at orelse overlay.pointer
     else
         null;
-    const raw_x = if (anchor) |at| at[0] else body.x + (body.w - box_w) / 2;
-    const x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
+    const area = if (anchor != null) bounds else body;
+    const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1));
+    const pad_x = v.cell_w;
+    const pad_y = v.line_h * 0.5;
+    const box_w = @min(area.w, @as(f32, @floatFromInt(widest + 2)) * v.cell_w);
+    const box_h = @min(area.h, @as(f32, @floatFromInt(visible_rows)) * v.line_h + 2 * pad_y);
+    const raw_x = if (anchor) |at| at[0] else area.x + (area.w - box_w) / 2;
+    const x = std.math.clamp(raw_x, area.x, @max(area.x, area.x + area.w - box_w));
     const bottom = std.mem.eql(u8, overlay.presentation, "bottom") or
         std.mem.eql(u8, overlay.presentation, "which-key-like");
     const corner = std.mem.eql(u8, overlay.presentation, "corner");
     const raw_y = if (anchor) |at|
-        (if (at[1] + box_h <= body.y + body.h) at[1] else at[1] - box_h - v.line_h)
+        (if (at[1] + box_h <= area.y + area.h) at[1] else at[1] - box_h - v.line_h)
     else if (bottom)
-        body.y + body.h - box_h
+        area.y + area.h - box_h
     else if (corner)
-        body.y
+        area.y
     else
-        body.y + (body.h - box_h) / 2;
-    const y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
+        area.y + (area.h - box_h) / 2;
+    const y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));
     try popup.outlinedBox(scratch, rects, x, y, box_w, box_h, v.theme.background, v.theme.accent);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
     try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true);
-    return hits.toOwnedSlice(hit_arena);
+    return .{ .hits = try hits.toOwnedSlice(hit_arena), .box = .{ .x = x, .y = y, .w = box_w, .h = box_h } };
 }
 
 fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool) !void {

@@ -106,6 +106,11 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
     hit.pane = .{ .id = map.pane, .gen = gen };
     hit.entry = node.pane().buffer_id;
     hit.focused = node == window_layout.headFocus(driver.layout, head);
+    // On the pane's floating overlay, the point is on that alone.
+    if (map.float) |f| if (f.contains(x, y)) {
+        if (map.hitAt(x, y)) |h| hit.node = .{ .view = h.view, .node = h.node };
+        return hit;
+    };
     // On the chrome (a tab, a status segment), the point is on THAT, not on
     // the text or scene the pane shows beneath the strip.
     if (map.chromeAt(x, y)) |c| {
