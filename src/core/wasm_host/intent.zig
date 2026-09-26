@@ -246,8 +246,9 @@ pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 
 /// Fire the offers-changed event (`on_offers_changed`) at one plugin: what
 /// the head's primary context offers just moved. The caller (the app's frame
-/// phase, `app/offer_watch.zig`) decides WHEN — once per frame at most, at
-/// the frame boundary, never from inside a dispatch — and this only delivers.
+/// phase, `app/application.zig`'s `notifyOffersChanged`) decides WHEN — once
+/// per frame at most, at the frame boundary, never from inside a dispatch —
+/// and this only delivers.
 /// A plugin that does not export the callback is remembered as deaf after the
 /// first try, so it costs nothing on later changes. Returns whether it ran.
 pub fn notifyOffersChanged(p: *WasmPlugin) bool {

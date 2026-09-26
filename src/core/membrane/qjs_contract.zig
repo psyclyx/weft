@@ -353,17 +353,19 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     }
     // A `.shared` claim is a claim about BODIES, and `e2e/demolition_test.zig`
     // checks those by function pointer. What this asserts is that nobody
-    // relabelled a gap as shared without one: today `proc` is the only group
-    // that has earned it.
+    // relabelled a gap as shared without one: today five groups have earned
+    // it — proc, edit, pointer, clipboard and history.
     var shared: usize = 0;
     for (parity) |p| {
         if (p.state == .shared) shared += 1;
     }
     try t.expectEqual(@as(usize, 5), shared);
 
-    // And the honest headline: a JS plugin reaches 42 doors where a wasm
-    // plugin reaches 217. Pinned so closing a gap is a visible, deliberate
-    // number change rather than something that drifts either way.
+    // And the honest headline: how many doors a JS plugin reaches, against
+    // the wasm plane's `weft_membrane.imports.len` (which the census in
+    // `membrane/root.zig` pins). This one is pinned below so closing a gap
+    // is a visible, deliberate number change rather than something that
+    // drifts either way; the history of that number follows.
     //
     // It went 40 → 42 by CLOSING one: the declare-command pair. A JS plugin
     // had no way to say what its commands are for, so every one of them was
