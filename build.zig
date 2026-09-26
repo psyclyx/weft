@@ -48,11 +48,12 @@ const Guest = struct {
 /// structured identity it names, `gutter` is the guest half of the
 /// `ui/gutter-segment` round, `statusline` the guest half of
 /// `ui/statusline-seg`'s, `regex` is the Pike-VM pattern engine
-/// (doc/configs.md §0.2) — and the one word-character rule `\b`, the word
-/// motions, text objects and C-d all ask — and `search` the query → matches planning over it
-/// that helix's `s S K A-K / ? n N *` and the find bar share — core never
-/// parses a pattern — and `labels` the jump labels snipe and helix's `gw`
-/// draw over the visible text.
+/// (doc/configs.md §0.2), with the one word-character rule `\b`, the word
+/// motions, text objects and C-d all ask, and `search` the query → matches
+/// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
+/// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
+/// draw over the visible text, and `put` the one-write-per-selection edit
+/// (one undo unit) helix's verbs and ide's transfer and line keys share.
 const Library = enum {
     prompt,
     invoke,
@@ -69,6 +70,7 @@ const Library = enum {
     labels,
     affordances,
     statusline,
+    put,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -89,6 +91,7 @@ const Library = enum {
             .labels => "weft_labels",
             .affordances => "weft_affordances",
             .statusline => "weft_statusline",
+            .put => "weft_put",
         };
     }
 
@@ -105,7 +108,9 @@ const Library = enum {
             // takes the tier above.
             .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels => .service_presentation,
             .invoke => .interaction_orchestration,
-            .ex => .editor_composition,
+            // `put` edits a document on a grammar's behalf, as `ex` runs
+            // its commands: the top of the stack, depending on nothing.
+            .ex, .put => .editor_composition,
         };
     }
 
@@ -477,10 +482,10 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels } },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels, .put } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
-    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{.regex} },
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{ .regex, .put } },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
     // Line numbers: binds `ui/gutter-segment` for text entries and answers a
     // window of cells per round (absolute or caret-relative). No commands.

@@ -1,18 +1,16 @@
 //! Every verb that edits, over every selection at once, as ONE undo unit.
 //!
-//! The one mechanism: `putEach` anchors one range per selection and runs
-//! helix's own operator `hx-op-put` over them through `runRangeArgEach` —
-//! reverse offset order (a later edit never shifts an earlier range), all
-//! inside one undo unit. The operator is handed only its range, so what to
-//! write there is a PLAN set up before the run: the job whose start offset
-//! the range still has (earlier jobs have not moved yet) and the `Source`
-//! that says what that job writes. Delete, change, paste, replace, case,
+//! The one mechanism: `putEach` — the `put` library's one write per
+//! selection, run as helix's own operator `hx-op-put` through
+//! `runRangeArgEach`, reverse offset order, one undo unit (ide's transfer and
+//! line keys ride the same library). Delete, change, paste, replace, case,
 //! replace-with-a-character, join and open-a-line are all `putEach` with a
 //! different source. Each job leaves a live range over what it wrote, and the
 //! verb reads those back to place the selections afterwards.
 
 const std = @import("std");
 const weft = @import("weft");
+const put = @import("weft_put");
 const sel = @import("selection.zig");
 const text = @import("text.zig");
 const state = @import("state.zig");
@@ -42,130 +40,66 @@ const Source = union(enum) {
     pad: []const usize,
 };
 
+/// The source of the `putEach` running now, for `derive`.
 var source: Source = .{ .literal = "" };
-var jobs: usize = 0;
-var job_at: [max]usize = undefined;
-var job_used: [max]bool = undefined;
-/// A linewise paste after a last line with no newline to land after: the job
-/// writes one first.
-var job_newline: [max]bool = undefined;
-/// The live range over what each job wrote.
-var job_result: [max]?u32 = undefined;
-
-var put_buf: [(1 << 16) + 8]u8 = undefined;
 
 /// Write `src` over each of `ranges` (document order, one per selection), as
-/// one undo unit.
+/// one undo unit. `newline[i]` writes a line break before job `i`'s bytes (a
+/// linewise paste after a last line with none to land after).
 fn putEach(ranges: []const weft.Range, src: Source, newline: ?[]const bool) void {
     source = src;
-    jobs = ranges.len;
-    var handles: [max]?u32 = undefined;
-    for (ranges, 0..) |r, i| {
-        job_at[i] = r.start;
-        job_used[i] = false;
-        job_newline[i] = if (newline) |nl| nl[i] else false;
-        job_result[i] = null;
-        handles[i] = weft.anchorRange(r);
-    }
-    weft.runRangeArgEach("hx-op-put", handles[0..ranges.len]);
+    const each: put.Source = switch (src) {
+        .literal => |l| .{ .literal = l },
+        .register => |reg| .{ .register = .{ .slot = reg.slot, .count = reg.count } },
+        .fill, .case, .open, .pad => .{ .derive = derive },
+    };
+    put.each("hx-op-put", ranges, each, newline);
 }
 
-/// Which job a range is. Jobs run from the last offset back, so the latest
-/// unused job starting here is the one.
-fn claim(start: usize) ?usize {
-    var i = jobs;
-    while (i > 0) {
-        i -= 1;
-        if (!job_used[i] and job_at[i] == start) {
-            job_used[i] = true;
-            return i;
-        }
-    }
-    return null;
-}
-
-/// What job `i` writes over `r`, built in `put_buf` where it is derived.
-fn bytesFor(i: usize, r: weft.Range) ?[]const u8 {
+/// What job `i` writes over `r` for the sources only helix has, built in the
+/// library's scratch.
+fn derive(i: usize, r: weft.Range) ?[]const u8 {
+    const out = put.scratch();
     switch (source) {
-        .literal => |l| return l,
-        .register => |reg| return weft.registerPasteValueIn(reg.slot, i, reg.count),
+        .literal, .register => unreachable,
         .fill => |f| {
             const src = weft.slice(r.start, r.end);
             var w: usize = 0;
             var k: usize = 0;
             while (k < src.len) {
                 const step = std.unicode.utf8ByteSequenceLength(src[k]) catch 1;
-                const out: []const u8 = if (src[k] == '\n') "\n" else f.buf[0..f.len];
-                if (w + out.len > put_buf.len) return null;
-                @memcpy(put_buf[w..][0..out.len], out);
-                w += out.len;
+                const piece: []const u8 = if (src[k] == '\n') "\n" else f.buf[0..f.len];
+                if (w + piece.len > out.len) return null;
+                @memcpy(out[w..][0..piece.len], piece);
+                w += piece.len;
                 k += step;
             }
-            return put_buf[0..w];
+            return out[0..w];
         },
         .case => |c| {
             const src = weft.slice(r.start, r.end);
-            if (src.len > put_buf.len) return null;
-            for (src, put_buf[0..src.len]) |b, *o| o.* = switch (c) {
+            if (src.len > out.len) return null;
+            for (src, out[0..src.len]) |b, *o| o.* = switch (c) {
                 .lower => std.ascii.toLower(b),
                 .upper => std.ascii.toUpper(b),
                 .toggle => if (std.ascii.isUpper(b)) std.ascii.toLower(b) else std.ascii.toUpper(b),
             };
-            return put_buf[0..src.len];
+            return out[0..src.len];
         },
-        .open => |where| {
-            const l = weft.lineAt(r.start);
-            const line = weft.slice(l.start, l.end);
-            var indent: usize = 0;
-            while (indent < line.len and (line[indent] == ' ' or line[indent] == '\t')) indent += 1;
-            if (indent + 1 > put_buf.len) return null;
-            switch (where) {
-                .below => {
-                    put_buf[0] = '\n';
-                    @memcpy(put_buf[1..][0..indent], line[0..indent]);
-                },
-                .above => {
-                    @memcpy(put_buf[0..indent], line[0..indent]);
-                    put_buf[indent] = '\n';
-                },
-            }
-            return put_buf[0 .. indent + 1];
-        },
+        .open => |where| return put.lineOpening(r.start, where == .below),
         .pad => |pad| {
-            const k = @min(pad[i], put_buf.len);
-            @memset(put_buf[0..k], ' ');
-            return put_buf[0..k];
+            const k = @min(pad[i], out.len);
+            @memset(out[0..k], ' ');
+            return out[0..k];
         },
     }
 }
 
 /// `hx-op-put`: the operator `putEach` runs once per selection.
-pub fn opPut() void {
-    const h = weft.argRange(0) orelse return;
-    const r = weft.rangeEnds(h) orelse return;
-    const i = claim(r.start) orelse return;
-    var bytes = bytesFor(i, r) orelse return;
-    var base = r.start;
-    if (job_newline[i]) {
-        if (bytes.len + 1 > put_buf.len) return;
-        std.mem.copyBackwards(u8, put_buf[1..][0..bytes.len], bytes);
-        put_buf[0] = '\n';
-        bytes = put_buf[0 .. bytes.len + 1];
-        base += 1;
-    }
-    weft.editRange(h, bytes);
-    const written = bytes.len - (base - r.start);
-    switch (source) {
-        .register => |reg| weft.pasteValueAtIn(reg.slot, base, i, reg.count),
-        else => {},
-    }
-    job_result[i] = weft.anchorRange(.{ .start = base, .end = base + written });
-}
+pub const opPut = put.run;
 
 /// What job `i` wrote, where it is now.
-fn wrote(i: usize) ?weft.Range {
-    return weft.rangeEnds(job_result[i] orelse return null);
-}
+const wrote = put.wrote;
 
 // ── The last modification (`g.`) ────────────────────────────────────────
 
