@@ -48,7 +48,8 @@ const Guest = struct {
 /// structured identity it names, `gutter` is the guest half of the
 /// `ui/gutter-segment` round, `statusline` the guest half of
 /// `ui/statusline-seg`'s, `regex` is the Pike-VM pattern engine
-/// (doc/configs.md §0.2) and `search` the query → matches planning over it
+/// (doc/configs.md §0.2) — and the one word-character rule `\b`, the word
+/// motions, text objects and C-d all ask — and `search` the query → matches planning over it
 /// that helix's `s S K A-K / ? n N *` and the find bar share — core never
 /// parses a pattern — and `labels` the jump labels snipe and helix's `gw`
 /// draw over the visible text.
@@ -442,11 +443,11 @@ const guests = [_]Guest{
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
     .{ .name = "shell", .import = "guest_shell_wasm", .install = true },
-    .{ .name = "motions", .import = "guest_motions_wasm", .install = true },
-    .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true },
+    .{ .name = "motions", .import = "guest_motions_wasm", .install = true, .libraries = &.{.regex} },
+    .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true, .libraries = &.{.regex} },
     .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
     .{ .name = "surround", .import = "guest_surround_wasm", .install = true },
-    .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{ .ex, .regex } },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
     .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
     .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
@@ -476,10 +477,10 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .search, .labels } },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
-    .{ .name = "ide", .import = "guest_ide_wasm", .install = true },
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{.regex} },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
     // Line numbers: binds `ui/gutter-segment` for text entries and answers a
     // window of cells per round (absolute or caret-relative). No commands.

@@ -182,9 +182,8 @@ var needle_buf: [needle_max]u8 = undefined;
 /// with room for a needle's overlap between windows.
 const window = 1 << 15;
 
-fn isWordByte(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
-}
+/// The word rule `\b` and the word motions share.
+const isWordByte = @import("weft_regex").isWordByte;
 
 /// The word around `at` (touching it on either side), or null on none.
 fn wordAround(at: usize) ?weft.Range {

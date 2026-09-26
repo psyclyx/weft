@@ -284,9 +284,9 @@ pub fn again(forward: bool, mode: sel.Mode) void {
 
 // ── * / A-* ─────────────────────────────────────────────────────────────
 
-fn isWord(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
-}
+/// The rule `\b` itself applies, so a `\b` added here always has a word
+/// edge to sit on.
+const isWord = text.isWord;
 
 /// `*` (`A-*` without `bounds`): the selections' text, escaped, becomes the
 /// search pattern — alternatives joined by `|`, each once. With `bounds`, a

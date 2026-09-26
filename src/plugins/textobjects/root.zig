@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const weft = @import("weft");
+/// The one word-character rule `\b` also uses.
+const regex = @import("weft_regex");
 
 const Obj = struct { s: usize, e: usize };
 fn retObj(o: ?Obj) void {
@@ -132,7 +134,7 @@ fn treeObj(comptime needles: []const []const u8) ?Obj {
 const Class = enum { space, word, punct };
 fn classOf(b: u8) Class {
     if (b == ' ' or b == '\t' or b == '\n' or b == '\r') return .space;
-    if (std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80) return .word;
+    if (regex.isWordByte(b)) return .word;
     return .punct;
 }
 fn bigClass(b: u8) Class {

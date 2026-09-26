@@ -10,6 +10,11 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const regex = @import("weft_regex");
+
+/// A word character: the regex library's rule, so the word `w` walks over is
+/// the word `*`'s `\b` bounds and `gw` labels.
+pub const isWord = regex.isWordByte;
 
 pub const Sel = weft.Selection;
 
@@ -63,7 +68,7 @@ pub fn classOf(c: u8, big: bool) Class {
     if (c == '\n') return .eol;
     if (c == ' ' or c == '\t' or c == '\r') return .space;
     if (big) return .word;
-    if (std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80) return .word;
+    if (isWord(c)) return .word;
     return .punct;
 }
 

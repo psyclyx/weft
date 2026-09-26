@@ -26,11 +26,18 @@
 //!
 //! Scope: this covers what helix's substitute/search and ide's find bar
 //! need, not PCRE. No lookaround, no named groups, no inline modifier
-//! groups (only a whole-pattern `(?i)`), no full Unicode case folding or
-//! `\w`/`\b` beyond ASCII. Each of those is a real feature some caller will
-//! eventually want; none of them changes the shape of the VM above, so they
-//! are deliberately left for whoever needs them first rather than guessed
-//! at here.
+//! groups (only a whole-pattern `(?i)`), no full Unicode case folding. Each
+//! of those is a real feature some caller will eventually want; none of them
+//! changes the shape of the VM above, so they are deliberately left for
+//! whoever needs them first rather than guessed at here.
+//!
+//! WORDS. `\w`, `\W`, `\b` and `\B` share ONE rule, `isWordByte`: an ASCII
+//! letter, digit or `_`, or any byte of a non-ASCII character. So `café` is
+//! one word and `\bcafé\b` finds it — the same word a grammar's motions
+//! see, because they ask the same predicate. It over-counts (a non-ASCII
+//! space or dash is a word character too), which is the side an editor errs
+//! on: splitting a word in two is the worse surprise. Case folding stays
+//! ASCII-only.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -118,18 +125,21 @@ const NOT_DIGIT_RANGES = [_]Range{
     .{ .lo = 0, .hi = '0' - 1 },
     .{ .lo = '9' + 1, .hi = MAX_CP },
 };
+/// `\w` over codepoints: `isWordByte`'s rule, so every non-ASCII codepoint
+/// (and every invalid byte, which decodes as itself) is a word character.
 const WORD_RANGES = [_]Range{
     .{ .lo = 'a', .hi = 'z' },
     .{ .lo = 'A', .hi = 'Z' },
     .{ .lo = '0', .hi = '9' },
     .{ .lo = '_', .hi = '_' },
+    .{ .lo = 0x80, .hi = MAX_CP },
 };
 const NOT_WORD_RANGES = [_]Range{
     .{ .lo = 0, .hi = '0' - 1 },
     .{ .lo = '9' + 1, .hi = 'A' - 1 },
     .{ .lo = 'Z' + 1, .hi = '_' - 1 },
     .{ .lo = '_' + 1, .hi = 'a' - 1 },
-    .{ .lo = 'z' + 1, .hi = MAX_CP },
+    .{ .lo = 'z' + 1, .hi = 0x7f },
 };
 // \t \n \v \f \r are the contiguous run 9..13; ' ' (32) is separate.
 const SPACE_RANGES = [_]Range{
@@ -179,14 +189,20 @@ fn classMatches(set: ClassSet, ci: bool, cp: u21) bool {
     return hit != set.negate;
 }
 
-fn isWordByte(b: u8) bool {
-    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_';
+/// THE word-character rule (module doc, WORDS): an ASCII letter, digit or
+/// `_`, or any byte of a non-ASCII character. Byte-wise on purpose: every
+/// byte of a UTF-8 sequence answers the same, so a caller scanning bytes and
+/// one decoding codepoints agree on where a word ends. Exported so every
+/// plugin that classifies words (motions, text objects, `*`, C-d) asks this
+/// rather than keeping a copy that drifts from `\b`.
+pub fn isWordByte(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_' or b >= 0x80;
 }
 fn wordBefore(haystack: []const u8, pos: usize) bool {
-    return pos > 0 and haystack[pos - 1] < 0x80 and isWordByte(haystack[pos - 1]);
+    return pos > 0 and isWordByte(haystack[pos - 1]);
 }
 fn wordAfter(haystack: []const u8, pos: usize) bool {
-    return pos < haystack.len and haystack[pos] < 0x80 and isWordByte(haystack[pos]);
+    return pos < haystack.len and isWordByte(haystack[pos]);
 }
 fn atWordBoundary(haystack: []const u8, pos: usize) bool {
     return wordBefore(haystack, pos) != wordAfter(haystack, pos);
@@ -1272,6 +1288,15 @@ test "shorthand classes and their negations, standalone and nested" {
 test "word boundaries" {
     try expectFind("\\bcat\\b", "concatenate cat scatter", 0, .{}, .{ .start = 12, .end = 15 });
     try expectFind("\\Bcat", "concatenate cat", 0, .{}, .{ .start = 3, .end = 6 });
+}
+
+test "a non-ASCII letter is a word character, for \\w and \\b alike" {
+    try expectFind("\\bcafé\\b", "un café noir", 0, .{}, .{ .start = 3, .end = 8 });
+    try expectFind("\\bcaf\\b", "café", 0, .{}, null);
+    try expectFind("\\w+", "  élan ", 0, .{}, .{ .start = 2, .end = 7 });
+    try expectFind("[\\w]+", "  élan ", 0, .{}, .{ .start = 2, .end = 7 });
+    try expectFind("\\W+", "é  é", 0, .{}, .{ .start = 2, .end = 4 });
+    try t.expect(isWordByte('_') and isWordByte(0xc3) and !isWordByte('-'));
 }
 
 test "anchors: default is whole-haystack, multiline is per-line" {

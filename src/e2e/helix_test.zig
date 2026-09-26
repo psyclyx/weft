@@ -494,6 +494,23 @@ test "e2e/helix: * searches for the selection's word, A-* for its bare text" {
     try expectSelections(ed, &.{.{ 4, 7 }});
 }
 
+test "e2e/helix: * on a word with a non-ASCII letter finds it again — one word rule for motions and \\b" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                            0     5 7
+    try openFile(ed, "cafe.txt", "café x café\n");
+
+    keys(ed, "e");
+    try expectSelections(ed, &.{.{ 0, 5 }});
+    keys(ed, "*");
+    try t.expectEqualStrings("\\bcafé\\b", searchRegister(ed));
+    keys(ed, "n");
+    try expectSelections(ed, &.{.{ 8, 13 }});
+}
+
 test "e2e/helix: the / register is shared — vim pastes the pattern helix searched for" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

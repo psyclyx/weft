@@ -9,6 +9,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const ex_mod = @import("weft_ex");
+const regex = @import("weft_regex");
 const semantic_action = weft.semantic.action.standard;
 
 /// The `:` command line: vim's resting mode is `normal`, its command-line
@@ -149,10 +150,8 @@ fn isChangeOp() bool {
     return std.mem.eql(u8, op_after, "insert");
 }
 
-fn isWordByte(ch: u8) bool {
-    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
-        (ch >= '0' and ch <= '9') or ch == '_';
-}
+/// The word rule the `motions` plugin's `w`/`e` split on, and `\b` too.
+const isWordByte = regex.isWordByte;
 
 /// Is the cursor sitting ON a word character? (vim's `cw`→`ce` rule only
 /// applies when in a word — on whitespace, `cw` stays `cw`.)

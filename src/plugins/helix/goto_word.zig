@@ -25,9 +25,7 @@ var words: [labels_mod.max_targets]weft.Range = undefined;
 var starts: [labels_mod.max_targets]usize = undefined;
 var how: sel.Mode = .move;
 
-fn isWord(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
-}
+const isWord = text.isWord;
 
 /// The words of `r` (at least two word characters each), in document order.
 fn scan(r: weft.Range, out: []weft.Range) usize {
