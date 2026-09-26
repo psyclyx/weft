@@ -56,7 +56,9 @@ weft.bind("menu", "F1", "which-key-now");
 //
 // `pointer-click` focuses the pane under the pointer first, so a click in an
 // unfocused pane lands where it points (click-through). A double or triple
-// click re-places the caret until a grammar gives it a meaning of its own.
+// click re-places the caret until a grammar gives it a meaning of its own; it
+// never presses a button, a tab or a status segment a second time (only a
+// gesture's first click acts).
 weft.bind("global", "mouse-1", "pointer-click");
 weft.bind("global", "double-mouse-1", "pointer-click");
 weft.bind("global", "triple-mouse-1", "pointer-click");

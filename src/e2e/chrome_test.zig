@@ -484,3 +484,29 @@ test "e2e/chrome: side by side, a text pane and a listing each show their own mo
     try t.expect(!try hasGutter(ed, sidebar));
     app.proj.shot(ed, "chrome-per-pane-mode");
 }
+
+test "e2e/chrome: a double click on a toolbar button runs it once" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "one\n");
+    // Two undo units: a motion between the edits seals the first.
+    ed.press("End", "");
+    ed.typeText("!");
+    ed.press("Home", "");
+    ed.press("End", "");
+    ed.typeText("?");
+    try ide.expectText(ed, "one!?\n");
+
+    // The second click of a double click is the same gesture, not a second
+    // press of the button: one undo, not two.
+    ed.applyWindow();
+    const view = try toolbarView(ed);
+    const node = button(view, "Undo") orelse return error.NoSuchButton;
+    const at = pointAtNodeIn(ed, (try toolbarPane(ed)).pane().id, node.id) orelse return error.ButtonNotDrawn;
+    ed.click(at);
+    ed.clickAgain(at);
+    try ide.expectText(ed, "one!\n");
+}

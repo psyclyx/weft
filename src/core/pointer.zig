@@ -222,9 +222,20 @@ fn focusHitPane(ctx: *Context) bool {
     return g.hit.focused;
 }
 
+/// Whether the gesture being dispatched may ACT — run an action node, press
+/// a tab or a status segment. Only its first click may: `double-mouse-1` and
+/// `triple-mouse-1` are the same press continued (a double click on a word
+/// selects it; on a button it must not press the button twice), so every
+/// pointer route to an action asks this, in one place. Zero clicks is a
+/// pointer command run with no gesture behind it, which acts.
+fn actsThisClick(ctx: *const Context) bool {
+    return ctx.head.pointer.clicks <= 1;
+}
+
 /// A click through a pane that took no focus: run the action node under the
 /// pointer by reference, leaving the head's focus where it was.
 fn activateInPlace(ctx: *Context) anyerror!Value {
+    if (!actsThisClick(ctx)) return ok;
     const node = ctx.head.pointer.hit.node orelse return ok;
     const services = ctx.semantic orelse return ok;
     _ = services.invokeActionNode(&ctx.head.interactions, ctx.head, ctx.gpa, node.view, node.node) catch |err| switch (err) {
@@ -280,12 +291,12 @@ fn cPointerFocusPoint(ctx: *Context, args: struct {}) anyerror!Value {
 /// action node acts, and in place.
 fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    if (ctx.head.pointer.hit.chrome) |chrome| return clickChrome(ctx, chrome);
+    if (ctx.head.pointer.hit.chrome) |chrome| return if (actsThisClick(ctx)) clickChrome(ctx, chrome) else ok;
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
         try focusNode(ctx, node);
-        if (isActionNode(ctx, node)) _ = try activateFocusedAction(ctx);
+        if (isActionNode(ctx, node)) _ = try activateActionNode(ctx);
         return ok;
     }
     const off = hit.offset orelse return ok;
@@ -386,9 +397,17 @@ fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const node = ctx.head.pointer.hit.node orelse return ok;
     try focusNode(ctx, node);
-    if (isActionNode(ctx, node)) return activateFocusedAction(ctx);
+    if (isActionNode(ctx, node)) return activateActionNode(ctx);
+    // Opening a row's target is what a double click on a listing is FOR.
     _ = try command.run(ctx.commands, ctx, "target-open-focused", &.{});
     return ok;
+}
+
+/// The pointer's route to the focused action node: it runs on a gesture's
+/// first click only (`actsThisClick`).
+fn activateActionNode(ctx: *Context) anyerror!Value {
+    if (!actsThisClick(ctx)) return ok;
+    return activateFocusedAction(ctx);
 }
 
 fn scrollHitPane(ctx: *Context, rows: i32) void {
