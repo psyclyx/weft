@@ -650,6 +650,15 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     return ok;
 }
 
+/// Show or hide a DECLARED viewport by name — the one door a "toggle the
+/// sidebar" key needs, without core learning what a sidebar is. It records
+/// the intent on the declaration; the layout phase docks or undocks to match.
+fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
+    _ = registry.toggle(args.name) catch return .{ .string = "no viewport by that name" };
+    return ok;
+}
+
 fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     return switch (p) {
         .command => |c| c,
@@ -728,6 +737,7 @@ const table = [_]command.Command{
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
     command.define("echo", "Show a message on the status line.", cEcho),
+    command.define("viewport-toggle", "Show or hide a declared viewport.", cViewportToggle),
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),

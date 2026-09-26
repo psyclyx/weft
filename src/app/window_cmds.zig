@@ -302,6 +302,19 @@ pub fn materializeViewports(
     var dirty = false;
     for (registry.list.items) |*decl| {
         const edge = decl.attrs.dock orelse continue;
+        if (!decl.shown) {
+            // Hidden: undock it through the ordinary close, which already
+            // knows how a dock collapses and where a head parked in it
+            // recovers to. Its entry stays open, so showing it again
+            // re-presents the same listing rather than a fresh one.
+            if (decl.pane) |id| if (win_layout.paneById(id)) |node| {
+                _ = win_layout.closeFocused(node) catch continue;
+                dirty = true;
+            };
+            decl.pane = null;
+            decl.presented = false;
+            continue;
+        }
         if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
             const panel = win_layout.dock(edge, decl.extent, buffers.active_id, decl.attrs) catch continue;
             decl.pane = panel.leaf.id;

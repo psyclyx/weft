@@ -88,6 +88,11 @@ pub const Declaration = struct {
     /// The `window_layout` pane slot this was materialized into.
     pane: ?u32 = null,
     presented: bool = false,
+    /// Whether the workspace holds this viewport on screen. A declaration
+    /// starts shown; `toggle` flips it and the layout phase docks or undocks
+    /// to match. Workspace state, not manifest data: a config reload
+    /// re-declaring the viewport leaves it as the user left it.
+    shown: bool = true,
 };
 
 /// The declared viewports of one system. Keyed by name, last declaration
@@ -127,6 +132,15 @@ pub const Registry = struct {
         const subject = try gpa.dupe(u8, "");
         errdefer gpa.free(subject);
         try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject });
+    }
+
+    /// Flip whether `name` is held on screen; returns the new state. Only the
+    /// intent is recorded here — the layout phase realizes it, exactly as it
+    /// realizes a declaration.
+    pub fn toggle(self: *Registry, name: []const u8) error{UnknownViewport}!bool {
+        const d = self.find(name) orelse return error.UnknownViewport;
+        d.shown = !d.shown;
+        return d.shown;
     }
 
     /// "Present resource R in viewport V" as a declaration. A NEW subject
@@ -173,6 +187,21 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
 
     try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", "."));
+}
+
+test "viewport: toggling is workspace state a re-declaration leaves alone" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+
+    try reg.declare(gpa, "sidebar", companion, 0.25);
+    try t.expect(reg.find("sidebar").?.shown);
+    try t.expect(!try reg.toggle("sidebar"));
+    // A config reload re-declares it; the choice to hide it stands.
+    try reg.declare(gpa, "sidebar", companion, 0.25);
+    try t.expect(!reg.find("sidebar").?.shown);
+    try t.expect(try reg.toggle("sidebar"));
+    try t.expectError(error.UnknownViewport, reg.toggle("nope"));
 }
 
 test "viewport: a sidebar is a bundle of attributes, not a kind" {
