@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: highlighted selection</title>
+  <rect width="256" height="256" rx="52" fill="#EEE8D8"/>
+  <path d="M50 68 177 47l30 137-127 21Z" fill="#3653C9"/>
+  <path d="m80 205 127-21-5 11-127 21Z" fill="#203AA1"/>
+  <path d="m73 94 79-13 3 12-79 13Zm8 31 93-15 3 12-93 15Zm7 31 58-10 3 12-58 10Z" fill="#F7F1E8"/>
+  <path d="m117 119 59-10 4 23-59 10Z" fill="#F8C975"/>
+  <path d="m127 130 39-7" stroke="#3653C9" stroke-width="9" stroke-linecap="round"/>
+  <path d="m181 105 10 47" stroke="#F38B62" stroke-width="7" stroke-linecap="round"/>
+</svg>

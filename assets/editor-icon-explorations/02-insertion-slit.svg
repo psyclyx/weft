@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Insertion slit</title><desc id="desc">A bright insertion mark cuts through a tilted block of text.</desc>
+  <rect width="256" height="256" rx="52" fill="#F1E8DA"/>
+  <path d="M45 84 177 47l35 124-132 37Z" fill="#293E68"/>
+  <path d="m80 208 132-37-6 13-132 37Z" fill="#172A4C"/>
+  <path d="m66 104 54-15 3 12-54 15Zm10 32 44-12 3 12-44 12Zm9 32 35-10 3 12-35 10Z" fill="#F6EFE3"/>
+  <path d="m152 66 28 103-16 5-28-103Z" fill="#F18F71"/>
+  <path d="m146 70 22-6m-2 108 22-6" stroke="#FFD1AE" stroke-width="6" stroke-linecap="round"/>
+</svg>

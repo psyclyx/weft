@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Leaves</title><desc id="desc">Three floating editor leaves overlap, with a cursor on the nearest one.</desc>
+  <rect width="256" height="256" rx="52" fill="#142D35"/>
+  <path d="M39 78 120 55l29 127-81 23Z" fill="#54757B"/>
+  <path d="M69 66 150 43l29 127-81 23Z" fill="#83B5B2"/>
+  <path d="M99 77 180 54l29 127-81 23Z" fill="#E9E5D6"/>
+  <path d="m128 204 81-23-5 13-81 23Z" fill="#B5B5A9"/>
+  <path d="m123 109 49-14m-43 42 57-16m-50 44 37-11" stroke="#284049" stroke-width="9" stroke-linecap="round"/>
+  <path d="m174 101 12 51" stroke="#F08C6D" stroke-width="8" stroke-linecap="round"/>
+</svg>

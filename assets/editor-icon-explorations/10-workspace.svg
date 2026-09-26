@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Workspace</title><desc id="desc">Two offset editor panes share one small workspace, with an active caret.</desc>
+  <rect width="256" height="256" rx="52" fill="#DBDFE9"/>
+  <path d="M37 73 126 49l28 130-89 24Z" fill="#D97B73"/>
+  <path d="m65 203 89-24-5 11-89 24Z" fill="#A55362"/>
+  <path d="M105 70 199 52l21 129-94 18Z" fill="#2B3F72"/>
+  <path d="m126 199 94-18-5 12-94 18Z" fill="#1B2D55"/>
+  <path d="m125 95 55-10m-50 43 68-13m-63 44 43-8" stroke="#F4EDE4" stroke-width="10" stroke-linecap="round"/>
+  <path d="m185 94 8 45" stroke="#F4BC72" stroke-width="7" stroke-linecap="round"/>
+</svg>

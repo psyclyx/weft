@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Gutter</title><desc id="desc">The margin and text rows of a code editor, with one active line.</desc>
+  <rect width="256" height="256" rx="52" fill="#EEEDE8"/>
+  <path d="M77 49v158" stroke="#B3B4BC" stroke-width="5" stroke-linecap="round"/>
+  <path d="M100 76h85M100 121h102M100 166h67" stroke="#354566" stroke-width="13" stroke-linecap="round"/>
+  <path d="M50 76h8M50 121h8M50 166h8" stroke="#A7ABB6" stroke-width="9" stroke-linecap="round"/>
+  <path d="M92 102h121v38H92z" fill="#F6B78E" opacity=".82"/>
+  <path d="M100 121h102" stroke="#354566" stroke-width="13" stroke-linecap="round"/>
+  <path d="M204 100v42" stroke="#CC604F" stroke-width="8" stroke-linecap="round"/>
+</svg>

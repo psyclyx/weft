@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: amethyst and citron</title>
+  <rect width="256" height="256" rx="52" fill="#241D37"/>
+  <path d="M58 51 201 70l-18 136-143-19Z" fill="#B8A5F2"/>
+  <path d="m40 187 143 19-8 11-143-19Z" fill="#7564BA"/>
+  <path d="m69 78 83 11-2 12-83-11Zm-4 31 104 14-2 12-104-14Zm-4 31 63 8-2 12-63-8Z" fill="#2C2547"/>
+  <path d="m148 111-7 52m-1-53 17 2m-23 50 17 2" fill="none" stroke="#E8EA8F" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title">
+  <title id="title">Weft icon concept: folded textile corners</title>
+  <rect width="160" height="160" rx="35" fill="#171B1C"/>
+  <path d="M30 68V30h38" fill="none" stroke="#E4E9E2" stroke-width="15" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M92 30h38v38" fill="none" stroke="#9BC997" stroke-width="15" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M130 92v38H92" fill="none" stroke="#E4E9E2" stroke-width="15" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M68 130H30V92" fill="none" stroke="#9BC997" stroke-width="15" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M60 80 80 60l20 20-20 20Z" fill="none" stroke="#6F8D79" stroke-width="8" stroke-linejoin="miter"/>
+</svg>

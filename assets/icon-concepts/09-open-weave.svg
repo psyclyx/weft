@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: open weave</title>
+  <desc id="desc">Four cobalt strips and three orange strips interlace in an open perspective grid.</desc>
+  <rect width="256" height="256" rx="52" fill="#F2EEE7"/>
+  <g transform="matrix(145 -42 48 137 33 83)">
+    <g fill="#3152C9">
+      <path d="M.05 0h.17v1H.05zM.30 0h.17v1H.30zM.55 0h.17v1H.55zM.80 0h.17v1H.80z"/>
+    </g>
+    <g fill="#F47652">
+      <path d="M0 .14h1v.18H0zM0 .43h1v.18H0zM0 .72h1v.18H0z"/>
+    </g>
+    <g fill="#3152C9">
+      <path d="M.05 .14h.17v.18H.05zM.55 .14h.17v.18H.55zM.30 .43h.17v.18H.30zM.80 .43h.17v.18H.80zM.05 .72h.17v.18H.05zM.55 .72h.17v.18H.55z"/>
+    </g>
+  </g>
+</svg>

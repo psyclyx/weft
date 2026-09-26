@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Lift</title><desc id="desc">One line lifts out from two lines of text like a movable strip.</desc>
+  <rect width="256" height="256" rx="52" fill="#2C2543"/>
+  <path d="M50 72h139M50 183h105" stroke="#EFE8DB" stroke-width="14" stroke-linecap="round"/>
+  <path d="M50 129h83" stroke="#EFE8DB" stroke-width="14" stroke-linecap="round"/>
+  <path d="m128 122 74-61 16 19-74 61Z" fill="#F3A46E"/>
+  <path d="m144 141 74-61-3 18-74 61Z" fill="#B96868"/>
+  <path d="m128 122 16 19-3 18-16-19Z" fill="#D48478"/>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title">
+  <title id="title">Weft icon concept: weaving shuttle</title>
+  <rect width="160" height="160" rx="35" fill="#171B1C"/>
+  <path d="M25 80C44 53 62 40 80 40s36 13 55 40c-19 27-37 40-55 40S44 107 25 80Z" fill="none" stroke="#E4E9E2" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M48 80h64" fill="none" stroke="#9BC997" stroke-width="10" stroke-linecap="round"/>
+  <path d="M64 80c7-12 24-12 32 0-8 12-25 12-32 0Z" fill="#171B1C" stroke="#9BC997" stroke-width="7"/>
+  <path d="M14 80h19m94 0h19" fill="none" stroke="#9BC997" stroke-width="8" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: folded fabric</title>
+  <desc id="desc">A small woven fabric square folded at one corner, in violet and pale yellow.</desc>
+  <rect width="256" height="256" rx="52" fill="#2B2446"/>
+  <path d="M45 82 172 50l40 132-127 32Z" fill="#705BA0"/>
+  <g transform="matrix(127 -32 40 132 45 82)">
+    <g fill="#F6D891">
+      <path d="M.07 0h.16v1H.07zM.30 0h.16v1H.30zM.53 0h.16v1H.53zM.76 0h.16v1H.76z"/>
+    </g>
+    <g fill="#B6A7E9">
+      <path d="M0 .10h1v.16H0zM0 .33h1v.16H0zM0 .56h1v.16H0zM0 .79h1v.16H0z"/>
+    </g>
+    <g fill="#F6D891">
+      <path d="M.07 .10h.16v.16H.07zM.53 .10h.16v.16H.53zM.30 .33h.16v.16H.30zM.76 .33h.16v.16H.76zM.07 .56h.16v.16H.07zM.53 .56h.16v.16H.53zM.30 .79h.16v.16H.30zM.76 .79h.16v.16H.76z"/>
+    </g>
+  </g>
+  <path d="M45 82 94 70l-33 42Z" fill="#F8E8BC"/>
+  <path d="M45 82 61 112l6-24Z" fill="#D6BBD9"/>
+  <path d="m85 214 127-32-5 11-127 32Z" fill="#4C3A75"/>
+</svg>

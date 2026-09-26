@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: folded corner</title>
+  <rect width="256" height="256" rx="52" fill="#E6F1EA"/>
+  <path d="M48 72 171 46l34 131-123 26Z" fill="#187177"/>
+  <path d="m82 203 123-26-6 12-123 26Z" fill="#10565F"/>
+  <path d="m171 46 27 19-20 5Z" fill="#91CBC3"/>
+  <path d="m69 99 73-15 3 12-73 15Zm8 31 86-18 3 12-86 18Zm8 31 55-12 3 12-55 12Z" fill="#EAF7E8"/>
+  <path d="m155 96 12 48m-20-46 17-4m-5 52 17-4" fill="none" stroke="#FFB467" stroke-width="7" stroke-linecap="round"/>
+</svg>

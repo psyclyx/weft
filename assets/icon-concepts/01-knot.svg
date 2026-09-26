@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title">
+  <title id="title">Weft icon concept: interlaced knot</title>
+  <rect width="160" height="160" rx="35" fill="#171B1C"/>
+  <path d="M80 25 119 64 80 103 41 64Z" fill="none" stroke="#E4E9E2" stroke-width="13" stroke-linejoin="round"/>
+  <path d="M80 57 119 96 80 135 41 96Z" fill="none" stroke="#9BC997" stroke-width="13" stroke-linejoin="round"/>
+  <path d="m45 60-4 4 13 13" fill="none" stroke="#171B1C" stroke-width="17"/>
+  <path d="m41 64 17 17" fill="none" stroke="#E4E9E2" stroke-width="13"/>
+  <path d="m106 77 13-13" fill="none" stroke="#171B1C" stroke-width="17"/>
+  <path d="m102 81 17-17" fill="none" stroke="#E4E9E2" stroke-width="13"/>
+</svg>

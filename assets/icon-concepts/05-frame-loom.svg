@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: frame loom</title>
+  <desc id="desc">A small wooden frame loom with taut warp threads, green woven cloth, and a shuttle.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#26302E"/><stop offset="1" stop-color="#141A1B"/></linearGradient>
+    <linearGradient id="wood" x2="1" y2="1"><stop stop-color="#D3A77D"/><stop offset=".5" stop-color="#AD7854"/><stop offset="1" stop-color="#80543C"/></linearGradient>
+    <linearGradient id="cloth" x2="0" y2="1"><stop stop-color="#A7D6A4"/><stop offset="1" stop-color="#568B77"/></linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="52" fill="url(#bg)"/>
+  <rect x="1" y="1" width="254" height="254" rx="51" fill="none" stroke="#52615A" stroke-opacity=".5" stroke-width="2"/>
+  <g>
+    <path d="M55 44h146v169H55z" fill="#101819" stroke="url(#wood)" stroke-width="17" stroke-linejoin="round"/>
+    <path d="M63 58h130M63 199h130" stroke="#F0C598" stroke-opacity=".55" stroke-width="2"/>
+    <g stroke="#E6E5C9" stroke-width="2.6" opacity=".9">
+      <path d="M75 62v132M92 62v132M109 62v132M126 62v132M143 62v132M160 62v132M177 62v132"/>
+    </g>
+    <path d="M68 130q60-6 120 0v63H68z" fill="url(#cloth)"/>
+    <path d="M68 136q60-6 120 0M68 149h120M68 162h120M68 175h120M68 188h120" fill="none" stroke="#D2E7BC" stroke-opacity=".48" stroke-width="3"/>
+    <path d="M76 132v60m17-61v61m17-62v62m17-62v62m17-62v62m17-61v61m17-60v60" stroke="#1F574E" stroke-opacity=".25" stroke-width="4"/>
+    <path d="M50 119 93 109h72l42 10-42 10H93z" fill="url(#wood)" stroke="#E7BC8D" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M107 119h42" stroke="#4C3D32" stroke-width="5" stroke-linecap="round"/>
+    <path d="M55 46h146M55 211h146" stroke="url(#wood)" stroke-width="16" stroke-linecap="round"/>
+  </g>
+</svg>

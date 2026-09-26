@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: folded strand</title>
+  <desc id="desc">One wide strand bends through space, showing three flat colored faces.</desc>
+  <rect width="256" height="256" rx="52" fill="#182D39"/>
+  <path d="M36 171 97 101l27 20-61 70Z" fill="#E8926E"/>
+  <path d="M97 101 163 56l27 20-66 45Z" fill="#F4DFB8"/>
+  <path d="M163 56 219 116l-27 20-56-60Z" fill="#72B6B1"/>
+  <path d="m97 101 27 20-10 11-27-20Z" fill="#BE685A"/>
+  <path d="m163 56 27 20-11 8-27-20Z" fill="#C3A885"/>
+</svg>

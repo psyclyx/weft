@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title">
+  <title id="title">Weft icon concept: continuous thread loop</title>
+  <rect width="160" height="160" rx="35" fill="#171B1C"/>
+  <path d="M29 112V72c0-28 22-49 50-49 29 0 51 22 51 51 0 27-20 48-46 48-23 0-39-16-39-37 0-19 14-34 33-34 17 0 29 12 29 28 0 13-10 22-22 22-10 0-17-6-17-15" fill="none" stroke="#9BC997" stroke-width="11" stroke-linecap="round"/>
+  <circle cx="29" cy="112" r="7" fill="#E4E9E2"/>
+  <circle cx="68" cy="86" r="7" fill="#E4E9E2"/>
+</svg>

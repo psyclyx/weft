@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Continuum: pixel</title><desc id="desc">A blocky, orthogonal wrapping line ends at a pixel cursor.</desc>
+  <rect width="256" height="256" rx="52" fill="#17263C"/>
+  <path d="M44 58h136v18H44zM180 58h18v57h-18zM76 97h122v18H76zM58 97h18v65H58zM58 144h102v18H58z" fill="#9EE4C0"/>
+  <path d="M174 142h14v65h-14zM160 142h42v11h-42zM160 196h42v11h-42z" fill="#FFAE72"/>
+</svg>

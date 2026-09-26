@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: warm paper</title>
+  <rect width="256" height="256" rx="52" fill="#23362F"/>
+  <path d="M54 69 180 49l26 137-126 20Z" fill="#F4E4C4"/>
+  <path d="m80 206 126-20-5 12-126 20Z" fill="#BBAB87"/>
+  <path d="m73 95 75-12 3 11-75 12Zm6 31 96-15 3 11-96 15Zm6 31 58-9 3 11-58 9Z" fill="#28453C"/>
+  <path d="m153 99 10 50m-19-48 17-3m-8 53 17-3" fill="none" stroke="#D7564D" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Folio</title><desc id="desc">Two floating leaves share one continuous line of text.</desc>
+  <rect width="256" height="256" rx="52" fill="#1F3239"/>
+  <path d="M43 79 149 48l30 126-106 31Z" fill="#76A6A7"/>
+  <path d="M82 61 191 52l13 140-109 9Z" fill="#EAE7D9"/>
+  <path d="m95 201 109-9-6 12-109 9Z" fill="#B0B6AF"/>
+  <path d="M55 105h52" stroke="#264C59" stroke-width="12" stroke-linecap="round"/>
+  <path d="M105 105c18 0 18 12 34 12h41" fill="none" stroke="#2C515B" stroke-width="12" stroke-linecap="round"/>
+  <path d="M111 155h68" stroke="#2C515B" stroke-width="12" stroke-linecap="round"/>
+  <path d="M186 132v49" stroke="#E88568" stroke-width="8" stroke-linecap="round"/>
+</svg>

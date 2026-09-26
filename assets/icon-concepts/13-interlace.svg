@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: interlaced lines</title>
+  <desc id="desc">Two broad strands cross twice in a loose, open weave.</desc>
+  <rect width="256" height="256" rx="52" fill="#F2EDD9"/>
+  <path d="M39 176C82 176 86 76 128 76s46 100 89 100" fill="none" stroke="#CF6559" stroke-width="19" stroke-linecap="round"/>
+  <path d="M39 76C82 76 86 176 128 176s46-100 89-100" fill="none" stroke="#3A598E" stroke-width="19" stroke-linecap="round"/>
+</svg>

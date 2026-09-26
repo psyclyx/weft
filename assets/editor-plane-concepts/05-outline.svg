@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: open outline</title>
+  <rect width="256" height="256" rx="52" fill="#17334C"/>
+  <path d="M48 71 179 49l29 137L77 208Z" fill="none" stroke="#E9E7DA" stroke-width="9" stroke-linejoin="round"/>
+  <path d="m71 98 69-12m-63 45 95-16m-89 47 61-10" fill="none" stroke="#E9E7DA" stroke-width="11" stroke-linecap="round"/>
+  <path d="m151 99 11 51m-19-49 18-3m-8 54 18-3" fill="none" stroke="#F7C66B" stroke-width="7" stroke-linecap="round"/>
+</svg>

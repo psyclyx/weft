@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: woven plane</title>
+  <desc id="desc">An angled square of interlaced coral and cream strips on deep blue.</desc>
+  <rect width="256" height="256" rx="52" fill="#17213B"/>
+  <path d="M44 87 164 47l48 122-120 40Z" fill="#26365B"/>
+  <g transform="matrix(120 -40 48 122 44 87)">
+    <g fill="#F9DFC2">
+      <path d="M.08 0h.16v1H.08zM.30 0h.16v1H.30zM.52 0h.16v1H.52zM.74 0h.16v1H.74z"/>
+    </g>
+    <g fill="#F38A78">
+      <path d="M0 .09h1v.16H0zM0 .31h1v.16H0zM0 .53h1v.16H0zM0 .75h1v.16H0z"/>
+    </g>
+    <g fill="#F9DFC2">
+      <path d="M.08 .09h.16v.16H.08zM.52 .09h.16v.16H.52zM.30 .31h.16v.16H.30zM.74 .31h.16v.16H.74zM.08 .53h.16v.16H.08zM.52 .53h.16v.16H.52zM.30 .75h.16v.16H.30zM.74 .75h.16v.16H.74z"/>
+    </g>
+  </g>
+  <path d="M92 209 212 169l-5 12-120 40Z" fill="#B45E63"/>
+  <path d="M44 87 92 209l-5 12L39 99Z" fill="#E6B090"/>
+</svg>

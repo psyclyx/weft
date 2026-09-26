@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: ink and coral</title>
+  <rect width="256" height="256" rx="52" fill="#F1EEE7"/>
+  <path d="M50 70 178 48l29 136L79 206Z" fill="#293B64"/>
+  <path d="m79 206 128-22-5 12-128 22Z" fill="#172641"/>
+  <path d="m73 95 76-13 3 12-76 13Zm8 30 88-15 3 12-88 15Zm7 30 58-10 3 12-58 10Z" fill="#F7F1E5"/>
+  <path d="m151 101 10 50m-19-48 18-3m-8 53 18-3" fill="none" stroke="#F18A67" stroke-width="7" stroke-linecap="round"/>
+</svg>

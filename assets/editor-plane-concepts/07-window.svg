@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: tilted editor window</title>
+  <rect width="256" height="256" rx="52" fill="#1E2734"/>
+  <path d="M48 68 178 47l29 139-130 21Z" fill="#E8EAE6"/>
+  <path d="m77 207 130-21-5 11-130 21Z" fill="#9AAFC0"/>
+  <path d="M48 68 178 47l5 26-130 21Z" fill="#728DA5"/>
+  <circle cx="68" cy="76" r="4" fill="#F5BC78"/><circle cx="82" cy="74" r="4" fill="#F5BC78"/>
+  <path d="m70 114 74-12m-68 43 95-16m-89 47 59-10" stroke="#30445A" stroke-width="11" stroke-linecap="round"/>
+  <path d="m153 105 9 48" stroke="#E26D65" stroke-width="8" stroke-linecap="round"/>
+</svg>

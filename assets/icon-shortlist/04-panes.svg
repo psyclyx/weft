@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Panes</title><desc id="desc">Two angled editor panes meet at a shared editing cursor.</desc>
+  <rect width="256" height="256" rx="52" fill="#EEF0F3"/>
+  <path d="M42 72 131 49l30 133-89 23Z" fill="#D8786A"/>
+  <path d="m72 205 89-23-5 12-89 23Z" fill="#9D514F"/>
+  <path d="M111 77 199 53l17 137-88 24Z" fill="#2D4772"/>
+  <path d="m128 214 88-24-5 12-88 24Z" fill="#1D3054"/>
+  <path d="m59 99 49-13m-42 46 49-13" stroke="#FAEADA" stroke-width="10" stroke-linecap="round"/>
+  <path d="m137 103 54-15m-49 46 54-15m-48 45 38-10" stroke="#E9F1EE" stroke-width="10" stroke-linecap="round"/>
+  <path d="m181 94 11 54" stroke="#FFD186" stroke-width="8" stroke-linecap="round"/>
+</svg>

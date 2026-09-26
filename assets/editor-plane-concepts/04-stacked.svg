@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: stacked pages</title>
+  <rect width="256" height="256" rx="52" fill="#F6E8DC"/>
+  <path d="M69 48 195 62l-16 137-126-14Z" fill="#EC8C73"/>
+  <path d="M46 66 172 50l21 139-126 16Z" fill="#353650"/>
+  <path d="m67 205 126-16-5 11-126 16Z" fill="#20243E"/>
+  <path d="m67 93 72-9 2 12-72 9Zm4 31 93-12 2 12-93 12Zm5 31 57-7 2 12-57 7Z" fill="#F9F2DD"/>
+  <path d="m150 100 7 50m-15-49 16-2m-9 53 16-2" fill="none" stroke="#D9ED84" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Continuum: cutout</title><desc id="desc">A wrapped text line appears as negative space cut from a bright field.</desc>
+  <rect width="256" height="256" rx="52" fill="#233A4A"/>
+  <rect x="31" y="35" width="194" height="187" rx="42" fill="#F2B66F"/>
+  <path d="M52 77h120c25 0 37 11 37 29s-12 29-37 29H83c-25 0-37 11-37 29s12 29 37 29h65" fill="none" stroke="#233A4A" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M175 163v54m-10-54h20m-20 54h20" fill="none" stroke="#233A4A" stroke-width="8" stroke-linecap="round"/>
+</svg>

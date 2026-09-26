@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Continuum: ribbon</title><desc id="desc">A broad folded ribbon wraps through the icon and meets a slender cursor.</desc>
+  <rect width="256" height="256" rx="52" fill="#24213D"/>
+  <path d="M45 71h124c27 0 42 13 42 34s-15 34-42 34H84c-27 0-42 13-42 32s15 32 42 32h63" fill="none" stroke="#62AFAE" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M45 64h124c27 0 42 13 42 34s-15 34-42 34H84c-27 0-42 13-42 32s15 32 42 32h63" fill="none" stroke="#BDE2CD" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M179 165v57m-12-57h24m-24 57h24" fill="none" stroke="#FFB483" stroke-width="8" stroke-linecap="round"/>
+</svg>

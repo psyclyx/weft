@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: strong perspective</title>
+  <rect width="256" height="256" rx="52" fill="#202139"/>
+  <path d="M39 89 163 42l55 125-124 47Z" fill="#B4A8E8"/>
+  <path d="m94 214 124-47-1 15-124 47Z" fill="#7567B0"/>
+  <path d="M39 89 94 214l-1 15L38 104Z" fill="#9183C8"/>
+  <path d="m62 105 72-27 6 12-72 27Zm13 30 91-34 6 12-91 34Zm13 30 59-22 6 12-59 22Z" fill="#302D53"/>
+  <path d="m151 91 21 47m-29-44 18-7m4 54 18-7" fill="none" stroke="#FFB07E" stroke-width="7" stroke-linecap="round"/>
+</svg>

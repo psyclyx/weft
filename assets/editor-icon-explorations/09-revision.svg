@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Revision</title><desc id="desc">A line of text is replaced by a new line, with the cursor at its end.</desc>
+  <rect width="256" height="256" rx="52" fill="#21352F"/>
+  <path d="M54 72h129M54 125h89" stroke="#8CADA1" stroke-width="13" stroke-linecap="round"/>
+  <path d="M53 125h114" stroke="#D36A5B" stroke-width="6" stroke-linecap="round"/>
+  <path d="M54 174h126" stroke="#F6E7BE" stroke-width="16" stroke-linecap="round"/>
+  <path d="M199 150v48m-12-48h24m-24 48h24" stroke="#E8AC67" stroke-width="8" stroke-linecap="round"/>
+</svg>

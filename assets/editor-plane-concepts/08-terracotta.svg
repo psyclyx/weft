@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Editor plane: terracotta and aqua</title>
+  <rect width="256" height="256" rx="52" fill="#DDD6F0"/>
+  <path d="M54 69 174 43l33 137-120 26Z" fill="#B8554C"/>
+  <path d="m87 206 120-26-7 15-120 26Z" fill="#823F4B"/>
+  <path d="m75 95 74-16 3 12-74 16Zm8 31 92-20 3 12-92 20Zm8 31 58-13 3 12-58 13Z" fill="#FFE6BF"/>
+  <path d="m160 95 12 50m-20-49 17-4m-5 55 17-4" fill="none" stroke="#79DDCE" stroke-width="7" stroke-linecap="round"/>
+</svg>

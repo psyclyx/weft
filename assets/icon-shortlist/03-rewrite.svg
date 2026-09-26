@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Rewrite</title><desc id="desc">An old text line gives way to a newly written line and its cursor.</desc>
+  <rect width="256" height="256" rx="52" fill="#E4EEE6"/>
+  <path d="M50 76h132" stroke="#9CB1AE" stroke-width="15" stroke-linecap="round"/>
+  <path d="M52 76h130" stroke="#CE7767" stroke-width="5" stroke-linecap="round"/>
+  <path d="M50 173h133" stroke="#284C59" stroke-width="17" stroke-linecap="round"/>
+  <path d="M188 76c21 0 25 18 25 43s-8 35-27 35" fill="none" stroke="#E89770" stroke-width="10" stroke-linecap="round"/>
+  <path d="M200 150v47m-12-47h24m-24 47h24" fill="none" stroke="#D76E57" stroke-width="8" stroke-linecap="round"/>
+</svg>

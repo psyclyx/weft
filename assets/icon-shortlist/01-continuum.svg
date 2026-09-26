@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Continuum</title><desc id="desc">A single text stroke wraps across the icon and finishes at a caret.</desc>
+  <rect width="256" height="256" rx="52" fill="#F1EDE3"/>
+  <path d="M48 71h126c25 0 36 12 36 31s-12 31-36 31H82c-25 0-36 12-36 30s12 30 36 30h69" fill="none" stroke="#233D58" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M174 71c25 0 36 12 36 31" fill="none" stroke="#E97761" stroke-width="17" stroke-linecap="round"/>
+  <path d="M175 165v57m-12-57h24m-24 57h24" fill="none" stroke="#E97761" stroke-width="8" stroke-linecap="round"/>
+</svg>

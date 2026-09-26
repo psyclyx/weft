@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Active gutter</title><desc id="desc">An active line crosses the editor gutter, with quieter lines above and below.</desc>
+  <rect width="256" height="256" rx="52" fill="#26243B"/>
+  <path d="M76 46v164" stroke="#8A88A5" stroke-width="7" stroke-linecap="round"/>
+  <path d="M103 75h87M103 178h63" stroke="#EDE8D9" stroke-width="14" stroke-linecap="round"/>
+  <path d="M52 128h150" stroke="#F4A478" stroke-width="18" stroke-linecap="round"/>
+  <path d="M209 104v48" stroke="#F4A478" stroke-width="8" stroke-linecap="round"/>
+</svg>

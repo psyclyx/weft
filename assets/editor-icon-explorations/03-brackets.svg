@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Brackets</title><desc id="desc">Folded angle brackets frame a slim editing caret.</desc>
+  <rect width="256" height="256" rx="52" fill="#EBE6F4"/>
+  <path d="m99 55-62 73 62 73 16-15-49-58 49-58Z" fill="#6253B4"/>
+  <path d="m157 55 62 73-62 73-16-15 49-58-49-58Z" fill="#6253B4"/>
+  <path d="m37 128 62 73 16-15-49-58Z" fill="#413682"/>
+  <path d="m219 128-62 73-16-15 49-58Z" fill="#413682"/>
+  <path d="M128 74v108m-12-108h24m-24 108h24" stroke="#E87B68" stroke-width="8" stroke-linecap="round"/>
+</svg>

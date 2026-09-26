@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Wrap</title><desc id="desc">One line of text wraps fluidly across three rows, ending at a cursor.</desc>
+  <rect width="256" height="256" rx="52" fill="#17283F"/>
+  <path d="M50 72h126c22 0 32 10 32 28s-10 27-32 27H80c-22 0-32 10-32 27s10 27 32 27h81" fill="none" stroke="#F3ECD9" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M181 158v47m-12-47h24m-24 47h24" fill="none" stroke="#F68C70" stroke-width="8" stroke-linecap="round"/>
+</svg>

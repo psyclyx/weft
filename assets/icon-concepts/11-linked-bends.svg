@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: linked bends</title>
+  <desc id="desc">Two open, rounded strands overlap like a loose woven link.</desc>
+  <rect width="256" height="256" rx="52" fill="#F1ECE3"/>
+  <path d="M163 64H95c-20 0-33 13-33 33v62c0 20 13 33 33 33h68" fill="none" stroke="#243B63" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M93 46h68c20 0 33 13 33 33v98c0 20-13 33-33 33H93" fill="none" stroke="#E87359" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M83 192h31" stroke="#F1ECE3" stroke-width="28"/>
+  <path d="M92 192h24" stroke="#243B63" stroke-width="22" stroke-linecap="round"/>
+</svg>

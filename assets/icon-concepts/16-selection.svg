@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft icon concept: selection</title>
+  <desc id="desc">A selected span runs through three short lines of text, ending at an insertion caret.</desc>
+  <rect width="256" height="256" rx="52" fill="#202C43"/>
+  <path d="M56 75h129M56 127h124M56 179h87" stroke="#F0EFE9" stroke-width="12" stroke-linecap="round"/>
+  <rect x="96" y="105" width="93" height="44" rx="9" fill="#E99572"/>
+  <path d="M108 127h67" stroke="#202C43" stroke-width="11" stroke-linecap="round"/>
+  <path d="M191 101v52" stroke="#A7DDD2" stroke-width="9" stroke-linecap="round"/>
+</svg>

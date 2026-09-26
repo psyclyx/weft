@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Cursor prism</title><desc id="desc">An insertion caret stands like a small prism in front of text.</desc>
+  <rect width="256" height="256" rx="52" fill="#F4EAD8"/>
+  <path d="M48 80h116M48 173h88" stroke="#354B72" stroke-width="15" stroke-linecap="round"/>
+  <path d="m118 62 23-8 28 134-23 8Z" fill="#E77558"/>
+  <path d="m141 54 14 8 28 134-14-8Z" fill="#A84950"/>
+  <path d="m103 67 38-13 14 8-38 13Zm28 134 38-13 14 8-38 13Z" fill="#F5A579"/>
+  <path d="M48 126h55m78 0h30" stroke="#354B72" stroke-width="15" stroke-linecap="round"/>
+</svg>
