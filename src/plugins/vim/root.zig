@@ -1,5 +1,5 @@
-//! vim — modal editing (design §6.1) as a `.wasm` plugin, perms `{}` grant_max
-//! edit. PURE KEYMAP POLICY: it owns modes, registers, and chords, and composes
+//! vim — modal editing (design §6.1) as a `.wasm` plugin, perms `{clipboard}`
+//! (config-granted only, for `"+`/`"*`) grant_max edit. PURE KEYMAP POLICY: it owns modes, registers, and chords, and composes
 //! the `motions` and `operators` plugins BY LATE-BOUND NAME — it contains no
 //! motion or edit logic of its own. A motion returns a borrowed live `range`; in
 //! normal mode vim moves the cursor to the target, in operator-pending mode it
@@ -25,6 +25,11 @@ var paste_buf: [(1 << 16) + 1]u8 = undefined;
 // Vim owns the register-prefix grammar; core only receives this transient
 // generic selection and providers never learn which editor chose it.
 var selected_register: u8 = 0;
+/// `"+`/`"*` is pending: the system clipboard, which is not a core register
+/// slot but a door (`weft.clipboardSet`/`clipboardGet`, config-granted). A
+/// yank lands in the unnamed slot AND the clipboard; a paste reads the
+/// clipboard. Cleared with `selected_register`.
+var clip_register: bool = false;
 
 // The standard transfer words `Y`/`p`/`P`/`yy`/`dd` lead with. Placement is
 // the focused view's business, so one paste word serves `p` and `P`.
@@ -71,6 +76,9 @@ const MB = struct {
     /// domain answers, everywhere else vim's own motion runs. Vim names no
     /// view, no provider, and asks nothing about either.
     intention: ?[]const u8 = null,
+    /// A JUMP in vim's sense (`:help jump-motions`): the position it leaves
+    /// goes on the jumplist, so C-o comes back.
+    jump: bool = false,
 };
 const mtable = [_]MB{
     .{ .key = "h", .motion = "motion.left", .in_op = false, .intention = "std.navigation.left" },
@@ -86,15 +94,16 @@ const mtable = [_]MB{
     .{ .key = "0", .motion = "motion.line-start", .in_op = true, .intention = "std.navigation.line-start" },
     .{ .key = "dollar", .motion = "motion.line-end", .in_op = true, .intention = "std.navigation.line-end" },
     .{ .key = "asciicircum", .motion = "motion.first-non-blank", .in_op = true, .intention = "std.navigation.first-non-blank" },
-    .{ .key = "G", .motion = "motion.doc-end", .in_op = true },
-    .{ .key = "percent", .motion = "motion.match-pair", .in_op = true },
+    .{ .key = "G", .motion = "motion.doc-end", .in_op = true, .jump = true },
+    .{ .key = "percent", .motion = "motion.match-pair", .in_op = true, .jump = true },
 };
 
 /// Normal-mode motion: run the motion `count` times, jumping to each target (the
 /// range end that isn't the current cursor — the motion is direction-carrying).
-fn moveByMotion(comptime motion: []const u8) fn () void {
+fn moveByMotion(comptime motion: []const u8, comptime jump: bool) fn () void {
     return struct {
         fn h() void {
+            if (jump) weft.jumpPush();
             var n = consumeCount();
             while (n > 0) : (n -= 1) {
                 const cur = weft.cursor();
@@ -292,7 +301,56 @@ fn enterOpAround() void {
 
 fn enterRegister() void {
     selected_register = 0;
+    clip_register = false;
     weft.setMode("register-pending");
+}
+
+/// `"+` / `"*`: the next yank also takes the system clipboard, the next paste
+/// reads from it. There is one desktop clipboard here — primary selection is
+/// not bound — so `*` names the same one `+` does.
+fn chooseClipboard() void {
+    selected_register = 0;
+    clip_register = true;
+    weft.exitToResting();
+}
+
+// ── Macros: `q<reg>` records, `q` stops, `@<reg>` plays, `@@` replays ─────
+// The recorder and the registers are core's (`macro-*` commands); vim only
+// says which keys drive them. `q` in a tool entry is still workspace-back —
+// that arm runs first, and nothing in a text buffer offers it.
+
+fn macroQ() void {
+    if (weft.macroRecording() != null) {
+        weft.run("macro-record-stop");
+        return;
+    }
+    weft.setMode("macro-record-pending");
+}
+fn macroRecordInto(comptime reg: u8) fn () void {
+    return struct {
+        fn h() void {
+            weft.exitToResting();
+            const name = [_]u8{reg};
+            weft.runStr("macro-record-start", &name);
+        }
+    }.h;
+}
+fn macroAt() void {
+    weft.setMode("macro-play-pending"); // keeps a typed count for `3@a`
+}
+/// Play `reg` (0 = the last one played) `count` times. Back at rest first:
+/// the keys replay from normal, the way they were typed.
+fn macroPlay(comptime reg: u8) fn () void {
+    return struct {
+        fn h() void {
+            const n = consumeCount();
+            weft.exitToResting();
+            var buf: [12]u8 = undefined;
+            const count = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "1";
+            const name = [_]u8{reg};
+            weft.runStr2("macro-play", if (reg == 0) "" else &name, count);
+        }
+    }.h;
 }
 
 fn chooseRegister(comptime index: u8) fn () void {
@@ -346,6 +404,11 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "enter-op-inner", .call = enterOpInner },
     .{ .name = "enter-op-around", .call = enterOpAround },
     .{ .name = "enter-register", .call = enterRegister },
+    .{ .name = "vim-register-plus", .call = chooseClipboard },
+    .{ .name = "vim-register-star", .call = chooseClipboard },
+    .{ .name = "vim-macro-q", .call = macroQ },
+    .{ .name = "vim-macro-at", .call = macroAt },
+    .{ .name = "vim-macro-play-last", .call = macroPlay(0) },
     .{ .name = "find-file", .call = findFile },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
@@ -412,7 +475,7 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
     var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion) };
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump) };
         i += 1;
         if (m.in_op) {
             arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion) };
@@ -442,7 +505,17 @@ const count_cmds: [9]weft.CommandEntry = blk: {
     };
     break :blk arr;
 };
-const cmds = static_cmds ++ ex_cmds ++ register_cmds ++ gen_cmds ++ count_cmds;
+/// `q<a-z>` records into, and `@<a-z>` plays, one macro register each.
+const macro_cmds: [52]weft.CommandEntry = blk: {
+    var arr: [52]weft.CommandEntry = undefined;
+    for (0..26) |i| {
+        const c: u8 = 'a' + @as(u8, @intCast(i));
+        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c) };
+        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c) };
+    }
+    break :blk arr;
+};
+const cmds = static_cmds ++ ex_cmds ++ register_cmds ++ gen_cmds ++ count_cmds ++ macro_cmds;
 
 /// Commands that PRESERVE a pending count instead of clearing it: the digit keys
 /// themselves, `0` (which may be a digit), and the operator entries (so `3dw`
@@ -454,6 +527,7 @@ const preserve_count = blk: {
     for (cmds, 0..) |c, i| {
         if (std.mem.startsWith(u8, c.name, "vim-count-") or
             std.mem.eql(u8, c.name, "vim-zero") or
+            std.mem.eql(u8, c.name, "vim-macro-at") or
             std.mem.startsWith(u8, c.name, "enter-op-")) arr[i] = true;
     }
     break :blk arr;
@@ -472,7 +546,9 @@ const preserve_register = blk: {
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept }).exportAll();
+    // `.clipboard` is declared for the approval surface to show; it confers
+    // nothing — only the config's `weft.grant("vim", "clipboard")` does.
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
 }
 
 /// The dispatch epilogue: a stray count or a named slot must not leak into an
@@ -481,7 +557,10 @@ comptime {
 /// whatever id the host happened to assign.
 fn settle(index: usize) void {
     if (!preserve_count[index]) pending_count = 0;
-    if (!preserve_register[index]) selected_register = 0;
+    if (!preserve_register[index]) {
+        selected_register = 0;
+        clip_register = false;
+    }
 }
 fn onPickAccept(pick_id: u32) void {
     if (pick_id != file_pick) return;
@@ -558,7 +637,8 @@ fn initExtra() void {
     for (intended) |b| weft.bindKeys("normal", b[0], &.{ b[1], b[2] });
     // Normal-mode Tab folds or nothing — it never inserts.
     weft.bindKeys("normal", "Tab", &.{"std.hierarchy.toggle-expanded"});
-    weft.bindKeys("normal", "q", &.{"std.navigation.back"});
+    // …and `q` then records a macro, where nothing offered workspace-back.
+    weft.bindKeys("normal", "q", &.{ "std.navigation.back", "vim-macro-q" });
     // The line break is the other half of §10.2's `Return` list — vim commits
     // one from insert, never from normal, so the two entries live in the two
     // postures rather than in one list a mode would have to disambiguate.
@@ -610,6 +690,23 @@ fn initExtra() void {
         std.fmt.comptimePrint("{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
         std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
     );
+    weft.bindKey("register-pending", "plus", "vim-register-plus");
+    weft.bindKey("register-pending", "asterisk", "vim-register-star");
+
+    // Macros: `q` then a letter records, `@` then a letter plays, `@@` plays
+    // the last one again. Both prompts are menus, like the register prefix.
+    weft.bindKey("normal", "at", "vim-macro-at");
+    for ([_][]const u8{ "macro-record-pending", "macro-play-pending" }) |m| {
+        weft.menuMode(m);
+        weft.setFallback(m, "default");
+        weft.bindKey(m, "Escape", "op-cancel");
+    }
+    for (0..26) |i| {
+        const key = [_]u8{'a' + @as(u8, @intCast(i))};
+        weft.bindKey("macro-record-pending", &key, macro_cmds[i].name);
+        weft.bindKey("macro-play-pending", &key, macro_cmds[26 + i].name);
+    }
+    weft.bindKey("macro-play-pending", "at", "vim-macro-play-last");
 
     // Count prefix: digits 1-9 accumulate in normal AND operator-pending (so both
     // `3dw` and `d3w` work). `0` becomes digit-or-line-start; `x` becomes
@@ -947,6 +1044,19 @@ fn consumeRegister() u8 {
 fn yankCurrent(start: usize, end: usize, linewise: bool) void {
     const slot = consumeRegister();
     weft.yankRangeIn(slot, start, end, linewise);
+    if (clip_register) {
+        clip_register = false;
+        // A linewise yank carries its line break to the desktop, which is how
+        // `"+p` (and every other editor) tells a line from a fragment.
+        const text = weft.registerTextIn(slot);
+        if (linewise and (text.len == 0 or text[text.len - 1] != '\n')) {
+            var buf = std.ArrayList(u8).initCapacity(weft.allocator, text.len + 1) catch return;
+            defer buf.deinit(weft.allocator);
+            buf.appendSliceAssumeCapacity(text);
+            buf.appendAssumeCapacity('\n');
+            _ = weft.clipboardSet(buf.items);
+        } else _ = weft.clipboardSet(text);
+    }
 }
 
 /// Ask the focused view for `action` in an EXPLICIT register slot. Only the
@@ -1006,43 +1116,66 @@ fn yankLine() void {
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
+    if (clip_register) return pasteClipboard(true);
     if (transferred(std_paste, semantic_action.paste_after)) return;
     const slot = consumeRegister();
-    if (weft.registerLinewiseIn(slot)) {
-        const l = weft.lineAt(weft.cursor());
-        const r = weft.registerTextIn(slot);
+    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), true, slot);
+}
+fn pasteBefore() void {
+    if (clip_register) return pasteClipboard(false);
+    if (transferred(std_paste, semantic_action.paste_before)) return;
+    const slot = consumeRegister();
+    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), false, slot);
+}
+
+/// `"+p`/`"+P`: paste the desktop clipboard. When it still holds what vim
+/// last yanked into the unnamed slot, paste THAT slot — the same text, plus
+/// the linewise flag and any identity it ferries (`dd` then `"+p` in a files
+/// listing stays a move). Otherwise it is foreign text: linewise when it
+/// ends in a line break, the convention every editor copies lines with.
+fn pasteClipboard(after: bool) void {
+    clip_register = false;
+    selected_register = 0;
+    const text = weft.clipboardGet() orelse return;
+    const own = weft.registerTextIn(0);
+    const own_linewise = weft.registerLinewiseIn(0);
+    const same = if (own_linewise)
+        text.len == own.len + 1 and text[own.len] == '\n' and std.mem.eql(u8, text[0..own.len], own)
+    else
+        std.mem.eql(u8, text, own);
+    if (same) return put(own, own_linewise, after, 0);
+    const linewise = text.len > 0 and text[text.len - 1] == '\n';
+    put(if (linewise) text[0 .. text.len - 1] else text, linewise, after, null);
+}
+
+/// Put `r` at the caret (charwise) or on its own line below/above the caret
+/// line (linewise), flash what landed, and — for a register paste — re-stamp
+/// the ferried id-spans over it so `dd`→`p` is a move, not a delete+create.
+fn put(r: []const u8, linewise: bool, after: bool, slot: ?u8) void {
+    if (!linewise) {
+        const off = weft.cursor();
+        weft.edit(.{ .start = off, .end = off }, r);
+        if (slot) |s| weft.pasteAtIn(s, off);
+        weft.flash(off, off + r.len);
+        return;
+    }
+    // The text plus a synthesized line break, assembled in `paste_buf` (a
+    // clipboard too big for it is refused rather than truncated).
+    if (r.len + 1 > paste_buf.len) return;
+    const l = weft.lineAt(weft.cursor());
+    if (after) {
         paste_buf[0] = '\n';
         @memcpy(paste_buf[1 .. 1 + r.len], r);
         weft.edit(.{ .start = l.end, .end = l.end }, paste_buf[0 .. 1 + r.len]);
-        // The register text lands after the synthesized newline; re-stamp any
-        // ferried id-span there so `dd`→`p` is a move, not a delete+create.
-        weft.pasteAtIn(slot, l.end + 1);
+        // The text lands after the synthesized newline.
+        if (slot) |s| weft.pasteAtIn(s, l.end + 1);
         weft.flash(l.end + 1, l.end + 1 + r.len); // vim-goggles: what landed
     } else {
-        const off = weft.cursor();
-        const r = weft.registerTextIn(slot);
-        weft.edit(.{ .start = off, .end = off }, r);
-        weft.pasteAtIn(slot, off);
-        weft.flash(off, off + r.len);
-    }
-}
-fn pasteBefore() void {
-    if (transferred(std_paste, semantic_action.paste_before)) return;
-    const slot = consumeRegister();
-    if (weft.registerLinewiseIn(slot)) {
-        const l = weft.lineAt(weft.cursor());
-        const r = weft.registerTextIn(slot);
         @memcpy(paste_buf[0..r.len], r);
         paste_buf[r.len] = '\n';
         weft.edit(.{ .start = l.start, .end = l.start }, paste_buf[0 .. r.len + 1]);
-        weft.pasteAtIn(slot, l.start); // text lands at l.start (the '\n' trails it)
+        if (slot) |s| weft.pasteAtIn(s, l.start); // lands at l.start; the '\n' trails it
         weft.flash(l.start, l.start + r.len);
-    } else {
-        const off = weft.cursor();
-        const r = weft.registerTextIn(slot);
-        weft.edit(.{ .start = off, .end = off }, r);
-        weft.pasteAtIn(slot, off);
-        weft.flash(off, off + r.len);
     }
 }
 fn joinLines() void {
@@ -1234,6 +1367,7 @@ fn vimWinMoveDown() void {
     runWorkspace("window-move-down");
 }
 fn vimGotoTop() void {
+    weft.jumpPush();
     weft.jump(0);
 }
 fn vimCenter() void {
