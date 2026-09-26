@@ -74,6 +74,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts = @import("weft_facts");
 const container_mod = @import("container.zig");
+const Affordance = @import("catalog.zig").Affordance;
 
 const Actions = @This();
 
@@ -113,13 +114,28 @@ const Provider = struct {
     priority: i32,
     command: []u8, // owned — the concrete command this provider runs
     owner: []u8, // owned — plugin/config name, for teardown
+    /// How THIS provider's offer is presented when it wins (label, group,
+    /// order) — strings owned. Presentation only: resolution never reads it.
+    affordance: Affordance = .{},
 
     fn deinit(self: *Provider, gpa: Allocator) void {
         facts.free(gpa, self.predicate);
         gpa.free(self.command);
         gpa.free(self.owner);
+        freeAffordance(gpa, self.affordance);
     }
 };
+
+fn freeAffordance(gpa: Allocator, a: Affordance) void {
+    gpa.free(a.label);
+    gpa.free(a.group);
+}
+
+fn dupeAffordance(gpa: Allocator, a: Affordance) Allocator.Error!Affordance {
+    const label = try gpa.dupe(u8, a.label);
+    errdefer gpa.free(label);
+    return .{ .label = label, .group = try gpa.dupe(u8, a.group), .order = a.order };
+}
 
 const Action = struct {
     policy: Policy,
@@ -266,6 +282,10 @@ pub const ProvideSpec = struct {
     /// `.imported` for a `weft.use`-imported one) — the config-plane
     /// stratification the W2b-pending note anticipated, arriving here first.
     tier: container_mod.Tier = .plugin,
+    /// How this provider's offer is presented where it wins (the
+    /// `weft.provide` option / `wl_provide_affordance`). Borrowed for the
+    /// call; `provide` copies it.
+    affordance: Affordance = .{},
 };
 
 /// Register a provider for `spec.action`, auto-declaring the action if needed
@@ -299,6 +319,7 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
         .priority = spec.priority,
         .command = try gpa.dupe(u8, spec.command),
         .owner = try gpa.dupe(u8, spec.owner),
+        .affordance = try dupeAffordance(gpa, spec.affordance),
     };
     errdefer p.deinit(gpa);
     const pred = p.predicate;
@@ -388,6 +409,40 @@ pub fn resolveFacts(self: *const Actions, name: []const u8, f: facts.Facts) ?[]c
     return b.provider.command;
 }
 
+/// The presentation the provider behind `winner` declared. The binding the
+/// Container resolved for `name` BORROWS its owner string from that provider
+/// (the command it copies), so the identity of that slice names the provider
+/// exactly — every provider owns its own allocation. Empty when the binding
+/// is not one of ours.
+pub fn affordanceOf(self: *const Actions, name: []const u8, winner: *const container_mod.Binding) Affordance {
+    const a = self.actions.getPtr(name) orelse return .{};
+    for (a.providers.items) |p| {
+        if (p.owner.ptr == winner.owner.ptr) return p.affordance;
+    }
+    return .{};
+}
+
+/// Set how `owner`'s providers of `name` present their offer — the door a
+/// plugin that registered through `provide` without one uses afterwards
+/// (`wl_provide_affordance`). Returns how many providers took it; zero means
+/// `owner` provides no such action, which the caller reports.
+pub fn setAffordance(self: *Actions, name: []const u8, owner: []const u8, aff: Affordance) Allocator.Error!usize {
+    const a = self.actions.getPtr(name) orelse return 0;
+    var n: usize = 0;
+    for (a.providers.items) |*p| {
+        if (!std.mem.eql(u8, p.owner, owner)) continue;
+        const next = try dupeAffordance(self.gpa, aff);
+        freeAffordance(self.gpa, p.affordance);
+        p.affordance = next;
+        n += 1;
+    }
+    // A published derived row BORROWS the strings just freed. Moving the
+    // epoch is what makes its publisher rebuild before anything reads them
+    // again, exactly as an unbind does.
+    if (n > 0) self.container.epoch +%= 1;
+    return n;
+}
+
 fn factsOf(ctx: Ctx) facts.Facts {
     return .{ .mode = ctx.mode, .lang = ctx.lang, .tool = ctx.tool };
 }
@@ -461,6 +516,32 @@ test "action: pick resolves by context, priority, and specificity" {
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("nope", .{ .mode = "normal" }));
     try acts.provide(.{ .action = "run", .predicate = .{ .mode = "debug" }, .command = "run-target" });
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("run", .{ .mode = "normal", .lang = "zig" }));
+}
+
+test "action: a provider's presentation travels with the binding it won, and its owner can restate it" {
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
+    defer acts.deinit();
+
+    try acts.provide(.{ .action = "rename", .command = "lsp-rename", .owner = "lsp", .affordance = .{ .label = "Rename symbol" } });
+    try acts.provide(.{ .action = "rename", .predicate = .{ .tool = "files" }, .command = "field-edit", .owner = "files" });
+
+    const text = container.resolveOne("rename", .{}).?;
+    try t.expectEqualStrings("Rename symbol", acts.affordanceOf("rename", text).label);
+    const listing = container.resolveOne("rename", .{ .tool = "files" }).?;
+    try t.expectEqualStrings("", acts.affordanceOf("rename", listing).label);
+
+    // Restating moves the epoch — a derived row borrowing the old strings
+    // must be rebuilt before anything reads them.
+    const epoch = container.epoch;
+    try t.expectEqual(@as(usize, 1), try acts.setAffordance("rename", "files", .{ .label = "Rename", .group = "edit", .order = 1 }));
+    try t.expect(container.epoch != epoch);
+    const again = container.resolveOne("rename", .{ .tool = "files" }).?;
+    try t.expectEqualStrings("Rename", acts.affordanceOf("rename", again).label);
+    try t.expectEqual(@as(?i32, 1), acts.affordanceOf("rename", again).order);
+    // An owner with no provider of the action restates nothing.
+    try t.expectEqual(@as(usize, 0), try acts.setAffordance("rename", "stranger", .{ .label = "x" }));
 }
 
 test "action: a projection scopes save by its tool identity, in any mode" {

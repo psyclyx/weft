@@ -143,6 +143,28 @@ transient_stack: std.ArrayList(TransientFrame) = .empty,
 /// snapshot is cached under; `revision` is the clock a rebuild keys on.
 catalog_clock: CatalogClock = .{},
 
+/// Where this head's PRIMARY focus last was: the last pane it focused whose
+/// viewport is a `focus_source` (a text pane, never a docked companion), and
+/// the entry that pane showed. Recorded by the layout phase beside its
+/// primary-focus feed publish (`focus_feed.zig` — the same attribute decides
+/// both). A toolbar or sidebar that takes focus leaves this on the editor, so
+/// the offers it enumerates (`intent.Where.primary`) still describe the
+/// editor rather than itself. Null until the first layout phase; readers fall
+/// back to the active entry.
+primary_focus: ?PrimaryFocus = null,
+/// The catalog clock for the primary context when it is NOT the active one —
+/// its own cache key, so describing the editor from a sidebar never evicts
+/// the snapshot the next keypress in the sidebar reads.
+primary_clock: CatalogClock = .{},
+
+pub const PrimaryFocus = struct {
+    /// A `window_layout` pane slot id, plain data for the reason
+    /// `focused_pane` is.
+    pane: u32,
+    /// The `Buffers.Id` that pane shows.
+    entry: u32,
+};
+
 pub const empty: Head = .{};
 
 /// The caller-owned half of `catalog.Context`, DERIVED rather than pushed:

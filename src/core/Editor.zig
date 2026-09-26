@@ -624,6 +624,16 @@ pub fn redo(self: *Editor, gpa: Allocator, gate: undo_mod.Gate) undo_mod.Error!b
     return did;
 }
 
+/// Whether `undo`/`redo` would find a unit right now — the availability the
+/// history offers publish, read without touching the log.
+pub fn canUndo(self: *const Editor) bool {
+    return self.history.hasUndo(&self.doc);
+}
+
+pub fn canRedo(self: *const Editor) bool {
+    return self.history.hasRedo(&self.doc);
+}
+
 // ── Selection ───────────────────────────────────────────────────────
 
 // The mark verbs act on EVERY selection — dropping or lifting the anchor is

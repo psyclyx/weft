@@ -25,6 +25,7 @@ const intent = @import("intent.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const Head = @import("Head.zig");
+const action_here = @import("action_here.zig");
 
 const offers = view_runtime.offers;
 const standard = model.action.standard;
@@ -125,7 +126,14 @@ pub const Publisher = struct {
     provider: catalog.ProviderId,
     intentions: [offers.Intent.count]catalog.IntentionId,
     endpoints: [offers.Intent.count]catalog.EndpointToken,
-    table: [offers.Intent.count]catalog.Offer = undefined,
+    table: [offers.Intent.count + max_node_actions]catalog.Offer = undefined,
+    /// The node actions this publication carries beyond the standard
+    /// vocabulary, in table order after the derived rows. Owned copies: the
+    /// scene that advertised them can be replaced while a row is published.
+    node_actions: [max_node_actions]NodeAction = undefined,
+    node_action_count: usize = 0,
+    /// Mints the node-action rows' endpoints (payload = index above).
+    node_handle: intent.Handle = undefined,
     /// Storage for a path SYNTHESIZED from a projection subject. Borrowed by
     /// the `focus.Path` handed to `derive`, so it must outlive that call.
     path_buf: [max_path]model.scene.NodeId = undefined,
@@ -137,7 +145,8 @@ pub const Publisher = struct {
 
     /// Register one invoker for the whole table (`intent.zig`'s token
     /// contract) and mint an endpoint per intent, its payload the intent's
-    /// index in `bindings`.
+    /// index in `bindings`. A second invoker runs the node-action rows; it
+    /// captures `&plane.views`, which is where this value lives.
     pub fn init(gpa: Allocator, plane: *intent.Plane) InitError!Publisher {
         var self: Publisher = .{
             .provider = try plane.catalog.provider(provider_name),
@@ -149,21 +158,23 @@ pub const Publisher = struct {
             self.intentions[index] = try plane.catalog.intention(binding.intention);
             self.endpoints[index] = handle.endpoint(@intCast(index));
         }
+        self.node_handle = try plane.invokers.register(gpa, provider_name, invokeNodeAction, &plane.views);
         return self;
     }
 
-    /// Bring the catalog in line with this head's focus. Returns true when a
-    /// new table was published or the old one withdrawn; an unchanged
-    /// signature costs one comparison and touches neither the epoch nor the
-    /// caller's cached snapshot.
+    /// Bring the catalog in line with a focus (the head's live one, or an
+    /// entry's saved one when the question is about a context the head is not
+    /// in). Returns true when a new table was published or the old one
+    /// withdrawn; an unchanged signature costs one comparison and touches
+    /// neither the epoch nor the caller's cached snapshot.
     pub fn refresh(
         self: *Publisher,
         cat: *catalog.Catalog,
         services: *const semantic.Services,
-        head: *const Head,
+        focus: *const Head.SemanticFocus,
         here: ?Here,
     ) Allocator.Error!bool {
-        const path = self.pathHere(services, head, here) orelse return self.withdraw(cat);
+        const path = self.pathHere(services, focus, here) orelse return self.withdraw(cat);
         const instance = services.views.get(path.view) orelse return self.withdraw(cat);
         const leaf = path.leaf() orelse return self.withdraw(cat);
         const next: Signature = .{
@@ -187,6 +198,7 @@ pub const Publisher = struct {
             };
         }
         self.count = items.len;
+        self.count += try self.publishNodeActions(cat, instance, path, self.table[self.count..]);
         self.revision += 1;
         _ = try cat.publish(.{
             .provider = self.provider,
@@ -203,10 +215,10 @@ pub const Publisher = struct {
     fn pathHere(
         self: *Publisher,
         services: *const semantic.Services,
-        head: *const Head,
+        focus: *const Head.SemanticFocus,
         here: ?Here,
     ) ?model.focus.Path {
-        if (head.semantic_focus.path()) |path| return path;
+        if (focus.path()) |path| return path;
         const subject = here orelse return null;
         const instance = services.views.get(subject.view) orelse return null;
         return (instance.focusPath(subject.node, &self.path_buf) catch return null) orelse null;
@@ -219,15 +231,117 @@ pub const Publisher = struct {
         _ = cat.retract(self.provider);
         self.signature = null;
         self.count = 0;
+        self.node_action_count = 0;
         return true;
     }
+
+    /// Publish the actions the focus path ADVERTISES that no standard
+    /// intention above already carries — `fs.entry.create-file`, `view.apply`
+    /// — so a toolbar or context menu enumerating offers sees them, labelled
+    /// as the scene labels them. Deepest advertiser wins an id, the same walk
+    /// the focused-action route makes. Each is offered under the
+    /// `plugin.<action id>` intention: the scene names an open protocol
+    /// string, and `plugin.` is the §5.1 root for a name the standard
+    /// vocabulary does not own. An id that name cannot spell is skipped
+    /// rather than mangled. Returns how many rows it wrote into `out`.
+    fn publishNodeActions(
+        self: *Publisher,
+        cat: *catalog.Catalog,
+        instance: *const view_runtime.view.Instance,
+        path: model.focus.Path,
+        out: []catalog.Offer,
+    ) Allocator.Error!usize {
+        self.node_action_count = 0;
+        var index = path.nodes.len;
+        while (index > 0) {
+            index -= 1;
+            const node = instance.node(path.nodes[index]) orelse continue;
+            for (node.actions) |action| {
+                if (self.node_action_count == max_node_actions) break;
+                if (coveredByStandard(action.id) or self.hasNodeAction(action.id)) continue;
+                const slot = &self.node_actions[self.node_action_count];
+                const name = std.fmt.bufPrint(&slot.name_buf, "plugin.{s}", .{action.id}) catch continue;
+                const id = cat.intention(name) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => continue,
+                };
+                if (action.id.len > slot.id_buf.len) continue;
+                @memcpy(slot.id_buf[0..action.id.len], action.id);
+                slot.id_len = action.id.len;
+                const label_len = @min(action.label.len, slot.label_buf.len);
+                @memcpy(slot.label_buf[0..label_len], action.label[0..label_len]);
+                slot.label_len = label_len;
+                out[self.node_action_count] = .{
+                    .intention = id,
+                    .endpoint = self.node_handle.endpoint(@intCast(self.node_action_count)),
+                    .availability = if (action.enabled)
+                        .enabled
+                    else
+                        .{ .disabled = .{ .reason = offers.provider_disabled, .message = disabled_message } },
+                    .affordance = .{ .label = slot.label() },
+                };
+                self.node_action_count += 1;
+            }
+        }
+        return self.node_action_count;
+    }
+
+    fn hasNodeAction(self: *const Publisher, id: []const u8) bool {
+        for (self.node_actions[0..self.node_action_count]) |*a| {
+            if (std.mem.eql(u8, a.id(), id)) return true;
+        }
+        return false;
+    }
 };
+
+/// Most non-standard actions one focus publishes; a scene advertising more
+/// keeps the first (deepest) ones. Generous for a row's verbs.
+const max_node_actions = 24;
+
+/// One published node action: the protocol id it runs, and the scene's label.
+const NodeAction = struct {
+    id_buf: [96]u8 = undefined,
+    id_len: usize = 0,
+    /// `plugin.<id>` — the intention it is offered under.
+    name_buf: [104]u8 = undefined,
+    label_buf: [64]u8 = undefined,
+    label_len: usize = 0,
+
+    fn id(self: *const NodeAction) []const u8 {
+        return self.id_buf[0..self.id_len];
+    }
+    fn label(self: *const NodeAction) []const u8 {
+        return self.label_buf[0..self.label_len];
+    }
+};
+
+/// The node actions `offers.derive` already turns into a standard intention:
+/// publishing them again would offer one verb twice under two names.
+fn coveredByStandard(id: []const u8) bool {
+    const covered = [_][]const u8{
+        standard.toggle_expanded, standard.open_container, standard.open,
+        standard.copy,            standard.paste_after,    standard.cut,
+        standard.insert_before,   standard.insert_after,
+    };
+    for (covered) |c| if (std.mem.eql(u8, c, id)) return true;
+    return false;
+}
 
 /// Run the route the winning endpoint names. Authority stays at the command
 /// door, exactly as when a key is bound to that command by name.
 fn invokeRoute(_: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void {
     if (payload >= bindings.len) return intent.Error.StaleEndpoint;
     _ = try command.run(ctx.commands, ctx, bindings[payload].route, &.{});
+}
+
+/// Run a published node action through the SAME door a key bound to its
+/// protocol name reaches (`action_here.invokeHere`): the focused view — scene
+/// or listing — decides what it means. Nobody claiming it is a stale row.
+fn invokeNodeAction(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void {
+    const self: *Publisher = @ptrCast(@alignCast(data.?));
+    if (payload >= self.node_action_count) return intent.Error.StaleEndpoint;
+    const id = self.node_actions[payload].id();
+    if (try action_here.invokeHere(ctx, id, 0) == null) return intent.Error.StaleEndpoint;
 }
 
 const t = std.testing;
@@ -317,7 +431,7 @@ const Fixture = struct {
     }
 
     fn refresh(self: *Fixture) !bool {
-        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head, null);
+        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head.semantic_focus, null);
     }
 
     fn context(self: *const Fixture) catalog.Context {
@@ -417,6 +531,38 @@ test "republication follows focus, scene revision, and the loss of a view" {
     try t.expect(try fixture.refresh());
     try t.expect(fixture.plane.catalog.published(fixture.plane.views.provider) == null);
     try t.expect(!try fixture.refresh());
+}
+
+test "node actions outside the standard vocabulary are offers too, labelled as the scene labels them" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+
+    const extra = [_]model.scene.Action{
+        .{ .id = standard.open, .label = "Open", .enabled = true },
+        .{ .id = "fs.entry.create-file", .label = "New file", .enabled = true },
+        .{ .id = standard.apply, .label = "Apply draft", .enabled = false },
+    };
+    var root = fixture.scene(false);
+    fixture.rows[0].actions = &extra;
+    // The root advertises create-file too: the DEEPEST advertiser (the row)
+    // owns the id, and it is offered once.
+    root.actions = extra[1..2];
+    const view = try fixture.services.publishView(t.allocator, fixture.owner, null, 1, root);
+    _ = try fixture.services.focusView(&fixture.head, t.allocator, view, @enumFromInt(12));
+    try t.expect(try fixture.refresh());
+
+    const snapshot = try fixture.plane.catalog.snapshot(fixture.context());
+    const create = fixture.plane.catalog.findIntention("plugin.fs.entry.create-file").?;
+    const rows = snapshot.offersFor(create);
+    try t.expectEqual(@as(usize, 1), rows.len);
+    try t.expectEqualStrings("New file", rows[0].affordance.label);
+    try t.expect(rows[0].availability == .enabled);
+    // A refused action is published disabled, with the derivation's reason.
+    const apply = try fixture.resolve(&.{"plugin.view.apply"});
+    try t.expectEqualStrings(offers.provider_disabled, apply.unavailable.disabled.reason.reason);
+    // A standard action is NOT republished under a second name.
+    try t.expect(fixture.plane.catalog.findIntention("plugin.target.open") == null);
 }
 
 test "a row's transfer designations resolve to the register's own routes" {

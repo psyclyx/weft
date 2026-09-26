@@ -17,6 +17,7 @@ const command = @import("command.zig");
 const semantic = @import("semantic.zig");
 const semantic_model = @import("weft_semantic");
 const projection = @import("projection.zig");
+const Buffers = @import("Buffers.zig");
 
 pub const Effect = semantic.Services.ActionEffect;
 
@@ -178,7 +179,13 @@ pub const Subjects = struct {
 /// in. Either may be absent — an empty listing has neither, and a producer that
 /// keys no spans has only the row.
 pub fn subjectsHere(ctx: *command.Context) Subjects {
-    const entry = ctx.buffers.active();
+    return subjectsIn(ctx.buffers.active());
+}
+
+/// The same question asked of ANY entry, at its own caret — what an offer
+/// enumeration for a context the head is not in (the primary pane, while a
+/// sidebar holds focus) derives from.
+pub fn subjectsIn(entry: *Buffers.Buffer) Subjects {
     if (entry.tool_view == null) return .{};
     const view = entry.projection orelse return .{};
     const ed = entry.textEditor() orelse return .{};

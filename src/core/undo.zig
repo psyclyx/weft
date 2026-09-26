@@ -172,6 +172,27 @@ pub const UndoLog = struct {
         return self.redoable.items.len > 0;
     }
 
+    /// Would `undo` find a unit, counting own commits `ingest` has not folded
+    /// in yet? A pure read — availability is asked on every keystroke's
+    /// offer sync, and asking must not move the bookkeeping it asks about.
+    pub fn hasUndo(self: *const UndoLog, doc: *const Document) bool {
+        return self.canUndo() or self.pendingOwn(doc);
+    }
+
+    /// Would `redo` find a unit? An own commit still waiting for `ingest`
+    /// empties the redo stack the moment it is folded in, so it answers no.
+    pub fn hasRedo(self: *const UndoLog, doc: *const Document) bool {
+        return self.canRedo() and !self.pendingOwn(doc);
+    }
+
+    fn pendingOwn(self: *const UndoLog, doc: *const Document) bool {
+        var i = self.cursor;
+        while (i < doc.commitCount()) : (i += 1) {
+            if (doc.commitAt(i).author == self.author) return true;
+        }
+        return false;
+    }
+
     /// Undo the newest unit. Returns false if there is nothing to undo;
     /// refuses (leaving the unit undoable) when `gate` denies the inverse.
     pub fn undo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
@@ -499,4 +520,27 @@ test "undo: new own commit clears redo" {
     try log.ingest(gpa, &doc);
     try t.expect(!log.canRedo());
     try t.expect(!try log.redo(gpa, &doc, .user_driven));
+}
+
+test "undo: hasUndo/hasRedo answer before ingest, without moving the log" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    var log: UndoLog = .empty;
+    defer log.deinit(gpa);
+
+    try t.expect(!log.hasUndo(&doc));
+    try t.expect(!log.hasRedo(&doc));
+    // An own commit not yet ingested already counts — availability is read
+    // on every keystroke's offer sync, before any undo has run.
+    try doc.insert(gpa, 0, "abc");
+    try t.expect(log.hasUndo(&doc));
+    try t.expectEqual(@as(usize, 0), log.cursor); // asking moved nothing
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try t.expect(!log.hasUndo(&doc));
+    try t.expect(log.hasRedo(&doc));
+    // A fresh own commit will clear the redo stack the moment it is folded
+    // in, so it already answers no.
+    try doc.insert(gpa, 0, "x");
+    try t.expect(!log.hasRedo(&doc));
 }

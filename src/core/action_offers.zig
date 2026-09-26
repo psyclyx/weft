@@ -144,6 +144,9 @@ pub const Publisher = struct {
                 // from the binding, which outlives this publication — the next
                 // `refresh` rebuilds from the bindings anyway.
                 .attribution = winner.owner,
+                // …and it is PRESENTED as its winner asked: the label a
+                // provider declared travels with the row that provider won.
+                .affordance = self.actions.affordanceOf(name, winner),
             });
         }
 

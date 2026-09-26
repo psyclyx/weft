@@ -789,6 +789,9 @@ const table = [_]command.Command{
     command.define("insert-tab", "Insert a tab at the cursor.", cInsertTab),
 };
 
+/// `save-file`'s eligibility: any entry whose bytes are not a tool projection.
+const not_a_projection: facts.Predicate = .{ .locus = .tool };
+
 /// Register every built-in and the default keymap. The default mode is
 /// plain modeless editing; a config replaces any of it by rebinding.
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), head: *@import("Head.zig"), actions: *@import("action.zig")) !void {
@@ -799,9 +802,17 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
     // (files/git) provides its own `save` scoped to its tool identity, which
-    // wins in its buffer. The default provider writes the file backing.
+    // wins in its buffer. The default provider writes the file backing, so it
+    // claims only entries whose bytes are NOT a tool's projection: a git status
+    // listing has nothing durable to write, and saying so here — by a fact, in
+    // the provider's own eligibility — is what lets `std.persistence.save` be
+    // absent there instead of offered and then refused (`intent.zig`).
+    //
+    // Priority -1 keeps it the FLOOR it was when it was unconstrained: the
+    // `not` makes it one conjunct specific, which would otherwise tie (and
+    // collide at bind) with every projection's own one-conjunct `tool` save.
     try command.registerAction(gpa, commands, actions, "save", .pick);
-    try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
+    try actions.provide(.{ .action = "save", .predicate = .{ .not = &not_a_projection }, .command = "save-file", .priority = -1, .owner = "core" });
 
     // Retiring an entry is an ACTION too, for the same reason `save` is: what a
     // tool's entry is worth is the tool's question. The default provider drops

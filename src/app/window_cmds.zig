@@ -351,6 +351,17 @@ pub fn presentIn(
 fn publishFocus(win_layout: *window_layout.Layout, head: *core.Head, focus: *core.focus_feed.Feed) void {
     const pane = window_layout.headFocus(win_layout, head).pane();
     focus.publish(.{ .viewport = pane.id, .entry = pane.buffer_id, .attrs = pane.attrs });
+    // The head's own record of its primary focus, by the SAME attribute the
+    // feed's companions filter on — so "what a toolbar describes" and "what
+    // an outline follows" cannot disagree about which pane is primary.
+    if (pane.attrs.focus_source) {
+        head.primary_focus = .{ .pane = pane.id, .entry = pane.buffer_id };
+    } else if (head.primary_focus) |*p| {
+        // Focus is on a companion, but the primary pane it left may since
+        // show something else (an open from the sidebar lands there): follow
+        // the pane, or forget it once the pane is gone.
+        if (win_layout.paneById(p.pane)) |node| p.entry = node.pane().buffer_id else head.primary_focus = null;
+    }
 }
 
 /// After a window op moved focus (or changed the focused pane's content),
