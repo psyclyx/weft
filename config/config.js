@@ -78,6 +78,8 @@ weft.plugin("files");       // file browser; the target handler owns its semanti
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
+weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
+weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
 
 // ── BREADTH, written down ────────────────────────────────────────────
 // A plugin that asks for `fs_read`/`fs_write` in describe() and gets no
@@ -149,6 +151,13 @@ weft.set("lsp", "zig", "zls");            // a server per language: weft.set("ls
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
+weft.set("editor", "flash-undo", "on");   // undo/redo flash what they put back, too
+// "relative": distance from the caret, with the caret line's own number —
+// vim's `number relativenumber`. Or "absolute".
+weft.set("linenumbers", "style", "relative");
+// Where an operator-pending snipe (`d f`, `c t`, …) hands its range: vim's
+// pending operator.
+weft.set("snipe", "operator", "vim-operate");
 weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust, C-0 resets
 // Each section gives an id, title, candidate-source command, activation
 // command, and maximum count. Source commands return newline-delimited lists.
@@ -272,6 +281,18 @@ weft.bind("normal", ".", "repeat-change");
 // `/` — search in this buffer (vim's search key). consult-line is a fuzzy
 // in-buffer jump: type a pattern, Return lands on the match.
 weft.bind("normal", "/", "consult-line");
+
+// `f F t T` — snipe instead of vim's line-bound find: the search covers what
+// the pane SHOWS, one hit jumps, several get labels you pick with one more
+// key. `; ,` repeat it. In operator-pending mode (`d f x`, `c t )`) the chosen
+// hit becomes the operator's range, across lines — see the `snipe` values
+// above. Vim's own `find-*` commands stay registered, just unbound here.
+for (const [key, dir] of [["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
+  weft.bind("normal", key, `snipe-${dir}`);
+  weft.bind("op-pending", key, `snipe-op-${dir}`);
+}
+weft.bind("normal", ";", "snipe-repeat");
+weft.bind("normal", ",", "snipe-repeat-rev");
 
 // `C-o` — back where you came from, vim's jump-list key. The intention first:
 // a focused view that knows its own history answers it; otherwise the generic

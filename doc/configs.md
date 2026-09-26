@@ -96,6 +96,15 @@ Snipe (config.js) needs these, and so do helix `gw` (goto word) and hint jumps i
   Drawing the `gutter` placement falls out of the same work, which also fixes the
   invisible breakpoint dot.
 
+**Built.** `wl_view_range(out) -> i32` (SDK `weft.viewRange() ?Range`) reads
+`Head.view_range`, which the frame build writes after laying out the focused pane; it
+answers `-1` when that pane showed a different entry. `overlay` is placement 5 on both
+`wl_decorate` and `wl_annotate_span`; the view substitutes the covered cells' glyphs and
+leaves stops (and so the caret) alone, and a label running past the line end continues
+into the empty cells. `gutter`-placed spans draw in a sign column whose width is fixed
+per frame (the widest mark plus a blank), so a marked row and an unmarked one start
+their text in the same column. `virtual_after` and `eol` still do not draw.
+
 ### 0.4 Flash — core-door, small
 
 - The flash range becomes a set of ranges, so one flash can cover every selection.
@@ -103,6 +112,13 @@ Snipe (config.js) needs these, and so do helix `gw` (goto word) and hint jumps i
 - `flash-ms` is re-read on config reload.
 - Undo and redo report the changed span, so core flashes it when `editor/flash-undo` is
   on. That is the one flash only core can do, because the grammar never sees the span.
+
+**Built.** `core/flash.zig`: a `flash` layer per document (anchored spans) plus a
+generation and a source on `Caps.flash`. `wl_flash` replaces the set, `wl_flash_add`
+adds to it (SDK `flash`, `flashAdd`, `flashRanges`). `undo`/`redo` always record the
+span their commits changed (`flash.changedSince`) as an `undo` flash; the frame shows it
+only when `editor/flash-undo` is `on`, and re-reads `editor/flash-ms` whenever a new
+flash starts.
 
 ### 0.5 Gutter door — core-door
 
@@ -113,12 +129,20 @@ Snipe (config.js) needs these, and so do helix `gw` (goto word) and hint jumps i
 - Plugins can bind `ui/gutter-segment` (today `wl_slot_bind` makes a
   `.schema_provider`, which the gutter skips).
 
+**Built.** `core/gutter.zig` declares the slot with a schema: an `ask` names a window of
+lines (`first`, `count`), the caret line and the line count; a `tell` answers one
+`{text, role}` cell per line. The view fetches a window lazily the first time a row
+outside the current one asks (`ui_mesh.GutterBatch`), so a frame costs one slot round,
+not one per visible row. The gutter facts carry `tool` and a new `posture` fact and
+predicate leaf. The guest half is the `gutter` plugin library.
+
 ---
 
 ## 1. config.js
 
 1. **Relative line numbers** — plugin `linenumbers`. It binds `ui/gutter-segment` with
-   predicate `posture == text`, reads `weft.set("linenumbers", "style",
+   predicate `posture == text` and no `tool` (an editable projection rests as text
+   too), reads `weft.set("linenumbers", "style",
    "relative"|"absolute"|"hybrid")`, and pads to the width of `line_count`. Depends on
    0.5.
 2. **Flash on every action** — in the vim plugin:
@@ -140,6 +164,17 @@ Snipe (config.js) needs these, and so do helix `gw` (goto word) and hint jumps i
      (and the operator-pending mode) to snipe. The e2e tests that pin `f .` then `;` `;`
      `,` (`authoring_test.zig:372`) move to exercising snipe, with a single-hit case
      that still lands exactly.
+
+**Built.** `linenumbers` has two styles: `absolute`, and `relative`, which shows the
+caret line's own number the way vim's `number relativenumber` does (`hybrid` is
+accepted as a synonym). config.js sets `relative`. The vim flashes are in place, `=` has
+no operator to flash yet. Snipe's operator-pending commands are `snipe-op-*`: the range
+goes to the command named by `weft.set("snipe", "operator", …)`, which config.js sets to
+vim's new `vim-operate` (apply the pending operator over a range argument). A motion
+that reads keys before it knows its target cannot be a synchronous range command like
+`motions`', so it hands the range back instead. Snipe is not bound in `visual`; there
+`f` falls through to `normal`'s binding and leaves visual, as vim's `find-*` did.
+The e2e coverage is `src/e2e/visual_aids_test.zig`.
 
 ## 2. helix.js — a working Helix
 
