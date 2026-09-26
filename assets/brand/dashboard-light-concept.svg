@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
+  <title id="title">Weft startup dashboard, light concept</title>
+  <desc id="desc">The Continuum mark sits above simple startup actions and a recent work list.</desc>
+  <rect width="1200" height="820" fill="#F7F5EF"/>
+  <path d="M0 58h1200" stroke="#E0E2DF" stroke-width="2"/>
+  <circle cx="31" cy="29" r="6" fill="#D9534E"/>
+  <text x="51" y="36" fill="#18354B" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="19" font-weight="600" letter-spacing="-.5">weft</text>
+  <text x="1160" y="35" text-anchor="end" fill="#6D7E89" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="15">Help</text>
+  <g transform="translate(427 78) scale(1.35)">
+    <path d="M46 68h129c23 0 34 11 34 33s-11 33-34 33H80c-23 0-34 11-34 32s11 32 34 32h72" fill="none" stroke="#18354B" stroke-width="13" stroke-linecap="square" stroke-linejoin="round"/>
+    <path d="M176 163v60m-12-60h24m-24 60h24" fill="none" stroke="#D9534E" stroke-width="8" stroke-linecap="square"/>
+  </g>
+  <text x="600" y="429" text-anchor="middle" fill="#18354B" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="35" font-weight="600" letter-spacing="-1.2">Start editing</text>
+  <text x="600" y="461" text-anchor="middle" fill="#687A84" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="16">An open space for code and prose.</text>
+  <rect x="342" y="493" width="155" height="48" rx="10" fill="#18354B"/>
+  <text x="419" y="524" text-anchor="middle" fill="#F8F6EE" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="16" font-weight="600">Open file</text>
+  <rect x="509" y="493" width="173" height="48" rx="10" fill="#FFFFFF" stroke="#D4DBDC" stroke-width="2"/>
+  <text x="596" y="524" text-anchor="middle" fill="#18354B" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="16" font-weight="600">Open project</text>
+  <rect x="694" y="493" width="164" height="48" rx="10" fill="#FFFFFF" stroke="#D4DBDC" stroke-width="2"/>
+  <text x="776" y="524" text-anchor="middle" fill="#18354B" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="16" font-weight="600">New buffer</text>
+  <rect x="255" y="589" width="690" height="162" rx="15" fill="#FFFDF8" stroke="#E0E4E2" stroke-width="2"/>
+  <text x="283" y="623" fill="#6E8088" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="12" font-weight="700" letter-spacing="1.5">RECENT WORK</text>
+  <path d="M275 639h650M275 690h650" stroke="#E6E9E7" stroke-width="2"/>
+  <path d="M283 655h11v15h-11zM283 706h11v15h-11z" fill="none" stroke="#8799A0" stroke-width="2"/>
+  <text x="307" y="670" fill="#213E51" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="17" font-weight="500">README.md</text>
+  <text x="307" y="721" fill="#213E51" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="17" font-weight="500">config/config.js</text>
+  <text x="916" y="670" text-anchor="end" fill="#8B9A9E" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="14">weft</text>
+  <text x="916" y="721" text-anchor="end" fill="#8B9A9E" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="14">weft</text>
+</svg>

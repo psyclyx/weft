@@ -1,0 +1,16 @@
+# Build with: makepkg -s
+# Place a bundle produced by ../make-bundle.sh in this directory first.
+pkgname=weft
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Weft text editor'
+arch=('x86_64')
+url='https://github.com/psyclyx/weft'
+license=('MIT')
+depends=('vulkan-driver')
+source=('weft-bundle.tar.gz')
+sha256sums=('SKIP')
+
+package() {
+  cp -a "$srcdir/weft-bundle/." "$pkgdir/"
+}

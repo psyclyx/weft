@@ -26,6 +26,8 @@
         "build.zig.zon",
         "src",
         "config",
+        "assets",
+        "packaging",
         "README.md",
         "LICENSE",
     },

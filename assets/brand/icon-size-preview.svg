@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" role="img" aria-labelledby="title desc">
+  <title id="title">Weft app icon at four sizes</title><desc id="desc">The chosen icon shown at 160, 96, 64, and 32 pixels.</desc>
+  <defs>
+    <symbol id="icon" viewBox="0 0 256 256">
+      <rect width="256" height="256" rx="52" fill="#F5F2E9"/>
+      <path d="M46 68h129c23 0 34 11 34 33s-11 33-34 33H80c-23 0-34 11-34 32s11 32 34 32h72" fill="none" stroke="#18354B" stroke-width="13" stroke-linecap="square" stroke-linejoin="round"/>
+      <path d="M176 163v60m-12-60h24m-24 60h24" fill="none" stroke="#D9534E" stroke-width="8" stroke-linecap="square"/>
+    </symbol>
+  </defs>
+  <rect width="900" height="330" rx="28" fill="#E6E9E8"/>
+  <text x="48" y="52" fill="#293D4C" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="18" font-weight="600">WEFT / APP ICON</text>
+  <use href="#icon" x="64" y="96" width="160" height="160"/>
+  <use href="#icon" x="306" y="160" width="96" height="96"/>
+  <use href="#icon" x="484" y="192" width="64" height="64"/>
+  <use href="#icon" x="630" y="224" width="32" height="32"/>
+  <path d="M48 256h804" stroke="#C7CECD" stroke-width="2"/>
+  <g fill="#536673" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="14">
+    <text x="122" y="289">160 px</text><text x="327" y="289">96 px</text><text x="494" y="289">64 px</text><text x="628" y="289">32 px</text>
+  </g>
+</svg>

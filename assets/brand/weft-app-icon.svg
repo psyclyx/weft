@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Weft app icon</title><desc id="desc">A continuous line of text wraps twice and ends at an insertion caret.</desc>
+  <rect width="256" height="256" rx="52" fill="#F5F2E9"/>
+  <path d="M46 68h129c23 0 34 11 34 33s-11 33-34 33H80c-23 0-34 11-34 32s11 32 34 32h72" fill="none" stroke="#18354B" stroke-width="13" stroke-linecap="square" stroke-linejoin="round"/>
+  <path d="M176 163v60m-12-60h24m-24 60h24" fill="none" stroke="#D9534E" stroke-width="8" stroke-linecap="square"/>
+</svg>

@@ -665,6 +665,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
+    const desktop = b.addInstallFileWithDir(b.path("packaging/weft.desktop"), .prefix, "share/applications/weft.desktop");
+    b.getInstallStep().dependOn(&desktop.step);
+    const icon = b.addInstallFileWithDir(b.path("assets/brand/weft-app-icon.svg"), .prefix, "share/icons/hicolor/scalable/apps/weft.svg");
+    b.getInstallStep().dependOn(&icon.step);
 
     // The reference plugins ship as external `.wasm` under lib/weft/plugins/,
     // not embedded — weft's binary carries none of them. Load one with e.g.
