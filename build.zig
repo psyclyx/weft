@@ -442,6 +442,8 @@ const guests = [_]Guest{
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
     .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{.ex} },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
+    // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
 };
 

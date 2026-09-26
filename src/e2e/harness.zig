@@ -2030,6 +2030,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "files", @embedFile("guest_files_wasm") },
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
+    .{ "ide", @embedFile("guest_ide_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
     .{ "marginalia", @embedFile("guest_marginalia_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
