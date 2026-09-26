@@ -10,11 +10,8 @@
 // the kernel applies as one value, so load ORDER below is for the reader, not
 // for the machine.
 //
-// Companion: config.northstar.js is this same surface re-narrated in
-// north-star terms (manifests, systems, trust roots). It is the argument that
-// the end-state model costs the degenerate case nothing; this file is the
-// daily driver. The M3/M4 parity gate compares the two as ONE surface, so a
-// line added here must land there too.
+// Siblings: helix.js is the same editor under Helix's grammar; ide.js is the
+// conventional, mouse-and-keyboard, non-modal flow.
 //
 // The whole config plane:
 //   weft.plugin(name)              — load a reference plugin (or a .wasm/.js path)

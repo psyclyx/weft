@@ -2045,11 +2045,9 @@ pub const ConfigLoader = struct {
     ed: *Editor,
     missing: std.ArrayList([]const u8) = .empty, // names not in the bundle
     failed: std.ArrayList([]const u8) = .empty, // resolved but loadPlugin errored
-    /// EVERY name `weft.plugin(name)` requested, in request order — the
-    /// M3/M4 parity harness's "plugin load-list set-equality" evidence
-    /// (config_test.zig): recorded regardless of resolve/load outcome (a
-    /// `.js` name included), so two configs with the same plugin list
-    /// produce the same set here.
+    /// EVERY name `weft.plugin(name)` requested, in request order —
+    /// recorded regardless of resolve/load outcome (a `.js` name included),
+    /// so a test can assert a config asked for a plugin at all.
     requested: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *ConfigLoader) void {
@@ -2104,95 +2102,6 @@ pub const ConfigLoader = struct {
     }
 };
 
-/// A stable, sorted text snapshot of `requested` — comparable between two
-/// `ConfigLoader`s with `expectEqualStrings` (M3/M4 parity: "plugin
-/// load-list set-equality").
-pub fn requestedPluginsSnapshot(gpa: Allocator, loader_state: *const ConfigLoader) ![]u8 {
-    const list = try gpa.dupe([]const u8, loader_state.requested.items);
-    defer gpa.free(list);
-    std.mem.sort([]const u8, list, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (list) |name| {
-        try out.appendSlice(gpa, name);
-        try out.append(gpa, '\n');
-    }
-    return out.toOwnedSlice(gpa);
-}
-
-/// A stable, sorted text snapshot of an entire `kv.Store` — namespace, key,
-/// and the raw framed value blob — for a "full config-store diff" (M3/M4
-/// parity: catches ANY value divergence, not just a hand-picked key).
-pub fn kvSnapshot(gpa: Allocator, store: *core.kv.Store) ![]u8 {
-    var lines: std.ArrayList([]u8) = .empty;
-    defer {
-        for (lines.items) |l| gpa.free(l);
-        lines.deinit(gpa);
-    }
-    var nsit = store.ns.iterator();
-    while (nsit.next()) |nse| {
-        var kit = nse.value_ptr.iterator();
-        while (kit.next()) |ke| {
-            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ nse.key_ptr.*, ke.key_ptr.*, ke.value_ptr.* });
-            try lines.append(gpa, line);
-        }
-    }
-    std.mem.sort([]u8, lines.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (lines.items) |l| try out.appendSlice(gpa, l);
-    return out.toOwnedSlice(gpa);
-}
-
-/// A stable, sorted text snapshot of the keymap's MODE STRUCTURE — which
-/// modes are declared menus/sticky-menus/locked/resting, and which modes
-/// declare that they commit text (`commitCommand`) — the which-key GROUP
-/// structure a bind-only snapshot can't see (M3/M4 parity item 4).
-pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
-    var names: std.StringArrayHashMapUnmanaged(void) = .empty;
-    defer names.deinit(gpa);
-    for (km.modes.keys()) |k| try names.put(gpa, k, {});
-    // Tag keys are `mode\x00tag`; a mode that exists only as a menu declaration
-    // (no bindings of its own yet) still belongs in the structure snapshot.
-    for (km.mode_tags.keys()) |k| {
-        const sep = std.mem.indexOfScalar(u8, k, 0) orelse continue;
-        if (std.mem.eql(u8, k[sep + 1 ..], core.Keymap.tag_menu)) try names.put(gpa, k[0..sep], {});
-    }
-    for (km.commit_commands.keys()) |k| try names.put(gpa, k, {});
-
-    const list = try gpa.dupe([]const u8, names.keys());
-    defer gpa.free(list);
-    std.mem.sort([]const u8, list, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-
-    // `commitCommand` is a pure function of (tables, mode) — W2a-1's split
-    // (Head owns the CURRENT-mode cursor; Keymap only holds tables) means
-    // probing every mode name needs no save/restore dance against a live
-    // head anymore; it never touches one.
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (list) |mode| {
-        const txt = km.commitCommand(mode) orelse "<none>";
-        const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|resting={}|text={s}\n", .{
-            mode, km.modeHasTag(mode, "menu"), km.modeHasTag(mode, "sticky"), km.modeHasTag(mode, "resting"), txt,
-        });
-        defer gpa.free(line);
-        try out.appendSlice(gpa, line);
-    }
-    return out.toOwnedSlice(gpa);
-}
-
 /// Boot the editor from the real `config/config.js` (read from `config_dir`,
 /// which also resolves its `weft.use("defaults")`). Fills `loader_state` with
 /// any plugins the config asked for that couldn't load.
@@ -2201,9 +2110,8 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
 }
 
 /// Like `bootConfig`, but the config FILE within `config_dir` is named
-/// explicitly — the M3/M4 parity harness's door (doc/configuration.md §7): boot
-/// `config.js` and `config.northstar.js` from the SAME directory (so both
-/// resolve `weft.use("defaults")` identically) into two separate `Editor`s.
+/// explicitly — config.js, helix.js and ide.js share one directory, so each
+/// resolves `weft.use("defaults")` identically.
 pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {
     const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/{s}", .{ config_dir, filename });
     defer ed.gpa.free(cfg_path);
@@ -2247,22 +2155,6 @@ pub fn keymapSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (lines.items) |l| try out.appendSlice(gpa, l);
-    return out.toOwnedSlice(gpa);
-}
-
-/// A text snapshot of how `actions` resolve across the cross product of
-/// `modes` × `langs` (deterministic iteration order — the lists are small,
-/// fixed, and given in the same order by both callers, so no sort needed).
-/// The action-provider-set analogue of `keymapSnapshot`.
-pub fn actionSnapshot(gpa: Allocator, ctx: *command.Context, actions: []const []const u8, modes: []const []const u8, langs: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (actions) |a| for (modes) |m| for (langs) |l| {
-        const cmd = ctx.actions.resolve(a, .{ .mode = m, .lang = l }) orelse "<none>";
-        const line = try std.fmt.allocPrint(gpa, "{s}|{s}|{s}->{s}\n", .{ a, m, l, cmd });
-        defer gpa.free(line);
-        try out.appendSlice(gpa, line);
-    };
     return out.toOwnedSlice(gpa);
 }
 

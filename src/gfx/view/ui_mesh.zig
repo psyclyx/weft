@@ -608,7 +608,7 @@ test "ui_mesh: MESH REACHABILITY — weft.statusSegment reaches ui/statusline-se
     // bind -> fireStatusline composes it into the statusline. Uses a real
     // `core.System` (task #19's shared-Container fold-in: `sys.container`
     // is the SAME instance `sys.caps`/`sys.actions` bind into) as the host,
-    // mirroring `System.zig`'s own "config/agent-ux.js hosts a SECOND
+    // mirroring `System.zig`'s own "a second manifest hosts a SECOND
     // system end-to-end" test.
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });

@@ -59,35 +59,6 @@ const arg_parse = @import("weft_app").args;
 const Args = arg_parse.Args;
 const parseArgs = arg_parse.parseArgs;
 
-/// Host a second, minimal system ("agent-ux") on `host` — task #19 items
-/// 1/4's live-swap gate, run against the REAL desktop session rather than
-/// `core/System.zig`'s synthetic fixtures. `src` is `config/agent-ux.js`'s
-/// already-read bytes. Mirrors `core/System.zig`'s own "the real
-/// config/agent-ux.js manifest hosts a SECOND system end-to-end" gate test
-/// almost exactly (a scoped, one-shot `wasm.Engine` for the eval, just like
-/// `config_load.ConfigSession.reload`'s pattern — config is a startup
-/// declaration, not a resident runtime) but against `Session.host` instead
-/// of a bare test-local `Host`. Deliberately does NOT call `initPlugins` on
-/// the new system (task #19 item 3: the second system stays plugin-free).
-fn hostAgentUx(gpa: std.mem.Allocator, pool: *core.task.Pool, host: *core.System.Host, user: []const u8, src: []const u8) !void {
-    const sys = try core.System.create(gpa, pool, "agent-ux", user);
-    errdefer sys.destroy();
-    var engine = try core.wasm.Engine.init(gpa);
-    defer engine.deinit();
-    var c = sys.contextFor(&sys.default_head);
-    const m = try core.quickjs.evalToManifest(&engine, &c, null, &sys.config_kv, "config", src, .config, "agent-ux");
-    {
-        // The manifest errdefer must not outlive applyManifest: on success,
-        // ownership of `m` moves into sys.applied_manifest, and sys.destroy()
-        // (the outer errdefer) frees it — a still-armed m.destroy() on a later
-        // failure (hostSystem OOM) would double-free.
-        errdefer m.destroy();
-        try sys.applyManifest(gpa, m, null);
-    }
-    try host.hostSystem(sys);
-    std.log.info("agent-ux: hosted a second system from config/agent-ux.js ({d} bytes)", .{src.len});
-}
-
 pub fn main(init: std.process.Init) !void {
     // Debug builds get leak checking; release builds get the lean
     // allocator (DebugAllocator's bookkeeping costs real RSS).
@@ -218,14 +189,14 @@ pub fn main(init: std.process.Init) !void {
     // OWNED by `session.system` now (task #19 item 3: "plugin instances are
     // PER-SYSTEM" — `core.System.Plugins`), not bare `main()` locals — this
     // is a STRUCTURAL move only: the editor system is still the only one
-    // that ever calls `initPlugins`/loads a plugin (agent-ux "stays
-    // plugin-free" per the task). `plug` below is a convenience alias to
+    // that ever calls `initPlugins`/loads a plugin (a second hosted system
+    // stays plugin-free). `plug` below is a convenience alias to
     // `session.system.plugins.?`, taken once, right after creation — it
     // stays valid even across a LATER `system-swap` (a raw pointer into the
     // editor System's heap-pinned allocation, not re-read through
     // `session.system`), which is exactly right: plugin ticking/streaming
     // is unconditionally editor-scoped regardless of which system the head
-    // is currently attached to (agent-ux never gets its own).
+    // is currently attached to (a second system never gets its own).
     try session.system.initPlugins(pool);
     const plug = &session.system.plugins.?;
     // Make `kv.zig`'s "state that outlives a run" literally true: restore the
@@ -320,28 +291,13 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("dashboard: {t}", .{e});
     }
 
-    // ── A second hosted system: agent-ux (doc/cwa-prior-docs-audit.md §5)
-    // ── A minimal SECOND system, hosted alongside "editor" on the SAME
-    // `session.host` — proves `system-swap` works on the REAL desktop
-    // session, not just `System.zig`'s synthetic gate fixtures.
-    // `config/agent-ux.js` is a dev-checkout GATE FIXTURE, not an installed
-    // file (see its own module doc — no `build.zig install` rule ships it);
-    // a missing/broken read degrades to a warning, never fatal, same as
-    // `--config`. Deliberately minimal — "a few binds, no heavy plugins" —
-    // so this costs nothing when absent and stays plugin-free when present
-    // (task #19 item 3: the SECOND system never calls `initPlugins`).
-    if (core.file.readAlloc(gpa, "config/agent-ux.js")) |src| {
-        defer gpa.free(src);
-        hostAgentUx(gpa, pool, &session.host, args.user, src) catch |e|
-            std.log.warn("agent-ux: failed to host: {t}", .{e});
-    } else |_| {}
     // The `system-swap <name>` command — SHADOWS `core.System.
     // registerSwapCommand` (registry last-wins, same pattern
     // `buffers_cmds.zig` uses): identical surface, but additionally refuses
     // while a live collab connection is bound to the CURRENT system's
     // Document (task #19 item 2). Bound onto EVERY hosted system's command
-    // table (not just "editor"'s) so a head that swapped onto agent-ux can
-    // swap BACK — see `Session.SwapCmdData`'s doc. `swap_data`'s address is
+    // table (not just "editor"'s) so a head that swapped onto another system
+    // can swap BACK — see `Session.SwapCmdData`'s doc. `swap_data`'s address is
     // stable for the run (a `main()` local); every system's binding shares
     // the same `data` pointer.
     var swap_data: session_mod.Session.SwapCmdData = .{ .session = &session };
@@ -364,7 +320,7 @@ pub fn main(init: std.process.Init) !void {
     // providers_state.deinit.
     // W0b: swap-blocking — `AttachDeps.caps` is a long-lived borrow of the
     // EDITOR system's caps, baked once here. Providers/LSP attach is
-    // structurally editor-only (agent-ux never gets a `--file`/providers
+    // structurally editor-only (a second system never gets a `--file`/providers
     // pass); not repointed on swap — see `fx`'s doc below for the full
     // borrow-audit finding this is one instance of.
     providers_state.initAttach(gpa, &session.system.caps, init.minimal.environ);

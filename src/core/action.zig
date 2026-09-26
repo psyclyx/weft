@@ -62,7 +62,7 @@
 //! a small, honest READ-side convenience (two lines: `container.resolveOne`
 //! + unwrap `.command`), used by this module's own tests, `System.zig`'s
 //! explain-adjacent test, `quickjs.zig`, `config_test.zig`, and
-//! `e2e/harness.zig`'s `actionSnapshot` — none of that is "adapter logic"
+//! the e2e config gates — none of that is "adapter logic"
 //! anymore (no bespoke scan, no bespoke tie-break), just a narrow-`Ctx`
 //! call shape those callers still want. That IS the end state W3 asked for:
 //! REGISTER stays a domain-shaped binding constructor; RESOLVE is the
@@ -365,8 +365,8 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
 /// **Not the dispatch path (W3 fold, see the file doc).** A thin two-line
 /// convenience — `container.resolveOne` + unwrap `.provider.command` — kept
 /// for callers that want the narrow `Ctx` (mode/lang/tool) shape: this
-/// module's own tests, `System.zig`, `quickjs.zig`, `config_test.zig`,
-/// `e2e/harness.zig`'s `actionSnapshot`. `command.actionTrampoline` — the
+/// module's own tests, `System.zig`, `quickjs.zig`, `config_test.zig`
+/// and the e2e config gates. `command.actionTrampoline` — the
 /// actual per-keystroke hot path `e2e/latency`'s `action` category measures
 /// — no longer calls this; it queries `self.container.resolveOne` directly
 /// against the FULL captured `mergedFacts()`, skipping the narrow-then-
