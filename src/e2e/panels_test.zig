@@ -148,16 +148,20 @@ test "e2e/panels: C-` runs a line-mode shell in the panel, with its controls str
     const ed = &app.ed;
 
     try ide.openFile(ed, "x.txt", "x\n");
-    try ed.setConfig("terminal", "shell", "/bin/sh");
+    // An interactive shell, as the default one is (`$SHELL -i`), with a
+    // prompt this test can name: it prints the prompt on stderr, with no
+    // newline after it, and both reach the buffer as they are read.
+    try ed.setConfig("terminal", "shell", "PS1='$ ' exec bash --norc --noprofile --noediting -i");
     ed.press("C-grave", "");
     ed.applyWindow();
     try t.expectEqualStrings("*terminal*", (panelEntry(ed) orelse return error.PanelNotShown).name);
     try t.expectEqualStrings("*terminal*", ed.buffers.active().name);
     try t.expectEqualStrings("terminal", ed.mode());
+    try t.expect(h.drainToolContains(ed, "*terminal*", "\n$ "));
 
     ed.typeText("echo hi");
     ed.press("Return", "");
-    try t.expect(h.drainToolContains(ed, "*terminal*", "echo hi\nhi\n"));
+    try t.expect(h.drainToolContains(ed, "*terminal*", "$ echo hi\nhi\n$ "));
     // An artifact to eyeball: ide.js with the shell in the bottom panel.
     {
         const pixels = try ed.renderComposite();

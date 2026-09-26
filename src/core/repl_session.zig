@@ -12,25 +12,42 @@ const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
 const task = @import("task.zig");
 
-/// The terminal-control filter's state between chunks.
-pub const Controls = enum { text, escape, csi, osc, osc_escape };
+/// The terminal-control filter's state between chunks. `cr`: a carriage
+/// return was the last byte, and what follows decides what it meant.
+pub const Controls = enum { text, cr, escape, csi, osc, osc_escape };
 
 /// Append `in` to `out` without its terminal controls. The buffer a session
 /// streams into is plain text with no terminal behind it, so an interactive
 /// shell's colors, cursor moves and window titles would land as literal
 /// bytes: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL | ESC \`) sequences,
-/// other two-byte escapes, carriage returns and bells are dropped. Newlines,
-/// tabs and printable text pass. Returns the state to resume from, since a
+/// other two-byte escapes and bells are dropped. Newlines, tabs and printable
+/// text pass. A carriage return before a newline is dropped; one before
+/// anything else returns to the start of the line, so what follows replaces
+/// the line so far instead of running on after it — zsh's end-of-output mark
+/// (`%`, a row of blanks, `\r \r`) then leaves nothing in front of the
+/// prompt. Only the part of the line still in `out` can be replaced: what
+/// was delivered already stays. Returns the state to resume from, since a
 /// sequence may straddle two reads.
 pub fn stripControls(gpa: Allocator, from: Controls, in: []const u8, out: *std.ArrayList(u8)) !Controls {
     var state = from;
     for (in) |b| {
+        if (state == .cr) {
+            if (b == '\n' or b == '\r') {
+                if (b == '\n') try out.append(gpa, b);
+                state = if (b == '\n') .text else .cr;
+                continue;
+            }
+            out.items.len = if (std.mem.lastIndexOfScalar(u8, out.items, '\n')) |nl| nl + 1 else 0;
+            state = .text;
+        }
         switch (state) {
             .text => switch (b) {
                 0x1b => state = .escape,
-                '\r', 0x07, 0x08 => {},
+                '\r' => state = .cr,
+                0x07, 0x08 => {},
                 else => try out.append(gpa, b),
             },
+            .cr => unreachable,
             .escape => state = switch (b) {
                 '[' => .csi,
                 ']' => .osc,
@@ -63,6 +80,24 @@ test "repl_session: terminal controls are stripped, even split across reads" {
     st = try stripControls(gpa, st, "1mb\x1b]2;t\x1b", &out);
     st = try stripControls(gpa, st, "\\c\x1b=d", &out);
     try std.testing.expectEqualStrings("abcd", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+}
+
+test "repl_session: a lone carriage return starts the line over" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // zsh's PROMPT_SP: the mark, blanks to the margin, then `\r \r` — split
+    // across two reads — and the prompt.
+    var st = try stripControls(gpa, .text, "done\n\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m     \r \r", &out);
+    try std.testing.expectEqual(Controls.cr, st);
+    st = try stripControls(gpa, st, "\x1b]2;t\x07zsh> ", &out);
+    try std.testing.expectEqualStrings("done\nzsh> ", out.items);
+    // A CRLF is a newline, and a progress line keeps only its last state.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\r\nb 10%\rb 99%\r", &out);
+    st = try stripControls(gpa, st, "\nc", &out);
+    try std.testing.expectEqualStrings("a\nb 99%\nc", out.items);
     try std.testing.expectEqual(Controls.text, st);
 }
 
