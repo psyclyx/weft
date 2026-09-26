@@ -1680,3 +1680,329 @@ test "e2e/config: the shipped config annotates palette rows — the whole chain,
         try t.expect(found);
     }
 }
+
+// ── helix.js: the same editor under a second grammar ─────────────────
+//
+// config.js is held honest by the gates above; helix.js by these. Nothing
+// else boots it, which is exactly how a helix key naming a command only vim
+// registers used to ship dead.
+
+fn bootHelix(gpa: std.mem.Allocator, proj: *Project, ed: *Editor, loader: *ConfigLoader) !void {
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try bootConfigNamed(ed, config_dir, "helix.js", loader);
+    for (loader.missing.items) |nm| std.debug.print("[e2e/helix] not in the bundle: {s}\n", .{nm});
+    for (loader.failed.items) |nm| std.debug.print("[e2e/helix] failed to load: {s}\n", .{nm});
+    try t.expect(loader.missing.items.len == 0);
+    try t.expect(loader.failed.items.len == 0);
+}
+
+test "e2e/config: helix.js boots whole, and every key it binds names something that answers" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootHelix(gpa, &proj, &ed, &loader);
+    try ed.enableCollabCommands();
+
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "helix.js loaded") != null);
+    try t.expectEqualStrings("helix-normal", ed.mode());
+
+    // The same sweep config.js passes: every arm of every binding in every
+    // mode — the config's, helix's, and each plugin's — is an intention, a
+    // menu, or a registered command.
+    var modes = ed.keymap.modes.iterator();
+    while (modes.next()) |mode| {
+        var keys = mode.value_ptr.iterator();
+        while (keys.next()) |key| {
+            for (key.value_ptr.commands) |arm| {
+                if (core.catalog.isIntentionName(arm) or ed.keymap.modeHasTag(arm, "menu")) continue;
+                if (embedderOwned(arm)) continue;
+                if (ed.commands.resolve(arm) == null) {
+                    std.debug.print("[e2e/helix] bound but unanswerable: {s} {s} -> {s}\n", .{ mode.key_ptr.*, key.key_ptr.*, arm });
+                    return error.BoundCommandMissing;
+                }
+            }
+        }
+    }
+
+    // The keys that used to be dead under helix, by name.
+    try t.expectEqualStrings("find-file", ed.keymap.resolveExact("helix-normal", "space space").?);
+    try t.expectEqualStrings("hx-goto-start", ed.keymap.resolveExact("helix-normal", "g g").?);
+    try t.expectEqualStrings("hx-goto-end", ed.keymap.resolveExact("helix-normal", "g e").?);
+    try t.expectEqualStrings("hx-delete-line", ed.keymap.resolveExact("helix-op", "d").?);
+    try t.expectEqualStrings("hx-select-line", ed.keymap.resolveExact("helix-normal", "x").?);
+    const Arms = struct { key: []const u8, arms: []const []const u8 };
+    const intended = [_]Arms{
+        .{ .key = "y", .arms = &.{ "std.transfer.yank", "hx-yank" } },
+        .{ .key = "p", .arms = &.{ "std.transfer.paste", "hx-paste" } },
+        .{ .key = "d", .arms = &.{ "std.transfer.delete-to-register", "hx-delete" } },
+        .{ .key = "u", .arms = &.{ "std.history.undo", "undo" } },
+        .{ .key = "U", .arms = &.{ "std.history.redo", "redo" } },
+        .{ .key = "j", .arms = &.{ "std.navigation.down", "hx/n/motion.down" } },
+        .{ .key = "k", .arms = &.{ "std.navigation.up", "hx/n/motion.up" } },
+        .{ .key = "space f s", .arms = &.{ "std.persistence.save", "save" } },
+        .{ .key = "C-o", .arms = &.{ "std.navigation.back", "navigate-back" } },
+    };
+    for (intended) |row| {
+        const arms = ed.keymap.resolveExactArms("helix-normal", row.key).?;
+        try t.expectEqual(row.arms.len, arms.len);
+        for (row.arms, arms) |want, got| try t.expectEqualStrings(want, got);
+    }
+
+    // SPC v exists under helix: the shared fragment bound it into the layer
+    // helix declared, and nowhere a plain entry would see it.
+    try t.expect(!ed.keymap.isPrefix("helix-normal", "space v"));
+    try t.expectEqualStrings("field.edit", ed.keymap.resolveExact("helix-structural", "space v e").?);
+    try t.expectEqualStrings("std.transfer.yank", ed.keymap.resolveExact("helix-structural", "space v y").?);
+    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("helix-structural", "space v j").?);
+
+    // The layers are chosen by declaration: a document binds through
+    // helix-source (its code chords live there), a scratch through nothing.
+    try t.expectEqualStrings("helix-normal", ed.ctx.bindingMode());
+    authorFile(&ed, "main.zig", "const x = 1;\n");
+    try t.expectEqualStrings("helix-source", ed.ctx.bindingMode());
+    try t.expectEqualStrings("goto-definition", ed.keymap.resolveExact("helix-source", "g d").?);
+}
+
+/// The generic retained scene config.js's structured-view gate drives, as a
+/// pinned value a second grammar's gate can publish: fields, actions, a
+/// target link — and no files, git, vim or helix branch.
+const SceneFixture = struct {
+    field: ConfigField = .{},
+    permission_field: ConfigField = .{},
+    actions: ConfigActions = .{},
+    target_handler: ConfigTargetHandler = undefined,
+    relation_provider: ConfigRelationProvider = undefined,
+    view: semantic.view.Ref = undefined,
+    target_view: semantic.view.Ref = undefined,
+
+    const field_id: semantic.scene.NodeId = @enumFromInt(3);
+    const second_row_id: semantic.scene.NodeId = @enumFromInt(4);
+
+    fn publish(self: *SceneFixture, ed: *Editor) !void {
+        const gpa = ed.gpa;
+        const services = &ed.session.system.semantic;
+        const owner = try services.acquireOwner();
+        const field_ref = try services.insertField(gpa, owner, .init(&self.field));
+        const permission_field_ref = try services.insertField(gpa, owner, .init(&self.permission_field));
+        const target_ref = try services.publishTarget(gpa, owner, .{
+            .kind = .{ .synthetic = "config-fixture" },
+            .display_name = "config fixture target",
+        });
+        const source_ref = try services.publishTarget(gpa, owner, .{
+            .kind = .{ .synthetic = "config-source" },
+            .display_name = "config fixture source",
+        });
+        self.target_view = try services.publishView(gpa, owner, target_ref, 1, .{
+            .id = @enumFromInt(100),
+            .focusable = true,
+            .content = .{ .label = "opened target" },
+        });
+        self.target_handler = .{ .view = self.target_view };
+        _ = try services.registerTargetHandler(gpa, owner, "config-fixture", .init(&self.target_handler));
+        const source: semantic.target.Located = .{ .target = source_ref, .revision = 1 };
+        self.relation_provider = .{ .source = source, .destination = .{ .target = target_ref, .revision = 1 } };
+        _ = try services.registerTargetRelationProvider(gpa, owner, "config-container", .init(&self.relation_provider));
+
+        const field_node: semantic.scene.Node = .{
+            .id = field_id,
+            .focusable = true,
+            .target = .{ .target = target_ref, .revision = 1, .location = .{ .node = "config" } },
+            .content = .{ .field = .{ .ref = field_ref, .single_line = true } },
+        };
+        const permission_node: semantic.scene.Node = .{
+            .id = @enumFromInt(5),
+            .focusable = false,
+            .content = .{ .field = .{ .ref = permission_field_ref, .single_line = true } },
+        };
+        const row_actions = [_]semantic.scene.Action{
+            .{ .id = semantic.action.standard.open },
+            .{ .id = semantic.action.standard.edit },
+            .{ .id = semantic.action.standard.copy },
+            .{ .id = semantic.action.standard.cut },
+            .{ .id = semantic.action.standard.delete },
+            .{ .id = "fs.permissions.edit" },
+            .{ .id = semantic.action.standard.paste_before },
+            .{ .id = semantic.action.standard.paste_after },
+            .{ .id = "fs.entry.create-file" },
+            .{ .id = "fs.entry.create-directory" },
+        };
+        const first_row: semantic.scene.Node = .{
+            .id = @enumFromInt(2),
+            .actions = &row_actions,
+            .content = .{ .container = .{ .children = &.{ field_node, permission_node } } },
+        };
+        const second_row: semantic.scene.Node = .{
+            .id = second_row_id,
+            .focusable = true,
+            .content = .{ .label = "second row" },
+        };
+        const root_actions = [_]semantic.scene.Action{
+            .{ .id = semantic.action.standard.open_container },
+            .{ .id = semantic.action.standard.set_working_target },
+            .{ .id = semantic.action.standard.refresh },
+            .{ .id = semantic.action.standard.revert },
+            .{ .id = semantic.action.standard.apply },
+        };
+        self.view = try services.publishView(gpa, owner, source_ref, 1, .{
+            .id = @enumFromInt(1),
+            .actions = &root_actions,
+            .content = .{ .container = .{ .children = &.{ first_row, second_row } } },
+        });
+        self.actions = .{ .view = self.view, .permission_target = permission_node.id, .relation_source = source };
+        try services.registerActionProvider(gpa, owner, .init(&self.actions));
+    }
+
+    fn focus(self: *SceneFixture, ed: *Editor) !void {
+        _ = try ed.session.system.semantic.focusView(ed.head, ed.gpa, self.view, field_id);
+    }
+};
+
+// "The semantic binds earn their keep": in a files listing and a generic
+// scene, helix's OWN keys do the structural thing through intentions, and
+// SPC v is the same group config.js has — with no files- or view-specific
+// helix code anywhere.
+test "e2e/config: under helix.js, helix's own keys and SPC v drive a listing and a scene" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootHelix(gpa, &proj, &ed, &loader);
+
+    // The files listing: the config's own launcher, then Return into a
+    // directory and `-` back out — helix binds the two intentions and nothing
+    // about files.
+    _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
+    ed.chord("SPC f d");
+    const listing = ed.toolView().?;
+    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(listing).?.scene.role);
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    try t.expectEqualStrings("helix-structural", ed.ctx.bindingMode());
+    const scene = ed.session.system.semantic.views.get(listing).?.scene;
+    const directory_row = sceneNodeWithFact(scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
+    const name_field = sceneNodeWithRole(directory_row, "files.name") orelse return error.MissingNameField;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, listing, name_field.id);
+    ed.press("Return", "");
+    const child = ed.toolView().?;
+    try t.expect(!child.eql(listing));
+    ed.press("minus", "");
+    try t.expectEqual(listing, ed.toolView().?);
+
+    // The generic scene: the SPC v group, under helix's structural layer.
+    var fx: SceneFixture = .{};
+    try fx.publish(&ed);
+    try fx.focus(&ed);
+    try t.expectEqualStrings("helix-structural", ed.ctx.bindingMode());
+    ed.chord("SPC v j");
+    try t.expectEqual(SceneFixture.second_row_id, ed.subjectHere().?);
+    ed.chord("SPC v k");
+    try t.expectEqual(SceneFixture.field_id, ed.subjectHere().?);
+    ed.chord("SPC v y");
+    ed.chord("SPC v p");
+    ed.chord("SPC v x");
+    ed.chord("SPC v P");
+    ed.chord("SPC v d");
+    ed.chord("SPC v c");
+    ed.chord("SPC v n");
+    ed.chord("SPC v N");
+    try t.expectEqual(@as(usize, 1), fx.actions.copies);
+    try t.expectEqual(@as(usize, 1), fx.actions.cuts);
+    try t.expectEqual(@as(usize, 1), fx.actions.paste_after);
+    try t.expectEqual(@as(usize, 1), fx.actions.paste_before);
+    try t.expectEqual(@as(usize, 1), fx.actions.deletes);
+    try t.expectEqual(@as(usize, 1), fx.actions.workspace_cds);
+    try t.expectEqual(@as(usize, 1), fx.actions.file_creates);
+    try t.expectEqual(@as(usize, 1), fx.actions.directory_creates);
+
+    // helix's own keys, same scene: j/k walk rows, y/p/P/d transfer, `i`
+    // types into the field and Escape rests again, `-` steps out.
+    try fx.focus(&ed);
+    ed.press("j", "");
+    try t.expectEqual(SceneFixture.second_row_id, ed.subjectHere().?);
+    ed.press("k", "");
+    try t.expectEqual(SceneFixture.field_id, ed.subjectHere().?);
+    ed.press("y", "");
+    ed.press("p", "");
+    ed.press("P", "");
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 2), fx.actions.copies);
+    try t.expectEqual(@as(usize, 2), fx.actions.paste_after);
+    try t.expectEqual(@as(usize, 2), fx.actions.paste_before);
+    try t.expectEqual(@as(usize, 2), fx.actions.cuts);
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    ed.press("i", "");
+    try t.expectEqualStrings("helix-insert", ed.mode());
+    ed.typeText("x");
+    try t.expectEqual(@as(usize, 1), fx.field.edits);
+    ed.press("Escape", "");
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    ed.press("minus", "");
+    try t.expectEqual(@as(usize, 1), fx.actions.container_opens);
+    try t.expectEqual(@as(usize, 1), fx.target_handler.opens);
+    try t.expectEqual(fx.target_view, ed.toolView().?);
+    try fx.focus(&ed);
+    ed.press("Return", "");
+    try t.expectEqual(@as(usize, 2), fx.target_handler.opens);
+}
+
+// The git spine's key-level contract, under helix.js: the status projection
+// keeps its own keys, its menus return to it, and the commit draft is an
+// ordinary entry in HELIX's modes whose `SPC f s` commits.
+test "e2e/config: under helix.js, a git status buffer and its commit draft work by key" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootHelix(gpa, &proj, &ed, &loader);
+
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > f.txt && git add f.txt && git commit -q -m base",
+        "printf 'one\\ntwo\\n' > f.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+    ed.chord("SPC g g");
+    try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
+    try t.expectEqualStrings("git", ed.mode());
+    ed.press("b", "");
+    try t.expectEqualStrings("git-branch-menu", ed.mode());
+    ed.press("Escape", "");
+    try t.expectEqualStrings("git", ed.mode());
+
+    // Stage everything, then commit through the draft.
+    ed.press("S", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "f.txt"));
+    try t.expect(h.drainLoopIdle(&ed));
+    ed.press("c", "");
+    ed.press("c", "");
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    ed.press("i", "");
+    try t.expectEqualStrings("helix-insert", ed.mode());
+    ed.typeText("helix: commit by key");
+    ed.press("Escape", "");
+    try t.expectEqualStrings("helix-normal", ed.mode());
+    // The persistence intention, answered by the draft's own provider.
+    ed.chord("SPC f s");
+    try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "helix: commit by key"));
+}
