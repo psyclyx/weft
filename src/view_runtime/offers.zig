@@ -29,6 +29,9 @@ pub const Intent = enum {
     toggle_expanded,
     step_out,
     activate,
+    /// `activate` on a focused `action` node: runs the action it names
+    /// rather than opening a target.
+    activate_action,
     transfer_yank,
     transfer_paste,
     transfer_delete,
@@ -88,9 +91,19 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     // answer it either — every row sits inside the root container, yet only a
     // provider knows whether anything encloses the LOCUS.
     count += pushAdvertised(instance, focus.path, out, count, .step_out, standard.open_container);
-    // Activation follows the same nearest-target walk the target-open route
-    // performs, so an offer can never name a subject the route would not.
-    if (nearestTarget(instance, focus.path) != null) {
+    // An `action` node IS its activation: focused, it offers `activate`
+    // through the route that runs the action it names — the same reference
+    // a click on it runs. It is disabled exactly when the scene says so.
+    if (focusedAction(instance, focus.path)) |action| {
+        out[count] = .{
+            .intent = .activate_action,
+            .disabled = if (action.enabled) null else provider_disabled,
+        };
+        count += 1;
+    } else if (nearestTarget(instance, focus.path) != null) {
+        // Activation follows the same nearest-target walk the target-open
+        // route performs, so an offer can never name a subject the route
+        // would not.
         out[count] = .{
             .intent = .activate,
             .disabled = actionState(instance, focus.path, standard.open),
@@ -181,6 +194,15 @@ fn advertiser(instance: *const view.Instance, path: semantic.focus.Path, id: []c
         for (node.actions) |candidate| if (std.mem.eql(u8, candidate.id, id)) return candidate;
     }
     return null;
+}
+
+/// The focused leaf's action, when the leaf is an `action` node.
+fn focusedAction(instance: *const view.Instance, path: semantic.focus.Path) ?@FieldType(semantic.scene.Content, "action") {
+    const leaf = instance.node(path.leaf() orelse return null) orelse return null;
+    return switch (leaf.content) {
+        .action => |action| action,
+        else => null,
+    };
 }
 
 fn nearestTarget(instance: *const view.Instance, path: semantic.focus.Path) ?*const semantic.scene.Node {

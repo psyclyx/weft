@@ -250,6 +250,21 @@ pub const Layout = struct {
         return slot.node;
     }
 
+    /// A pane handle, validated: the live leaf, or null when that pane has
+    /// since closed (its generation moved on).
+    pub fn resolvePane(self: *const Layout, id: PaneId, gen: u32) ?*Node {
+        return self.resolve(id, gen);
+    }
+
+    /// The current generation of a live pane id — how a pane named by last
+    /// frame's geometry (a pointer hit) becomes a handle.
+    pub fn paneGen(self: *const Layout, id: PaneId) ?u32 {
+        if (id >= self.slots.items.len) return null;
+        const slot = self.slots.items[id];
+        if (slot.node == null) return null;
+        return slot.gen;
+    }
+
     /// Mint a slot for a freshly-created (or freshly-relocated) leaf at
     /// `node`'s address, reusing a retired id when one is free. (If a caller
     /// allocs TWO slots and the second alloc fails, a recycled first id is

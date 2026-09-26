@@ -719,6 +719,7 @@ pub const FrameBuilder = struct {
                 .annotations = other_layers.annotations,
             };
             const bo = try self.view.build(arena_state.allocator(), oed, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
+            self.view.recordPane(slot.pane.id, slot.rect);
             try self.built_panes.append(gpa, bo);
         }
 
@@ -731,6 +732,7 @@ pub const FrameBuilder = struct {
             ed.readonly_layer = fx.caps.layers.find(&ed.doc, "readonly");
         }
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
+        self.view.recordPane(focused.pane().id, foc_rect);
         try self.built_panes.append(gpa, b);
         focused.pane().top_row = self.view.top_row; // scrollToCursor may have moved it
         // What the focused pane SHOWS, for a guest acting on the visible

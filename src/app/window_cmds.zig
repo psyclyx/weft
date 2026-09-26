@@ -18,9 +18,6 @@ pub const WindowCtx = struct {
     focus_dir: ?window_layout.Dir = null,
     move_dir: ?window_layout.Dir = null,
     focus_next: bool = false, // cycle focus (legacy `focus-other`)
-    click_focus: bool = false, // focus the pane at (click_x, click_y)
-    click_x: f32 = 0,
-    click_y: f32 = 0,
 };
 
 /// Which window operation a bound command requests (mapped to a WindowCtx
@@ -184,18 +181,6 @@ pub fn applyIntents(
             window_layout.setHeadFocus(head, nx, win_layout);
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
-        }
-    }
-    if (win_ctx.click_focus) {
-        win_ctx.click_focus = false;
-        const focused = window_layout.headFocus(win_layout, head);
-        focused.pane().top_row = view.top_row;
-        if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) |hit| {
-            if (hit != focused) {
-                window_layout.setHeadFocus(head, hit, win_layout);
-                applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
-                dirty = true;
-            }
         }
     }
     if (applyPlacement(win_layout, buffers, gpa, head, keymap, policy)) dirty = true;

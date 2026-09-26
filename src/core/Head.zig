@@ -113,6 +113,11 @@ focused_pane_gen: u32 = 0,
 /// land between the frame and the read.
 view_range: ?ViewRange = null,
 
+/// This head's pointer facts: the gesture being dispatched and what is under
+/// the pointer (`pointer.zig`). Per-head because the pointer is: another
+/// head's click must never move this head's drag origin.
+pointer: @import("pointer.zig").Gesture = .{},
+
 /// The placement HINT the open in flight carries (§9.4), consumed by the
 /// next layout phase. Per-head for the same reason `focused_pane` is: two
 /// heads activating a row at once must not read each other's intent. It is

@@ -161,6 +161,9 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The shell's pane operations for pointer commands (focus and scroll
+    /// the pane under the pointer). `null` in embeddings without panes.
+    panes: ?@import("pointer.zig").Panes = null,
     /// The system's declared viewports (`weft.viewport`/`weft.present`).
     /// `null` in embeddings with no workspace composition; a viewport
     /// declaration is then reported as dropped rather than silently staged

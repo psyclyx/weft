@@ -121,4 +121,17 @@ pub const WindowHead = struct {
         defer self.client.endDispatch(prior);
         return dispatch.dispatchKey(ctx, ev);
     }
+
+    /// The pointer twin of `dispatchKey`: scale the event from surface to
+    /// framebuffer pixels (the platform owns the scale), then hand it to the
+    /// application under this head's identity.
+    pub fn dispatchPointer(self: *WindowHead, app: *@import("application.zig").Application, ev: wayland.PointerEvent) !void {
+        const prior = self.client.beginDispatch();
+        defer self.client.endDispatch(prior);
+        const scale: f64 = @floatFromInt(self.window.bufferScale());
+        var scaled = ev;
+        scaled.x *= scale;
+        scaled.y *= scale;
+        return app.pointer(scaled);
+    }
 };

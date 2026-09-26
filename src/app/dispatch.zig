@@ -46,97 +46,9 @@
 //! by this migration.
 
 const std = @import("std");
-const semantic = @import("weft_semantic");
 const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
-const region = @import("weft_gfx").region;
-const window_layout = @import("weft_gfx").window_layout;
-const window_cmds = @import("window_cmds.zig");
 const wayland = @import("weft_platform").wayland;
-
-/// Pointer → caret: a plain left click places the caret (and arms a drag
-/// anchor); motion with the button held extends a selection from that anchor.
-/// A click outside the focused pane's rect records a pane-focus intent on
-/// `win_ctx` (applied later against the layout) instead. World space is
-/// framebuffer pixels; the surface-space pointer scales by buffer_scale
-/// (HiDPI-correct). Sets `had_input` and returns whether the view was damaged.
-pub fn handlePointer(
-    window: *wayland.Window,
-    win_layout: *window_layout.Layout,
-    head: *core.Head,
-    semantic_services: *core.semantic.Services,
-    view: *view_mod.View,
-    /// Null when the focused entry holds no text: only the semantic hit path
-    /// can act on a click.
-    editor: ?*core.Editor,
-    win_ctx: *window_cmds.WindowCtx,
-    gpa: std.mem.Allocator,
-    last_frame_rect: region.Rect,
-    drag_anchor: *?usize,
-    drag_selecting: *bool,
-    had_input: *bool,
-) !bool {
-    var dirty = false;
-    const scale: f32 = @floatFromInt(window.bufferScale());
-    const px = @as(f32, @floatCast(window.mouse_x)) * scale;
-    const py = @as(f32, @floatCast(window.mouse_y)) * scale;
-    // Pane routing: a click outside the focused pane's rect focuses the
-    // pane under the cursor (the intent is applied below, against the
-    // layout); inside, the click maps directly (panes render into their
-    // own rects, so the geometry map is already in absolute coords). The
-    // frame rect is last render's — one-frame latency, unseen. `head`'s
-    // focus, not the layout's own — see window_layout.zig's module doc.
-    const focused = window_layout.headFocus(win_layout, head);
-    const click_in_peek = win_layout.count() > 1 and !win_layout.focusedRect(focused, last_frame_rect).contains(px, py);
-    if (window.consumeMousePressed(0)) {
-        if (click_in_peek) {
-            win_ctx.click_focus = true;
-            win_ctx.click_x = px;
-            win_ctx.click_y = py;
-            had_input.* = true;
-            dirty = true;
-        } else if (view.hasSemanticInput()) {
-            if (view.semanticHitAtPoint(px, py)) |hit| {
-                if (semantic_services.views.get(hit.view)) |instance| {
-                    var path_nodes: [130]semantic.scene.NodeId = undefined;
-                    if (try instance.focusPath(hit.node, &path_nodes)) |path|
-                        try head.semantic_focus.set(gpa, path);
-                }
-            }
-            drag_anchor.* = null;
-            drag_selecting.* = false;
-            had_input.* = true;
-            dirty = true;
-        } else if (editor) |ed| {
-            const off = view.offsetAtPoint(px, py);
-            ed.clearSelection();
-            ed.placeCursor(off);
-            drag_anchor.* = off;
-            drag_selecting.* = false;
-            had_input.* = true;
-            dirty = true;
-        }
-    } else if (window.mouse_down[0] and !click_in_peek and !view.hasSemanticInput()) {
-        if (drag_anchor.*) |anchor| if (editor) |ed| {
-            const off = view.offsetAtPoint(px, py);
-            if (off != ed.cursorOffset()) {
-                if (!drag_selecting.*) {
-                    // First motion: anchor the mark, then drag the caret.
-                    ed.placeCursor(anchor);
-                    try ed.setMark(gpa);
-                    drag_selecting.* = true;
-                }
-                ed.placeCursor(off);
-                had_input.* = true;
-                dirty = true;
-            }
-        };
-    } else {
-        drag_anchor.* = null;
-        drag_selecting.* = false;
-    }
-    return dirty;
-}
 
 /// Whether the TOP of `ctx.head`'s transient stack is the frame our own
 /// paired-transient menu machinery (below) pushed for menu mode `m` — the
@@ -493,8 +405,10 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
 
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
+    // A pointer gesture is not recorded: replayed later it would act wherever
+    // the pointer happens to be then, not where the change was made.
     const dot_recording = !ctx.head.dot.replaying;
-    if (dot_recording) dotRecord(&ctx.head.dot, spec, commit);
+    if (dot_recording and !core.pointer.isPointerSpec(spec)) dotRecord(&ctx.head.dot, spec, commit);
     defer if (dot_recording) dotBoundary(ctx);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:

@@ -61,6 +61,9 @@ pub const bindings = [_]Binding{
     .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = "hierarchy-toggle-expanded" },
     .{ .intent = .step_out, .intention = "std.hierarchy.step-out", .route = "hierarchy-step-out" },
     .{ .intent = .activate, .intention = "std.target.activate", .route = "target-open-focused" },
+    // The same intention on an `action` node, routed to the action it names
+    // (`pointer.zig`'s `activateFocusedAction`, also what a click on it runs).
+    .{ .intent = .activate_action, .intention = "std.target.activate", .route = "activate-focused-action" },
     // Transfer rides the routes the register already owns: capture, place,
     // and capture-as-a-move. The provider decides what a capture MEANS for
     // its rows; the standard word only says which half of the ferry runs.

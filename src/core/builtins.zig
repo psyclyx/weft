@@ -793,6 +793,9 @@ const table = [_]command.Command{
 /// plain modeless editing; a config replaces any of it by rebinding.
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), head: *@import("Head.zig"), actions: *@import("action.zig")) !void {
     for (table) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
+    // The generic pointer commands: the modeless floor for a click, a drag,
+    // and a wheel step. Which gesture runs which is config (defaults.js).
+    try @import("pointer.zig").install(gpa, commands);
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
     // (files/git) provides its own `save` scoped to its tool identity, which

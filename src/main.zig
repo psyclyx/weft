@@ -502,33 +502,6 @@ pub fn main(init: std.process.Init) !void {
     // Platform input and network services plug into the one application
     // lifecycle. They contribute events/effects; neither can select, skip, or
     // reorder async, menu, picker, layout, or build phases.
-    const PointerInput = struct {
-        window: @TypeOf(whead.window),
-        drag_anchor: ?usize = null,
-        drag_selecting: bool = false,
-
-        fn run(raw: ?*anyopaque, app: *application_mod.Application, active: frame_mod.Driver.Prepared) anyerror!bool {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            var had_input = false;
-            _ = try dispatch.handlePointer(
-                self.window,
-                app.driver.layout,
-                &app.session.head,
-                &app.session.system.semantic,
-                app.driver.view,
-                active.editor,
-                app.driver.window_ctx,
-                app.driver.ctx.gpa,
-                app.last_frame_rect,
-                &self.drag_anchor,
-                &self.drag_selecting,
-                &had_input,
-            );
-            return had_input;
-        }
-    };
-    var pointer_input: PointerInput = .{ .window = whead.window };
-
     const DesktopServices = struct {
         state: *collab.Collab,
         pool: *core.task.Pool,
@@ -607,7 +580,6 @@ pub fn main(init: std.process.Init) !void {
         .view = view,
         .which_key_delay_ns = which_key_delay_ns,
         .flash_duration_ns = flash_duration_ns,
-        .before_async = .{ .context = &pointer_input, .run = PointerInput.run },
         .services = .{ .context = &desktop_services, .run = DesktopServices.run },
     });
 
@@ -738,6 +710,11 @@ pub fn main(init: std.process.Init) !void {
             if (!ev.pressed) continue;
             try whead.dispatchKey(&session.cmd_ctx, ev);
             application.noteInput();
+        }
+        // Pointer gestures reach the same dispatch as keys, as pointer
+        // keyspecs (`app/pointer.zig`); what a click does is a binding.
+        while (whead.window.nextPointerEvent()) |ev| {
+            try whead.dispatchPointer(&application, ev);
         }
         if (whead.window.shouldClose()) break;
 

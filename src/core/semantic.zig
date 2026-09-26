@@ -841,6 +841,40 @@ pub const Services = struct {
         return error.ActionUnavailable;
     }
 
+    /// Activate the focused node when it is an `action` node: invoke the
+    /// action its content names, with the node itself as the subject. Null
+    /// when the focus is not an action node, or the action is disabled.
+    ///
+    /// An action node IS its action reference; nothing needs to advertise it
+    /// in a `node.actions` list for it to be invocable. A click on it and a
+    /// key that activates it both land here, so they cannot disagree.
+    pub fn invokeFocusedActionNode(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+    ) InvokeActionError!?ActionEffect {
+        const path = head.semantic_focus.path() orelse return null;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return null;
+        };
+        const leaf = path.leaf() orelse return null;
+        const node = instance.node(leaf) orelse return null;
+        const action = switch (node.content) {
+            .action => |value| value,
+            else => return null,
+        };
+        if (!action.enabled) return null;
+        const effect = try self.invokeActionInRegister(stack, gpa, .{
+            .action = action.action,
+            .view = path.view,
+            .subject = leaf,
+        }, 0);
+        try self.applyActionFocus(head, gpa, path, effect);
+        return effect;
+    }
+
     /// Visual operations on a semantic field are text selections, even when
     /// the field is backed by a structured provider such as the files view.
     /// Keep this in the shared action layer so Vim does not learn how a field

@@ -86,12 +86,21 @@ pub const Registry = struct {
         const view_instance = views.get(request.view) orelse return error.StaleView;
         const subject = view_instance.node(request.subject) orelse return error.UnknownSubject;
         var advertised = false;
-        for (subject.actions) |action| {
+        // An `action` node advertises the action it names by being one: its
+        // content is the same reference a click and a key activate.
+        switch (subject.content) {
+            .action => |action| if (std.mem.eql(u8, action.action, request.action)) {
+                if (!action.enabled) return error.ActionUnavailable;
+                advertised = true;
+            },
+            else => {},
+        }
+        if (!advertised) for (subject.actions) |action| {
             if (!std.mem.eql(u8, action.id, request.action)) continue;
             if (!action.enabled) return error.ActionUnavailable;
             advertised = true;
             break;
-        }
+        };
         if (!advertised) return error.ActionUnavailable;
         return invokeProvider(self, view_instance, request);
     }

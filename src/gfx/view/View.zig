@@ -102,6 +102,15 @@ frame_layout: layout.Layout = .{ .lines = &.{} },
 /// Like `frame_layout`, these live in `layout_arena` until the next frame.
 semantic_hits: []const semantic.Hit = &.{},
 semantic_active: bool = false,
+/// The last `build`'s scene hit regions, active or not: an unfocused pane's
+/// rows are clickable too. `recordPane` files them with the pane.
+build_hits: []const semantic.Hit = &.{},
+/// Every pane's hit geometry from the last frame, so the pointer can ask
+/// what is under it in ANY pane, not only the focused one — a click in an
+/// unfocused pane must land where it points. Arena-backed like
+/// `frame_layout`; reset with it.
+pane_maps: [max_pane_maps]PaneMap = undefined,
+pane_map_count: usize = 0,
 semantic_last_view: ?@import("weft_semantic").view.Ref = null,
 semantic_last_node: ?@import("weft_semantic").scene.NodeId = null,
 /// The current build's content origin (its frame inset by `margin`) — a
@@ -265,6 +274,54 @@ pub fn resetFrame(self: *View) void {
     _ = self.layout_arena.reset(.retain_capacity);
     self.semantic_hits = &.{};
     self.semantic_active = false;
+    self.build_hits = &.{};
+    self.pane_map_count = 0;
+}
+
+pub const max_pane_maps = 64;
+
+/// One pane's hit geometry as last built: its rect, its text layout (empty
+/// for a scene), and its scene hit regions (empty for text).
+pub const PaneMap = struct {
+    pane: u32,
+    rect: region.Rect,
+    lines: layout.Layout,
+    hits: []const semantic.Hit,
+
+    /// The byte offset under (x, y), or null when the pane shows no text.
+    pub fn offsetAt(self: *const PaneMap, x: f32, y: f32) ?usize {
+        if (self.lines.lines.len == 0 or self.hits.len != 0) return null;
+        return self.lines.offsetAtPoint(x, y);
+    }
+
+    /// The topmost scene hit region under (x, y).
+    pub fn hitAt(self: *const PaneMap, x: f32, y: f32) ?semantic.Hit {
+        var index = self.hits.len;
+        while (index > 0) {
+            index -= 1;
+            if (self.hits[index].rect.contains(x, y)) return self.hits[index];
+        }
+        return null;
+    }
+};
+
+/// File the geometry the last `build` produced under `pane`, drawn into
+/// `rect`. Called once per pane per frame, right after its build.
+pub fn recordPane(self: *View, pane: u32, rect: region.Rect) void {
+    if (self.pane_map_count >= max_pane_maps) return;
+    self.pane_maps[self.pane_map_count] = .{
+        .pane = pane,
+        .rect = rect,
+        .lines = self.frame_layout,
+        .hits = self.build_hits,
+    };
+    self.pane_map_count += 1;
+}
+
+/// The pane whose last-built rect contains (x, y).
+pub fn paneAtPoint(self: *const View, x: f32, y: f32) ?*const PaneMap {
+    for (self.pane_maps[0..self.pane_map_count]) |*m| if (m.rect.contains(x, y)) return m;
+    return null;
 }
 
 pub fn semanticHitAtPoint(self: *const View, x: f32, y: f32) ?semantic.Hit {
@@ -305,6 +362,7 @@ pub fn build(
     pick_dock: region.Rect,
     world_to_pixel: scene.Transform2D,
 ) !Built {
+    self.build_hits = &.{};
     // Carve the pane's frame into regions (no element computes an offset
     // against another): content is the frame inset by `margin`; a top
     // tab strip and a bottom HUD (status line + optional panel) are cut
@@ -366,6 +424,7 @@ pub fn build(
             document_body.w = width;
         }
         const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, hud, document_body, top_row);
+        self.build_hits = hits;
         if (document.active) {
             self.semantic_active = true;
             self.semantic_hits = hits;
@@ -479,6 +538,8 @@ pub fn build(
     if (hud.semantic_overlay) |overlay| {
         self.semantic_active = true;
         self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect);
+        // The dialog is on top: it is what a click on this pane reaches.
+        self.build_hits = self.semantic_hits;
     }
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of

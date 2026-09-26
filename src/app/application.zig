@@ -16,6 +16,8 @@ const providers = @import("providers.zig");
 const window_cmds = @import("window_cmds.zig");
 const session_mod = @import("session.zig");
 const dispatch = @import("dispatch.zig");
+const pointer_mod = @import("pointer.zig");
+const platform = @import("weft_platform");
 
 pub const Application = struct {
     session: *session_mod.Session,
@@ -127,6 +129,16 @@ pub const Application = struct {
             .layout = args.layout,
             .view = args.view,
         };
+        // The pointer commands' layout door reads through the driver, so a
+        // `bindTarget` swap is seen by the next click without re-installing.
+        args.session.cmd_ctx.panes = pointer_mod.panesDoor(&self.driver);
+    }
+
+    /// Inject one pointer event, its position in framebuffer pixels, through
+    /// the same dispatch door keys use (`app/pointer.zig`). The platform
+    /// scales from its surface coordinates; the head brackets identity.
+    pub fn pointer(self: *Application, ev: platform.PointerEvent) !void {
+        if (try pointer_mod.handle(&self.driver, &self.session.cmd_ctx, ev)) self.lifecycle.noteInput();
     }
 
     /// Inject one canonical key event — the physical keyspec plus whatever
@@ -137,8 +149,8 @@ pub const Application = struct {
         self.lifecycle.noteInput();
     }
 
-    /// Record input already translated by a platform adapter (pointer input or
-    /// a platform head which bracketed dispatch under its own identity).
+    /// Record input already translated by a platform adapter (a platform
+    /// head which bracketed dispatch under its own identity).
     pub fn noteInput(self: *Application) void {
         self.lifecycle.noteInput();
     }
