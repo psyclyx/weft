@@ -137,7 +137,19 @@ pub const GroupDecl = struct { mode: []u8, prefix: []u8, name: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
-pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: []u8, priority: i32 };
+/// `weft.provide(action, when, cmd, prio | opts)`. The predicate is held in
+/// its WIRE form (`facts.encode`) — owned bytes, so the decl is plain data a
+/// manifest hash reads and a reload compares, and applying it decodes through
+/// the same codec `wl_provide` uses.
+pub const ProvideDecl = struct {
+    action: []u8,
+    predicate: []u8,
+    command: []u8,
+    priority: i32,
+    label: []u8,
+    group: []u8,
+    order: ?i32,
+};
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunArg = struct { value: []u8 };
 pub const RunDecl = struct { command: []u8, args: []RunArg };
@@ -408,9 +420,10 @@ pub const Manifest = struct {
         self.semantic_actions.deinit(gpa);
         for (self.provides.items) |d| {
             gpa.free(d.action);
-            gpa.free(d.mode);
-            gpa.free(d.lang);
+            gpa.free(d.predicate);
             gpa.free(d.command);
+            gpa.free(d.label);
+            gpa.free(d.group);
         }
         self.provides.deinit(gpa);
         for (self.values.items) |d| {
@@ -499,14 +512,25 @@ pub const Manifest = struct {
     pub fn addSemanticAction(self: *Manifest, name: []const u8) !void {
         try self.semantic_actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
     }
-    pub fn addProvide(self: *Manifest, action: []const u8, mode: []const u8, lang: []const u8, cmd: []const u8, priority: i32) !void {
-        try self.provides.append(self.gpa, .{
-            .action = try self.gpa.dupe(u8, action),
-            .mode = try self.gpa.dupe(u8, mode),
-            .lang = try self.gpa.dupe(u8, lang),
-            .command = try self.gpa.dupe(u8, cmd),
+    pub fn addProvide(
+        self: *Manifest,
+        action: []const u8,
+        predicate: facts.Predicate,
+        cmd: []const u8,
+        priority: i32,
+        affordance: @import("catalog.zig").Affordance,
+    ) !void {
+        const gpa = self.gpa;
+        const d: ProvideDecl = .{
+            .action = try gpa.dupe(u8, action),
+            .predicate = try facts.encode(gpa, predicate),
+            .command = try gpa.dupe(u8, cmd),
             .priority = priority,
-        });
+            .label = try gpa.dupe(u8, affordance.label),
+            .group = try gpa.dupe(u8, affordance.group),
+            .order = affordance.order,
+        };
+        try self.provides.append(gpa, d);
     }
     pub fn addValue(self: *Manifest, owner: []const u8, key: []const u8, value: []const u8) !void {
         try self.values.append(self.gpa, .{ .owner = try self.gpa.dupe(u8, owner), .key = try self.gpa.dupe(u8, key), .value = try self.gpa.dupe(u8, value) });
@@ -629,10 +653,14 @@ pub const Manifest = struct {
         hLen(h, self.provides.items.len);
         for (self.provides.items) |d| {
             hStr(h, d.action);
-            hStr(h, d.mode);
-            hStr(h, d.lang);
+            hStr(h, d.predicate);
             hStr(h, d.command);
             h.update(std.mem.asBytes(&d.priority));
+            hStr(h, d.label);
+            hStr(h, d.group);
+            const order: i32 = d.order orelse 0;
+            h.update(std.mem.asBytes(&order));
+            h.update(&[_]u8{@intFromBool(d.order != null)});
         }
         hLen(h, self.values.items.len);
         for (self.values.items) |d| {
@@ -824,17 +852,18 @@ pub const Manifest = struct {
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
-            var pred_buf: [2]facts.Predicate = undefined;
+            // The bytes were encoded from a parsed predicate by this module;
+            // a decode failure is corruption, and it narrows to nothing.
+            const predicate = facts.decode(gpa, d.predicate) catch continue;
+            defer facts.free(gpa, predicate);
             actx.ctx.actions.provide(.{
                 .action = d.action,
-                .predicate = facts.allOf(&pred_buf, &.{
-                    if (optStr(d.mode)) |m| .{ .mode = m } else null,
-                    if (optStr(d.lang)) |l| .{ .lang = l } else null,
-                }),
+                .predicate = predicate,
                 .command = d.command,
                 .priority = d.priority,
                 .owner = self.owner,
                 .tier = self.tier,
+                .affordance = .{ .label = d.label, .group = d.group, .order = d.order },
             }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(actx.ctx, gpa, d.action);
         }
         for (self.values.items) |d| {
@@ -1348,10 +1377,6 @@ pub const Manifest = struct {
         }
     }
 };
-
-fn optStr(s: []const u8) ?[]const u8 {
-    return if (s.len > 0) s else null;
-}
 
 /// `hash()`'s framing primitives (R3 fix): every string is LENGTH-prefixed
 /// and every decl LIST is length-prefixed before its items, so bare byte

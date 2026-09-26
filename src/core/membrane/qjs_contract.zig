@@ -121,7 +121,7 @@ pub const imports = [_]Entry{
     e("qjs_group", 6, 0, .config, "weft.group(scope, prefix, name): label an implicit chord group"),
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
     e("qjs_semantic_action", 2, 0, .config, "weft.semanticAction(name): declare a focused-view action command"),
-    e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
+    e("qjs_provide", 8, 0, .config, "weft.provide(action, when, cmd, prio | opts): register a provider; `when` ({mode, lang, tool, role, locality}) and opts ({priority, label, group, order}) cross as JSON, parsed host-side into a facts.Predicate + presentation"),
     e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
     e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent, cycles, persistent, followFocus}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),

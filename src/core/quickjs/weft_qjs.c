@@ -169,9 +169,9 @@ __attribute__((import_module("weft"), import_name("qjs_semantic_action")))
 extern void host_semantic_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
 extern void host_provide(const char *action, int action_len,
-                         const char *mode, int mode_len,
-                         const char *lang, int lang_len,
-                         const char *cmd, int cmd_len, int prio);
+                         const char *when_json, int when_len,
+                         const char *cmd, int cmd_len,
+                         const char *opts_json, int opts_len);
 // weft.statusSegment(text, role, priority): stage a static ui/statusline-seg
 // segment onto the manifest (north-star-plan §6 W3, task #19 item 3).
 __attribute__((import_module("weft"), import_name("qjs_status_segment")))
@@ -483,38 +483,44 @@ static JSValue js_semantic_action(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.provide(action, when, cmd[, prio]) — register a provider for `action`.
-// `when` is an object {mode?, lang?}; an absent field is "don't care". The
-// highest-priority provider whose `when` holds in the current context wins when
-// the action fires (ties break toward the more specific `when`).
+// JSON text of `v`, or NULL (with *len 0) when `v` is absent or has no JSON
+// form. The caller frees a non-NULL result with JS_FreeCString.
+static const char *json_of(JSContext *ctx, JSValueConst v, size_t *len) {
+    *len = 0;
+    if (JS_IsUndefined(v) || JS_IsNull(v)) return NULL;
+    JSValue s = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+    if (JS_IsException(s) || !JS_IsString(s)) {
+        JS_FreeValue(ctx, s);
+        return NULL;
+    }
+    const char *out = JS_ToCStringLen(ctx, len, s);
+    JS_FreeValue(ctx, s);
+    return out;
+}
+
+// weft.provide(action, when, cmd[, prio | opts]) — register a provider for
+// `action`. `when` is an object over the context facts — {mode?, lang?, tool?,
+// role?, locality?}; an absent field is "don't care". The fourth argument is
+// the priority, or an object {priority?, label?, group?, order?} whose other
+// fields say how the provider's offer is PRESENTED where it wins. Both cross
+// as JSON and are parsed host-side into the same Predicate the wasm door
+// builds, so the two planes cannot disagree about what a fact means.
 static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 3) return JS_ThrowTypeError(ctx, "provide(action, when, cmd[, prio])");
-    size_t al, cl;
+    if (argc < 3) return JS_ThrowTypeError(ctx, "provide(action, when, cmd[, prio | opts])");
+    size_t al, cl, wl, ol;
     const char *a = JS_ToCStringLen(ctx, &al, argv[0]);
     const char *c = JS_ToCStringLen(ctx, &cl, argv[2]);
-    const char *mode = NULL;
-    size_t ml = 0;
-    const char *lang = NULL;
-    size_t ll = 0;
-    JSValue jmode = JS_UNDEFINED, jlang = JS_UNDEFINED;
-    if (JS_IsObject(argv[1])) {
-        jmode = JS_GetPropertyStr(ctx, argv[1], "mode");
-        if (!JS_IsUndefined(jmode) && !JS_IsNull(jmode)) mode = JS_ToCStringLen(ctx, &ml, jmode);
-        jlang = JS_GetPropertyStr(ctx, argv[1], "lang");
-        if (!JS_IsUndefined(jlang) && !JS_IsNull(jlang)) lang = JS_ToCStringLen(ctx, &ll, jlang);
-    }
-    int32_t prio = 0;
-    if (argc >= 4) JS_ToInt32(ctx, &prio, argv[3]);
+    const char *when = json_of(ctx, argv[1], &wl);
+    const char *opts = argc >= 4 ? json_of(ctx, argv[3], &ol) : NULL;
+    if (!opts) ol = 0;
     if (a && c)
-        host_provide(a, (int)al, mode ? mode : "", (int)ml,
-                     lang ? lang : "", (int)ll, c, (int)cl, prio);
+        host_provide(a, (int)al, when ? when : "", (int)wl, c, (int)cl,
+                     opts ? opts : "", (int)ol);
     JS_FreeCString(ctx, a);
     JS_FreeCString(ctx, c);
-    if (mode) JS_FreeCString(ctx, mode);
-    if (lang) JS_FreeCString(ctx, lang);
-    JS_FreeValue(ctx, jmode);
-    JS_FreeValue(ctx, jlang);
+    if (when) JS_FreeCString(ctx, when);
+    if (opts) JS_FreeCString(ctx, opts);
     return JS_UNDEFINED;
 }
 

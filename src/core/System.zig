@@ -998,7 +998,7 @@ test "system: GATE (c) — a manifest-driven provide scoped to one buffer's lang
 
     const m = try manifest.Manifest.create(gpa, "config", .config);
     try m.addAction("format-file");
-    try m.addProvide("format-file", "", "nix", "nix-fmt", 0); // lang=nix only
+    try m.addProvide("format-file", .{ .lang = "nix" }, "nix-fmt", 0, .{}); // lang=nix only
     try sys.applyManifest(gpa, m, null);
 
     const nix_id = try sys.buffers.create(gpa, "flake.nix");

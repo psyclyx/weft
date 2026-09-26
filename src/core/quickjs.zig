@@ -21,6 +21,7 @@ const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
 const manifest_mod = @import("manifest.zig");
+const provide_json = @import("quickjs/provide.zig");
 const viewport_mod = @import("viewport.zig");
 const TranscriptDoc = @import("transcript.zig");
 const GraphDoc = @import("graph.zig");
@@ -1661,39 +1662,55 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         @import("builtins.zig").registerSemanticAction(gpa, br.activeCtx().commands, services, name) catch {};
 }
 
-/// weft.provide(action, mode, lang, cmd, prio) — register a provider. Empty
-/// mode/lang strings mean "don't care" (an unconstrained provider). Auto-
-/// declares the action if `weft.action` hasn't run yet (load order is free),
-/// but does NOT bind a trampoline command — a provider alone isn't a key
-/// target; declare (or another config's declare) owns the command bind.
+/// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`
+/// and the options arrive as JSON and are parsed by `quickjs/provide.zig`
+/// into the same `facts.Predicate` `wl_provide` decodes: every fact a config
+/// can name (mode, lang, tool, role, locality), and a presentation (label,
+/// group, order) for the offer the provider wins. A `when` naming no fact is
+/// refused out loud rather than widened to everywhere. Auto-declares the
+/// action if `weft.action` hasn't run yet (load order is free), but does NOT
+/// bind a trampoline command — a provider alone isn't a key target; declare
+/// (or another config's declare) owns the command bind.
 fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.activeCtx().gpa;
     const action = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(action);
-    const mode = readStr(br, caller, args[2], args[3]) orelse return;
-    defer gpa.free(mode);
-    const lang = readStr(br, caller, args[4], args[5]) orelse return;
-    defer gpa.free(lang);
-    const cmd = readStr(br, caller, args[6], args[7]) orelse return;
+    const when = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(when);
+    const cmd = readStr(br, caller, args[4], args[5]) orelse return;
     defer gpa.free(cmd);
-    const priority = args[8];
+    const opts = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(opts);
+    var parsed = provide_json.parse(gpa, when, opts) catch |err| {
+        echoProvideMalformed(br, action, provide_json.describe(err));
+        return;
+    };
+    defer parsed.deinit(gpa);
     if (br.manifest) |m| {
-        m.addProvide(action, mode, lang, cmd, priority) catch {};
+        m.addProvide(action, parsed.predicate, cmd, parsed.priority, parsed.affordance) catch {};
         return;
     }
-    var pred_buf: [2]facts.Predicate = undefined;
     br.activeCtx().actions.provide(.{
         .action = action,
-        .predicate = facts.allOf(&pred_buf, &.{
-            if (mode.len > 0) .{ .mode = mode } else null,
-            if (lang.len > 0) .{ .lang = lang } else null,
-        }),
+        .predicate = parsed.predicate,
         .command = cmd,
-        .priority = priority,
+        .priority = parsed.priority,
         .owner = "config",
+        .affordance = parsed.affordance,
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br, action);
+}
+
+fn echoProvideMalformed(br: *Bridge, action: []const u8, why: []const u8) void {
+    const ctx = br.activeCtx();
+    const msg = std.fmt.allocPrint(ctx.gpa, "provide '{s}': {s} — not registered", .{ action, why }) catch return;
+    defer ctx.gpa.free(msg);
+    std.log.warn("config: {s}", .{msg});
+    if (br.in_dispatch or br.loading) {
+        ctx.head.echo.clearRetainingCapacity();
+        ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    }
 }
 
 /// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
@@ -1883,4 +1900,5 @@ fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
 
 test {
     _ = @import("quickjs/tests.zig");
+    _ = provide_json;
 }
