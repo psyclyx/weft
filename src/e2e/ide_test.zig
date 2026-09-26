@@ -722,3 +722,23 @@ test "e2e/ide: long moves leave a jump — M-Left comes back from C-End and from
     ed.press("M-Left", "");
     try t.expectEqual(@as(usize, 0), cursor(ed));
 }
+
+test "e2e/ide: a clipboard holding the register's line plus its line break pastes the register, linewise" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "lw.txt", "one two\nbeta");
+
+    // The last line has no line break of its own: the register holds `beta`,
+    // linewise. Another editor (vim's `"+yy`) puts the same line on the
+    // clipboard WITH its break — it is still the register's text.
+    ed.press("C-End", "");
+    ed.press("C-c", "");
+    try ed.head.clipboard.set(gpa, "beta\n");
+    ed.press("C-Home", "");
+    for (0..4) |_| ed.press("Right", "");
+    ed.press("C-v", "");
+    try expectText(ed, "beta\none two\nbeta");
+}

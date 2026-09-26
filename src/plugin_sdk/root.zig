@@ -1965,6 +1965,41 @@ pub fn clipboardGet() ?[]const u8 {
     return clip_buf.items[0..@min(@as(usize, @intCast(n)), clip_buf.items.len)];
 }
 
+/// What a paste from the clipboard puts in — the ONE rule every grammar that
+/// mirrors a register onto the clipboard pastes by (ide's C-v, helix's
+/// `SPC p P R`, vim's `"+p`).
+pub const ClipboardPaste = union(enum) {
+    /// The clipboard could not be read.
+    unavailable,
+    /// It holds nothing.
+    empty,
+    /// It still holds the unnamed register's text: paste the REGISTER, so a
+    /// cut-and-paste stays a move (its ferried identity) and a line stays a
+    /// line (its linewise flag).
+    register,
+    /// Text from elsewhere (borrowed until the next clipboard read).
+    foreign: []const u8,
+};
+
+/// Classify the clipboard against the unnamed register. TRAPS without the
+/// `clipboard` grant, like `clipboardGet`: a grammar asks only when its
+/// config said the register mirrors the clipboard.
+pub fn clipboardPasteSource() ClipboardPaste {
+    const clip = clipboardGet() orelse return .unavailable;
+    if (clip.len == 0) return .empty;
+    if (clipboardHoldsRegister(clip, registerTextIn(0), registerLinewiseIn(0))) return .register;
+    return .{ .foreign = clip };
+}
+
+/// Does clipboard text `clip` hold register text `own`? The same bytes, or —
+/// for a linewise register — its text plus the one line break a line is
+/// copied to the desktop with (vim's `"+yy`, and every other editor), which
+/// the register itself may not carry.
+pub fn clipboardHoldsRegister(clip: []const u8, own: []const u8, linewise: bool) bool {
+    if (std.mem.eql(u8, clip, own)) return true;
+    return linewise and clip.len == own.len + 1 and clip[own.len] == '\n' and std.mem.eql(u8, clip[0..own.len], own);
+}
+
 // ── History: the jumplist and macros ──────────────────────────────────
 // Core keeps a per-head jumplist and macro registers; the grammar decides what
 // is a jump and which keys record. Travel and replay are commands:

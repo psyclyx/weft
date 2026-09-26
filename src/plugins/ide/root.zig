@@ -544,9 +544,9 @@ var paste_buf: [(1 << 16) + 1]u8 = undefined;
 /// register pastes, which keeps a cut-and-paste a MOVE (its ferried ids)
 /// and a linewise yank linewise.
 fn paste() void {
-    if (mirrorsClipboard()) if (weft.clipboardGet()) |clip| if (clip.len > 0 and !std.mem.eql(u8, clip, weft.registerTextIn(0))) {
-        weft.runStr("insert-text", clip);
-        return;
+    if (mirrorsClipboard()) switch (weft.clipboardPasteSource()) {
+        .foreign => |clip| return weft.runStr("insert-text", clip),
+        .unavailable, .empty, .register => {},
     };
     const txt = weft.registerText();
     if (txt.len == 0) return;

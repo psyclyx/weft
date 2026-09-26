@@ -315,20 +315,22 @@ pub fn yankToClipboard() void {
 
 /// What the clipboard offers a paste: nothing (said why), the unnamed
 /// register (it holds the same text — paste that, identity and all), or
-/// text from elsewhere.
+/// text from elsewhere. The rule is the SDK's, shared with ide and vim.
 const Clip = union(enum) { none, register, text: []const u8 };
 
 fn clipboard() Clip {
-    const clip = weft.clipboardGet() orelse {
-        weft.echo("clipboard unavailable");
-        return .none;
+    return switch (weft.clipboardPasteSource()) {
+        .unavailable => blk: {
+            weft.echo("clipboard unavailable");
+            break :blk .none;
+        },
+        .empty => blk: {
+            weft.echo("clipboard is empty");
+            break :blk .none;
+        },
+        .register => .register,
+        .foreign => |t| .{ .text = t },
     };
-    if (clip.len == 0) {
-        weft.echo("clipboard is empty");
-        return .none;
-    }
-    if (std.mem.eql(u8, clip, weft.registerTextIn(0))) return .register;
-    return .{ .text = clip };
 }
 
 /// `SPC p` / `SPC P`: the clipboard after (before) every selection.

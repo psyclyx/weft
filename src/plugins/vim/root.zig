@@ -1131,23 +1131,22 @@ fn pasteBefore() void {
 }
 
 /// `"+p`/`"+P`: paste the desktop clipboard. When it still holds what vim
-/// last yanked into the unnamed slot, paste THAT slot — the same text, plus
+/// last yanked into the unnamed slot (the SDK's `clipboardPasteSource`, the
+/// rule ide and helix paste by too), paste THAT slot — the same text, plus
 /// the linewise flag and any identity it ferries (`dd` then `"+p` in a files
 /// listing stays a move). Otherwise it is foreign text: linewise when it
 /// ends in a line break, the convention every editor copies lines with.
 fn pasteClipboard(after: bool) void {
     clip_register = false;
     selected_register = 0;
-    const text = weft.clipboardGet() orelse return;
-    const own = weft.registerTextIn(0);
-    const own_linewise = weft.registerLinewiseIn(0);
-    const same = if (own_linewise)
-        text.len == own.len + 1 and text[own.len] == '\n' and std.mem.eql(u8, text[0..own.len], own)
-    else
-        std.mem.eql(u8, text, own);
-    if (same) return put(own, own_linewise, after, 0);
-    const linewise = text.len > 0 and text[text.len - 1] == '\n';
-    put(if (linewise) text[0 .. text.len - 1] else text, linewise, after, null);
+    switch (weft.clipboardPasteSource()) {
+        .unavailable, .empty => {},
+        .register => put(weft.registerTextIn(0), weft.registerLinewiseIn(0), after, 0),
+        .foreign => |text| {
+            const linewise = text[text.len - 1] == '\n';
+            put(if (linewise) text[0 .. text.len - 1] else text, linewise, after, null);
+        },
+    }
 }
 
 /// Put `r` at the caret (charwise) or on its own line below/above the caret
