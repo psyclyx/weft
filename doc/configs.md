@@ -215,6 +215,49 @@ Phases:
 6. **Tree-sitter selection:** `A-o A-i A-p A-n` over the `ts` plugin, with multi-selection
    aware versions.
 
+**Phases 2, 3 and 6 landed.** What the build settled:
+
+- The plugin is four files: `selection.zig` (the set, and every verb that reshapes it),
+  `edit.zig` (every verb that edits), `text.zig` (the motions, as pure functions from one
+  selection to the next) and `state.zig` (the count and register prefixes).
+- A selection is core's `{anchor, head}`, and the cursor a motion starts from is the head,
+  where core draws the caret. Helix's "at least one character" rule is `span()`: a caret
+  acts on the character under it. Helix draws its cursor ON the last selected character;
+  weft draws it at the head, one past it on a forward selection. Closing that gap would
+  need the grammar to declare where the caret draws; it is not done.
+- Each motion is generated twice, `hx/n/<m>` (move: the motion's own selection) and
+  `hx/x/<m>` (extend: the anchor stays). `helix-normal` binds the first, `helix-select`
+  (`v`) the second. `helix-op` is gone: a verb acts on the selections.
+- Every edit is one mechanism: `putEach` anchors a range per selection and runs helix's
+  own operator `hx-op-put` over them through `run_range_arg_each`, so each verb is one undo
+  unit. The operator receives only its range, so the plan (which job, what to write) is
+  set before the run and claimed by start offset. `d c p P R r ~ \` A-\` o O` are all
+  `putEach` with a different source; `J` has its own operator, and `> <` and `SPC c` run
+  `op.indent`/`op.dedent`/`op.comment` over merged line blocks.
+- Per-selection reads of other plugins go through `run_range_each`: `mi`/`ma` over
+  `textobjects`, `mm` over `motion.match-pair`, and `A-o A-i A-n A-p ]f [f` over new
+  range forms in `ts` (`ts.expand`, `ts.shrink`, `ts.sibling-next/prev`,
+  `ts.function-next/prev`). `A-i` first retraces the sets `A-o` replaced, then asks for a
+  child.
+- `surround` is a new plugin of operators (`surround.add/delete/replace`), with the pair
+  chosen by an earlier `surround-pair <c> [r]`. helix captures the characters (`ms md mr`)
+  and runs the operators per selection. vim's `ys ds cs` are not bound: vim has no capture
+  that feeds an operator yet.
+- Counts (`3w`, `5gg`, `2x`, `3C`) and registers (`"a`) live in the grammar and die with
+  the command that used them (the manifest's `after` hook).
+- The new doors are commands, not ABI: `buffer-previous` (core) for `gp`, and
+  `scroll-line-to-top/bottom` and `scroll-goto-view-top/middle/bottom` (app, beside the
+  scroll family) for `zt zb gt gc gb`. The lsp plugin grew `goto-type-definition` and
+  `goto-implementation` for `gy gi`.
+- Space mode is Helix's (`f F b e k s a r h c g / ? y p P R w`). weft's other groups moved
+  to keys Helix leaves free: `SPC O` open & save, `SPC B` buffers, `SPC V` version control,
+  `SPC l` project, `SPC i`/`SPC m` code, `SPC A` agents, `SPC G` debug, `SPC x` share.
+- Not yet: `gw` (on 0.3's overlay), `gm` (no last-modified-buffer history), `&` (align),
+  `A-u`/`A-U` (history branches), `SPC j` (jumplist), `SPC S` (workspace symbols),
+  `SPC d`/`D` (diagnostics pickers), `]g`/`[g` (no hunk motion), and the clipboard keys use
+  the selected register until 3.3 lands. The flash marks the primary only until 0.4 makes
+  it a set.
+
 "The semantic binds earn their keep" means this, concretely:
 
 - in a structural buffer (files, git), helix's own keys (`d`, `y`, `p`, `x`, `Return`,
