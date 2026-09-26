@@ -17,6 +17,16 @@
 //! The enclosing pair around a range is found by scanning outwards: brackets
 //! by nesting depth, quotes by parity on the range's line (an odd number of
 //! quotes before the range means it sits inside one).
+//!
+//! MANY RANGES. Deleting or replacing per range, one after another, is wrong
+//! as soon as two ranges sit in the same pair: the first job removes it and
+//! the second finds the NEXT pair out (`md(` with carets on `a` and `b` in
+//! `f((a b))` gave `fa b`). So a grammar with several ranges PLANS first —
+//! `surround.plan` once per range, which finds each pair on the untouched
+//! text and keeps a pair two ranges share once — then `surround.apply
+//! delete|replace` edits every planned pair, last first, as one undo unit.
+//! `surround.delete`/`.replace` stay for a grammar with one range (vim's
+//! `ds`/`cs`): find and edit at once, through the same `strip`.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -27,6 +37,9 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "surround.delete", .call = opDelete, .summary = "delete the chosen pair around the operator's range" },
     .{ .name = "surround.replace", .call = opReplace, .summary = "replace the chosen pair around the operator's range" },
     .{ .name = "surround.find", .call = find, .summary = "the chosen pair around the selection, delimiters included" },
+    .{ .name = "surround.plan", .call = opPlan, .summary = "find the chosen pair around the operator's range and keep it for surround.apply" },
+    .{ .name = "surround.apply", .call = apply, .params = "delete|replace", .summary = "delete or replace every planned pair, as one undo unit" },
+    .{ .name = "surround.strip", .call = opStrip },
 };
 
 comptime {
@@ -79,10 +92,11 @@ var pair: Pair = .{};
 var replacement: Pair = .{};
 
 /// `surround-pair <c> [r]`: remember the pair (and the replacement pair) the
-/// operators below read.
+/// operators below read. A new pair starts a new plan.
 fn setPair() void {
     pair = Pair.of(weft.argStr(0) orelse "");
     replacement = Pair.of(weft.argStr(1) orelse "");
+    forgetPlan();
 }
 
 // ── Finding the pair around a range ───────────────────────────────────
@@ -196,21 +210,97 @@ fn opAdd() void {
     weft.edit(.{ .start = r.start, .end = r.start }, pair.open());
 }
 
+// ── Delete and replace: plan, then apply ─────────────────────────────
+
+/// What `surround.apply` (and so `surround.strip`) does to each planned pair.
+const Change = enum { delete, replace };
+
+/// The pairs planned since `surround-pair`: where each was found (the dedupe
+/// key — no edit happens while planning, so offsets compare) and a live range
+/// over it, delimiters included, retained until the plan is applied or
+/// dropped.
+var plan_at: [weft.max_selections]Found = undefined;
+var plan_range: [weft.max_selections]?u32 = undefined;
+var planned: usize = 0;
+var change: Change = .delete;
+
+/// Keep the pair around `r` for the next apply, once. False when there is
+/// none (said so).
+fn planAround(r: weft.Range) bool {
+    const f = findAround(r) orelse {
+        weft.echo("surround: no pair here");
+        return false;
+    };
+    for (plan_at[0..planned]) |q| if (q.open == f.open and q.close == f.close) return true;
+    if (planned == plan_at.len) return false;
+    const h = weft.anchorRange(.{ .start = f.open, .end = f.close + pair.close().len }) orelse return false;
+    // Each plan call is a dispatch of its own, and a dispatch's ranges go
+    // with it: the plan keeps its ranges until `apply` (or a new pair) lets
+    // them go.
+    if (!weft.retainRange(h)) return false;
+    plan_at[planned] = f;
+    plan_range[planned] = h;
+    planned += 1;
+    return true;
+}
+
+/// Let the plan's ranges go and start an empty one.
+fn forgetPlan() void {
+    for (plan_range[0..planned]) |h| if (h) |live| weft.releaseRange(live);
+    planned = 0;
+}
+
+/// `surround.plan`: the pair around the operator's range, into the plan.
+fn opPlan() void {
+    _ = planAround(argSpan() orelse return);
+}
+
+/// `surround.apply delete|replace`: edit every planned pair — last first, so
+/// a pair inside another is edited before the one around it moves — as one
+/// undo unit, then forget the plan.
+fn apply() void {
+    const how = weft.argStr(0) orelse "delete";
+    change = if (std.mem.eql(u8, how, "replace")) .replace else .delete;
+    if (change == .replace and !replacement.valid()) return;
+    weft.runRangeArgEach("surround.strip", plan_range[0..planned]);
+    forgetPlan();
+}
+
+/// `surround.strip`: one planned pair — its range runs from the open
+/// delimiter to past the close — deleted or replaced. Edits inside a range
+/// never move its ends, so a pair inside it edited first leaves it whole.
+fn opStrip() void {
+    strip(argSpan() orelse return);
+}
+
+/// Delete or replace the pair spanning `r`: the close first, so the open's
+/// offset still holds.
+fn strip(r: weft.Range) void {
+    if (r.end - r.start < pair.open().len + pair.close().len) return;
+    const new: Pair = if (change == .replace) replacement else .{};
+    weft.edit(.{ .start = r.end - pair.close().len, .end = r.end }, new.close());
+    weft.edit(.{ .start = r.start, .end = r.start + pair.open().len }, new.open());
+}
+
 /// `surround.delete`: drop both delimiters of the pair around the range.
 fn opDelete() void {
-    const r = argSpan() orelse return;
-    const f = findAround(r) orelse return weft.echo("surround: no pair here");
-    weft.edit(.{ .start = f.close, .end = f.close + pair.close().len }, "");
-    weft.edit(.{ .start = f.open, .end = f.open + pair.open().len }, "");
+    change = .delete;
+    stripAround();
 }
 
 /// `surround.replace`: swap the pair around the range for the replacement.
 fn opReplace() void {
     if (!replacement.valid()) return;
+    change = .replace;
+    stripAround();
+}
+
+/// The one-range case: the pair around the operator's range, edited at once
+/// (the operator run that called this already owns the undo unit).
+fn stripAround() void {
     const r = argSpan() orelse return;
     const f = findAround(r) orelse return weft.echo("surround: no pair here");
-    weft.edit(.{ .start = f.close, .end = f.close + pair.close().len }, replacement.close());
-    weft.edit(.{ .start = f.open, .end = f.open + pair.open().len }, replacement.open());
+    strip(.{ .start = f.open, .end = f.close + pair.close().len });
 }
 
 /// `surround.find`: a range motion — the pair around the selection (or the

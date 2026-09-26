@@ -511,6 +511,30 @@ test "e2e/helix: * on a word with a non-ASCII letter finds it again — one word
     try expectSelections(ed, &.{.{ 8, 13 }});
 }
 
+test "e2e/helix: md and mr with several selections inside ONE pair edit that pair once" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "nest.txt", "f((a b))\n");
+
+    keys(ed, "%s");
+    answer(ed, "a|b");
+    try expectSelections(ed, &.{ .{ 3, 4 }, .{ 5, 6 } });
+    keys(ed, "md(");
+    try expectText(ed, "f(a b)\n");
+    keys(ed, "u");
+    try expectText(ed, "f((a b))\n");
+
+    keys(ed, "%s");
+    answer(ed, "a|b");
+    keys(ed, "mr([");
+    try expectText(ed, "f([a b])\n");
+    keys(ed, "u");
+    try expectText(ed, "f((a b))\n");
+}
+
 test "e2e/helix: the / register is shared — vim pastes the pattern helix searched for" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

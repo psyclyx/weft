@@ -634,13 +634,24 @@ fn repeatBlankLine(points: []const weft.Range, count: u32) void {
 
 // ── Surround (the `surround` plugin, per selection) ─────────────────────
 
-/// Choose the pair, then run a surround operator over every selection.
-pub fn surround(cmd: []const u8, pair: []const u8, replacement: ?[]const u8) void {
+pub const SurroundVerb = enum { add, delete, replace };
+
+/// Choose the pair, then surround every selection. Adding wraps each on its
+/// own; deleting and replacing PLAN every selection's pair on the untouched
+/// text first, so two selections inside one pair edit it once (the
+/// `surround` plugin's module doc), then apply the plan as one undo unit.
+pub fn surround(verb: SurroundVerb, pair: []const u8, replacement: ?[]const u8) void {
     if (!sel.load()) return;
     if (replacement) |r| weft.runStr2("surround-pair", pair, r) else weft.runStr("surround-pair", pair);
     var handles: [max]?u32 = undefined;
     for (sel.items[0..sel.n], handles[0..sel.n]) |s, *h| h.* = weft.anchorRange(sel.span(s));
-    weft.runRangeArgEach(cmd, handles[0..sel.n]);
+    switch (verb) {
+        .add => weft.runRangeArgEach("surround.add", handles[0..sel.n]),
+        .delete, .replace => {
+            weft.runRangeArgEach("surround.plan", handles[0..sel.n]);
+            weft.runStr("surround.apply", @tagName(verb));
+        },
+    }
     sel.flashAll();
     noteEdit();
 }

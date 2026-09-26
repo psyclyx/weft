@@ -326,11 +326,11 @@ fn registerChar() void {
 
 fn surroundAdd() void {
     weft.exitToResting();
-    edit.surround("surround.add", capture() orelse return, null);
+    edit.surround(.add, capture() orelse return, null);
 }
 fn surroundDelete() void {
     weft.exitToResting();
-    edit.surround("surround.delete", capture() orelse return, null);
+    edit.surround(.delete, capture() orelse return, null);
 }
 /// `mr<a><b>`: the first key names the pair to find, the second its
 /// replacement.
@@ -345,7 +345,7 @@ fn surroundFrom() void {
 fn surroundTo() void {
     weft.exitToResting();
     const ch = capture() orelse return;
-    edit.surround("surround.replace", surround_from[0..surround_from_len], ch);
+    edit.surround(.replace, surround_from[0..surround_from_len], ch);
 }
 
 const captures = [_][2][]const u8{
