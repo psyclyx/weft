@@ -370,6 +370,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_yank_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture n `[start,end)` ranges as one value each (one per selection) into an explicit register slot" },
     .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
     .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
+    .{ .name = "wl_register_set", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "put typed bytes in an explicit register slot as one value, leaving unnamed alone (the `/` search register)" },
 
     // ── clipboard.zig — the dispatching head's system clipboard ───────────
     .{ .name = "wl_clipboard_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .clipboard, .perm = .clipboard, .doc = "take the system clipboard with `<bytes>` (0 ok, -1 failed); the grant is config-only" },
@@ -589,9 +590,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 250;
+const max_import_count: usize = 251;
 const max_export_count: usize = 19;
-const max_semantic_operation_count: usize = 269;
+const max_semantic_operation_count: usize = 270;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -746,7 +747,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 250), census.imports);
+    try t.expectEqual(@as(usize, 251), census.imports);
     try t.expectEqual(@as(usize, 19), census.exports);
-    try t.expectEqual(@as(usize, 269), census.semantic_operations);
+    try t.expectEqual(@as(usize, 270), census.semantic_operations);
 }

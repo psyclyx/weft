@@ -285,6 +285,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_yank_each", .handler = register.hYankEach },
     .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
     .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
+    .{ .name = "wl_register_set", .handler = register.hRegisterSet },
 
     // ── clipboard.zig — the head's system clipboard (config-only grant) ──
     .{ .name = "wl_clipboard_set", .handler = clipboard.hClipboardSet },

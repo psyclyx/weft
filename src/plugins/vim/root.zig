@@ -409,6 +409,8 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-macro-q", .call = macroQ },
     .{ .name = "vim-macro-at", .call = macroAt },
     .{ .name = "vim-macro-play-last", .call = macroPlay(0) },
+    // `"/`: the search register, the last pattern any grammar searched for.
+    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search) },
     .{ .name = "find-file", .call = findFile },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
@@ -692,6 +694,7 @@ fn initExtra() void {
     );
     weft.bindKey("register-pending", "plus", "vim-register-plus");
     weft.bindKey("register-pending", "asterisk", "vim-register-star");
+    weft.bindKey("register-pending", "slash", "vim-register-search");
 
     // Macros: `q` then a letter records, `@` then a letter plays, `@@` plays
     // the last one again. Both prompts are menus, like the register prefix.

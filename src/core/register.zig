@@ -41,11 +41,16 @@ pub const Payload = struct {
     facts: []Fact,
 };
 
-/// Explicit register slots. Slot zero is unnamed; 1..26 are `a`..`z`.
+/// Explicit register slots. Slot zero is unnamed; 1..26 are `a`..`z`; 27
+/// is `/`, the last search pattern, which every grammar's search writes and
+/// every grammar can read (helix's `/` sets it, vim's `"/p` pastes it).
 /// Named yanks also update unnamed, while every read/restamp names its slot
 /// explicitly so a prefix cannot leak through ambient state.
 pub const Bank = struct {
-    slots: [27]Register = @splat(.empty),
+    pub const search: u8 = 27;
+    pub const slot_count = 28;
+
+    slots: [slot_count]Register = @splat(.empty),
 
     pub fn deinit(self: *Bank, gpa: Allocator) void {
         for (&self.slots) |*slot| slot.deinit(gpa);
@@ -53,8 +58,22 @@ pub const Bank = struct {
     }
 
     pub fn get(self: *Bank, name: u8) ?*Register {
-        if (name > 26) return null;
+        if (name >= slot_count) return null;
         return &self.slots[name];
+    }
+
+    /// Put `bytes` in slot `name` as one charwise value with no ferried
+    /// identity — text that was typed, not yanked (a search pattern). Unlike
+    /// a yank it leaves unnamed alone: setting the search register is not a
+    /// copy, and must not replace what `p` pastes.
+    pub fn set(self: *Bank, gpa: Allocator, name: u8, bytes: []const u8) !void {
+        const selected = self.get(name) orelse return error.InvalidRegister;
+        var next = Register.empty;
+        errdefer next.deinit(gpa);
+        try next.text.appendSlice(gpa, bytes);
+        try next.spans.append(gpa, .{ .start = 0, .end = bytes.len });
+        selected.deinit(gpa);
+        selected.* = next;
     }
 
     pub fn yank(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, range: Range, bytes: []const u8, linewise: bool) !void {

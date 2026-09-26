@@ -15,7 +15,7 @@ const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
 fn slotArg(raw: i32) ?u8 {
-    if (raw < 0 or raw > 26) return null;
+    if (raw < 0 or raw >= Register.Bank.slot_count) return null;
     return @intCast(raw);
 }
 
@@ -40,6 +40,21 @@ pub fn hYankRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         sr.interface.readSliceAll(buf) catch return;
     }
     reg.yank(p.gpa, name, p.subbuffers, &ed.doc, .{ .start = s, .end = e }, buf, linewise) catch {};
+}
+
+/// `registerSet(ptr, len, name)`: put the guest's bytes in slot `name` as
+/// one typed value (`Bank.set`: no identity ferried, unnamed untouched) —
+/// how a search publishes its pattern to the `/` register.
+pub fn hRegisterSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const reg = p.register orelse return;
+    const name = slotArg(args[2]) orelse return;
+    const n = word(args[1]);
+    if (n > 1 << 16) return;
+    const bytes = caller.readMemory(p.gpa, word(args[0]), n) catch return;
+    defer p.gpa.free(bytes);
+    reg.set(p.gpa, name, bytes) catch {};
 }
 
 /// `registerText(out_ptr, out_cap) -> len`: the register bytes into guest
@@ -164,6 +179,7 @@ test "register membrane accepts only canonical slots" {
     try std.testing.expectEqual(@as(?u8, 0), slotArg(0));
     try std.testing.expectEqual(@as(?u8, 26), slotArg(26));
     try std.testing.expectEqual(@as(?u8, null), slotArg(-1));
-    try std.testing.expectEqual(@as(?u8, null), slotArg(27));
+    try std.testing.expectEqual(@as(?u8, 27), slotArg(27));
+    try std.testing.expectEqual(@as(?u8, null), slotArg(28));
     try std.testing.expectEqual(@as(?u8, null), slotArg(std.math.maxInt(i32)));
 }

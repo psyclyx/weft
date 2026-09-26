@@ -1954,6 +1954,17 @@ pub fn macroRecording() ?u8 {
     return if (r == 0) null else @intCast(r);
 }
 
+/// The `/` register: the last search pattern, shared by every grammar (core
+/// `register.Bank.search`). A search writes it with `registerSet`; anyone
+/// reads it with `registerTextIn(register_search)`.
+pub const register_search: u8 = 27;
+
+/// Put typed `bytes` in register `name` as one value. Unlike a yank it
+/// ferries no identity and leaves the unnamed register alone.
+pub fn registerSet(name: u8, bytes: []const u8) void {
+    e.wl_register_set(p(bytes.ptr), @intCast(bytes.len), name);
+}
+
 // ── Generic semantic views ────────────────────────────────────────────
 
 /// Attach a retained semantic view to this head. NodeId is canonically split
