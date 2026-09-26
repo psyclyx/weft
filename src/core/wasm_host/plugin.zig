@@ -168,10 +168,16 @@ pub fn adoptGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, 
 /// silently bypassed, so every existing test that pokes `.perms[i] = true`
 /// directly (without ever touching a `HandleTable`) keeps behaving
 /// identically.
+///
+/// Except a CONFIG-ONLY capability (`Perm.configOnly`): only a config-authored
+/// grant confers it, and with no table there is no grant — so it is false
+/// without one, whatever `perms` says. That is a property of this check, not
+/// of how a principal happens to be wired.
 pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
     if (id.grant_table) |table| {
         return table.check(id.grant_handles[@intFromEnum(perm)]);
     }
+    if (comptime perm.configOnly()) return false;
     return id.perms[@intFromEnum(perm)];
 }
 
@@ -543,6 +549,20 @@ pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Docu
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "hasPerm: a config-only capability is false with no grant table, whatever the booleans say" {
+    // A principal outside the grant machinery (no table): the booleans stand
+    // for the ordinary capabilities, but none of them can confer the
+    // clipboard — only a config-authored grant does, and there is none.
+    const Bare = struct {
+        grant_table: ?*grants_mod.HandleTable = null,
+        grant_handles: [WasmPlugin.perm_count]grants_mod.CapHandle = @splat(grants_mod.CapHandle.none),
+        perms: [WasmPlugin.perm_count]bool = @splat(true),
+    };
+    const id: Bare = .{};
+    try t.expect(hasPerm(id, .fs_read));
+    try t.expect(!hasPerm(id, .clipboard));
+}
 
 test "mintGrantHandles: the composition rule — a pre-existing config-authored row is REUSED, never duplicated" {
     const gpa = t.allocator;
