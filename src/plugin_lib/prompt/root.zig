@@ -75,6 +75,14 @@ pub const Config = struct {
     /// asks its owner what to trail the line with, and its owner — which does
     /// know — answers. Return "" for nothing to say.
     hint: ?*const fn (line: []const u8) []const u8 = null,
+    /// Called after every change to the line (a keystroke, a backspace, a
+    /// clear) with the line as it now stands, before the redraw — for a
+    /// LIVE preview: helix's `s` and `/` select their matches as you type,
+    /// and put the selections back if you cancel (`on_cancel`).
+    on_change: ?*const fn (line: []const u8) void = null,
+    /// Trim blanks off both ends of the accepted line. Off for a prompt whose
+    /// blanks are part of the answer — a pattern: `S` on ` ` splits on spaces.
+    trim: bool = true,
 };
 
 /// One of the five commands a prompt answers to. Named at MODULE scope, not
@@ -240,7 +248,7 @@ pub fn Prompt(comptime cfg: Config) type {
             }
             @memcpy(buf[len .. len + s.len], s);
             len += s.len;
-            render();
+            changed();
         }
 
         /// Backspace on an empty line backs OUT (vim's command line, and the
@@ -251,12 +259,17 @@ pub fn Prompt(comptime cfg: Config) type {
             var n: usize = 1;
             while (len - n > 0 and (buf[len - n] & 0xc0) == 0x80) n += 1; // utf8 tail
             len -= n;
-            render();
+            changed();
         }
 
         pub fn onClear() void {
             if (!open_now) return;
             len = 0;
+            changed();
+        }
+
+        fn changed() void {
+            if (cfg.on_change) |f| f(buf[0..len]);
             render();
         }
 
@@ -266,7 +279,7 @@ pub fn Prompt(comptime cfg: Config) type {
         /// racing this one's teardown.
         pub fn onAccept() void {
             if (!open_now) return;
-            const line = std.mem.trim(u8, buf[0..len], " \t\r");
+            const line = if (cfg.trim) std.mem.trim(u8, buf[0..len], " \t\r") else buf[0..len];
             var held: [cfg.capacity]u8 = undefined;
             @memcpy(held[0..line.len], line);
             const n = line.len;
