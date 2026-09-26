@@ -114,7 +114,10 @@ The existing verbs persist with their meanings — `weft.plugin(name, {grants})`
   **`weft.present(viewport, {subject, presentation, options})`** — the
   workspace-composition declarations (attributes per architecture §7;
   `subject` is a durable target or a provider-computed value). A "sidebar" is
-  a fragment bundling these.
+  a fragment bundling these; so is a "toolbar" (`config/toolbar.js`: a top
+  dock one text row tall, `extent: {rows: 1}`, that takes no focus and has
+  no status line). `present(v, {command})` presents whatever entry a command
+  leaves active — how a plugin's own entry, which has no path, is shown.
 - **Action contracts, not bare names.** A declared semantic action carries
   its contract (schema, shapes, effect grade — architecture §9.1);
   `{ name }`-only declarations are legacy.

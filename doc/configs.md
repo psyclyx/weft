@@ -422,7 +422,9 @@ for the picker. Before that, a plugin's bottom surface drew into a zero-height s
   as JSON, and `core/quickjs/provide.zig` parses them into the same `facts.Predicate`
   `wl_provide` decodes. `when` takes `mode`, `lang`, `tool`, `role` and `locality`; a key
   no fact answers is refused with an echo rather than widening the provider. `opts` is
-  `{priority, label, group, order}`. `Facts` has no posture, so none is sayable. ide.js's
+  `{priority, label, group, order}`. `posture` is sayable too (`text`, `structural`,
+  `field`, `capture`); the action facts and `explain-binding` carry it, so ide.js keys its
+  source-only actions on `{posture: "text", locality}`. ide.js's
   F2 listing provider keys on `{ tool: "files" }`: the sidebar is a scene entry, and
   `role` is only derived for text projections today.
 - Chosen contexts: `intent.Where` is `active` or `primary`. `Head.primary_focus` is
@@ -474,6 +476,60 @@ for the picker. Before that, a plugin's bottom surface drew into a zero-height s
 5. A **menubar** is deliberately left out of this arc. The palette (C-S-p) plus the
    toolbar is the discovery surface; a menubar is the next consumer of the same offer
    metadata.
+
+**Landed (2 and 3).** The doors, all generic:
+
+- Viewport attributes `takesFocus` and `statusLine`, and `extent: {rows: n}`. A row
+  extent is resolved against the view's row height at every layout
+  (`window_layout.Rows`), so a zoom keeps a one-row strip one row. A pane that takes no
+  focus is skipped by the window commands and by focus recovery, and the pointer's
+  pane-focus door refuses it.
+- A click on such a pane acts through it: `pointer-click` runs an `action` node there
+  by reference (`Services.invokeActionNode`) and leaves the head's focus alone. An
+  action node is clickable whether or not it is in the focus order.
+- `weft.present(v, {command})`: a viewport shows the entry a command leaves active,
+  which is how a plugin entry with no path is presented.
+- `pointer-focus-point`: focus the pane and the node or caret under the pointer, and
+  keep a selection the point is inside. It is what "the context under the pointer"
+  means.
+- The bundled presenter hangs an interaction with `presentation: "pointer"` or
+  `"caret"` below that point.
+
+The plugins:
+
+- **`toolbar`** (`config/toolbar.js`) lists the pinned entries (`weft.set("toolbar",
+  "pinned", ...)`) plus every non-`std.*` offer of the primary context. It arranges them
+  with the shared `affordances` plugin library (groups by their most urgent `order`,
+  separators between). It redraws only on `on_offers_changed`. A click runs
+  `invokeIntentionIn(.primary)`, and a refusal is echoed. A disabled offer is greyed by
+  a `tone` fact and stays clickable so it can say why. Measured in ide.js: a Zig file
+  shows `Save Undo Redo Palette | Build Test Debug | Format Rename`; a files listing
+  in the primary pane shows its node actions (New file, New directory, Rename, …); git
+  status shows `Stage Diff Commit Push Pull Fetch Refresh` (git now labels its verbs
+  with `provideAffordance`).
+- **`contextmenu`** (mouse-3; S-F10 and Menu open it at the caret) runs
+  `pointer-focus-point`, then lists `offersIn(.active)` as a head-local interaction.
+  The menu hides the key-only words (navigation, input, gesture, line break); set
+  `weft.set("contextmenu", "hide", [...])` to change that. Its keys (Up, Down,
+  Return, Escape) and its clicks are the interaction's own bindings, so no mode is
+  entered. A click on an item runs it; a click anywhere else closes the menu.
+  config.js binds it on mouse-3 as well.
+- ide.js's actions are intention-named (`plugin.ide.build/test/debug/format/rename`),
+  because only intentions are offers, and so only they reach chrome. Each is provided
+  "in source" (`posture: "text"` and `locality` local or remote), so a git status
+  buffer, which is text but a tool projection, is offered none of them.
+- The ide grammar reads the pointer facts: double-click selects a word (on a scene row
+  it opens the row), triple-click selects the line, and C-click adds a caret. It also
+  mirrors the unnamed register to the clipboard when ide.js sets `weft.set("ide",
+  "clipboard", "unnamed")` next to the grant. That setting is needed because the
+  clipboard doors trap without the grant. C-Home/C-End, C-g and F12 push a jump, and
+  M-Left/M-Right walk the jumplist.
+
+Not done: hover dispatches nothing, so there are no tooltips (the reason and provider
+ride on each button as scene facts). A strip wider than the window is clipped, with no
+overflow menu. The toolbar and sidebar entries show in the tab strip. A docked
+companion never becomes the primary context, so while the sidebar has focus the
+toolbar still describes the editor; the context menu covers the sidebar.
 
 ### 3.7 ide.js keys
 
