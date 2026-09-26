@@ -584,6 +584,33 @@ Not done: breadcrumbs read the grammar outline only, not LSP document symbols. T
 problems list shows what `lsp` holds, which is one document per server. The terminal
 has no interrupt: C-c cannot reach a piped child as a signal.
 
+**Polish.** What screenshots of ide.js showed, and the fixes:
+
+- A popup paints over the text beneath it. A pane's build draws its rects and then its
+  glyphs, so a menu's fill used to sit under the pane's own text. Everything a build adds
+  from its surfaces on is now a second layer (`render.Layers`), drawn after the first.
+- A menu hung at a point (`pointer`, `caret`) is placed and clamped against the frame
+  (`Hud.float_bounds`), not the pane it opened over, so a menu opened on the sidebar
+  floats over the editor beside it. The box is filed with its pane
+  (`View.PaneMap.float`), and a click inside it is that pane's, whichever pane is beneath.
+- The context menu lists only offers that can run; the toolbar still greys them. A group
+  of one joins its neighbours instead of standing between two rules. A files row's
+  "Insert Before/After" stays: the listing itself advertises them (a new pending entry).
+- Each pane's status line and gutter are asked with that pane's facts, built by
+  `intent.entryFacts` (the builder the offers use). The mode is the head's for the entry
+  the head is on, and the entry's resting mode for every other pane. Before this, every
+  pane showed the focused pane's mode.
+- The `weft.status` chip belongs to its system (`Buffers.status`), not the process. A
+  debug session that ended in one editor used to leave "○ \*debug\* · done" in the next
+  editor started in the same process.
+- The terminal stays line-mode. The shell's stderr was already merged, and partial lines
+  were already delivered as they were read; the prompt-less shots came from a test shell
+  that was not interactive. A carriage return not followed by a newline now starts the
+  line over, so zsh's end-of-output mark no longer runs into the prompt. bash with
+  readline echoes the input line a second time; `--noediting` avoids it.
+- Every block caret flips the glyph under it to `cursor_text`, a label's included, not
+  only the primary's.
+
 ### 3.7 ide.js keys
 
 - C-s, C-S-s, C-o, C-p (quick open), C-S-p (palette), C-w, C-Tab.
