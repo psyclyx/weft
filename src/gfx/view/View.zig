@@ -634,6 +634,20 @@ pub fn pickDockHeight(self: *const View, pick: ?*const core.Pick) f32 {
     return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
 }
 
+/// Pixel height the window-bottom dock needs: the picker's (`pickDockHeight`)
+/// or the tallest active `.bottom`-placed surface a plugin published (a find
+/// bar), whichever is taller. Both draw into the one dock, so both size it —
+/// counting only the picker left a plugin's bottom surface drawing into a
+/// zero-height strip, which is to say not at all.
+pub fn dockHeight(self: *const View, pick: ?*const core.Pick, surfaces: []const *const core.surface.Surface) f32 {
+    var rows: usize = 0;
+    for (surfaces) |surf| {
+        if (surf.active and surf.placement == .bottom) rows = @max(rows, surf.rows.items.len);
+    }
+    const surface_h = @as(f32, @floatFromInt(@min(rows, Hud.max_pick_rows + 1))) * self.line_h;
+    return @max(self.pickDockHeight(pick), surface_h);
+}
+
 // ── Tests ──
 
 const testing = std.testing;
@@ -655,6 +669,25 @@ test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
     var rope2 = try stemma.Rope.fromSlice(gpa, "\t\tx");
     defer rope2.deinit(gpa);
     try testing.expectApproxEqAbs(margin + 8 * cw, try view.xOfOffsetOnRow(&rope2, 2), 0.5);
+}
+
+test "dock: a plugin's bottom surface sizes the dock with no pick open" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var bar: core.surface.Surface = .{};
+    defer bar.deinit(gpa);
+    bar.begin(gpa, .bottom);
+    bar.addRow(gpa);
+    bar.addSpan(gpa, "Find: x", .normal);
+    bar.addRow(gpa);
+    bar.addSpan(gpa, "Replace: y", .normal);
+    bar.end(gpa, null);
+    const surfaces = [_]*const core.surface.Surface{&bar};
+    try testing.expectApproxEqAbs(2 * view.line_h, view.dockHeight(null, &surfaces), 0.01);
+    // A corner surface floats over the body; it carves nothing.
+    bar.placement = .corner;
+    try testing.expectApproxEqAbs(@as(f32, 0), view.dockHeight(null, &surfaces), 0.01);
 }
 
 test "monospace parity gate: view-computed vertical target == old column target" {

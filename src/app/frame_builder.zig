@@ -651,11 +651,12 @@ pub const FrameBuilder = struct {
         defer arena_state.deinit();
         self.view.resetFrame();
         const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
-        // Carve the picker's window-bottom dock off the window FIRST, so the
-        // panes lay out in what remains — the picker is a real region, not an
-        // overlay, and cannot overlap a pane or status line (region.zig's
-        // contract). Zero-height when no pick is open ⇒ panes fill the window.
-        const dock_cut = window_rect.cutBottom(self.view.pickDockHeight(if (fx.head.pick.active) &fx.head.pick else null));
+        // Carve the window-bottom dock off the window FIRST, so the panes lay
+        // out in what remains — the picker (or a plugin's `.bottom` surface,
+        // a find bar) is a real region, not an overlay, and cannot overlap a
+        // pane or status line (region.zig's contract). Zero-height when
+        // neither is showing ⇒ panes fill the window.
+        const dock_cut = window_rect.cutBottom(self.view.dockHeight(if (fx.head.pick.active) &fx.head.pick else null, hud.surfaces));
         const pick_dock = dock_cut.strip;
         const frame_rect = dock_cut.rest;
         fx.last_frame_rect.* = frame_rect;
