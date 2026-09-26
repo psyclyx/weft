@@ -104,12 +104,15 @@ weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
 // F2 renames what the focus is ON: the symbol under the cursor in source (the
-// language server), the row's name in a listing. `ide-structural` is the mode
-// every text-less entry rests in, which is the only context fact a config
-// provider can key on today (doc/configs.md §3.5.1 adds role/tool).
+// language server), the row's name in a listing. The listing provider keys on
+// the entry's TOOL identity — the files listing, whose rows' names are fields
+// — not on the mode a text-less entry rests in: that was a grammar detail
+// standing in for the fact, and it also claimed git's rows, whose names are
+// not fields. A git status buffer keeps the source default. The options object
+// is how the offer is presented where it wins (a toolbar's label).
 weft.action("rename-here");
-weft.provide("rename-here", {}, "rename");
-weft.provide("rename-here", { mode: "ide-structural" }, "field-edit");
+weft.provide("rename-here", {}, "rename", { label: "Rename", group: "edit" });
+weft.provide("rename-here", { tool: "files" }, "field-edit", { label: "Rename", group: "edit" });
 
 // ── Keys ─────────────────────────────────────────────────────────────
 // The GRAMMAR binds the editing keys (arrows, shift-selection, Home/End, Tab,

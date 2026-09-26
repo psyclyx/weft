@@ -107,6 +107,49 @@ fn expectReady(ed: *Editor, key: []const u8, intention: []const u8, provider: []
     }
 }
 
+/// The key's arm is RELEVANT here but refuses, with `reason` — which is what
+/// which-key shows and what the keypress reports instead of running a later
+/// arm.
+fn expectBlocked(ed: *Editor, key: []const u8, intention: []const u8, reason: []const u8) !void {
+    switch (explainKey(ed, key)) {
+        .blocked => |b| {
+            try t.expectEqualStrings(intention, b.intention);
+            try t.expectEqualStrings(reason, b.reason);
+        },
+        else => |other| {
+            std.debug.print("[e2e/ide] {s} in {s}: {s}, expected {s} blocked by {s}\n", .{ key, ed.mode(), @tagName(other), intention, reason });
+            return error.TestExpectedBlocked;
+        },
+    }
+}
+
+/// Whether anything offers `intention` in the active context at all —
+/// absence (nonapplicable), as distinct from a disabled offer.
+fn offered(ed: *Editor, intention: []const u8) bool {
+    const plane = ed.ctx.intent orelse return false;
+    const id = plane.catalog.findIntention(intention) orelse return false;
+    const snap = plane.snapshotFor(ed.ctx) orelse return false;
+    return snap.offersFor(id).len > 0;
+}
+
+/// Run a command and read its integer result (the fixture's counters).
+fn runInt(ed: *Editor, cmd: []const u8, args: []const core.command.Value) i64 {
+    const v = core.command.run(ed.commands, ed.ctx, cmd, args) catch return -1;
+    return if (v == .integer) v.integer else -1;
+}
+
+/// Run a command and copy its string result (the fixture's listings).
+fn runStr(ed: *Editor, buf: []u8, cmd: []const u8, args: []const core.command.Value) []const u8 {
+    const v = core.command.run(ed.commands, ed.ctx, cmd, args) catch return "";
+    const s = switch (v) {
+        .string => |s| s,
+        else => return "",
+    };
+    const n = @min(s.len, buf.len);
+    @memcpy(buf[0..n], s[0..n]);
+    return buf[0..n];
+}
+
 /// The key's intentions all fall through here, and the plain command arm it
 /// names is what dispatch runs.
 fn expectCommand(ed: *Editor, key: []const u8, command: []const u8) !void {
@@ -311,7 +354,17 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectCommand(ed, "C-x", "ide-cut");
     try expectCommand(ed, "C-v", "ide-paste");
     try expectCommand(ed, "Down", "ide-down");
+    // REAL availability: a buffer nothing has changed has nothing to undo, so
+    // the offer is there but DISABLED, with the reason which-key shows — and
+    // it becomes ready the moment there is an edit to take back.
+    try expectBlocked(ed, "C-z", "std.history.undo", "nothing-to-undo");
+    try expectBlocked(ed, "C-S-z", "std.history.redo", "nothing-to-redo");
+    ed.press("End", "");
+    ed.typeText("!");
     try expectReady(ed, "C-z", "std.history.undo", "core.editing");
+    ed.press("C-z", "");
+    try expectText(ed, "one\ntwo\n");
+    try expectReady(ed, "C-S-z", "std.history.redo", "core.editing");
     try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
     // F2 is an ACTION: in source it is the language server's rename.
     try expectActionWinner(ed, "rename-here", "rename");
@@ -332,8 +385,15 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectReady(ed, "C-c", "std.transfer.yank", "core.view");
     try expectReady(ed, "C-x", "std.transfer.delete-to-register", "core.view");
     try expectReady(ed, "C-v", "std.transfer.paste", "core.view");
-    // …and F2 renames the ROW, through the provider keyed to this state.
+    // …and F2 renames the ROW, through the config provider keyed on this
+    // entry's tool identity (a `weft.provide` fact beyond mode and lang).
     try expectActionWinner(ed, "rename-here", "field-edit");
+    // Whether the persistence word applies is the `save` providers' call, not
+    // core's: the files listing provides one (it applies the draft), so C-s
+    // is offered here and runs THAT — while a git listing, below, provides
+    // none and is not offered it at all.
+    try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
+    try expectActionWinner(ed, "save", "files-apply");
 
     // ── A git status buffer: git's own mode, and the global layer. ──
     ed.run("window-focus-right");
@@ -351,9 +411,151 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     // Return is git's: the row opens its diff, attributed to git.
     try expectReady(ed, "Return", "plugin.git.open-diff", "plugin.git");
     // C-s reaches this tool mode, which falls back to nothing, only through
-    // the global layer — and the persistence word resolves here as in text:
-    // core's offer runs the `save` ACTION, whose providers decide per tool
-    // (a commit draft commits) rather than this key.
+    // the global layer. A status listing has nothing durable: no `save`
+    // provider is eligible for a tool projection that did not provide one (a
+    // commit draft does, and commits), so core does not offer the persistence
+    // word here and the key falls through to its plain `save` arm — which
+    // refuses for want of a provider instead of "saving" a listing.
     try t.expect(ed.keymap.lookupArms("git", "C-s") != null);
-    try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
+    try t.expect(!offered(ed, "std.persistence.save"));
+    try expectCommand(ed, "C-s", "save");
+    // F2's config providers: git's rows are not the files tool, so the source
+    // default stands — the same action, a third answer.
+    try expectActionWinner(ed, "rename-here", "rename");
+}
+
+test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus, and say when that changes" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try h.loadOfferwatch(ed);
+    try openFile(ed, "a.txt", "one\n");
+    const editor_entry = ed.buffers.active_id;
+    var buf: [1 << 14]u8 = undefined;
+
+    // The first wake delivers the first description; quiet wakes deliver
+    // nothing — no polling, and no event without a change.
+    ed.applyWindow();
+    const first = runInt(ed, "ow-fired", &.{});
+    try t.expect(first >= 1);
+    ed.applyWindow();
+    ed.applyWindow();
+    try t.expectEqual(first, runInt(ed, "ow-fired", &.{}));
+    // A caret move changes nothing a toolbar shows.
+    ed.press("End", "");
+    ed.applyWindow();
+    try t.expectEqual(first, runInt(ed, "ow-fired", &.{}));
+    // An edit does — Undo becomes available — and it is ONE event however
+    // many wakes follow.
+    ed.typeText("!");
+    ed.applyWindow();
+    ed.applyWindow();
+    try t.expectEqual(first + 1, runInt(ed, "ow-fired", &.{}));
+
+    // Focus the docked sidebar. The PRIMARY context is still the editor, so
+    // what a toolbar describes did not move: no event.
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expect(ed.buffers.active_id != editor_entry);
+    ed.press("Down", ""); // onto a row, as a user would
+    ed.applyWindow();
+    try t.expectEqual(first + 1, runInt(ed, "ow-fired", &.{}));
+
+    // The primary enumeration is the EDITOR's — its history and persistence
+    // words, presented with the intention table's labels and groups — while
+    // the active one is the listing's.
+    const primary = runStr(ed, &buf, "ow-list", &.{.{ .integer = 1 }});
+    try t.expect(std.mem.indexOf(u8, primary, "std.history.undo|core.editing|enabled||Undo|history|") != null);
+    try t.expect(std.mem.indexOf(u8, primary, "std.history.redo|core.editing|disabled|nothing-to-redo|Redo|history|") != null);
+    try t.expect(std.mem.indexOf(u8, primary, "std.persistence.save|core.editing|enabled||Save|persistence|") != null);
+    try t.expect(std.mem.indexOf(u8, primary, "core.view") == null);
+    var active_buf: [1 << 14]u8 = undefined;
+    const active = runStr(ed, &active_buf, "ow-list", &.{.{ .integer = 0 }});
+    try t.expect(std.mem.indexOf(u8, active, "|core.view|") != null);
+    // The listing's own non-standard node actions are offers too, labelled as
+    // the scene labels them — what a toolbar in the sidebar would show.
+    try t.expect(std.mem.indexOf(u8, active, "plugin.fs.entry.create-file|core.view|enabled||New file|fs|") != null);
+
+    // Invoking in the primary context acts on the editor, and leaves the
+    // head where it was.
+    try t.expectEqualStrings("invoked", runStr(ed, &buf, "ow-invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } }));
+    try t.expect(ed.buffers.active_id != editor_entry);
+    {
+        const text = try ed.buffers.get(editor_entry).?.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        try t.expectEqualStrings("one\n", text);
+    }
+    // …which moved the editor's availability (undo spent, redo ready): one
+    // event, delivered at the frame boundary rather than inside the invoke.
+    try t.expectEqual(first + 1, runInt(ed, "ow-fired", &.{}));
+    ed.applyWindow();
+    try t.expectEqual(first + 2, runInt(ed, "ow-fired", &.{}));
+    // A refusal says why instead of doing nothing.
+    const refusal = runStr(ed, &buf, "ow-invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } });
+    try t.expect(std.mem.indexOf(u8, refusal, "nothing-to-undo") != null);
+
+    // A provider registering is a change; its presentation override shows.
+    try t.expectEqual(@as(i64, 1), runInt(ed, "ow-provide", &.{}));
+    ed.applyWindow();
+    try t.expectEqual(first + 3, runInt(ed, "ow-fired", &.{}));
+    const probed = runStr(ed, &buf, "ow-list", &.{.{ .integer = 1 }});
+    try t.expect(std.mem.indexOf(u8, probed, "plugin.offerwatch.probe|plugin.offerwatch|enabled||Probe|watch|5") != null);
+
+    // Back to the editor: the same primary context, so no event…
+    ed.run("window-focus-right");
+    ed.applyWindow();
+    try t.expectEqual(editor_entry, ed.buffers.active_id);
+    try t.expectEqual(first + 3, runInt(ed, "ow-fired", &.{}));
+    // …and a different entry in the primary pane is one.
+    try openFile(ed, "b.txt", "two\n");
+    ed.applyWindow();
+    try t.expectEqual(first + 4, runInt(ed, "ow-fired", &.{}));
+}
+
+test "e2e/ide: C-d adds the next occurrence, C-S-l takes them all, and typing edits every one as one undo unit" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "o.txt", "foo bar foo baz foo\n");
+
+    // The first press selects the word under the caret; each later press adds
+    // the next occurrence.
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 1), textEd(ed).selectionCount());
+    try t.expectEqual(Span{ .start = 0, .end = 3 }, selected(ed).?);
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+    // The newest occurrence is the primary, and it was flashed.
+    try t.expectEqual(Span{ .start = 16, .end = 19 }, selected(ed).?);
+    // Every occurrence is taken: another press adds nothing.
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+
+    // Typing replaces all three; one C-z takes all three back.
+    ed.typeText("X");
+    try expectText(ed, "X bar X baz X\n");
+    ed.press("C-z", "");
+    try expectText(ed, "foo bar foo baz foo\n");
+
+    // Escape is back to one caret.
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 1), textEd(ed).selectionCount());
+
+    // C-S-l from a caret inside the MIDDLE occurrence: all of them at once,
+    // the one the caret was in still primary.
+    ed.press("C-Home", "");
+    for (0..9) |_| ed.press("Right", "");
+    ed.press("C-S-l", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+    try t.expectEqual(Span{ .start = 8, .end = 11 }, selected(ed).?);
+    ed.typeText("Y");
+    try expectText(ed, "Y bar Y baz Y\n");
+    ed.press("C-z", "");
+    try expectText(ed, "foo bar foo baz foo\n");
 }

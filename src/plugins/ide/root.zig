@@ -135,11 +135,149 @@ fn selectAll() void {
     weft.setSelection(.{ .start = 0, .end = weft.byteLen() });
 }
 
-/// Escape: drop the selection, and leave a capture posture if one holds the
-/// entry — so the key a user reaches for first is always a way out.
+/// Escape: back to one caret, drop the selection, and leave a capture posture
+/// if one holds the entry — so the key a user reaches for first is always a
+/// way out.
 fn escape() void {
+    if (weft.selectionCount() > 1) _ = weft.collapseSelections();
     collapse();
     if (weft.posture() == .capture) _ = weft.invokeIntention("std.input.break-out");
+}
+
+// ── Occurrences: C-d adds the next match, C-S-l selects them all ─────
+// Literal, case-sensitive matching over the document. Core holds the
+// selections (doc/configs.md §0.1); typing, deleting and pasting then act at
+// every one of them as ONE undo unit, so nothing here edits anything.
+
+/// Longest needle an occurrence command looks for.
+const needle_max = 1024;
+var needle_buf: [needle_max]u8 = undefined;
+
+/// Bytes read per `slice` while searching — under the SDK's 64 KiB scratch
+/// with room for a needle's overlap between windows.
+const window = 1 << 15;
+
+fn isWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+}
+
+/// The word around `at` (touching it on either side), or null on none.
+fn wordAround(at: usize) ?weft.Range {
+    const line = weft.lineAt(at);
+    const text = weft.slice(line.start, line.end);
+    const col = at - line.start;
+    var s = col;
+    while (s > 0 and isWordByte(text[s - 1])) s -= 1;
+    var e = col;
+    while (e < text.len and isWordByte(text[e])) e += 1;
+    if (s == e) return null;
+    return .{ .start = line.start + s, .end = line.start + e };
+}
+
+/// The first match of `needle` STARTING in `[from, to)`, or null.
+fn findIn(needle: []const u8, from: usize, to: usize) ?usize {
+    const len = weft.byteLen();
+    var pos = from;
+    while (pos < to) {
+        const end = @min(len, pos + window + needle.len - 1);
+        if (std.mem.indexOf(u8, weft.slice(pos, end), needle)) |i| {
+            const at = pos + i;
+            return if (at < to) at else null;
+        }
+        if (end >= len) return null;
+        pos += window;
+    }
+    return null;
+}
+
+fn overlapsAny(items: []const weft.Selection, r: weft.Range) bool {
+    for (items) |s| {
+        const q = s.range();
+        if (r.start < q.end and q.start < r.end) return true;
+    }
+    return false;
+}
+
+/// The primary selection's text as the needle, copied out of the scratch
+/// every read shares. With a bare caret there is no needle yet: the word
+/// under it becomes the selection, and that press is spent selecting it —
+/// the convention every editor with this key shares.
+fn needleOrSelectWord() ?[]const u8 {
+    const set = weft.selections();
+    if (set.items.len == 0) return null;
+    const primary = set.items[set.primary].range();
+    if (primary.start == primary.end) {
+        const w = wordAround(primary.start) orelse return null;
+        set.items[set.primary] = .{ .anchor = w.start, .head = w.end };
+        _ = weft.setSelections(set.items, set.primary);
+        weft.flash(w.start, w.end);
+        return null;
+    }
+    const n = primary.end - primary.start;
+    if (n > needle_max) {
+        weft.echo("add next match: the selection is too long to search for");
+        return null;
+    }
+    @memcpy(needle_buf[0..n], weft.slice(primary.start, primary.end));
+    return needle_buf[0..n];
+}
+
+/// C-d: add the next occurrence of the primary selection's text after it
+/// (wrapping at the end) as a new primary selection. An occurrence already
+/// selected is skipped; when every one is, nothing changes.
+fn addNextMatch() void {
+    const needle = needleOrSelectWord() orelse return;
+    const set = weft.selections();
+    const after = set.items[set.primary].range().end;
+    const len = weft.byteLen();
+    // Past the primary to the end, then from the top back round to it.
+    const spans = [_][2]usize{ .{ after, len }, .{ 0, after } };
+    for (spans) |span| {
+        var from = span[0];
+        while (findIn(needle, from, span[1])) |at| {
+            const hit: weft.Range = .{ .start = at, .end = at + needle.len };
+            if (!overlapsAny(weft.selections().items, hit)) {
+                _ = weft.addSelection(.{ .anchor = hit.start, .head = hit.end });
+                weft.flash(hit.start, hit.end);
+                return;
+            }
+            from = at + 1;
+        }
+    }
+}
+
+var all_items: [weft.max_selections]weft.Selection = undefined;
+
+/// C-S-l: select every occurrence of the primary selection's text (or of the
+/// word under the caret), keeping the one the caret was on primary.
+fn selectAllMatches() void {
+    var needle = needleOrSelectWord();
+    if (needle == null) {
+        // The press that selected a word goes on to select its twins too.
+        const set = weft.selections();
+        if (set.items.len == 0) return;
+        const w = set.items[set.primary].range();
+        if (w.start == w.end or w.end - w.start > needle_max) return;
+        @memcpy(needle_buf[0 .. w.end - w.start], weft.slice(w.start, w.end));
+        needle = needle_buf[0 .. w.end - w.start];
+    }
+    const n = needle.?;
+    const before = weft.selections();
+    const origin = before.items[before.primary].range().start;
+    var count: usize = 0;
+    var primary: usize = 0;
+    var from: usize = 0;
+    const len = weft.byteLen();
+    while (count < all_items.len) {
+        const at = findIn(n, from, len) orelse break;
+        if (at == origin) primary = count;
+        all_items[count] = .{ .anchor = at, .head = at + n.len };
+        count += 1;
+        from = at + n.len;
+    }
+    if (count == 0) return;
+    _ = weft.setSelections(all_items[0..count], primary);
+    for (all_items[0..count]) |s| weft.flash(s.anchor, s.head);
 }
 
 // ── Line blocks ──────────────────────────────────────────────────────
@@ -452,6 +590,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "open-path", .call = openPath, .summary = "open a file by typed path" },
     .{ .name = "goto-line", .call = gotoLine, .summary = "go to a line by number" },
     .{ .name = "ide-toggle-sidebar", .call = toggleSidebar, .summary = "show or hide the docked sidebar" },
+    .{ .name = "ide-add-next-match", .call = addNextMatch, .summary = "select the word, then add the next occurrence of the selection" },
+    .{ .name = "ide-select-all-matches", .call = selectAllMatches, .summary = "select every occurrence of the selection" },
 };
 
 fn initExtra() void {
@@ -517,6 +657,7 @@ fn initExtra() void {
         .{ "C-slash", "comment-selection" },     .{ "M-Up", "ide-move-line-up" },
         .{ "M-Down", "ide-move-line-down" },     .{ "C-S-k", "ide-delete-line" },
         .{ "C-Return", "ide-open-below" },       .{ "C-S-Return", "ide-open-above" },
+        .{ "C-d", "ide-add-next-match" },        .{ "C-S-l", "ide-select-all-matches" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
 

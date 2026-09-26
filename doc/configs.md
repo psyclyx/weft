@@ -312,6 +312,44 @@ for the picker. Before that, a plugin's bottom surface drew into a zero-height s
    are published as offers too.
 5. **Real availability.** Undo and redo report disabled when there is nothing to undo.
 
+**Landed.** What the build settled:
+
+- `weft.provide(action, when, cmd, prio | opts)`: the shim sends `when` and the options
+  as JSON, and `core/quickjs/provide.zig` parses them into the same `facts.Predicate`
+  `wl_provide` decodes. `when` takes `mode`, `lang`, `tool`, `role` and `locality`; a key
+  no fact answers is refused with an echo rather than widening the provider. `opts` is
+  `{priority, label, group, order}`. `Facts` has no posture, so none is sayable. ide.js's
+  F2 listing provider keys on `{ tool: "files" }`: the sidebar is a scene entry, and
+  `role` is only derived for text projections today.
+- Chosen contexts: `intent.Where` is `active` or `primary`. `Head.primary_focus` is
+  recorded in the layout phase, beside the focus-feed publish and by the same
+  `focus_source` attribute. `Plane.snapshotAt(ctx, where)` feeds one builder a `Scope`
+  (the entry, its saved mode and semantic focus, and its own catalog clock), so the
+  primary context isn't a second resolver. `Plane.invokeNamedAt` runs an offer in the
+  primary entry by bringing it to the head for the call and restoring it afterwards.
+- Doors: `wl_offers_list(where, out, cap)` writes the whole enumeration as one record,
+  with the presentation already completed. `wl_intent_invoke_at(where, name, out, cap)`
+  is head-gated. `wl_provide_affordance(action, label, group, order)` is the wasm twin of
+  `opts`. The SDK wraps them as `offersIn`, `invokeIntentionIn` and `provideAffordance`.
+- Offers-changed: the export `on_offers_changed`. `Application` fires it after the
+  layout phase, at most once per wake and never inside a dispatch. It fires when
+  `Plane.signatureAt(.primary)` changes. That signature is a content hash of the rows
+  (intention, owner, availability, presentation) and of the context (entry, mode), not
+  the catalog epoch, so a caret move or focusing a companion fires nothing.
+- Metadata: `catalog.Affordance {label, group, order}` rides on `Offer` and `Candidate`
+  and is never a ranking key. `intent.presentation` fills in what a provider left out.
+  The label comes from `intentions.zig`'s new per-intention `label`, the group is the
+  package segment, and the order is the table position. Non-standard node actions on
+  the focus path are published by `core.view` as `plugin.<action id>` (for example
+  `plugin.fs.entry.create-file`, labelled "New file").
+- Availability: core's table is computed from an entry `Shape`. Undo and redo are
+  disabled with `nothing-to-undo` or `nothing-to-redo`. `std.persistence.save` is absent
+  unless some `save` provider is eligible. Core's `save-file` now excludes
+  `locus == tool` (priority -1, so it is still the floor), so a git status listing isn't
+  offered save, and a files listing (which provides `files-apply`) is.
+- ide: `C-d` selects the word, then adds the next literal occurrence. `C-S-l` selects
+  every occurrence. Both flash what they select, and Escape collapses back to one caret.
+
 ### 3.6 Chrome — plugins, on small core-doors
 
 1. **Viewport extent in rows** (core-door), so a one-row top dock is expressible.
