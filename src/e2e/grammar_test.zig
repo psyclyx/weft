@@ -558,6 +558,10 @@ const PostureCase = struct {
     committing: ?[]const u8 = null,
     text_resting: []const u8,
     structural_resting: []const u8,
+    /// The mode a structural entry's keys are looked up in — the layer the
+    /// grammar DECLARED over its resting state (`weft.bindingVariant`), or
+    /// the resting state itself where it declared none.
+    structural_layer: []const u8,
     /// The chord this grammar keeps bound for `std.input.break-out` — each
     /// picks its own, which is exactly why the vocabulary is an intention
     /// and not a key core reserves.
@@ -567,13 +571,16 @@ const PostureCase = struct {
 const posture_cases = [_]PostureCase{
     // Vim: modal, so its text resting state commits nothing already; the
     // insert-like state is what a structural entry must not inherit.
-    .{ .grammar = "vim", .enter_text = "i", .committing = "insert", .text_resting = "normal", .structural_resting = "normal", .break_out = "C-backslash" },
+    .{ .grammar = "vim", .enter_text = "i", .committing = "insert", .text_resting = "normal", .structural_resting = "normal", .structural_layer = "normal-structural", .break_out = "C-backslash" },
     // Emacs: MODELESS — its text resting state IS the committing one, so it
     // must declare a separate structural state or every letter leaks.
-    .{ .grammar = "emacs", .committing = "emacs", .text_resting = "emacs", .structural_resting = "emacs-structural", .break_out = "C-c C-backslash" },
+    .{ .grammar = "emacs", .committing = "emacs", .text_resting = "emacs", .structural_resting = "emacs-structural", .structural_layer = "emacs-structural", .break_out = "C-c C-backslash" },
     // The synthetic std-only grammar: one state, committing nothing, and it
     // DECLARES that as its answer for both postures rather than defaulting.
-    .{ .grammar = "gramtest", .text_resting = "gramtest", .structural_resting = "gramtest", .break_out = "C-backslash" },
+    .{ .grammar = "gramtest", .text_resting = "gramtest", .structural_resting = "gramtest", .structural_layer = "gramtest", .break_out = "C-backslash" },
+    // Helix: modal like vim, one resting mode for both postures, and its own
+    // declared structural LAYER over it — where the SPC v group binds.
+    .{ .grammar = "helix", .enter_text = "i", .committing = "helix-insert", .text_resting = "helix-normal", .structural_resting = "helix-normal", .structural_layer = "helix-structural", .break_out = "C-backslash" },
 };
 
 test "e2e/grammar: GATE 5 — a structural entry rests structurally, and the text entry's resting state comes back" {
@@ -608,6 +615,7 @@ test "e2e/grammar: GATE 5 — a structural entry rests structurally, and the tex
         // not by refusing edits after the fact.
         try t.expectEqualStrings(case.structural_resting, ed.mode());
         try t.expectEqual(@as(?[]const u8, null), ed.keymap.commitCommand(ed.mode()));
+        try t.expectEqualStrings(case.structural_layer, ed.ctx.bindingMode());
 
         // The grammar DECLINES its insert-like state here rather than parking
         // the user in it.

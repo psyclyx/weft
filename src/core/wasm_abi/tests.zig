@@ -784,9 +784,14 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     // nothing here assumes vim's "normal". If core privileged vim, this breaks.
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
     try t.expectEqualStrings("hx-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
-    try t.expectEqualStrings("cursor-left", env.keymap.lookup(env.head.currentMode(), "h").?);
-    // Word motion is bound to helix's generated move wrapper (shared `motions`).
-    try t.expectEqualStrings("hx/n/motion.word-fwd", env.keymap.lookup(env.head.currentMode(), "w").?);
+    // A motion leads with its navigation intention (a listing answers it) and
+    // falls back to helix's generated move wrapper over the shared `motions`.
+    const left = env.keymap.lookupArms(env.head.currentMode(), "h").?;
+    try t.expectEqualStrings("std.navigation.left", left[0]);
+    try t.expectEqualStrings("hx/n/motion.left", left[1]);
+    const word = env.keymap.lookupArms(env.head.currentMode(), "w").?;
+    try t.expectEqualStrings("std.navigation.word-next", word[0]);
+    try t.expectEqualStrings("hx/n/motion.word-fwd", word[1]);
     // op-pending stays a menu mode (which-key renders its motions), but the
     // leader is now a key SEQUENCE — no `helix-leader` mode: `space` opens a
     // chord and `space g g` completes to git-status through the sequence engine.
