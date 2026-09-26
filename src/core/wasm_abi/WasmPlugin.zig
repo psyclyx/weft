@@ -54,9 +54,9 @@ pub const SemanticFileRegistration = struct {
 pub const SyntaxResolver = *const fn (buf: *Buffers.Buffer) ?*syntax.Syntax;
 
 /// The guest-side `Perm` enum order (weft.zig): fs_read, fs_write, net, proc,
-/// timer. Kept in lockstep with abi.Perm so a wasm plugin's declaration means
-/// the same thing as an in-process one's.
-pub const perm_count = 6;
+/// timer, env, clipboard. Kept in lockstep with abi.Perm so a wasm plugin's
+/// declaration means the same thing as an in-process one's.
+pub const perm_count = 7;
 
 pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 

@@ -24,6 +24,7 @@ pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
 pub const perm_env = 5;
+pub const perm_clipboard = 6;
 
 /// The membrane's one grant-gate vocabulary
 /// (doc/contextual-workspace-architecture.md §13.5), enum-closed so a
@@ -40,6 +41,9 @@ pub const Perm = enum(u32) {
     /// there. That is an escalation `proc` does not imply, so it is its own
     /// capability, config-visible in the approval diff.
     env = perm_env,
+    /// Read and take the system clipboard (`wasm_host/clipboard.zig`).
+    /// CONFIG-ONLY — see `configOnly`.
+    clipboard = perm_clipboard,
 
     pub fn label(self: Perm) []const u8 {
         return switch (self) {
@@ -49,7 +53,18 @@ pub const Perm = enum(u32) {
             .proc => "proc",
             .timer => "timer",
             .env => "env",
+            .clipboard => "clipboard",
         };
+    }
+
+    /// A capability a plugin cannot grant itself by declaring it: only a
+    /// config-authored `weft.grant` confers it. For the others, `describe()`
+    /// mints a baseline row and config narrows it; for these, declaring is
+    /// a statement of intent the approval surface can show, nothing more.
+    /// The clipboard is the first: it holds whatever the user last copied
+    /// anywhere on the desktop, and a plugin should not reach that by asking.
+    pub fn configOnly(self: Perm) bool {
+        return self == .clipboard;
     }
 };
 
@@ -90,7 +105,12 @@ pub const Perm = enum(u32) {
 /// visible (`weft.grant(who, cap, { root: … })`, `"/"` for unconfined).
 pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
     inline for (0..WasmPlugin.perm_count) |i| {
-        if (perms[i]) {
+        const cp: Perm = @enumFromInt(i);
+        if (cp.configOnly()) {
+            // Declared or not, only config confers it: adopt its row or hold
+            // nothing (`Perm.configOnly`).
+            out[i] = table.findLive(principal, cp.label()) orelse grants_mod.CapHandle.none;
+        } else if (perms[i]) {
             const p: Perm = @enumFromInt(i);
             if (table.findLive(principal, p.label())) |existing| {
                 out[i] = existing;

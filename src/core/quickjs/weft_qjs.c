@@ -146,6 +146,18 @@ extern void host_jump(int offset);
 // the one `wl_pointer` runs: eight u32 words, 0 when there is no gesture.
 __attribute__((import_module("weft"), import_name("qjs_pointer")))
 extern int host_pointer(unsigned *out_words);
+// The system clipboard (grant: clipboard, config-only) — wasm_host/clipboard.zig's
+// bodies. `get` answers the FULL length, so a caller whose buffer was short
+// can ask again; both answer WEFT_DENIED without the grant.
+__attribute__((import_module("weft"), import_name("qjs_clipboard_set")))
+extern int host_clipboard_set(const char *text, int len);
+__attribute__((import_module("weft"), import_name("qjs_clipboard_get")))
+extern int host_clipboard_get(char *out, int cap);
+// The head's history — wasm_host/history.zig's bodies.
+__attribute__((import_module("weft"), import_name("qjs_jump_push")))
+extern void host_jump_push(void);
+__attribute__((import_module("weft"), import_name("qjs_macro_recording")))
+extern int host_macro_recording(void);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -1034,6 +1046,57 @@ static JSValue js_pointer(JSContext *ctx, JSValueConst this_val,
     return o;
 }
 
+// weft.clipboardSet(text) -> bool: take the system clipboard. Throws without
+// the `clipboard` grant.
+static JSValue js_clipboard_set(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (!s) return JS_EXCEPTION;
+    int r = host_clipboard_set(s, (int)l);
+    JS_FreeCString(ctx, s);
+    if (r == WEFT_DENIED) return weft_throw_denied(ctx, "clipboardSet");
+    return JS_NewBool(ctx, r == 0);
+}
+
+// weft.clipboardGet() -> string | null: the system clipboard's text. Throws
+// without the `clipboard` grant; null when it cannot be read.
+static JSValue js_clipboard_get(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int n = host_clipboard_get(g_read_buf, (int)sizeof g_read_buf);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "clipboardGet");
+    if (n < 0) return JS_NULL;
+    if ((size_t)n <= sizeof g_read_buf) return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+    char *big = js_malloc(ctx, (size_t)n);
+    if (!big) return JS_EXCEPTION;
+    int m = host_clipboard_get(big, n);
+    JSValue v = m < 0 ? JS_NULL : JS_NewStringLen(ctx, big, (size_t)(m < n ? m : n));
+    js_free(ctx, big);
+    return v;
+}
+
+// weft.jumpPush(): remember the caret as a jump in the head's jumplist.
+static JSValue js_jump_push(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    host_jump_push();
+    return JS_UNDEFINED;
+}
+
+// weft.macroRecording() -> string | null: the register a macro is recording
+// into, for a status chip.
+static JSValue js_macro_recording(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int r = host_macro_recording();
+    if (r <= 0) return JS_NULL;
+    char c = (char)r;
+    return JS_NewStringLen(ctx, &c, 1);
+}
+
 // weft.jump(offset): move the caret, clamped by the host.
 static JSValue js_jump(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
@@ -1178,6 +1241,10 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "path", JS_NewCFunction(g_ctx, js_path, "path", 0));
     JS_SetPropertyStr(g_ctx, weft, "jump", JS_NewCFunction(g_ctx, js_jump, "jump", 1));
     JS_SetPropertyStr(g_ctx, weft, "pointer", JS_NewCFunction(g_ctx, js_pointer, "pointer", 0));
+    JS_SetPropertyStr(g_ctx, weft, "clipboardSet", JS_NewCFunction(g_ctx, js_clipboard_set, "clipboardSet", 1));
+    JS_SetPropertyStr(g_ctx, weft, "clipboardGet", JS_NewCFunction(g_ctx, js_clipboard_get, "clipboardGet", 0));
+    JS_SetPropertyStr(g_ctx, weft, "jumpPush", JS_NewCFunction(g_ctx, js_jump_push, "jumpPush", 0));
+    JS_SetPropertyStr(g_ctx, weft, "macroRecording", JS_NewCFunction(g_ctx, js_macro_recording, "macroRecording", 0));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));

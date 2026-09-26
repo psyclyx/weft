@@ -99,8 +99,9 @@ fn p(x: anytype) u32 {
 
 pub const Range = struct { start: usize, end: usize };
 pub const Level = enum(u32) { debug = 0, info = 1, warn = 2, err = 3 };
-/// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer).
-pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5 };
+/// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer, env,
+/// clipboard). `clipboard` is config-only: declaring it grants nothing.
+pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5, clipboard = 6 };
 
 // ── Group A: core ────────────────────────────────────────────────────
 pub fn log(level: Level, msg: []const u8) void {
@@ -1902,6 +1903,55 @@ pub fn registerPasteValueIn(name: u8, index: usize, count: usize) []const u8 {
 /// `pasteAtIn` for the value selection `index` of `count` pasted at `base`.
 pub fn pasteValueAtIn(name: u8, base: usize, index: usize, count: usize) void {
     e.wl_paste_value_at(@intCast(base), @intCast(index), @intCast(count), name);
+}
+
+// ── System clipboard (grant: clipboard — CONFIG-ONLY) ─────────────────
+// The desktop clipboard of the head dispatching you. Declaring `.clipboard`
+// in `describe()` confers nothing; the user's config grants it
+// (`weft.grant("<plugin>", "clipboard")`), and without that grant both calls
+// TRAP. Which register mirrors the clipboard is the grammar's choice: ide
+// mirrors the unnamed register, vim keeps `"+`.
+
+var clip_buf: std.ArrayList(u8) = .empty;
+
+/// Take the clipboard with `bytes`. False when the host could not store them.
+pub fn clipboardSet(bytes: []const u8) bool {
+    return e.wl_clipboard_set(p(bytes.ptr), @intCast(bytes.len)) == 0;
+}
+/// The clipboard's text ("" when empty), or null when it could not be read.
+/// Borrowed until the next call.
+pub fn clipboardGet() ?[]const u8 {
+    // A real buffer from the first call: an empty slice's pointer is not an
+    // address the host may be asked to bounds-check.
+    if (clip_buf.items.len == 0) clip_buf.resize(allocator, 4096) catch return null;
+    var n = e.wl_clipboard_get(p(clip_buf.items.ptr), @intCast(clip_buf.items.len));
+    if (n < 0) return null;
+    if (@as(usize, @intCast(n)) > clip_buf.items.len) {
+        clip_buf.resize(allocator, @intCast(n)) catch return null;
+        n = e.wl_clipboard_get(p(clip_buf.items.ptr), @intCast(clip_buf.items.len));
+        if (n < 0) return null;
+    }
+    return clip_buf.items[0..@min(@as(usize, @intCast(n)), clip_buf.items.len)];
+}
+
+// ── History: the jumplist and macros ──────────────────────────────────
+// Core keeps a per-head jumplist and macro registers; the grammar decides what
+// is a jump and which keys record. Travel and replay are commands:
+// `run("jump-back")`, `runStr("jump-forward", "3")`, `run("jumplist-pick")`,
+// `runStr("macro-record-start", "a")`, `run("macro-record-stop")`,
+// `run("macro-record-toggle")` (register `@`), `runStr2("macro-play", "a",
+// "3")`, `run("macro-play")` (the last one played or recorded).
+
+/// Remember the caret as a jump (before a search, a goto, a big motion).
+/// Moving between entries is recorded by core already.
+pub fn jumpPush() void {
+    e.wl_jump_push();
+}
+/// The register a macro is recording into, or null — for a status chip, and
+/// for a `q` that stops a recording or starts one.
+pub fn macroRecording() ?u8 {
+    const r = e.wl_macro_recording();
+    return if (r == 0) null else @intCast(r);
 }
 
 // ── Generic semantic views ────────────────────────────────────────────

@@ -83,6 +83,12 @@ pub const Group = enum {
     activation,
     tool,
     register,
+    /// `wasm_host/clipboard.zig` — the dispatching head's system clipboard,
+    /// behind a config-only `clipboard` grant.
+    clipboard,
+    /// `wasm_host/history.zig` — the dispatching head's jumplist and macro
+    /// recorder: push a jump, ask whether a macro is recording.
+    history,
     semantic,
     proc,
     sessions,
@@ -108,7 +114,7 @@ pub const Group = enum {
 /// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
 /// gates alone — modeled honestly as the pair it always is, rather than
 /// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -365,6 +371,14 @@ pub const imports = [_]Entry{
     .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
     .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
 
+    // ── clipboard.zig — the dispatching head's system clipboard ───────────
+    .{ .name = "wl_clipboard_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .clipboard, .perm = .clipboard, .doc = "take the system clipboard with `<bytes>` (0 ok, -1 failed); the grant is config-only" },
+    .{ .name = "wl_clipboard_get", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .clipboard, .perm = .clipboard, .doc = "the system clipboard's text into guest memory (clamped); returns the full length" },
+
+    // ── history.zig — the dispatching head's jumplist and macro recorder ──
+    .{ .name = "wl_jump_push", .params = &.{}, .results = &.{}, .group = .history, .doc = "remember the caret as a jump in the head's jumplist (a grammar decides what a jump is)" },
+    .{ .name = "wl_macro_recording", .params = &.{}, .results = &.{.u32}, .group = .history, .doc = "the register a macro is recording into (its byte), or 0 when none is" },
+
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
     .{ .name = "wl_semantic_interaction_open", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "decode and open a bounded interaction definition on this head, writing its typed ref" },
@@ -575,9 +589,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 246;
+const max_import_count: usize = 250;
 const max_export_count: usize = 19;
-const max_semantic_operation_count: usize = 265;
+const max_semantic_operation_count: usize = 269;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -732,7 +746,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 246), census.imports);
+    try t.expectEqual(@as(usize, 250), census.imports);
     try t.expectEqual(@as(usize, 19), census.exports);
-    try t.expectEqual(@as(usize, 265), census.semantic_operations);
+    try t.expectEqual(@as(usize, 269), census.semantic_operations);
 }

@@ -105,6 +105,23 @@ pub const pointer_doors = struct {
     pub const hPointer = pointer.hPointer;
 };
 
+/// The clipboard and history doors, whose one body each both membranes run.
+/// Re-exported for the same function-pointer proof.
+const clipboard = @import("wasm_host/clipboard.zig");
+pub const clipboard_doors = struct {
+    pub const setBody = clipboard.setBody;
+    pub const getBody = clipboard.getBody;
+    pub const hClipboardSet = clipboard.hClipboardSet;
+    pub const hClipboardGet = clipboard.hClipboardGet;
+};
+const history = @import("wasm_host/history.zig");
+pub const history_doors = struct {
+    pub const jumpPushBody = history.jumpPushBody;
+    pub const macroRecordingBody = history.macroRecordingBody;
+    pub const hJumpPush = history.hJumpPush;
+    pub const hMacroRecording = history.hMacroRecording;
+};
+
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
 

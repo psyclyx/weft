@@ -55,6 +55,8 @@ const proc = @import("../wasm_host/proc.zig");
 const proj = @import("../wasm_host/projection.zig");
 const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
+const clipboard = @import("../wasm_host/clipboard.zig");
+const history = @import("../wasm_host/history.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
@@ -283,6 +285,14 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_yank_each", .handler = register.hYankEach },
     .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
     .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
+
+    // ── clipboard.zig — the head's system clipboard (config-only grant) ──
+    .{ .name = "wl_clipboard_set", .handler = clipboard.hClipboardSet },
+    .{ .name = "wl_clipboard_get", .handler = clipboard.hClipboardGet },
+
+    // ── history.zig — the head's jumplist and macro recorder ──────────
+    .{ .name = "wl_jump_push", .handler = history.hJumpPush },
+    .{ .name = "wl_macro_recording", .handler = history.hMacroRecording },
 
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },
@@ -596,6 +606,8 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
     .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
     .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
+    .{ .name = "wl_clipboard_set", .perm = .clipboard }, // clipboard.zig hClipboardSet: wasmDoor gate .clipboard
+    .{ .name = "wl_clipboard_get", .perm = .clipboard }, // clipboard.zig hClipboardGet: wasmDoor gate .clipboard
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {

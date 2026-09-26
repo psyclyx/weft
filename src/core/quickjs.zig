@@ -43,6 +43,8 @@ const proc_doors = @import("wasm_host/proc.zig");
 const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
 const pointer_doors = @import("wasm_host/pointer.zig");
+const clipboard_doors = @import("wasm_host/clipboard.zig");
+const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -255,6 +257,10 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_path", .handler = cPath },
     .{ .name = "qjs_jump", .handler = cJump },
     .{ .name = "qjs_pointer", .handler = cPointer },
+    .{ .name = "qjs_clipboard_set", .handler = cClipboardSet },
+    .{ .name = "qjs_clipboard_get", .handler = cClipboardGet },
+    .{ .name = "qjs_jump_push", .handler = cJumpPush },
+    .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -764,6 +770,13 @@ const cPath = jsDoor(edit_doors.pathBody, null);
 const cJump = jsDoor(edit_doors.jumpBody, null);
 /// Where the pointer gesture being dispatched is — `wl_pointer`'s body.
 pub const cPointer = jsDoor(pointer_doors.pointerBody, null);
+/// The system clipboard — `wl_clipboard_*`'s bodies, behind the same
+/// config-only grant (a denial answers `denied`, thrown in JS).
+pub const cClipboardSet = jsDoor(clipboard_doors.setBody, .clipboard);
+pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
+/// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
+pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
+pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";
