@@ -523,7 +523,7 @@ fn replaceOne() void {
 }
 
 /// Replace every match. Planned in full first, then applied last-first
-/// between two undo barriers, so the whole pass undoes as one step.
+/// as one undo unit, so the whole pass undoes as one step.
 fn replaceAll() void {
     if (!live()) return weft.echo("find: open the replace bar first (find-replace)");
     sync();
@@ -534,14 +534,7 @@ fn replaceAll() void {
     defer plan.deinit(gpa);
     if (plan.edits.len == 0) return weft.echo("find: no matches");
     remember();
-    weft.run("undo-barrier");
-    var i = plan.edits.len;
-    while (i > 0) {
-        i -= 1;
-        const e = plan.edits[i];
-        weft.edit(.{ .start = e.span.start, .end = e.span.end }, e.bytes);
-    }
-    weft.run("undo-barrier");
+    weft.undoUnit(applyLastFirst, .{plan.edits});
     // Flash what was written, as far as anyone can see it: the replacements
     // around the first one.
     const shown = search.window(plan.edits.len, 0, paint_window);
@@ -555,6 +548,16 @@ fn replaceAll() void {
     weft.echo(std.fmt.bufPrint(&buf, "find: replaced {d}", .{plan.edits.len}) catch "find: replaced");
     origin = first.start;
     seek();
+}
+
+/// Apply `edits` last-first, so an earlier one's offsets still hold.
+fn applyLastFirst(edits: []const search.Edit) void {
+    var i = edits.len;
+    while (i > 0) {
+        i -= 1;
+        const e = edits[i];
+        weft.edit(.{ .start = e.span.start, .end = e.span.end }, e.bytes);
+    }
 }
 
 var sel_buf: [weft.max_selections]weft.Selection = undefined;

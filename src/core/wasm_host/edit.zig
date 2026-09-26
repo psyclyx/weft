@@ -652,6 +652,20 @@ pub fn hRunRangeArgEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
     }
 }
 
+/// `undo_unit(open) -> 0 | -1`: open (1) or close (0) an undo unit on the
+/// entry this call is about — everything the user's history ingests in
+/// between is ONE unit, whatever barriers fire. Units nest, and the outermost
+/// owns the unit: an operator that brackets itself inside a guest's count
+/// loop is part of the loop's unit. Scoped to the command dispatch that
+/// opened it (a unit left open closes as that dispatch returns). -1 outside
+/// a dispatch, on an entry with no text, or for a close with none open here.
+pub fn hUndoUnit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const done = if (args[0] != 0) p.openUndoUnit() else p.closeUndoUnit();
+    results[0] = if (done) 0 else -1;
+}
+
 /// The read/motion doors BOTH membranes bind, named once. `quickjs.zig` walks
 /// this to bind its own side, and `e2e/demolition_test.zig` walks it to prove
 /// by function pointer that the two planes run the same body — the same proof

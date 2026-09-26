@@ -598,6 +598,17 @@ pub fn runRangeArgEach(cmd: []const u8, handles: []const ?u32) void {
     e.wl_run_range_arg_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(n));
 }
 
+/// Call `f(args…)` as ONE undo unit of the entry this command is about:
+/// whatever it edits, across however many commands, one undo takes back. Units
+/// nest and the outermost owns the unit, so a count loop over operators that
+/// are each one unit (`runRangeArgEach`) is one unit too. The host closes the
+/// unit if `f` does not return (a unit never outlives the command dispatch).
+pub fn undoUnit(comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    _ = e.wl_undo_unit(1);
+    defer _ = e.wl_undo_unit(0);
+    return @call(.auto, f, args);
+}
+
 /// Anchor `[r.start, r.end)` in the active CRDT document and return an opaque
 /// live-range handle. The document advances its endpoints through local and
 /// merged edits; call `releaseRange` when retaining it across a callback.

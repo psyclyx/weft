@@ -118,6 +118,8 @@ const Phase = enum { describing, active };
 /// A live CRDT range the guest holds by opaque handle. The endpoints are
 /// document-owned anchors, not offsets paired with a version. `buffer` gives
 /// the handles their locus and rejects buffer-identity reuse after one closes.
+pub const UndoUnit = struct { at: Buffers.Ref, depth: usize };
+
 pub const RangeSlot = struct {
     buffer: Buffers.Ref,
     start: @import("../Document.zig").AnchorHandle,
@@ -284,6 +286,12 @@ result_buf: std.ArrayList(u8) = .empty,
 /// dispatch; a nested result can never overwrite its caller's result bytes.
 retired_result_bufs: std.ArrayList(std.ArrayList(u8)) = .empty,
 dispatch_depth: usize = 0,
+/// Undo units this guest opened with `wl_undo_unit(1)`, innermost last, each
+/// on the entry it was opened on and at the dispatch depth that opened it.
+/// A unit cannot outlive that dispatch: `closeUndoUnits` runs as the
+/// dispatch returns, so a guest that forgets to close one (or traps) never
+/// leaves an editor's barriers held shut.
+undo_units: std.ArrayList(UndoUnit) = .empty,
 
 // The three guest-handle tables. Monotonic issuance, never-recycled numbers
 // and fail-closed exhaustion are `handles.Handles`'s, stated once there
@@ -630,6 +638,45 @@ pub fn clearAllRanges(self: *WasmPlugin) void {
     self.ephemeral_range_handles.clearRetainingCapacity();
 }
 
+/// `wl_undo_unit(1)`: open an undo unit on this call's entry. Only a command
+/// dispatch may (the unit is scoped to it); false otherwise, or when the entry
+/// holds no text. Nests — `UndoLog.beginUnit` counts, and the outermost bracket
+/// owns the unit, so a count loop of operators, each bracketing itself, is one.
+pub fn openUndoUnit(self: *WasmPlugin) bool {
+    if (self.dispatch_depth == 0) return false;
+    const entry = self.activeCtx().entry() orelse return false;
+    const ed = entry.textEditor() orelse return false;
+    self.undo_units.append(self.gpa, .{ .at = entry.ref(), .depth = self.dispatch_depth }) catch return false;
+    ed.history.beginUnit();
+    return true;
+}
+
+/// `wl_undo_unit(0)`: close the innermost unit THIS dispatch opened; false
+/// when it opened none (a close cannot reach a caller's unit).
+pub fn closeUndoUnit(self: *WasmPlugin) bool {
+    const last = self.undo_units.getLastOrNull() orelse return false;
+    if (last.depth != self.dispatch_depth) return false;
+    self.endUndoUnit(self.undo_units.pop().?);
+    return true;
+}
+
+/// Close every unit opened at dispatch depth `depth` or deeper — what a
+/// returning dispatch does for whatever its guest left open (and teardown,
+/// with 0, for everything).
+pub fn closeUndoUnits(self: *WasmPlugin, depth: usize) void {
+    while (self.undo_units.getLastOrNull()) |u| {
+        if (u.depth < depth) return;
+        self.endUndoUnit(self.undo_units.pop().?);
+    }
+}
+
+/// End `u` on its entry's editor — if that entry is still open; a closed one
+/// took its history (and the unit) with it.
+fn endUndoUnit(self: *WasmPlugin, u: UndoUnit) void {
+    const b = self.ctx.buffers.resolve(u.at) orelse return;
+    (b.textEditor() orelse return).history.endUnit();
+}
+
 pub fn clearRetiredResultBuffers(self: *WasmPlugin) void {
     for (self.retired_result_bufs.items) |*buf| buf.deinit(self.gpa);
     self.retired_result_bufs.clearRetainingCapacity();
@@ -821,6 +868,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.query_caps.deinit(gpa);
     self.clearRetiredResultBuffers();
     self.retired_result_bufs.deinit(gpa);
+    self.closeUndoUnits(0);
+    self.undo_units.deinit(gpa);
     self.result_buf.deinit(gpa);
     self.pick_prompt.deinit(gpa);
     self.pick_category.deinit(gpa);

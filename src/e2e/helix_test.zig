@@ -409,6 +409,28 @@ test "e2e/helix: two selections on one line paste a line twice, and o opens two 
     try expectText(ed, "foo bar\nX\nX\nzzz\n");
 }
 
+test "e2e/helix: a counted edit is ONE undo unit — 3> and 3] space undo with one u" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "count.txt", "a\nb\n");
+
+    keys(ed, "3>");
+    const indented = try ed.textAlloc();
+    defer gpa.free(indented);
+    try t.expect(std.mem.startsWith(u8, indented, " ") or std.mem.startsWith(u8, indented, "\t"));
+    keys(ed, "u");
+    try expectText(ed, "a\nb\n");
+
+    keys(ed, "3]");
+    ed.press("space", " ");
+    try expectText(ed, "a\n\n\n\nb\n");
+    keys(ed, "u");
+    try expectText(ed, "a\nb\n");
+}
+
 test "e2e/helix: / ? n N search with smart case, wrap around, and extend in select mode" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

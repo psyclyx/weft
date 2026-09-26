@@ -16,6 +16,9 @@
 //!   - `ms-upcase-each`: motion-then-operator at every selection.
 //!   - `ms-yank` / `ms-paste`: one value per selection into the unnamed
 //!     register, and a paste at every head under core's distribution rule.
+//!   - `ms-unit-leak`: opens an undo unit (`undo_unit(1)`), edits, and never
+//!     closes it — the unit must still end with the dispatch.
+//!   - `ms-unit-close`: closes a unit it never opened; answers the door's -1.
 
 const weft = @import("weft");
 
@@ -29,6 +32,8 @@ const cmds = [_]Cmd{
     .{ .name = "ms-upcase-each", .handler = upcaseEach },
     .{ .name = "ms-yank", .handler = yank },
     .{ .name = "ms-paste", .handler = paste },
+    .{ .name = "ms-unit-leak", .handler = unitLeak },
+    .{ .name = "ms-unit-close", .handler = unitClose },
 };
 
 fn describe() callconv(.c) void {
@@ -107,6 +112,19 @@ fn paste() void {
         weft.edit(.{ .start = heads[i], .end = heads[i] }, v);
         weft.pasteValueAtIn(0, heads[i], i, n);
     }
+}
+
+// The raw door: the SDK's `undoUnit` always closes what it opens, and this
+// fixture exists to prove the host closes what a guest does not.
+extern "weft:abi/1" fn wl_undo_unit(open: u32) i32;
+
+fn unitLeak() void {
+    _ = wl_undo_unit(1);
+    weft.edit(.{ .start = 0, .end = 0 }, "X");
+}
+
+fn unitClose() void {
+    weft.setResultInt(wl_undo_unit(0));
 }
 
 comptime {

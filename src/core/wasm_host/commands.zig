@@ -376,6 +376,8 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // nested-from-background case is a sanctioned door, not a bug.
     p.in_dispatch = true;
     defer {
+        // An undo unit is scoped to the dispatch that opened it.
+        p.closeUndoUnits(p.dispatch_depth);
         p.dispatch_depth -= 1;
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;

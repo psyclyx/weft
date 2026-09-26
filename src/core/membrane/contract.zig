@@ -126,6 +126,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
     .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
     .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
+    .{ .name = "wl_undo_unit", .handler = edit.hUndoUnit },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .handler = pointer.hPointer },

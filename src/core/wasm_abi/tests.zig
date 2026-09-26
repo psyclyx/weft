@@ -4073,6 +4073,38 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     try t.expectEqual(primary_at, ed.cursorOffset());
 }
 
+test "wasm plugin: an undo unit a guest leaves open ends with its dispatch, and a close reaches only its own" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "abc");
+    ed.placeCursor(3);
+
+    // Nothing open in this dispatch: the close is refused, not taken from
+    // anyone else's bracket.
+    try t.expectEqual(command.Value{ .integer = -1 }, try command.run(&env.commands, &env.ctx, "ms-unit-close", &.{}));
+
+    // The guest opens a unit and returns without closing it. The unit ended
+    // with the dispatch, so barriers work again: the typing after a motion is
+    // its own undo unit, not folded into the guest's.
+    _ = try command.run(&env.commands, &env.ctx, "ms-unit-leak", &.{});
+    try expectDoc(gpa, ed, "Xabc");
+    try t.expectEqual(@as(u32, 0), ed.history.held);
+    ed.placeCursor(4);
+    try ed.insertText(gpa, "!");
+    try t.expect(try ed.undo(gpa, .user_driven));
+    try expectDoc(gpa, ed, "Xabc");
+}
+
 test "wasm plugin: multiple selections — a per-selection yank distributes across a matching paste" {
     const gpa = t.allocator;
     var env: Env = undefined;

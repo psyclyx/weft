@@ -89,6 +89,7 @@ pub extern "weft:abi/1" fn wl_selections_get(out_ptr: u32, cap: u32) u32;
 pub extern "weft:abi/1" fn wl_selections_set(ptr: u32, n: u32) i32;
 pub extern "weft:abi/1" fn wl_run_range_each(ptr: u32, len: u32, out_ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_run_range_arg_each(ptr: u32, len: u32, handles_ptr: u32, n: u32) void;
+pub extern "weft:abi/1" fn wl_undo_unit(open: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
 pub extern "weft:abi/1" fn wl_echo(ptr: u32, len: u32) void;

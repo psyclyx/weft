@@ -73,6 +73,11 @@ e2e must stay green with one selection.
   - `wl_run_range_arg_each` runs an operator once per range, in reverse offset order,
     inside `UndoLog.beginUnit`/`endUnit`, so barriers the operator raises cannot split
     the unit.
+  - `wl_undo_unit(open)` (SDK `weft.undoUnit(f, args)`) brackets anything a grammar does
+    as one unit. Units nest and the outermost owns the unit, so helix's `3>` (a count
+    loop over `run_range_arg_each`) and find's replace-all are one undo each. A unit is
+    scoped to the command dispatch that opened it: one a guest leaves open ends as that
+    dispatch returns.
 - Registers hold one value per selection (`wl_yank_each`). The distribution rule
   (`Register.pasteSpan`): when the register holds exactly as many values as there are
   selections, selection *i* pastes value *i*. Otherwise every selection pastes the joined

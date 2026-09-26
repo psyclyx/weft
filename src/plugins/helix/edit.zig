@@ -497,10 +497,15 @@ pub fn onLines(cmd: []const u8) void {
     const m = lineBlocks(&blocks);
     var handles: [max]?u32 = undefined;
     for (blocks[0..m], handles[0..m]) |b, *h| h.* = weft.anchorRange(b);
-    var k = state.takeCount();
-    while (k > 0) : (k -= 1) weft.runRangeArgEach(cmd, handles[0..m]);
+    // `3>` is one edit: the count loop is one undo unit, not three.
+    weft.undoUnit(repeatOnLines, .{ cmd, handles[0..m], state.takeCount() });
     sel.flashAll();
     noteEdit();
+}
+
+fn repeatOnLines(cmd: []const u8, handles: []const ?u32, count: u32) void {
+    var k = count;
+    while (k > 0) : (k -= 1) weft.runRangeArgEach(cmd, handles);
 }
 
 /// `J`: join each selection's lines into one — or, for a selection on one
@@ -619,8 +624,12 @@ pub fn addBlankLine(below: bool) void {
         const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
         p.* = .{ .start = at, .end = at };
     }
-    var k = state.takeCount();
-    while (k > 0) : (k -= 1) putEach(points[0..sel.n], .{ .literal = "\n" }, null);
+    weft.undoUnit(repeatBlankLine, .{ points[0..sel.n], state.takeCount() });
+}
+
+fn repeatBlankLine(points: []const weft.Range, count: u32) void {
+    var k = count;
+    while (k > 0) : (k -= 1) putEach(points, .{ .literal = "\n" }, null);
 }
 
 // ── Surround (the `surround` plugin, per selection) ─────────────────────

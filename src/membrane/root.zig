@@ -209,6 +209,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
     .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
     .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
+    .{ .name = "wl_undo_unit", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "open (1) or close (0) an undo unit on the addressed entry; nests (the outermost owns the unit), scoped to the dispatch that opened it; 0 on success" },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .params = &.{.u32}, .results = &.{.u32}, .group = .pointer, .doc = "write the pointer gesture being dispatched (kind, button, clicks, mods, offset and scene node under the pointer) as eight u32 words; 0 when there is none" },
@@ -594,9 +595,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 254;
+const max_import_count: usize = 255;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 274;
+const max_semantic_operation_count: usize = 275;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -751,7 +752,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 254), census.imports);
+    try t.expectEqual(@as(usize, 255), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 274), census.semantic_operations);
+    try t.expectEqual(@as(usize, 275), census.semantic_operations);
 }
