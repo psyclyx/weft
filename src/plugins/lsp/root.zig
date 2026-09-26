@@ -81,6 +81,7 @@ const base_cmds = [_]weft.CommandEntry{
     .{ .name = "symbols", .call = cmdSymbols, .summary = "pick a symbol in this file" },
     .{ .name = "next-diagnostic", .call = cmdNextDiag, .summary = "go to the next diagnostic" },
     .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .summary = "go to the previous diagnostic" },
+    .{ .name = "diagnostics", .call = cmdDiagnostics, .summary = "pick a diagnostic in this file" },
     .{ .name = "lsp-format", .call = cmdFormat, .summary = "format the buffer through the language server" },
     .{ .name = "rename", .call = cmdRename, .summary = "rename the symbol everywhere" },
     .{ .name = "signature-help", .call = cmdSignature, .summary = "show the call signature here" },
@@ -425,6 +426,33 @@ fn gotoDiag(fwd: bool) void {
         .legacy_unversioned => std.fmt.bufPrint(&buf, "{s} (unverified server position): {s}", .{ label, msg }) catch label,
     };
     weft.echo(line);
+}
+
+/// Pick among this document's diagnostics, in the order the server sent
+/// them; accepting one jumps there (`onPickAccept`, like a reference).
+fn cmdDiagnostics() void {
+    const s = lookupActive() orelse return weft.echo("lsp: no diagnostics");
+    if (s.diag.n == 0) return weft.echo("lsp: no diagnostics");
+    const snapshot = s.diag.snapshot orelse return staleDiagnostics(s);
+    if (!weft.docSnapshotIsCurrent(snapshot)) return staleDiagnostics(s);
+    resetPickTargets();
+    weft.pickBegin("diagnostic", pick_id_results);
+    var i: usize = 0;
+    while (i < s.diag.n) : (i += 1) {
+        const off = targetOffset(s.diag.targets[i]) orelse continue;
+        if (!addPickTarget(off)) break;
+        const label: []const u8 = switch (s.diag.sev[i]) {
+            1 => "error",
+            2 => "warning",
+            3 => "info",
+            else => "hint",
+        };
+        var buf: [512]u8 = undefined;
+        const msg = s.diag.message(i);
+        const text = std.fmt.bufPrint(&buf, "{s}: {s}", .{ label, msg[0..@min(msg.len, 400)] }) catch label;
+        weft.pickAdd(text, "");
+    }
+    weft.pickEnd();
 }
 
 fn staleDiagnostics(s: *Session) void {
