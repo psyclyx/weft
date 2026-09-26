@@ -36,7 +36,7 @@ weft.plugin("languages.js"); // parser packages + explicit query paths
   "comment", "indent", "whitespace", "numbers", "autopair", "consult", "git",
   "grep", "run", "make", "notes", "fmt", "buffers", "windows", "modes",
   "snippets", "direnv", "llm", "console", "repl", "net", "http", "which_key",
-  "files", "lsp", "debug", "marginalia",
+  "files", "lsp", "debug", "marginalia", "linenumbers",
 ].forEach((p) => weft.plugin(p));
 
 // Grants, exactly as config.js reasons about them: the file browser goes
@@ -61,6 +61,8 @@ weft.set("lsp", "zig", "zls");
 weft.set("which_key", "placement", "center");
 weft.set("which_key", "delay-ms", "350");
 weft.set("editor", "flash-ms", "150");
+weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
+weft.set("linenumbers", "style", "relative");
 weft.set("dashboard", "sections", [
   "start\tStart\t\t\t0",
   "files\tRecent files\tproject-recent\topen\t5",

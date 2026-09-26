@@ -62,6 +62,7 @@ weft.plugin("files");       // file browser — what the sidebar shows
 weft.plugin("lsp");         // language server client (F2, F12, S-F12, C-.)
 weft.plugin("debug");       // breakpoints (F9)
 weft.plugin("marginalia");  // pick-row annotations
+weft.plugin("linenumbers"); // a line-number gutter on text entries
 
 // The same breadth config.js writes down, for the same reasons: the browser
 // goes where you point it, and the two `.js` plugins hold exactly what these
@@ -86,6 +87,8 @@ weft.use("sidebar");
 weft.set("lsp", "zig", "zls");
 weft.set("which_key", "delay-ms", "400"); // few chords here; don't pop eagerly
 weft.set("editor", "flash-ms", "150");
+weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
+weft.set("linenumbers", "style", "absolute"); // the conventional gutter
 weft.set("palette", "arguments", "ask");
 // Which declared viewport C-b toggles — the fragment above calls it this.
 weft.set("ide", "sidebar", "sidebar");
