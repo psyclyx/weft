@@ -150,6 +150,91 @@ fn bpLines(arena: std.mem.Allocator, caps: *core.Caps, editor: ?*core.Editor) []
     return arena.dupe(u8, csv) catch "";
 }
 
+/// A `weft.set(ns, key, "<ms>")` value in milliseconds, or null when unset
+/// or not a number.
+fn configMs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) ?u64 {
+    const raw = (config orelse return null).get(ns, key) orelse return null;
+    const s = core.framed.first(raw) orelse return null;
+    return std.fmt.parseInt(u64, s, 10) catch null;
+}
+
+/// Whether a `weft.set(ns, key, "on")` switch is on.
+fn configOn(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) bool {
+    const raw = (config orelse return false).get(ns, key) orelse return false;
+    const s = core.framed.first(raw) orelse return false;
+    return std.mem.eql(u8, s, "on") or std.mem.eql(u8, s, "true");
+}
+
+/// The app's half of a plugin gutter round (`ui_mesh.GutterBatch`): WHO
+/// fires (the live dispatch context, so the provider answers for this head),
+/// with WHICH facts (the pane's entry, so a provider's predicate — "text
+/// entries only" — is evaluated host-side), about which lines. The view asks
+/// for a window; this fires `core.gutter`'s slot once and decodes every
+/// eligible provider's answer.
+const GutterRound = struct {
+    ctx: *core.command.Context,
+    facts: core.facts.Facts,
+    caret_line: usize,
+    line_count: usize,
+
+    fn fetch(raw: *anyopaque, gpa: std.mem.Allocator, first: usize, out: *view_mod.ui_mesh.GutterBatch) anyerror!void {
+        const self: *GutterRound = @ptrCast(@alignCast(raw));
+        const host = self.ctx.slot_host orelse return;
+        const cast = std.math.cast;
+        const request = try core.gutter.encodeAsk(gpa, .{
+            .first = cast(u32, first) orelse return,
+            .count = core.gutter.window,
+            .caret = cast(u32, self.caret_line) orelse return,
+            .lines = cast(u32, self.line_count) orelse return,
+        });
+        const id = (try host.fire(core.gutter.slot_name, self.facts, "", .{ .request = request, .ctx = self.ctx })) orelse return;
+        defer host.finish(id);
+        const session = host.session(id) orelse return;
+        for (session.all()) |result| try view_mod.ui_mesh.appendGutterAnswer(out, gpa, result.provider, result.payload);
+    }
+};
+
+/// Resolve one pane's gutter for this frame: the eligible providers (one
+/// Container scan) and, when a PLUGIN is among them, the round its cells
+/// come from. `buffer`'s tool and posture ride the facts, so a provider bound
+/// to text entries never answers for a git status or a file listing.
+pub fn gutterFrame(
+    arena: std.mem.Allocator,
+    fx: *const FrameCtx,
+    buffer: *core.Buffers.Buffer,
+    editor: ?*core.Editor,
+    file_name: []const u8,
+    diag_layer: ?*const core.layers.Layer,
+    bp_lines: []const u8,
+) !view_mod.ui_mesh.GutterFrame {
+    const facts: core.facts.Facts = .{
+        .mode = fx.head.currentMode(),
+        .path = file_name,
+        .tool = buffer.tool,
+        .posture = @tagName(buffer.posture(false)),
+    };
+    var gf: view_mod.ui_mesh.GutterFrame = .{
+        .bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, arena, facts),
+        .diag_layer = diag_layer,
+        .bp_lines = bp_lines,
+    };
+    if (editor) |ed| {
+        const rope = ed.text();
+        gf.line_count = rope.lineCount();
+        gf.caret_line = rope.offsetToPoint(@min(ed.cursorOffset(), rope.byteLen())).row;
+    }
+    for (gf.bindings) |b| {
+        if (b.provider != .schema_provider) continue;
+        const round = try arena.create(GutterRound);
+        round.* = .{ .ctx = fx.cmd_ctx, .facts = facts, .caret_line = gf.caret_line, .line_count = gf.line_count };
+        const batch = try arena.create(view_mod.ui_mesh.GutterBatch);
+        batch.* = .{ .ctx = round, .fetch = GutterRound.fetch };
+        gf.batch = batch;
+        break;
+    }
+    return gf;
+}
+
 /// What a TEXT entry reports on the status line. An entry that holds no text
 /// has nothing to save, realize, or diagnose.
 const DocStatus = struct {
@@ -464,29 +549,35 @@ pub const FrameBuilder = struct {
                 tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
             }
         }
-        // vim-goggles: a guest set a flash range; show it for the duration.
-        const flash_range: ?stemma.Range = fblk: {
-            const fs = core.wasm_host.flashState();
+        // vim-goggles: an operation flashed a set of ranges on a document;
+        // show them for the duration. The duration is re-read from the
+        // configuration as each new flash starts, so a reload applies to the
+        // next one; an undo's flash shows only where the configuration
+        // turned it on (`editor/flash-undo`).
+        var flash_buf: [64]stemma.Range = undefined;
+        const flash_ranges: []const stemma.Range = fblk: {
+            const fs = &fx.caps.flash;
             if (fs.gen != fx.flash_gen.*) {
                 fx.flash_gen.* = fs.gen;
                 fx.flash_start_ns.* = act.frame_start;
+                if (configMs(fx.config, "editor", "flash-ms")) |ms| fx.flash_duration_ns.* = ms * std.time.ns_per_ms;
             }
-            const active = fs.gen > 0 and (act.frame_start -| fx.flash_start_ns.*) < fx.flash_duration_ns;
+            const shown = fs.source != .undo or configOn(fx.config, "editor", "flash-undo");
+            const active = fs.gen > 0 and shown and (act.frame_start -| fx.flash_start_ns.*) < fx.flash_duration_ns.*;
             if (active or fx.flash_was_active.*) fx.view_dirty.* = true; // draw it, then clear it
             fx.flash_was_active.* = active;
-            if (!active) break :fblk null;
-            const len = (editor orelse break :fblk null).text().byteLen();
-            break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
+            if (!active) break :fblk &.{};
+            const ed = editor orelse break :fblk &.{};
+            break :fblk fs.ranges(&fx.caps.layers, &ed.doc, &flash_buf);
         };
         // `ui/statusline-seg` (doc/contextual-workspace-architecture.md
         // §11): fire the mesh with this frame's
         // mode/file/position/diagnostics/link — the same values the
         // pre-mesh direct assembly used — and hand the composed segments
         // to the Hud. `ui/gutter-segment` resolves its eligible provider
-        // list once too (empty by default: `Session.init` never binds the
-        // default gutter providers, so this is one cheap linear scan over
-        // a handful of bindings that always comes back empty in production
-        // today — see `ui_mesh.zig`'s module doc).
+        // list once too (`gutterFrame`): empty unless a plugin bound it for
+        // an entry like this one, whose cells then arrive through one slot
+        // round per visible window, never one per row.
         var statusline_args: view_mod.ui_mesh.StatuslineArgs = .{
             .facts = .{ .mode = fx.head.currentMode(), .path = file_name },
             .file = file_name,
@@ -496,12 +587,7 @@ pub const FrameBuilder = struct {
             .theme = &self.view.theme,
         };
         const statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, mesh_gpa, &statusline_args);
-        const gutter_bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, mesh_gpa, statusline_args.facts);
-        const gutter_frame: view_mod.ui_mesh.GutterFrame = .{
-            .bindings = gutter_bindings,
-            .diag_layer = diag_layer,
-            .bp_lines = bpLines(mesh_gpa, fx.caps, editor),
-        };
+        const gutter_frame = try gutterFrame(mesh_gpa, fx, abuf, editor, file_name, diag_layer, bpLines(mesh_gpa, fx.caps, editor));
 
         const hud: view_mod.Hud = .{
             .mode = fx.head.currentMode(),
@@ -509,7 +595,7 @@ pub const FrameBuilder = struct {
             .surfaces = surface_buf[0..surface_n],
             .semantic_view = semanticDocument(fx),
             .semantic_overlay = semanticOverlay(fx),
-            .flash = flash_range,
+            .flash = flash_ranges,
             // Rendering P2: hover is a LIVE producer now — the `lsp` guest
             // plugin emits its own `.caret` surface (`wl_surface_caret`)
             // straight into `hud.surfaces` above (via `fx.plugins`), same as
@@ -615,11 +701,7 @@ pub const FrameBuilder = struct {
                 .theme = &self.view.theme,
             };
             const other_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena_state.allocator(), &other_args);
-            const other_gutter: view_mod.ui_mesh.GutterFrame = .{
-                .bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, arena_state.allocator(), other_args.facts),
-                .diag_layer = other_diag,
-                .bp_lines = bpLines(arena_state.allocator(), fx.caps, oed),
-            };
+            const other_gutter = try gutterFrame(arena_state.allocator(), fx, ob, oed, other_name, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),
                 .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
@@ -651,6 +733,15 @@ pub const FrameBuilder = struct {
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
         try self.built_panes.append(gpa, b);
         focused.pane().top_row = self.view.top_row; // scrollToCursor may have moved it
+        // What the focused pane SHOWS, for a guest acting on the visible
+        // range (`wl_view_range`) — only the layout knows it, after
+        // scrolling and folds.
+        const shown = self.view.frame_layout.lines;
+        fx.head.view_range = if (editor != null and shown.len > 0) .{
+            .entry = act.abuf.ref(),
+            .start = shown[0].src.start,
+            .end = shown[shown.len - 1].src.end,
+        } else null;
 
         // Signal that the retained draw list changed. No GPU work happens here.
         self.rebuilt = true;

@@ -407,7 +407,7 @@ pub fn build(
         for (ed.selections.items) |sel| {
             if (ed.rangeOf(sel)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
         }
-        if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
+        for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
         if (hud.cursor_on) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
             for (ed.selections.items, 0..) |sel, i| {

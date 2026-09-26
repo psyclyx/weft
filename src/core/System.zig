@@ -269,6 +269,10 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // core holding bytes it cannot interpret. Nothing else about annotation
     // is core's — no category, no note, no policy about who may write one.
     try pick.declareAnnotation(&self.container);
+    // The gutter exchange, for the same reason: the frame decodes the cells a
+    // plugin answers with. What a cell says (a line number, a mark) is the
+    // plugin's.
+    try @import("gutter.zig").declare(&self.container);
     // How a projection ROLE reads, as bindings rather than a switch — so a
     // theme restyles a diff, or styles a role core never heard of, the same
     // way anything else overrides anything else.

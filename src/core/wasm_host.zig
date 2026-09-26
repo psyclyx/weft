@@ -48,10 +48,6 @@ pub fn hostEnviron() @import("std").process.Environ {
 }
 pub const resolvePeerWp = plugin.resolvePeerWp;
 
-const layers = @import("wasm_host/layers.zig");
-pub const Flash = layers.Flash;
-pub const flashState = layers.flashState;
-
 const fs = @import("wasm_host/fs.zig");
 pub const PeerFsBridge = fs.PeerFsBridge;
 pub const setPeerFsBridge = fs.setPeerFsBridge;

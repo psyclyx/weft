@@ -53,6 +53,7 @@ pub extern "weft:abi/1" fn wl_edit_as(agent: u32, agent_len: u32, start: u32, en
 pub extern "weft:abi/1" fn wl_register(ptr: u32, len: u32) u32;
 pub extern "weft:abi/1" fn wl_jump(offset: u32) void;
 pub extern "weft:abi/1" fn wl_flash(start: u32, end: u32) void;
+pub extern "weft:abi/1" fn wl_flash_add(start: u32, end: u32) void;
 pub extern "weft:abi/1" fn wl_fold_clear() void;
 pub extern "weft:abi/1" fn wl_fold(start: u32, end: u32) void;
 pub extern "weft:abi/1" fn wl_decorate_clear() void;
@@ -75,6 +76,7 @@ pub extern "weft:abi/1" fn wl_anchor_range(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_set_result_range(handle: u32) void;
 pub extern "weft:abi/1" fn wl_run_range(ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_range_ends(handle: u32, out_ptr: u32) i32;
+pub extern "weft:abi/1" fn wl_view_range(out_ptr: u32) i32;
 pub extern "weft:abi/1" fn wl_range_retain(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_range_release(handle: u32) void;
 pub extern "weft:abi/1" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;

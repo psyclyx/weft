@@ -46,9 +46,11 @@ pub const Feed = enum { builtin, annotation };
 /// insert display-only text at the offset (never in the document, so no
 /// commit, no sync — pure local overlay), `eol` floats it at the line end
 /// (inlay hints, blame), `gutter` shows it in the margin (breakpoints,
-/// diagnostics severity, fold arrows). One anchored-annotation type covers
-/// all of them — the density split is spans-vs-bulk, not a third store.
-pub const Placement = enum(u8) { range, virtual_before, virtual_after, eol, gutter };
+/// diagnostics severity, fold arrows), `overlay` draws it OVER the cells
+/// starting at `start` (jump labels) without moving any text. One
+/// anchored-annotation type covers all of them — the density split is
+/// spans-vs-bulk, not a third store.
+pub const Placement = enum(u8) { range, virtual_before, virtual_after, eol, gutter, overlay };
 
 /// Presentation attributes orthogonal to the `kind` a span carries: does
 /// the range fold, is it hidden (folded/concealed), does it respond to a

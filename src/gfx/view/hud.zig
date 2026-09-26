@@ -112,9 +112,10 @@ pub const Hud = struct {
     tabs: ?[]const Tab = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
-    /// vim-goggles: a byte range to flash this frame (e.g. a yanked region),
-    /// drawn as a transient highlight. Null when nothing is flashing.
-    flash: ?stemma.Range = null,
+    /// vim-goggles: the byte ranges to flash this frame (a yanked region, every
+    /// range one operation touched), drawn as a transient highlight. Empty
+    /// when nothing is flashing.
+    flash: []const stemma.Range = &.{},
     /// Rendering P2 (doc/rendering.md): LEGACY/test-only, like `pick` above
     /// — production hover is the `lsp` guest plugin's OWN `.caret` surface
     /// (through `wl_surface_caret`, landing in `surfaces` below via

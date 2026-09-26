@@ -372,6 +372,25 @@ pub fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     results[0] = 0;
 }
 
+/// `wl_view_range(out_ptr)` → 0, writing `[start,end)`: the byte range the
+/// head's focused pane showed of the addressed entry in its last built frame
+/// — what the user can SEE, after scrolling and folds. -1 when that pane
+/// showed another entry, or nothing yet. Clamped to the entry's current
+/// length (an edit may have landed since the frame).
+pub fn hViewRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    const shown = ctx.head.view_range orelse return;
+    const entry = ctx.buffer();
+    if (shown.entry.id != entry.id or shown.entry.generation != entry.generation) return;
+    const doc = ctx.document() orelse return;
+    const len = doc.text().byteLen();
+    const pair = [2]u32{ @intCast(@min(shown.start, len)), @intCast(@min(shown.end, len)) };
+    _ = caller.writeMemory(@intCast(args[0]), 8, std.mem.asBytes(&pair)) catch return;
+    results[0] = 0;
+}
+
 /// Explicitly release one anchored-range resource. Motion/operator handles are
 /// also cleared at the next dispatch; asynchronous interactions release them
 /// when their terminal callback runs.

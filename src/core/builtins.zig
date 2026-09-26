@@ -287,13 +287,28 @@ fn undid(result: @import("undo.zig").Error!bool) anyerror!Value {
 fn cUndo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return undid(ed.undo(ctx.gpa, ctx.undoGate()));
+    const before = ed.doc.commitCount();
+    const did = ed.undo(ctx.gpa, ctx.undoGate());
+    flashChanged(ctx, &ed.doc, before);
+    return undid(did);
 }
 
 fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return undid(ed.redo(ctx.gpa, ctx.undoGate()));
+    const before = ed.doc.commitCount();
+    const did = ed.redo(ctx.gpa, ctx.undoGate());
+    flashChanged(ctx, &ed.doc, before);
+    return undid(did);
+}
+
+/// Record what an undo/redo just put back as an `undo` flash. Only core sees
+/// that span — the grammar that pressed the key never learns which bytes
+/// came back — so core records it, and the frame shows it only where the
+/// configuration asks (`editor/flash-undo`).
+fn flashChanged(ctx: *Context, doc: *@import("Document.zig"), before: usize) void {
+    const span = @import("flash.zig").changedSince(doc, before) orelse return;
+    ctx.caps.flash.set(ctx.gpa, &ctx.caps.layers, doc, span, .undo) catch {};
 }
 
 /// The default `save` provider: write the buffer to its file backing. `save` is

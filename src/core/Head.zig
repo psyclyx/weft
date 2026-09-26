@@ -103,6 +103,16 @@ dot: DotRepeat = .empty,
 focused_pane: u32 = 0,
 focused_pane_gen: u32 = 0,
 
+/// The byte range this head's focused pane showed in its last built frame,
+/// and the entry it showed it for (`wl_view_range`). Written by the frame
+/// build — only the layout knows what is visible after scrolling and folds —
+/// and read by a guest that must act on what the user can SEE (a jump label,
+/// a visible-range search). Null before the first frame and while the pane
+/// holds no text. A reader checks `entry` against the entry it is asking
+/// about; offsets are clamped to that entry's length, since an edit can
+/// land between the frame and the read.
+view_range: ?ViewRange = null,
+
 /// The placement HINT the open in flight carries (§9.4), consumed by the
 /// next layout phase. Per-head for the same reason `focused_pane` is: two
 /// heads activating a row at once must not read each other's intent. It is
@@ -155,6 +165,13 @@ pub const CatalogClock = struct {
         self.signature = signature;
         self.revision += 1;
     }
+};
+
+/// See `Head.view_range`.
+pub const ViewRange = struct {
+    entry: Buffers.Ref,
+    start: usize,
+    end: usize,
 };
 
 pub const WorkingTarget = struct {

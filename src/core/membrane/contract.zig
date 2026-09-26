@@ -113,6 +113,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_set_result_range", .handler = edit.hSetResultRange },
     .{ .name = "wl_run_range", .handler = edit.hRunRange },
     .{ .name = "wl_range_ends", .handler = edit.hRangeEnds },
+    .{ .name = "wl_view_range", .handler = edit.hViewRange },
     .{ .name = "wl_range_retain", .handler = edit.hRangeRetain },
     .{ .name = "wl_range_release", .handler = edit.hRangeRelease },
     .{ .name = "wl_run_range_arg", .handler = edit.hRunRangeArg },
@@ -125,6 +126,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .handler = layers.hFlash },
+    .{ .name = "wl_flash_add", .handler = layers.hFlashAdd },
     .{ .name = "wl_fold_clear", .handler = layers.hFoldClear },
     .{ .name = "wl_fold", .handler = layers.hFold },
     .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },

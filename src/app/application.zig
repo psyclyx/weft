@@ -28,6 +28,9 @@ pub const Application = struct {
     flash_gen: u64 = 0,
     flash_start_ns: u64 = 0,
     flash_was_active: bool = false,
+    /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
+    /// whenever a new flash starts.
+    flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
 
     next_backing_poll_ns: u64 = 0,
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
@@ -68,6 +71,9 @@ pub const Application = struct {
         view: *view_mod.View,
         which_key_delay_ns: u64 = 200 * std.time.ns_per_ms,
         flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
+        /// The `weft.set` store the frame reads live (flash timing). The
+        /// harness passes its own; null means the system's.
+        config: ?*const core.kv.Store = null,
         blink_period_ns: u64 = 530 * std.time.ns_per_ms,
         before_async: Hook = .{},
         services: Hook = .{},
@@ -84,6 +90,7 @@ pub const Application = struct {
             .lifecycle = .{ .blink_period_ns = args.blink_period_ns },
             .before_async = args.before_async,
             .services = args.services,
+            .flash_duration_ns = args.flash_duration_ns,
         };
         self.driver = .{
             .ctx = .{
@@ -111,7 +118,9 @@ pub const Application = struct {
                 .flash_gen = &self.flash_gen,
                 .flash_start_ns = &self.flash_start_ns,
                 .flash_was_active = &self.flash_was_active,
-                .flash_duration_ns = args.flash_duration_ns,
+                .flash_duration_ns = &self.flash_duration_ns,
+                .config = args.config orelse &args.session.system.config_kv,
+                .cmd_ctx = &args.session.cmd_ctx,
             },
             .attach_deps = args.attach_deps,
             .window_ctx = args.window_ctx,

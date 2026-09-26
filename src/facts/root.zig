@@ -73,6 +73,12 @@ pub const Facts = struct {
     /// binds against what the row IS, so the producer never has to enumerate
     /// what its rows afford and never has to know the extension exists.
     role: []const u8 = "",
+    /// How the entry rests under input (`input.Posture`'s tag name: "text",
+    /// "structural", "field", "capture"), or "" when the caller does not say.
+    /// A string rather than the enum so this module keeps its `std`-only
+    /// dependency. It lets a provider say "text entries only" without
+    /// naming every tool that is not one.
+    posture: []const u8 = "",
     /// The focused pane handle (doc/cwa-prior-docs-audit.md §5: "`pane` is a fact on
     /// head scopes, `principal` is identity, never a scope axis"). Mirrors
     /// `Head.focused_pane` — 0 is not a sentinel here either (see that
@@ -150,6 +156,8 @@ pub const Predicate = union(enum) {
     tool: []const u8,
     /// The focused projection row.s role equals this string exactly.
     role: []const u8,
+    /// The entry's posture ("text", "structural", …) equals this string exactly.
+    posture: []const u8,
     /// Every child matches (a bare leaf is the same as `all` of one child;
     /// an empty slice is vacuously true — the "unconstrained" predicate).
     all: []const Predicate,
@@ -174,6 +182,7 @@ pub const Predicate = union(enum) {
             .lang => |l| std.mem.eql(u8, l, f.lang),
             .tool => |tl| std.mem.eql(u8, tl, f.tool),
             .role => |r| std.mem.eql(u8, r, f.role),
+            .posture => |r| std.mem.eql(u8, r, f.posture),
             .all => |kids| {
                 for (kids) |k| if (!k.matches(f)) return false;
                 return true;
@@ -271,6 +280,7 @@ fn sameAxisDisjoint(a: Predicate, b: Predicate) bool {
         .lang => |v| b == .lang and !std.mem.eql(u8, v, b.lang),
         .tool => |v| b == .tool and !std.mem.eql(u8, v, b.tool),
         .role => |v| b == .role and !std.mem.eql(u8, v, b.role),
+        .posture => |v| b == .posture and !std.mem.eql(u8, v, b.posture),
         .locus => |v| b == .locus and v != b.locus,
         else => false,
     };
@@ -309,6 +319,7 @@ pub const Tag = enum(u8) {
     tool = 9,
     locus = 10,
     role = 11,
+    posture = 12,
 };
 
 /// How deep a decoded predicate may nest. A guest supplies these bytes, and
@@ -365,7 +376,7 @@ fn encodeInto(out: *std.ArrayList(u8), gpa: std.mem.Allocator, pred: Predicate) 
             try out.append(gpa, @intFromEnum(Tag.locus));
             try out.append(gpa, @intFromEnum(l));
         },
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s, kind| {
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s, kind| {
             try out.append(gpa, @intFromEnum(@field(Tag, @tagName(kind))));
             try putUv(out, gpa, s.len);
             try out.appendSlice(gpa, s);
@@ -449,7 +460,7 @@ pub fn dupe(gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error!Pre
             return .{ .not = owned };
         },
         .locus => |l| return .{ .locus = l },
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s, kind| {
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s, kind| {
             return @unionInit(Predicate, @tagName(kind), try gpa.dupe(u8, s));
         },
     }
@@ -483,7 +494,7 @@ pub fn free(gpa: std.mem.Allocator, pred: Predicate) void {
             gpa.destroy(k);
         },
         .locus => {},
-        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role => |s| gpa.free(s),
+        inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s| gpa.free(s),
     }
 }
 
@@ -568,6 +579,20 @@ test "facts: role is a first-class axis, on the wire and in disjointness" {
     try t.expect(!disjoint(.{ .role = "git.file.staged" }, .{ .role = "git.file.staged" }));
     // Different axes are never provably disjoint — they can co-match.
     try t.expect(!disjoint(.{ .role = "git.file.staged" }, .{ .mode = "git" }));
+}
+
+test "facts: posture narrows by how an entry rests, on the wire and in disjointness" {
+    const gpa = t.allocator;
+    // "Text entries only" — the gutter's line numbers — without naming every
+    // tool that is not one.
+    const bytes = try encode(gpa, .{ .posture = "text" });
+    defer gpa.free(bytes);
+    const back = try decode(gpa, bytes);
+    defer free(gpa, back);
+    try t.expect(back.matches(.{ .posture = "text" }));
+    try t.expect(!back.matches(.{ .posture = "structural", .tool = "git" }));
+    try t.expect(!back.matches(.{})); // a caller that did not say is not text
+    try t.expect(disjoint(.{ .posture = "text" }, .{ .posture = "structural" }));
 }
 
 test "facts: a predicate survives the wire whole, combinators included" {
@@ -730,6 +755,7 @@ test "facts: merge carries EVERY field — the class, not one field" {
         .lang = "zig",
         .tool = "git",
         .role = "git.file.unstaged",
+        .posture = "text",
         .pane = 3,
     };
     inline for (@typeInfo(Facts).@"struct".fields) |f| {

@@ -648,7 +648,7 @@ pub fn main(init: std.process.Init) !void {
     var which_key_ctx: loop_sources.WhichKeyCtx = .{ .menu = &session.menu_overlay, .delay_ns = which_key_delay_ns };
     _ = try sched.addTimer(&which_key_ctx, loop_sources.whichKeyDue, "which_key_delay");
     _ = try sched.addTimer(&application.next_backing_poll_ns, loop_sources.backingPollDue, "backing_poll");
-    var flash_ctx: loop_sources.FlashCtx = .{ .flash_start_ns = &application.flash_start_ns, .flash_duration_ns = flash_duration_ns };
+    var flash_ctx: loop_sources.FlashCtx = .{ .flash = &session.system.caps.flash, .flash_start_ns = &application.flash_start_ns, .flash_duration_ns = &application.flash_duration_ns };
     _ = try sched.addTimer(&flash_ctx, loop_sources.flashDue, "flash_expiry");
     var reconnect_ctx: loop_sources.ReconnectCtx = .{
         .share_ctx = &collab_state.share_ctx,

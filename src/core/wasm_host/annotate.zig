@@ -99,6 +99,7 @@ pub fn hSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         2 => .virtual_after,
         3 => .eol,
         4 => .gutter,
+        5 => .overlay,
         else => return,
     };
     const len = layer.doc.text().byteLen();

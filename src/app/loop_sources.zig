@@ -98,15 +98,16 @@ pub fn backingPollDue(ctx: ?*anyopaque, now: u64) ?u64 {
 // forced a rebuild every frame regardless of damage). ──
 
 pub const FlashCtx = struct {
+    flash: *const core.flash.Flash,
     flash_start_ns: *const u64,
-    flash_duration_ns: u64,
+    /// Live: the frame re-reads `editor/flash-ms` into it per flash.
+    flash_duration_ns: *const u64,
 };
 
 pub fn flashDue(ctx: ?*anyopaque, now: u64) ?u64 {
     const self: *const FlashCtx = @ptrCast(@alignCast(ctx.?));
-    const fs = core.wasm_host.flashState();
-    if (fs.gen == 0) return null;
-    const due = self.flash_start_ns.* + self.flash_duration_ns;
+    if (self.flash.gen == 0) return null;
+    const due = self.flash_start_ns.* + self.flash_duration_ns.*;
     if (due <= now) return null; // already expired; the body clears it on this wake
     return due;
 }

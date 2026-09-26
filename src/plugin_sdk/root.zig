@@ -281,6 +281,27 @@ pub fn jump(offset: usize) void {
 pub fn flash(start: usize, end: usize) void {
     e.wl_flash(@intCast(start), @intCast(end));
 }
+/// Add `[start, end)` to the set the last `flash` started — one operation
+/// over several ranges (every selection, every changed line) fades as one.
+pub fn flashAdd(start: usize, end: usize) void {
+    e.wl_flash_add(@intCast(start), @intCast(end));
+}
+/// Flash every range in `ranges` as one set. Nothing flashes for an empty
+/// slice.
+pub fn flashRanges(ranges: []const Range) void {
+    if (ranges.len == 0) return;
+    flash(ranges[0].start, ranges[0].end);
+    for (ranges[1..]) |r| flashAdd(r.start, r.end);
+}
+/// The byte range of the active entry the user can SEE — what its pane
+/// showed in the last frame, after scrolling and folds — or null when the
+/// pane showed something else (or nothing yet). A visible-range search (a
+/// jump-label plugin) reads this instead of guessing a screenful.
+pub fn viewRange() ?Range {
+    var pair: [2]u32 = undefined;
+    if (e.wl_view_range(p(&pair)) < 0) return null;
+    return .{ .start = pair[0], .end = pair[1] };
+}
 
 // ── Styles (tool-buffer coloring): publish per-byte-range StyleClass spans over
 // the ACTIVE buffer, painted by the view through the theme (same door as
@@ -322,7 +343,7 @@ pub fn fold(start: usize, end: usize) void {
 }
 
 /// How a decoration is placed beside the text (never in the document).
-pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4, overlay = 5 };
 /// Reclaim + empty the decorations layer (republish the full set after).
 pub fn decorateClear() void {
     e.wl_decorate_clear();
@@ -380,7 +401,7 @@ pub const Annotations = struct {
     /// How an annotation span presents. `range` is a face over `[start, end)`;
     /// the rest are display-only decorations anchored at `start` (the same set
     /// `DecoPlacement` names for the active buffer).
-    pub const Placement = enum(u32) { range = 0, virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+    pub const Placement = enum(u32) { range = 0, virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4, overlay = 5 };
 
     /// Claim layer `name` on the entry with compact id `entry` (from
     /// `bufferId`). Null when the entry is unknown, holds no text, or `name`

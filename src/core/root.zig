@@ -71,6 +71,11 @@ pub const facts = @import("weft_facts");
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
+/// The gutter's plugin exchange: the `ui/gutter-segment` slot's name and schema.
+pub const gutter = @import("gutter.zig");
+/// The transient highlight over what an operation just touched: a set of
+/// ranges anchored on its document.
+pub const flash = @import("flash.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
 pub const intent = @import("intent.zig");

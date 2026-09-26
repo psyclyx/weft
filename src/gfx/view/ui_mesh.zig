@@ -46,6 +46,14 @@
 //! live app, because there is no existing gutter rendering to reproduce
 //! (nothing regresses by construction) — see the W3-1 report for why this
 //! is the honest, minimal-risk shape for a first slice.
+//!
+//! **Plugins bind the gutter too.** `ui/gutter-segment` is declared with a
+//! schema (`core.gutter`), so a guest binds it with `wl_slot_bind` like any
+//! slot. Its binding is a `.schema_provider`, and `gutterCellsForLine` reads
+//! its cell from a `GutterBatch`: one slot round answers a WINDOW of lines,
+//! fetched the first time a row outside the current window asks — one
+//! membrane crossing per frame, never one per row. The `linenumbers` plugin
+//! is the live provider.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -184,23 +192,41 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
 // ── ui/gutter-segment ──────────────────────────────────────────────
 
 /// Per-visible-ROW input a gutter provider reads. `row` is this line's byte
-/// range (`rope.lineRange(line)`); `diag_layer`/`bp_lines` are the SAME
-/// per-buffer values across every row this frame (resolved once by the
-/// caller, not re-fetched per line).
+/// range (`rope.lineRange(line)`); `diag_layer`/`bp_lines`/`caret_line`/
+/// `line_count` are the SAME per-buffer values across every row this frame
+/// (resolved once by the caller, not re-fetched per line). `line_count` is
+/// what a fixed-width column pads to; `caret_line` is what a column relative
+/// to the caret counts from.
 pub const GutterLineArgs = struct {
     line: usize,
     row: stemma.Range,
+    caret_line: usize = 0,
+    line_count: usize = 0,
     diag_layer: ?*const core.layers.Layer = null,
     /// `breakpoints.get(path)`'s "l1,l2,…" CSV, or "" for none.
     bp_lines: []const u8 = "",
     theme: *const Theme,
+    /// The PLUGIN providers' answers (`GutterFrame.batch`), fetched a window
+    /// at a time; null when the frame wired no fetch.
+    batch: ?*GutterBatch = null,
     /// Set by `gutterCellsForLine` itself before invoking providers.
     out: *std.ArrayList(Seg) = undefined,
 };
 
+/// Decimal digits in `n` (at least 1) — the width a numbered column pads to.
+pub fn digits(n: usize) usize {
+    var d: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) d += 1;
+    return d;
+}
+
 fn lineNumberProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const a: *GutterLineArgs = @ptrCast(@alignCast(raw));
-    const text = try std.fmt.allocPrint(gpa, "{d} ", .{a.line + 1});
+    // Padded to the widest number in the entry, so every row's text starts in
+    // the same column.
+    const width = digits(@max(a.line_count, a.line + 1));
+    const text = try std.fmt.allocPrint(gpa, "{d: >[1]} ", .{ a.line + 1, width });
     try a.out.append(gpa, .{ .text = text, .role = .muted });
     return true;
 }
@@ -247,7 +273,77 @@ pub const GutterFrame = struct {
     bindings: []const *const container.Binding,
     diag_layer: ?*const core.layers.Layer = null,
     bp_lines: []const u8 = "",
+    caret_line: usize = 0,
+    line_count: usize = 0,
+    /// Where a PLUGIN provider's cells come from (`GutterBatch`). Null means
+    /// only in-process providers answer — a `.schema_provider` binding is
+    /// then skipped, exactly as before plugins could bind the slot.
+    batch: ?*GutterBatch = null,
 };
+
+/// The plugin half of the gutter: one slot round (`core.gutter`) answers a
+/// WINDOW of lines, and every row inside it reads its cell from here — so a
+/// frame crosses the membrane once, not once per visible row.
+///
+/// The fetch is lazy and view-driven on purpose: the view scrolls to the
+/// caret and skips folded rows while it lays out, so only the layout knows
+/// which lines are visible. The first row outside the current window asks
+/// for the window starting at that row; a normal frame asks once.
+///
+/// HOW a plugin is reached (the slot host, the firing context, the facts)
+/// is the app's `fetch`; the view only sees cells.
+pub const GutterBatch = struct {
+    ctx: *anyopaque,
+    /// Replace `out.answers` with every eligible provider's cells for
+    /// `[first, first + core.gutter.window)`. Allocate from `gpa` — the
+    /// frame's scratch, which outlives every row that reads them.
+    fetch: *const fn (ctx: *anyopaque, gpa: Allocator, first: usize, out: *GutterBatch) anyerror!void,
+    first: usize = 0,
+    len: usize = 0,
+    answers: std.ArrayList(Answer) = .empty,
+
+    /// One provider's cells, by the binding owner the slot host names it by.
+    pub const Answer = struct {
+        owner: []const u8,
+        first: usize,
+        cells: []const Seg,
+    };
+
+    fn covers(self: *const GutterBatch, line: usize) bool {
+        return self.len > 0 and line >= self.first and line < self.first + self.len;
+    }
+
+    fn ensure(self: *GutterBatch, gpa: Allocator, line: usize) !void {
+        if (self.covers(line)) return;
+        self.answers.clearRetainingCapacity();
+        self.first = line;
+        self.len = core.gutter.window;
+        try self.fetch(self.ctx, gpa, line, self);
+    }
+
+    /// `owner`'s cell for `line`, or null when it said nothing there.
+    fn cell(self: *const GutterBatch, owner: []const u8, line: usize) ?Seg {
+        for (self.answers.items) |ans| {
+            if (!std.mem.eql(u8, ans.owner, owner)) continue;
+            if (line < ans.first or line - ans.first >= ans.cells.len) return null;
+            const c = ans.cells[line - ans.first];
+            return if (c.text.len == 0) null else c;
+        }
+        return null;
+    }
+};
+
+/// Decode one provider's `core.gutter` answer into `Seg`s owned by `gpa`, and
+/// append it to `out`. A malformed answer contributes nothing.
+pub fn appendGutterAnswer(out: *GutterBatch, gpa: Allocator, owner: []const u8, payload: []const u8) !void {
+    var tell = core.gutter.decodeTell(payload) orelse return;
+    var cells: std.ArrayList(Seg) = .empty;
+    while (tell.next()) |c| {
+        if (cells.items.len >= core.gutter.window) break;
+        try cells.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = core.surface.Role.fromInt(c.role) });
+    }
+    try out.answers.append(gpa, .{ .owner = try gpa.dupe(u8, owner), .first = tell.first, .cells = cells.items });
+}
 
 /// Resolve `ui/gutter-segment`'s eligible, priority-sorted provider list
 /// against `facts` — the ONE Container scan per frame; caller reuses the
@@ -272,6 +368,16 @@ pub fn gutterCellsForLine(bindings: []const *const container.Binding, gpa: Alloc
                 std.log.warn("ui_mesh: gutter provider '{s}' failed on line {d}: {s}", .{ b.owner, args.line, @errorName(err) });
                 continue;
             },
+            // A plugin: its cell comes from the window its round answered,
+            // in the same priority position its binding holds.
+            .schema_provider => |ref| {
+                const batch = args.batch orelse continue;
+                batch.ensure(gpa, args.line) catch |err| {
+                    std.log.warn("ui_mesh: gutter round failed on line {d}: {s}", .{ args.line, @errorName(err) });
+                    continue;
+                };
+                if (batch.cell(ref.owner, args.line)) |c| try out.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = c.role });
+            },
             else => {},
         }
     }
@@ -282,7 +388,8 @@ pub fn gutterCellsForLine(bindings: []const *const container.Binding, gpa: Alloc
 
 pub fn declareSlots(c: *container.Container) !void {
     try c.declareSlot(.{ .name = "ui/statusline-seg", .shape = .query, .composition = .ordered_union });
-    try c.declareSlot(.{ .name = "ui/gutter-segment", .shape = .query, .composition = .ordered_union });
+    // Declared WITH its schema (`core.gutter`), so a plugin can bind it too.
+    try core.gutter.declare(c);
 }
 
 /// The five default statusline segments, at `.core` tier (lowest). The TIER
@@ -599,6 +706,68 @@ test "ui_mesh: gutter — unbound is a zero-cost no-op; bound, line numbers + di
         try t.expectEqualStrings("3 ", cells[0].text);
         try t.expectEqualStrings("\u{25CF} ", cells[1].text);
     }
+}
+
+test "ui_mesh: a PLUGIN gutter provider answers one window per round, only where its predicate holds" {
+    const gpa = t.allocator;
+    var c = container.Container.init(gpa);
+    defer c.deinit();
+    try declareSlots(&c);
+    // What `wl_slot_bind` makes: a schema provider, narrowed to text entries.
+    try c.bind(.{
+        .slot = core.gutter.slot_name,
+        .provider = .{ .schema_provider = .{ .owner = "numbers", .seq = 0 } },
+        .predicate = .{ .posture = "text" },
+        .tier = .plugin,
+        .priority = 100,
+        .owner = "numbers",
+        .domain = .slot,
+    });
+
+    // A structural entry (a git status, a listing) never asks it.
+    const none = try gutterBindings(&c, gpa, .{ .posture = "structural", .tool = "git" });
+    defer gpa.free(none);
+    try t.expectEqual(@as(usize, 0), none.len);
+
+    const bindings = try gutterBindings(&c, gpa, .{ .posture = "text" });
+    defer gpa.free(bindings);
+    try t.expectEqual(@as(usize, 1), bindings.len);
+
+    // The round, as the app wires it — here answering "L<n>" for each line
+    // of the asked window through the real `core.gutter` encode/decode.
+    const Round = struct {
+        calls: usize = 0,
+        fn fetch(raw: *anyopaque, a: Allocator, first: usize, out: *GutterBatch) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            var cells: [core.gutter.window]core.gutter.Cell = undefined;
+            for (&cells, 0..) |*cell, i| cell.* = .{ .text = try std.fmt.allocPrint(a, "L{d}", .{first + i}), .role = 5 };
+            const payload = try core.gutter.encodeTell(a, @intCast(first), &cells);
+            try appendGutterAnswer(out, a, "numbers", payload);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var round: Round = .{};
+    var batch: GutterBatch = .{ .ctx = &round, .fetch = Round.fetch };
+    const theme: Theme = .{};
+
+    for ([_]usize{ 0, 7, 255 }) |line| {
+        var args: GutterLineArgs = .{ .line = line, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &batch };
+        const cells = try gutterCellsForLine(bindings, a, &args);
+        try t.expectEqual(@as(usize, 1), cells.len);
+        try t.expectEqualStrings(try std.fmt.allocPrint(a, "L{d}", .{line}), cells[0].text);
+        try t.expectEqual(core.surface.Role.muted, cells[0].role);
+    }
+    // Three rows, ONE membrane crossing: the window covered them all.
+    try t.expectEqual(@as(usize, 1), round.calls);
+
+    // A row past the window asks for the next one.
+    var args: GutterLineArgs = .{ .line = 300, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &batch };
+    const cells = try gutterCellsForLine(bindings, a, &args);
+    try t.expectEqualStrings("L300", cells[0].text);
+    try t.expectEqual(@as(usize, 2), round.calls);
 }
 
 test "ui_mesh: MESH REACHABILITY — weft.statusSegment reaches ui/statusline-seg through the REAL sealed-eval manifest path (task #19)" {

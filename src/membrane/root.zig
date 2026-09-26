@@ -190,6 +190,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_set_result_range", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "set the command result from an anchored live-range handle" },
     .{ .name = "wl_run_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a command by name and import its returned borrowed live range (await-a-motion)" },
     .{ .name = "wl_range_ends", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "resolve an anchored live-range handle to its current `[start,end)`" },
+    .{ .name = "wl_view_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "write the `[start,end)` byte range the focused pane showed of the addressed entry last frame; -1 if it showed another" },
     .{ .name = "wl_range_retain", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "retain a live-range handle across command dispatches; 0 on success" },
     .{ .name = "wl_range_release", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "release one anchored live-range handle (idempotent)" },
     .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing an anchored live range as its single borrowed argument" },
@@ -201,7 +202,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
-    .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw" },
+    .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: replace the flash set with `[start,end)` on the active document, for the frame loop to fade and the view to draw" },
+    .{ .name = "wl_flash_add", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "add `[start,end)` to the flash set the last `wl_flash` started (one operation, several ranges, one fade)" },
     .{ .name = "wl_fold_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's fold layer and empty it" },
     .{ .name = "wl_fold", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "hide `[start,end)` as an invisible/folded span" },
     .{ .name = "wl_decorate_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's decorations layer and empty it" },
@@ -561,9 +563,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 240;
+const max_import_count: usize = 242;
 const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 258;
+const max_semantic_operation_count: usize = 260;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -718,7 +720,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 240), census.imports);
+    try t.expectEqual(@as(usize, 242), census.imports);
     try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 258), census.semantic_operations);
+    try t.expectEqual(@as(usize, 260), census.semantic_operations);
 }
