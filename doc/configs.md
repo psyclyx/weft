@@ -46,6 +46,38 @@ Generalize the degenerate case:
 This is the largest item in the arc. It lands first, behind its own gate: vim and emacs
 e2e must stay green with one selection.
 
+**Landed.** What the build settled:
+
+- A selection is `{head, anchor?}` (`Editor.Selection`). The anchor is optional rather
+  than equal to the head, because the two states move differently: with no anchor, a
+  motion moves a caret; with one, it grows a selection. The old `cursor`/`mark` fields are
+  gone; they are `selections[primary]`.
+- The set is always sorted and disjoint (`Editor.normalize`): overlapping selections, and
+  carets that meet, merge. Core motions (`moveTo` and the cursor-* builtins) move only the
+  primary. A grammar that moves every selection computes the targets and calls
+  `setSelections`.
+- Typing, backspace, delete, newline and tab act at every selection through
+  `Context.editEach`: one gate check over every range, then one `replaceAll` commit, so
+  the edit is one undo unit.
+- The ABI:
+  - `wl_selections_get`/`wl_selections_set` exchange one u32 record,
+    `[primary, anchor0, head0, …]`, in document order. add, remove and collapse are
+    SDK compositions over that pair (`addSelection`, `removeSelection`,
+    `collapseSelections`), not doors.
+  - `wl_run_range_each` runs a motion once per selection, with that selection as the
+    primary.
+  - `wl_run_range_arg_each` runs an operator once per range, in reverse offset order,
+    inside `UndoLog.beginUnit`/`endUnit`, so barriers the operator raises cannot split
+    the unit.
+- Registers hold one value per selection (`wl_yank_each`). The distribution rule
+  (`Register.pasteSpan`): when the register holds exactly as many values as there are
+  selections, selection *i* pastes value *i*. Otherwise every selection pastes the joined
+  text: all the values, with a `\n` between two values when the first doesn't already
+  end in one. `wl_register_paste_value` and `wl_paste_value_at` answer that rule, so no
+  grammar re-derives it.
+- The view draws a wash for every selection and a caret for every head. Presence still
+  publishes only the primary.
+
 ### 0.2 Regex — plugin library
 
 Helix needs regex for `s S K A-K / * n N`. ide needs it for find and replace. Neither
