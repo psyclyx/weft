@@ -22,83 +22,142 @@
 //! it; paste then takes the clipboard when something else put different
 //! text there. Long moves (the ends of the buffer, a line
 //! by number, a definition) leave a jump behind for M-Left to return to.
+//!
+//! EVERY SELECTION. C-d, C-S-l and C-click make several; every key here then
+//! acts at each of them — moves map over the set, and the edits (transfer,
+//! Tab, C-S-k, C-Return) are one `put` library write per selection, one undo
+//! unit. M-Up/Down alone collapse to the primary first: two moved blocks
+//! could swap into each other.
 
 const std = @import("std");
 const weft = @import("weft");
+const put = @import("weft_put");
 
 const file_pick = 0;
 const path_pick = 1;
 const line_pick = 2;
 
-// ── Selection primitives (core's mark model) ─────────────────────────
+/// The put operator this grammar registers (`put.run`).
+const put_op = "ide-op-put";
 
-/// Start a selection at the cursor unless one is already open — the half
-/// every shift-move shares. An empty selection (mark on the cursor) reads as
-/// none, and re-marking it there is the same state.
-fn ensureMark() void {
-    if (weft.selection() == null) weft.run("set-mark");
+// ── The selection set ────────────────────────────────────────────────
+// Read once per command into a private copy (the SDK's read scratch is
+// reused by the next read), reshaped, and handed back whole: core
+// normalizes it — sorted, overlaps and meeting carets merged.
+
+const max = weft.max_selections;
+var sels: [max]weft.Selection = undefined;
+var sel_n: usize = 0;
+var sel_primary: usize = 0;
+
+fn load() bool {
+    const set = weft.selections();
+    sel_n = set.items.len;
+    if (sel_n == 0) return false;
+    @memcpy(sels[0..sel_n], set.items);
+    sel_primary = set.primary;
+    return true;
 }
 
-/// Drop the selection, if any — the half every plain move shares.
+fn store() void {
+    _ = weft.setSelections(sels[0..sel_n], sel_primary);
+}
+
+fn caret(at: usize) weft.Selection {
+    return .{ .anchor = at, .head = at };
+}
+
+/// Whether every selection is a bare caret.
+fn allCarets() bool {
+    for (sels[0..sel_n]) |s| if (s.anchor != s.head) return false;
+    return true;
+}
+
+/// Drop the selection, if any.
 fn collapse() void {
     weft.run("clear-selection");
 }
 
-/// Where running `motion` (a `motions` range command) would put the cursor:
-/// the end of its range that isn't the cursor, which carries the direction.
-/// The cursor itself when the motion has nowhere to go (or is not loaded).
-fn motionTarget(motion: []const u8) usize {
-    const cur = weft.cursor();
-    const h = weft.runRange(motion) orelse return cur;
-    const r = weft.rangeEnds(h) orelse return cur;
-    return if (r.end == cur) r.start else r.end;
-}
+// ── Moves: plain collapses, shifted extends, at every selection ──────
+
+const Target = enum { left, right, up, down, word_left, word_right, home, end, doc_start, doc_end };
 
 /// Smart home: the first non-blank of the line, or column 0 when already
 /// there — so a second press reaches the margin.
-fn homeTarget() usize {
-    const cur = weft.cursor();
-    const target = motionTarget("motion.first-non-blank");
-    return if (target == cur) weft.lineAt(cur).start else target;
+fn homeOf(head: usize) usize {
+    const l = weft.lineAt(head);
+    const t = weft.slice(l.start, l.end);
+    var i: usize = 0;
+    while (i < t.len and (t[i] == ' ' or t[i] == '\t')) i += 1;
+    return if (head == l.start + i) l.start else l.start + i;
 }
 
-/// A cursor move, as a plain key (collapse, then move) or a shifted one
-/// (extend from the mark). `to` computes the destination at press time.
-fn Move(comptime to: fn () usize) type {
+/// Where a `motions` range lands from `head`: the end that isn't `head`,
+/// which carries the direction; `head` itself when there is no range.
+fn motionEnd(head: usize, handle: ?u32) usize {
+    const r = weft.rangeEnds(handle orelse return head) orelse return head;
+    return if (r.end == head) r.start else r.end;
+}
+
+/// Move every selection's head to `t`: collapsed to a caret there (plain),
+/// or with its anchor kept (shifted — a caret's anchor is where it was). A
+/// plain Left/Right over a selection lands on its near edge instead of
+/// moving one further, the convention every desktop editor shares.
+fn moveAll(t: Target, extend: bool) void {
+    // One caret moving vertically stays core's: it owns the sticky visual
+    // column. Several step by byte column, each on its own line.
+    if ((t == .up or t == .down) and weft.selectionCount() == 1) {
+        if (!extend) collapse() else if (weft.selection() == null) weft.run("set-mark");
+        return weft.run(if (t == .up) "cursor-up" else "cursor-down");
+    }
+    if (!load()) return;
+    var words: [max]?u32 = undefined;
+    const hops: []?u32 = switch (t) {
+        .word_left => weft.runRangeEach("motion.word-back", &words),
+        .word_right => weft.runRangeEach("motion.word-fwd", &words),
+        else => words[0..0],
+    };
+    for (sels[0..sel_n], 0..) |*s, i| {
+        const r = s.range();
+        const edge = !extend and r.start != r.end;
+        const to: usize = switch (t) {
+            .left => if (edge) r.start else weft.step(s.head, .back, .char),
+            .right => if (edge) r.end else weft.step(s.head, .fwd, .char),
+            .up => weft.step(s.head, .back, .line),
+            .down => weft.step(s.head, .fwd, .line),
+            .word_left, .word_right => motionEnd(s.head, if (i < hops.len) hops[i] else null),
+            .home => homeOf(s.head),
+            .end => weft.lineAt(s.head).end,
+            .doc_start => 0,
+            .doc_end => weft.byteLen(),
+        };
+        s.* = if (extend) .{ .anchor = s.anchor, .head = to } else caret(to);
+    }
+    store();
+}
+
+/// A move as its two commands, plain and shifted.
+fn Move(comptime t: Target) type {
     return struct {
         fn plain() void {
-            collapse();
-            weft.jump(to());
+            moveAll(t, false);
         }
         fn extend() void {
-            ensureMark();
-            weft.jump(to());
+            moveAll(t, true);
         }
     };
 }
 
-fn wordNext() usize {
-    return motionTarget("motion.word-fwd");
-}
-fn wordPrev() usize {
-    return motionTarget("motion.word-back");
-}
-fn lineEnd() usize {
-    return weft.lineAt(weft.cursor()).end;
-}
-fn docStart() usize {
-    return 0;
-}
-fn docEnd() usize {
-    return weft.byteLen();
-}
-
-const word_right = Move(wordNext);
-const word_left = Move(wordPrev);
-const home = Move(homeTarget);
-const end_of_line = Move(lineEnd);
-const doc_start = Move(docStart);
-const doc_end = Move(docEnd);
+const left = Move(.left);
+const right = Move(.right);
+const up = Move(.up);
+const down = Move(.down);
+const word_right = Move(.word_right);
+const word_left = Move(.word_left);
+const home = Move(.home);
+const end_of_line = Move(.end);
+const doc_start = Move(.doc_start);
+const doc_end = Move(.doc_end);
 
 /// C-Home / C-End: a long move, so where it started is a jump to come back to.
 fn docStartJump() void {
@@ -116,48 +175,8 @@ fn gotoDefinition() void {
     weft.run("goto-definition");
 }
 
-/// Left/Right with a selection collapse to its near edge instead of moving
-/// one further — the convention every desktop editor shares.
-fn left() void {
-    if (weft.selection()) |s| {
-        collapse();
-        weft.jump(s.start);
-    } else weft.run("cursor-left");
-}
-fn right() void {
-    if (weft.selection()) |s| {
-        collapse();
-        weft.jump(s.end);
-    } else weft.run("cursor-right");
-}
-/// Vertical moves stay core's: it owns the sticky visual column.
-fn up() void {
-    collapse();
-    weft.run("cursor-up");
-}
-fn down() void {
-    collapse();
-    weft.run("cursor-down");
-}
-fn selectLeft() void {
-    ensureMark();
-    weft.run("cursor-left");
-}
-fn selectRight() void {
-    ensureMark();
-    weft.run("cursor-right");
-}
-fn selectUp() void {
-    ensureMark();
-    weft.run("cursor-up");
-}
-fn selectDown() void {
-    ensureMark();
-    weft.run("cursor-down");
-}
-
 fn selectAll() void {
-    weft.setSelection(.{ .start = 0, .end = weft.byteLen() });
+    _ = weft.setSelections(&.{.{ .anchor = 0, .head = weft.byteLen() }}, 0);
 }
 
 /// Escape: back to one caret, drop the selection, and leave a capture posture
@@ -342,35 +361,67 @@ fn addCaretAtPointer() void {
 
 // ── Line blocks ──────────────────────────────────────────────────────
 
-/// The whole lines the selection covers, or the cursor's line. A selection
-/// ending at column 0 does not claim the line it ends on.
-fn lineBlock() weft.Range {
-    const s = weft.selection() orelse {
-        const l = weft.lineAt(weft.cursor());
-        return .{ .start = l.start, .end = l.end };
-    };
-    const last = if (s.end > s.start and weft.lineAt(s.end).start == s.end) s.end - 1 else s.end;
-    return .{ .start = weft.lineAt(s.start).start, .end = weft.lineAt(last).end };
+/// The whole lines selection `s` covers, or its caret's line (end before the
+/// last line's break). A selection ending at column 0 does not claim the
+/// line it ends on.
+fn linesOf(s: weft.Selection) weft.Range {
+    const r = s.range();
+    const last = if (r.end > r.start and weft.lineAt(r.end).start == r.end) r.end - 1 else r.end;
+    return .{ .start = weft.lineAt(r.start).start, .end = weft.lineAt(last).end };
 }
 
-/// Run a range operator (`op.indent`, `op.dedent`) over the selected lines
-/// and keep them selected afterwards, so Tab can be pressed again.
-fn overSelectedLines(comptime op: []const u8) void {
-    const block = lineBlock();
-    const h = weft.anchorRange(block) orelse return;
-    weft.runRangeArg(op, h);
-    if (weft.rangeEnds(h)) |r| weft.setSelection(r);
-}
-
-/// Tab: indent the selected lines; with nothing selected, the floor's tab.
-fn indent() void {
-    if (weft.selection() == null) {
-        weft.run("insert-tab");
-        return;
+/// Every loaded selection's lines as blocks in document order. A block that
+/// shares or touches the one before is merged into it, so no line is edited
+/// twice and no two blocks' edits overlap.
+fn lineBlocks(out: []weft.Range) usize {
+    var m: usize = 0;
+    for (sels[0..sel_n]) |s| {
+        const b = linesOf(s);
+        if (m > 0 and b.start <= out[m - 1].end + 1) {
+            out[m - 1].end = @max(out[m - 1].end, b.end);
+        } else {
+            out[m] = b;
+            m += 1;
+        }
     }
+    return m;
+}
+
+/// The primary selection's lines — the one block M-Up/Down move.
+fn lineBlock() weft.Range {
+    const set = weft.selections();
+    if (set.items.len == 0) return .{ .start = 0, .end = 0 };
+    return linesOf(set.items[set.primary]);
+}
+
+/// Run a range operator (`op.indent`, `op.dedent`) over every selection's
+/// lines, as one undo unit. A selection is left over its lines, so Tab can
+/// be pressed again; a caret stays a caret.
+fn overSelectedLines(comptime op: []const u8) void {
+    if (!load()) return;
+    var blocks: [max]weft.Range = undefined;
+    const m = lineBlocks(&blocks);
+    var handles: [max]?u32 = undefined;
+    for (blocks[0..m], handles[0..m]) |b, *h| h.* = weft.anchorRange(b);
+    // Where each selection ends up, carried through the edit by anchors.
+    var keep: [max]?u32 = undefined;
+    for (sels[0..sel_n], keep[0..sel_n]) |s, *k| k.* = weft.anchorRange(if (s.anchor == s.head) s.range() else linesOf(s));
+    weft.runRangeArgEach(op, handles[0..m]);
+    for (sels[0..sel_n], keep[0..sel_n]) |*s, k| {
+        const r = weft.rangeEnds(k orelse continue) orelse continue;
+        s.* = if (s.anchor == s.head) caret(r.start) else .{ .anchor = r.start, .head = r.end };
+    }
+    store();
+}
+
+/// Tab: indent the selected lines; with only carets, the floor's tab (which
+/// types at every caret).
+fn indent() void {
+    if (!load()) return;
+    if (allCarets()) return weft.run("insert-tab");
     overSelectedLines("op.indent");
 }
-/// S-Tab: dedent the selected lines, or the cursor's line.
+/// S-Tab: dedent the selected lines, or each caret's line.
 fn dedent() void {
     overSelectedLines("op.dedent");
 }
@@ -381,9 +432,12 @@ var move_a: [1 << 15]u8 = undefined;
 var move_b: [1 << 15]u8 = undefined;
 var move_out: [(1 << 16) + 1]u8 = undefined;
 
-/// Swap the block with the line below (`down`) or above, as ONE edit, so
-/// the move is one undo unit. The cursor and selection travel with it.
+/// Swap the primary's block with the line below (`down`) or above, as ONE
+/// edit, so the move is one undo unit. The cursor and selection travel with
+/// it. The one key that does not map over the selections: two blocks moving
+/// at once could swap into each other, so the others collapse first.
 fn moveBlock(down_dir: bool) void {
+    if (weft.selectionCount() > 1) _ = weft.collapseSelections();
     const block = lineBlock();
     const len = weft.byteLen();
     const other = if (down_dir) blk: {
@@ -435,65 +489,94 @@ fn moveLineDown() void {
     moveBlock(true);
 }
 
-/// C-S-k: delete the block's lines, newline included, into no register.
+/// Keep `m` of the loaded selections (the rest merged away by an edit), the
+/// primary clamped into them.
+fn keepFirst(m: usize) void {
+    sel_n = m;
+    sel_primary = @min(sel_primary, m -| 1);
+}
+
+/// C-S-k: delete every selection's lines, line break included, into no
+/// register — one undo unit, a caret left where each block was.
 fn deleteLine() void {
-    const block = lineBlock();
+    if (!load()) return;
+    var spans: [max]weft.Range = undefined;
+    const m = lineBlocks(&spans);
     const len = weft.byteLen();
-    const span: weft.Range = if (block.end < len)
-        .{ .start = block.start, .end = block.end + 1 }
-    else if (block.start > 0)
-        .{ .start = block.start - 1, .end = block.end }
-    else
-        block;
-    collapse();
-    weft.edit(span, "");
-    weft.jump(@min(block.start, weft.byteLen()));
+    for (spans[0..m]) |*b| {
+        if (b.end < len) {
+            b.end += 1;
+        } else if (b.start > 0) b.start -= 1;
+    }
+    put.each(put_op, spans[0..m], .{ .literal = "" }, null);
+    keepFirst(m);
+    for (sels[0..m], 0..) |*s, i| s.* = caret((put.wrote(i) orelse spans[i]).start);
+    store();
 }
 
-var indent_buf: [256]u8 = undefined;
+var open_below = true;
 
-/// The cursor line's leading whitespace, copied (a new line inherits it).
-fn leadingIndent(l: weft.Range) []const u8 {
-    const t = weft.slice(l.start, l.end);
-    var i: usize = 0;
-    while (i < t.len and i < indent_buf.len - 1 and (t[i] == ' ' or t[i] == '\t')) i += 1;
-    @memcpy(indent_buf[0..i], t[0..i]);
-    return indent_buf[0..i];
+fn opening(_: usize, r: weft.Range) ?[]const u8 {
+    return put.lineOpening(r.start, open_below);
 }
 
-var open_buf: [indent_buf.len + 1]u8 = undefined;
-
-/// C-Return / C-S-Return: a fresh line below / above, at the same indent,
-/// wherever the cursor sat on this one.
+/// C-Return / C-S-Return: a fresh line below / above each selection's line,
+/// at that line's indent, wherever the caret sat on it — a caret on each.
+fn openLine(below: bool) void {
+    if (!load()) return;
+    var points: [max]weft.Range = undefined;
+    var m: usize = 0;
+    for (sels[0..sel_n]) |s| {
+        const l = weft.lineAt(s.head);
+        const at = if (below) l.end else l.start;
+        if (m > 0 and points[m - 1].start == at) continue;
+        points[m] = .{ .start = at, .end = at };
+        m += 1;
+    }
+    open_below = below;
+    put.each(put_op, points[0..m], .{ .derive = opening }, null);
+    keepFirst(m);
+    for (sels[0..m], 0..) |*s, i| {
+        const w = put.wrote(i) orelse continue;
+        // Below, the new line is all of what was written; above, it ends
+        // before the line break that follows it.
+        s.* = caret(if (below) w.end else w.end - 1);
+    }
+    store();
+}
 fn openBelow() void {
-    const l = weft.lineAt(weft.cursor());
-    const ind = leadingIndent(.{ .start = l.start, .end = l.end });
-    open_buf[0] = '\n';
-    @memcpy(open_buf[1..][0..ind.len], ind);
-    collapse();
-    weft.edit(.{ .start = l.end, .end = l.end }, open_buf[0 .. ind.len + 1]);
-    weft.jump(l.end + 1 + ind.len);
+    openLine(true);
 }
 fn openAbove() void {
-    const l = weft.lineAt(weft.cursor());
-    const ind = leadingIndent(.{ .start = l.start, .end = l.end });
-    @memcpy(open_buf[0..ind.len], ind);
-    open_buf[ind.len] = '\n';
-    collapse();
-    weft.edit(.{ .start = l.start, .end = l.start }, open_buf[0 .. ind.len + 1]);
-    weft.jump(l.start + ind.len);
+    openLine(false);
 }
 
 // ── Transfer: the text arm behind the std.transfer.* intentions ──────
 // The register is core's shared one (the same `dd`/`p` and emacs's kill ring
 // use), so a row cut in the sidebar and text copied here share one ferry.
-// With nothing selected, copy and cut take the whole line, linewise — the
-// convention that makes C-x C-v a line move.
+// It holds one value per selection (`yankEachIn`), and a paste hands them
+// back out by core's rule. With only carets, copy and cut take each caret's
+// whole line, linewise — the convention that makes C-x C-v a line move.
 
-/// The current line with its newline, for a linewise transfer.
-fn wholeLine() weft.Range {
-    const l = weft.lineAt(weft.cursor());
+/// The line `at` is on, with its line break, for a linewise transfer.
+fn wholeLine(at: usize) weft.Range {
+    const l = weft.lineAt(at);
     return .{ .start = l.start, .end = if (l.end < weft.byteLen()) l.end + 1 else l.end };
+}
+
+/// What copy and cut take from the loaded selections, into `out` in
+/// document order: each caret's whole line (a line two carets share, once)
+/// when there are only carets — `linewise` — else every selection's text.
+fn transferRanges(out: []weft.Range, linewise: *bool) usize {
+    linewise.* = allCarets();
+    var m: usize = 0;
+    for (sels[0..sel_n]) |s| {
+        const r = if (linewise.*) wholeLine(s.head) else s.range();
+        if (linewise.* and m > 0 and out[m - 1].start == r.start) continue;
+        out[m] = r;
+        m += 1;
+    }
+    return m;
 }
 
 /// Whether the unnamed register mirrors the system clipboard: the config
@@ -512,71 +595,67 @@ fn mirrorToClipboard() void {
 }
 
 fn copy() void {
-    if (weft.selection()) |s| {
-        weft.yankRange(s.start, s.end, false);
-        weft.flash(s.start, s.end);
-    } else {
-        const l = wholeLine();
-        weft.yankRange(l.start, l.end, true);
-        weft.flash(l.start, l.end);
-    }
+    if (!load()) return;
+    var ranges: [max]weft.Range = undefined;
+    var lines = false;
+    const m = transferRanges(&ranges, &lines);
+    weft.yankEachIn(0, ranges[0..m], lines);
+    weft.flashRanges(ranges[0..m]);
     mirrorToClipboard();
 }
 
+/// C-x: copy, then delete what was copied at every selection as one undo
+/// unit, a caret left where each one was.
 fn cut() void {
-    if (weft.selection()) |s| {
-        weft.yankRange(s.start, s.end, false);
-        mirrorToClipboard();
-        weft.edit(s, "");
-    } else {
-        const l = wholeLine();
-        weft.yankRange(l.start, l.end, true);
-        mirrorToClipboard();
-        weft.edit(l, "");
-    }
+    if (!load()) return;
+    var ranges: [max]weft.Range = undefined;
+    var lines = false;
+    const m = transferRanges(&ranges, &lines);
+    weft.yankEachIn(0, ranges[0..m], lines);
+    mirrorToClipboard();
+    put.each(put_op, ranges[0..m], .{ .literal = "" }, null);
+    keepFirst(m);
+    for (sels[0..m], 0..) |*s, i| s.* = caret((put.wrote(i) orelse ranges[i]).start);
+    store();
 }
 
-var paste_buf: [(1 << 16) + 1]u8 = undefined;
-
-/// C-v: replace the selection with the register, or insert it at the cursor.
-/// A linewise register lands above the cursor's line, whole.
+/// C-v, at every selection, as one undo unit: over each selection, or at
+/// each caret — a linewise register above the caret's line, whole, when
+/// every selection is a caret. The register hands out its values by core's
+/// rule: one each when the counts match, else all of them everywhere.
 ///
 /// When the clipboard holds something else — text another program copied —
-/// that is what the user means: it goes in at every selection, replacing
-/// each, as typing would. When it still holds what the register holds, the
+/// that is what the user means, and it goes in at every selection the same
+/// way, as typing would. When it still holds the register's text
+/// (`weft.clipboardPasteSource`, the rule helix and vim paste by too), the
 /// register pastes, which keeps a cut-and-paste a MOVE (its ferried ids)
 /// and a linewise yank linewise.
 fn paste() void {
+    if (!load()) return;
     if (mirrorsClipboard()) switch (weft.clipboardPasteSource()) {
-        .foreign => |clip| return weft.runStr("insert-text", clip),
+        .foreign => |clip| return pasteFrom(.{ .literal = clip }, false),
         .unavailable, .empty, .register => {},
     };
-    const txt = weft.registerText();
-    if (txt.len == 0) return;
-    if (weft.selection()) |s| {
-        weft.edit(s, txt);
-        weft.pasteAt(s.start);
-        weft.jump(s.start + txt.len);
-        return;
+    if (weft.registerTextIn(0).len == 0) return;
+    const lines = weft.registerLinewiseIn(0) and allCarets();
+    pasteFrom(.{ .register = .{ .slot = 0, .count = sel_n, .line = lines } }, lines);
+}
+
+/// Put `src` at every loaded selection — over it, or (`lines`) at the start
+/// of each caret's line — and leave a caret after what landed (a line paste:
+/// where it was, moved down with its line).
+fn pasteFrom(src: put.Source, lines: bool) void {
+    var spots: [max]weft.Range = undefined;
+    for (sels[0..sel_n], spots[0..sel_n]) |s, *spot| {
+        const at = weft.lineAt(s.head).start;
+        spot.* = if (lines) .{ .start = at, .end = at } else s.range();
     }
-    const cur = weft.cursor();
-    if (weft.registerLinewiseIn(0)) {
-        // A linewise register may or may not carry its closing newline.
-        const n = txt.len;
-        @memcpy(paste_buf[0..n], txt);
-        const body = if (txt[n - 1] == '\n') paste_buf[0..n] else blk: {
-            paste_buf[n] = '\n';
-            break :blk paste_buf[0 .. n + 1];
-        };
-        const at = weft.lineAt(cur).start;
-        weft.edit(.{ .start = at, .end = at }, body);
-        weft.pasteAt(at);
-        weft.jump(cur + body.len);
-        return;
+    put.each(put_op, spots[0..sel_n], src, null);
+    for (sels[0..sel_n], spots[0..sel_n], 0..) |*s, spot, i| {
+        const w = put.wrote(i) orelse continue;
+        s.* = caret(if (lines) w.end + (s.head - spot.start) else w.end);
     }
-    weft.edit(.{ .start = cur, .end = cur }, txt);
-    weft.pasteAt(cur);
-    weft.jump(cur + txt.len);
+    store();
 }
 
 // ── Opening and jumping (the pickers this grammar owns) ──────────────
@@ -599,20 +678,19 @@ fn gotoLine() void {
     weft.pickEnd();
 }
 
-/// Put the cursor at the start of 1-based line `n`, clamped to the last,
+/// Put one caret at the start of 1-based line `number`, clamped to the last,
 /// leaving a jump where it was.
-fn jumpToLine(n: usize) void {
+fn jumpToLine(number: usize) void {
     weft.jumpPush();
     var off: usize = 0;
     var line: usize = 1;
     const len = weft.byteLen();
-    while (line < n) : (line += 1) {
+    while (line < number) : (line += 1) {
         const l = weft.lineAt(off);
         if (l.end >= len) break;
         off = l.end + 1;
     }
-    collapse();
-    weft.jump(off);
+    _ = weft.setSelections(&.{caret(off)}, 0);
 }
 
 /// C-b: show or hide the docked viewport this config names (`weft.set("ide",
@@ -644,20 +722,20 @@ fn onPickAccept(pick_id: u32) void {
 
 // ── Command table (registration order == on_command id) ──
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ide-left", .call = left, .summary = "move left, or collapse the selection to its start" },
-    .{ .name = "ide-right", .call = right, .summary = "move right, or collapse the selection to its end" },
-    .{ .name = "ide-up", .call = up, .summary = "collapse the selection and move up" },
-    .{ .name = "ide-down", .call = down, .summary = "collapse the selection and move down" },
+    .{ .name = "ide-left", .call = left.plain, .summary = "move left, or collapse the selection to its start" },
+    .{ .name = "ide-right", .call = right.plain, .summary = "move right, or collapse the selection to its end" },
+    .{ .name = "ide-up", .call = up.plain, .summary = "collapse the selection and move up" },
+    .{ .name = "ide-down", .call = down.plain, .summary = "collapse the selection and move down" },
     .{ .name = "ide-word-left", .call = word_left.plain, .summary = "move to the previous word" },
     .{ .name = "ide-word-right", .call = word_right.plain, .summary = "move to the next word" },
     .{ .name = "ide-home", .call = home.plain, .summary = "move to the first non-blank, then to column 0" },
     .{ .name = "ide-end", .call = end_of_line.plain, .summary = "move to the end of the line" },
     .{ .name = "ide-doc-start", .call = docStartJump, .summary = "move to the start of the buffer (a jump)" },
     .{ .name = "ide-doc-end", .call = docEndJump, .summary = "move to the end of the buffer (a jump)" },
-    .{ .name = "ide-select-left", .call = selectLeft, .summary = "extend the selection left" },
-    .{ .name = "ide-select-right", .call = selectRight, .summary = "extend the selection right" },
-    .{ .name = "ide-select-up", .call = selectUp, .summary = "extend the selection up" },
-    .{ .name = "ide-select-down", .call = selectDown, .summary = "extend the selection down" },
+    .{ .name = "ide-select-left", .call = left.extend, .summary = "extend the selection left" },
+    .{ .name = "ide-select-right", .call = right.extend, .summary = "extend the selection right" },
+    .{ .name = "ide-select-up", .call = up.extend, .summary = "extend the selection up" },
+    .{ .name = "ide-select-down", .call = down.extend, .summary = "extend the selection down" },
     .{ .name = "ide-select-word-left", .call = word_left.extend, .summary = "extend the selection to the previous word" },
     .{ .name = "ide-select-word-right", .call = word_right.extend, .summary = "extend the selection to the next word" },
     .{ .name = "ide-select-home", .call = home.extend, .summary = "extend the selection to the smart line start" },
@@ -686,6 +764,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .summary = "select the line under the pointer" },
     .{ .name = "ide-add-caret-at-pointer", .call = addCaretAtPointer, .summary = "add a caret at the pointer" },
     .{ .name = "ide-goto-definition", .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
+    // The operator the transfer and line keys write through (`put.each`).
+    .{ .name = put_op, .call = put.run },
 };
 
 fn initExtra() void {

@@ -747,6 +747,98 @@ test "e2e/ide: C-S-l flashes every occurrence it selects, not only the last" {
     try t.expectEqual(@as(usize, 16), set[2].start);
 }
 
+test "e2e/ide: C-c, C-x and C-v act at every selection — the cut is one undo unit, the paste distributes" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "cx.txt", "foo foo\n");
+
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+
+    // C-x takes BOTH, and one C-z brings both back.
+    ed.press("C-x", "");
+    try expectText(ed, " \n");
+    ed.press("C-z", "");
+    try expectText(ed, "foo foo\n");
+
+    // Cut again, then paste: two carets, two values — each its own.
+    ed.press("Escape", "");
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    ed.press("C-x", "");
+    try expectText(ed, " \n");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    ed.press("C-v", "");
+    try expectText(ed, "foo foo\n");
+    ed.press("C-z", "");
+    try expectText(ed, " \n");
+    ed.press("C-v", "");
+    try expectText(ed, "foo foo\n");
+
+    // Text copied elsewhere goes in at every selection too.
+    try ed.head.clipboard.set(gpa, "Z");
+    ed.press("C-v", "");
+    try expectText(ed, "fooZ fooZ\n");
+}
+
+test "e2e/ide: moves and line edits act at every selection, and Escape collapses" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    //                          0     6   10
+    try openFile(ed, "mv.txt", "foo x\nbar\nfoo y\n");
+
+    // End moves every caret, so `;` lands at both ends.
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    ed.press("End", "");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    ed.typeText(";");
+    try expectText(ed, "foo x;\nbar\nfoo y;\n");
+
+    // Smart Home, then S-End: both lines selected.
+    ed.press("Home", "");
+    ed.press("S-End", "");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    try t.expectEqual(Span{ .start = 11, .end = 17 }, selected(ed).?);
+    // Tab indents both lines (not the one between), as one undo unit.
+    ed.press("Tab", "\t");
+    try expectText(ed, "  foo x;\nbar\n  foo y;\n");
+    ed.press("C-z", "");
+    try expectText(ed, "foo x;\nbar\nfoo y;\n");
+
+    // Escape is one caret again.
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 1), textEd(ed).selectionCount());
+
+    // C-S-k deletes every selection's line, as one undo unit.
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    ed.press("C-S-k", "");
+    try expectText(ed, "bar\n");
+    ed.press("C-z", "");
+    try expectText(ed, "foo x;\nbar\nfoo y;\n");
+
+    // C-Return opens a line below each, and typing lands in both.
+    ed.press("Escape", "");
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    ed.press("C-Return", "");
+    ed.typeText("z");
+    try expectText(ed, "foo x;\nz\nbar\nfoo y;\nz\n");
+}
+
 test "e2e/ide: a clipboard holding the register's line plus its line break pastes the register, linewise" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
