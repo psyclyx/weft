@@ -31,7 +31,7 @@
 //                                    what a command leaves active (a plugin's entry)
 //   weft.set(owner, key, value)    — a value binding; every key has an OWNER
 //   weft.menu(name)                — declare a prefix-menu keymap mode
-//   weft.statusSegment(text, role, prio) — a static status-line segment
+//   weft.statusSegment(text, role, prio[, cmd]) — a static status-line segment; a click runs cmd
 //   weft.run(command, ...args)     — invoke a command now, up to eight string args
 //   weft.echo(message) / weft.log(message)
 
@@ -85,6 +85,10 @@ weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the k
 weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
 weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
 weft.plugin("contextmenu"); // mouse-3: what the thing under the pointer offers
+weft.plugin("panel");       // panel-toggle: the bottom panel (config/panel.js) on and off
+weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
+weft.plugin("terminal");    // a LINE-MODE shell in the panel (SPC o t) — no terminal emulation
+weft.plugin("breadcrumbs"); // path › symbol › symbol for the caret, on the status line
 
 // ── BREADTH, written down ────────────────────────────────────────────
 // A plugin that asks for `fs_read`/`fs_write` in describe() and gets no
@@ -148,6 +152,10 @@ weft.use("defaults");
 // quarter of every frame, which is a workspace opinion the reference config
 // declines to hold for you.
 // weft.use("sidebar");
+
+// `panel` docks a bottom panel that starts hidden: the problems list and the
+// terminal each bring themselves into it (SPC o p, SPC o t), one at a time.
+weft.use("panel");
 
 // ── Values: weft.set(owner, key, value) ──────────────────────────────
 // Every value has an OWNER — the plugin (or core namespace) that reads it.
@@ -393,6 +401,9 @@ weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o C", "console-send");
 weft.bind("normal", "SPC o a", "llm-ask-line"); // one-shot: each ask is its own instance
 weft.bind("normal", "SPC o h", "http-get");     // fetch a URL into its own *http* buffer
+weft.bind("normal", "SPC o p", "problems");     // the diagnostics list, in the bottom panel
+weft.bind("normal", "SPC o t", "terminal");     // the shell, in the bottom panel
+weft.bind("normal", "SPC o P", "panel-toggle"); // hide or show whichever the panel holds
 
 // SPC a — coding agents (ACP). Each `agent-start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo

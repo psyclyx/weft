@@ -39,6 +39,10 @@ weft.plugin("languages.js"); // parser packages + explicit query paths
   "grep", "run", "make", "notes", "fmt", "buffers", "windows", "modes",
   "snippets", "direnv", "llm", "console", "repl", "net", "http", "which_key",
   "files", "lsp", "debug", "marginalia", "linenumbers",
+  // The bottom panel and what shows in it (config/panel.js), and the caret's
+  // symbol trail on the status line. No keys: the palette reaches
+  // `problems`, `terminal` and `panel-toggle`.
+  "panel", "problems", "terminal", "breadcrumbs",
 ].forEach((p) => weft.plugin(p));
 
 // Grants, exactly as config.js reasons about them: the file browser goes
@@ -59,6 +63,7 @@ weft.plugin("acp.js");
 // ── Fragments ────────────────────────────────────────────────────────
 weft.use("defaults"); // picker and which-key navigation keys
 weft.use("semantic"); // SPC v, bound into helix-structural (and vim's layer)
+weft.use("panel");    // a hidden bottom panel the problems list and terminal take
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");

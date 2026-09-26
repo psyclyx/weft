@@ -231,4 +231,18 @@ weft.bind("ide", "parenright", "pair-close-paren");
 weft.bind("ide", "braceright", "pair-close-brace");
 weft.bind("ide", "bracketright", "pair-close-bracket");
 
+// ── Panels ───────────────────────────────────────────────────────────
+// The bottom panel (config/panel.js) shows one of two plugins' entries at a
+// time: the problems list or the terminal. Each brings its own entry in with
+// core's `viewport-take`; C-j shows and hides whichever it holds. The
+// breadcrumbs are status-line segments, so they need no viewport at all.
+weft.use("panel");
+weft.plugin("panel");        // panel-toggle: show or hide the panel
+weft.plugin("problems");     // every diagnostic, grouped by file; Return jumps
+weft.plugin("terminal");     // a LINE-MODE shell (no terminal emulation)
+weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
+bindWorkspace("C-j", "panel-toggle");
+bindWorkspace("C-grave", "terminal");
+bindWorkspace("C-S-m", "problems");
+
 weft.echo("weft: ide.js loaded");
