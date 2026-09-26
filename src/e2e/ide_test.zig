@@ -723,6 +723,30 @@ test "e2e/ide: long moves leave a jump — M-Left comes back from C-End and from
     try t.expectEqual(@as(usize, 0), cursor(ed));
 }
 
+/// The flash set on the active entry right now.
+fn flashed(ed: *Editor, out: []core.flash.Range) []core.flash.Range {
+    return ed.caps.flash.ranges(&ed.caps.layers, &textEd(ed).doc, out);
+}
+
+test "e2e/ide: C-S-l flashes every occurrence it selects, not only the last" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "fl.txt", "foo bar foo baz foo\n");
+
+    ed.press("C-Home", "");
+    ed.press("C-S-l", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+    var out: [8]core.flash.Range = undefined;
+    const set = flashed(ed, &out);
+    try t.expectEqual(@as(usize, 3), set.len);
+    try t.expectEqual(@as(usize, 0), set[0].start);
+    try t.expectEqual(@as(usize, 8), set[1].start);
+    try t.expectEqual(@as(usize, 16), set[2].start);
+}
+
 test "e2e/ide: a clipboard holding the register's line plus its line break pastes the register, linewise" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

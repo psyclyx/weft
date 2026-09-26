@@ -271,6 +271,7 @@ fn addNextMatch() void {
 }
 
 var all_items: [weft.max_selections]weft.Selection = undefined;
+var all_ranges: [weft.max_selections]weft.Range = undefined;
 
 /// C-S-l: select every occurrence of the primary selection's text (or of the
 /// word under the caret), keeping the one the caret was on primary.
@@ -301,7 +302,9 @@ fn selectAllMatches() void {
     }
     if (count == 0) return;
     _ = weft.setSelections(all_items[0..count], primary);
-    for (all_items[0..count]) |s| weft.flash(s.anchor, s.head);
+    // ONE flash over the set: each `flash` call starts a new one.
+    for (all_items[0..count], all_ranges[0..count]) |s, *r| r.* = s.range();
+    weft.flashRanges(all_ranges[0..count]);
 }
 
 // ── The pointer ──────────────────────────────────────────────────────
