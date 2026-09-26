@@ -147,6 +147,16 @@ pub fn deinit(self: *View) void {
     self.* = undefined;
 }
 
+/// Change the text scale and every metric derived from it together. The next
+/// frame rebuilds the geometry map used for drawing and hit testing.
+pub fn setEm(self: *View, em: f32) void {
+    const scale = em / self.em;
+    self.em = em;
+    self.cell_w *= scale;
+    self.line_h *= scale;
+    self.ascent *= scale;
+}
+
 /// Rows that fit in a rect of pixel height `h` (its usable body height).
 pub fn rowsIn(self: *const View, h: f32) usize {
     return @intFromFloat(@max(1, @floor((h - 2 * margin) / self.line_h)));

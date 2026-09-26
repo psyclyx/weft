@@ -151,6 +151,7 @@ weft.set("lsp", "zig", "zls");            // a server per language: weft.set("ls
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
+weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust, C-0 resets
 weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
 // The palette's argument behaviour. A command with parameters can be run two
 // ways: type them next to the name (`listen 7777 edit` — the palette accepts

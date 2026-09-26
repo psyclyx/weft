@@ -109,6 +109,7 @@ weft.set("lsp", "zig", "zls");
 weft.set("which_key", "delay-ms", "200");     // was: weft.set("editor", "which-key-delay-ms", …)
 weft.set("which_key", "placement", "corner");
 weft.set("editor", "flash-ms", "150");
+weft.set("editor", "font-size", "16");
 weft.set("collab", "share-presence", "on");
 // The palette's argument behaviour — a value owned by the plugin that reads
 // it, like every other. Typed arguments (`listen 7777 edit`) and asked-for

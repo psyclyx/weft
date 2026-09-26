@@ -27,6 +27,7 @@ const handler = @import("weft_app").handler;
 const ok_echo = handler.ok_echo;
 const setEcho = handler.setEcho;
 const scroll = @import("weft_app").scroll;
+const font_size = @import("app/font_size.zig");
 const window_cmds = @import("weft_app").window_cmds;
 const cursor_config = @import("weft_app").cursor_config;
 const config_load = @import("weft_app").config_load;
@@ -437,8 +438,17 @@ pub fn main(init: std.process.Init) !void {
     //    deliberately does NOT extract (the frame loop stays here).
     const font_bytes: []const u8 = if (args.font) |p| try core.file.readAlloc(gpa, p) else embedded_font;
     defer if (args.font != null) gpa.free(@constCast(font_bytes));
+    const configured_em = blk: {
+        if (session.system.config_kv.get("editor", "font-size")) |raw| {
+            if (core.framed.first(raw)) |s| {
+                if (font_size.parse(s)) |size| break :blk size;
+            }
+            std.log.warn("editor.font-size must be between 8 and 72; using --em", .{});
+        }
+        break :blk if (std.math.isFinite(args.em) and args.em >= font_size.min_size and args.em <= font_size.max_size) args.em else 15;
+    };
     var whead: window_head.WindowHead = undefined;
-    try whead.init(gpa, &session.cmd_ctx, 1280, 800, font_bytes, args.em, buffers.active_id);
+    try whead.init(gpa, &session.cmd_ctx, 1280, 800, font_bytes, configured_em, buffers.active_id);
     defer whead.deinit();
     // The swapchain's actual extent is authoritative: a server-side-deco or
     // tiling compositor can force it to differ from the requested framebuffer
@@ -449,6 +459,13 @@ pub fn main(init: std.process.Init) !void {
     // the frame loop reads them unchanged regardless of backend.
     const view = &whead.render.fb.view;
     const win_layout = &whead.render.fb.win_layout;
+    var font_control: font_size.Control = .{ .view = view, .default_size = configured_em };
+    try font_control.register(gpa, &session.system.commands);
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-plus", "font-size-increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-equal", "font-size-increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-S-equal", "font-size-increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-minus", "font-size-decrease", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-0", "font-size-reset", core.Keymap.prio_core, "shell");
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
@@ -630,7 +647,7 @@ pub fn main(init: std.process.Init) !void {
         .services = .{ .context = &desktop_services, .run = DesktopServices.run },
     });
 
-    std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
+    std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), configured_em });
 
     // ── The scheduler (doc/contextual-workspace-architecture.md §7):
     // registered SOURCES, one poll()-based wait per iteration.
