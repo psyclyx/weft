@@ -500,6 +500,50 @@ test "editor: selections are CRDT anchors — a concurrent peer edit shifts ever
     try t.expectEqual(@as(usize, 1), ed.selectionCount());
 }
 
+test "editor: every single-selection write collapses the set; only a visit addresses one of several" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "aa bb cc dd");
+    const three: []const Editor.Ends = &.{ .{ .anchor = 0, .head = 2 }, .{ .anchor = 3, .head = 5 }, .{ .anchor = 6, .head = 8 } };
+
+    // A click / jump: one caret, where it was placed.
+    try ed.setSelections(gpa, three, 1);
+    ed.placeCursor(10);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(@as(usize, 10), ed.cursorOffset());
+    // Dropping or lifting the mark, a motion, a selected range: likewise.
+    try ed.setSelections(gpa, three, 1);
+    ed.clearSelection();
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(@as(usize, 5), ed.cursorOffset());
+    try ed.setSelections(gpa, three, 0);
+    try ed.setMark(gpa);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try ed.setSelections(gpa, three, 2);
+    ed.moveLeft();
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try ed.setSelections(gpa, three, 0);
+    try ed.selectRange(gpa, 9, 11);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(stemma.Range{ .start = 9, .end = 11 }, ed.selectedRange().?);
+    // So the next keystroke types once.
+    try ed.insertText(gpa, "!");
+    try expectEdText(gpa, &ed, "aa bb cc !");
+
+    // Inside a visit the single-selection API is the visited selection's:
+    // its siblings survive a motion of it.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 } }, 0);
+    ed.beginVisit();
+    ed.visit(1);
+    ed.placeCursor(4);
+    ed.endVisit();
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+    try expectHeads(&ed, &.{ 0, 4 });
+}
+
 test "editor: insert-text through the edit door types at every selection, and refuses all-or-nothing" {
     const gpa = t.allocator;
     var host: TestHost = undefined;

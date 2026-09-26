@@ -284,17 +284,15 @@ pub fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 }
 
 /// `editor.setSelection(start, end)`: select `[start, end)` (mark at start,
-/// cursor at end). The native selection write-half, composed from placeCursor
-/// + setMark.
+/// cursor at end) as THE selection — `Editor.selectRange`, so any secondaries
+/// collapse; several are written only through `selections_set`.
 pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ed = activeEditor(p.activeCtx()) orelse return;
     const len = ed.text().byteLen();
-    ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
-    ed.setMark(p.gpa) catch {};
-    ed.placeCursor(@min(@as(usize, @intCast(args[1])), len));
+    ed.selectRange(p.gpa, @min(@as(usize, @intCast(args[0])), len), @min(@as(usize, @intCast(args[1])), len)) catch {};
 }
 
 /// Anchor `[start, end)` in the current CRDT document and return an opaque
@@ -557,7 +555,9 @@ pub fn hRunRangeEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     results[0] = 0;
     const cmd = caller.readMemory(p.gpa, word(args[0]), word(args[1])) catch return;
     defer p.gpa.free(cmd);
-    const ed = activeEditor(p.activeCtx()) orelse return;
+    const entry = p.activeCtx().entry() orelse return;
+    const at = entry.ref();
+    const ed = entry.textEditor() orelse return;
     // Iterate by HANDLE, not index: a motion is free to reshape the set, and
     // the head handle is the selection's stable identity meanwhile.
     const heads = p.gpa.alloc(SelectionHead, ed.selectionCount()) catch return;
@@ -566,20 +566,36 @@ pub fn hRunRangeEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     const out = p.gpa.alloc(i32, heads.len) catch return;
     defer p.gpa.free(out);
     const primary_head = ed.selections.items[ed.primary].head;
+    // A VISIT: the motion speaks the single-selection API, and here that
+    // means the visited selection, not a collapse of its siblings.
+    ed.beginVisit();
     for (heads, out) |h, *o| {
         o.* = -1;
         // The motion may have closed or switched the entry: stop, honestly.
-        if (activeEditor(p.activeCtx()) != ed) continue;
-        ed.primary = selectionIndexOf(ed, h) orelse continue;
+        if (visitedEditor(p, at) != ed) continue;
+        ed.visit(selectionIndexOf(ed, h) orelse continue);
         o.* = runForRange(p, cmd);
     }
-    if (activeEditor(p.activeCtx()) == ed) ed.primary = selectionIndexOf(ed, primary_head) orelse @min(ed.primary, ed.selectionCount() - 1);
+    if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |still| {
+        still.visit(selectionIndexOf(still, primary_head) orelse @min(still.primary, still.selectionCount() - 1));
+        still.endVisit();
+    };
     const bytes = std.mem.sliceAsBytes(out[0..@min(word(args[3]), out.len)]);
     if (bytes.len > 0) _ = caller.writeMemory(word(args[2]), bytes.len, bytes) catch {};
     results[0] = @intCast(heads.len);
 }
 
 const SelectionHead = @FieldType(Editor.Selection, "head");
+
+/// The editor a visit began on, found again by its entry ref — only while that
+/// entry is still the one this dispatch addresses. A command run inside the
+/// visit may switch or close the entry; a closed one's editor is gone (and
+/// took its visit with it). The visit still ENDS on a merely switched one.
+fn visitedEditor(p: *WasmPlugin, at: anytype) ?*Editor {
+    const b = p.ctx.buffers.resolve(at) orelse return null;
+    const ed = b.textEditor() orelse return null;
+    return if (activeEditor(p.activeCtx()) == ed) ed else null;
+}
 
 fn selectionIndexOf(ed: *const Editor, head: SelectionHead) ?usize {
     for (ed.selections.items, 0..) |sel, i| {
@@ -616,12 +632,19 @@ pub fn hRunRangeArgEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
             return a.start > b.start or (a.start == b.start and a.end > b.end);
         }
     }.gt);
-    // Close the unit on the editor this began on, found again by its entry
-    // ref: an operator may switch (or close) the entry meanwhile.
+    // Close the unit (and the visit: an operator that places "the" caret
+    // places its own, not a collapse of the set) on the editor this began on,
+    // found again by its entry ref: an operator may switch (or close) the
+    // entry meanwhile.
     const entry = p.activeCtx().entry() orelse return;
     const at = entry.ref();
-    (entry.textEditor() orelse return).history.beginUnit();
-    defer if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |ed| ed.history.endUnit();
+    const began = entry.textEditor() orelse return;
+    began.history.beginUnit();
+    began.beginVisit();
+    defer if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |ed| {
+        ed.endVisit();
+        ed.history.endUnit();
+    };
     for (jobs.items) |job| {
         const slot = p.activeRange(job.handle) orelse continue;
         const rv = command.Value{ .range = p.borrowedRange(slot) orelse continue };

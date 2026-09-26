@@ -173,9 +173,7 @@ pub fn hProjSelect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const lo = @min(n.start + @as(usize, @intCast(@max(args[1], 0))), n.body);
     const hi = @min(n.start + @as(usize, @intCast(@max(args[2], 0))), n.body);
     if (lo >= hi) return;
-    editor.placeCursor(lo);
-    editor.setMark(p.gpa) catch return;
-    editor.placeCursor(hi);
+    editor.selectRange(p.gpa, lo, hi) catch return;
 }
 
 /// `wl_proj_rows(out, cap) -> i32`: what every EDITABLE row says NOW, as

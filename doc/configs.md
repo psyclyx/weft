@@ -53,9 +53,13 @@ e2e must stay green with one selection.
   motion moves a caret; with one, it grows a selection. The old `cursor`/`mark` fields are
   gone; they are `selections[primary]`.
 - The set is always sorted and disjoint (`Editor.normalize`): overlapping selections, and
-  carets that meet, merge. Core motions (`moveTo` and the cursor-* builtins) move only the
-  primary. A grammar that moves every selection computes the targets and calls
-  `setSelections`.
+  carets that meet, merge. The single-selection API means ONE selection: every write
+  through it (`moveTo` and the cursor-* builtins, `placeCursor`, `setMark`,
+  `clearSelection`, `selectRange`, so `wl_jump`, `wl_set_selection` and a click) first
+  collapses the set to the primary. A grammar that moves every selection computes the
+  targets and calls `setSelections`. The one exception is a VISIT
+  (`Editor.beginVisit`/`visit`): inside `wl_run_range_each` and `wl_run_range_arg_each`
+  the single-selection API addresses the visited selection alone.
 - Typing, backspace, delete, newline and tab act at every selection through
   `Context.editEach`: one gate check over every range, then one `replaceAll` commit, so
   the edit is one undo unit.

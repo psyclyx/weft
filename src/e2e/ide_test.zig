@@ -562,6 +562,53 @@ test "e2e/ide: C-d adds the next occurrence, C-S-l takes them all, and typing ed
     try expectText(ed, "foo bar foo baz foo\n");
 }
 
+/// How many times `needle` occurs in the focused document.
+fn occurrences(ed: *Editor, needle: []const u8) !usize {
+    const got = try ed.textAlloc();
+    defer ed.gpa.free(got);
+    return std.mem.count(u8, got, needle);
+}
+
+test "e2e/ide: after C-S-l, a click places THE caret — no stray secondary takes the typing" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "s.txt", "foo bar foo baz foo\n");
+    ed.applyWindow();
+
+    // A click places THE caret: the three occurrences C-S-l took are gone,
+    // not left behind as carets the next keystroke types into.
+    ed.press("C-Home", "");
+    ed.press("C-S-l", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+    ed.click(ed.pointAt(5).?);
+    try t.expectEqual(@as(usize, 1), textEd(ed).selectionCount());
+    ed.typeText("!");
+    try expectText(ed, "foo b!ar foo baz foo\n");
+}
+
+test "e2e/ide: after C-S-l, a find selects its match as THE selection — no stray secondary takes the typing" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "s.txt", "foo bar foo baz foo\n");
+
+    ed.press("C-Home", "");
+    ed.press("C-S-l", "");
+    try t.expectEqual(@as(usize, 3), textEd(ed).selectionCount());
+    ed.press("C-f", "");
+    ed.typeText("bar");
+    ed.press("Return", "\n");
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 1), textEd(ed).selectionCount());
+    ed.typeText("!");
+    try t.expectEqual(@as(usize, 1), try occurrences(ed, "!"));
+}
+
 test "e2e/ide: a double click selects a word, a triple click the line, and C-click adds a caret" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

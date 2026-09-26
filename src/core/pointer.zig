@@ -359,9 +359,9 @@ fn cPointerDragSelect(ctx: *Context, args: struct {}) anyerror!Value {
     const ed = hitEditor(ctx) orelse return ok;
     if (off == ed.cursorOffset()) return ok;
     if (!g.selecting) {
-        ed.placeCursor(anchor);
-        try ed.setMark(ctx.gpa);
+        try ed.selectRange(ctx.gpa, anchor, off);
         g.selecting = true;
+        return ok;
     }
     ed.placeCursor(off);
     return ok;

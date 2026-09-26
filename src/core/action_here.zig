@@ -165,9 +165,7 @@ fn focusPart(ctx: *command.Context, node: semantic_model.scene.NodeId) void {
     var key_buf: [24]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{d}", .{@intFromEnum(node)}) catch return;
     const span = view.subjectSpan(key) orelse return;
-    editor.placeCursor(span.start);
-    editor.setMark(ctx.gpa) catch return;
-    editor.placeCursor(span.end);
+    editor.selectRange(ctx.gpa, span.start, span.end) catch return;
 }
 
 pub const Subjects = struct {

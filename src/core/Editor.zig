@@ -1,7 +1,7 @@
 //! Editor — the interactive shell around one Document: its selections
 //! (one or many; each a head and an optional anchor in the Document's
-//! auto-shifted AnchorSet, never bare offsets — the cursor/mark API is a view
-//! onto the primary one), movement over the rope's line/scalar queries, undo
+//! auto-shifted AnchorSet, never bare offsets — the cursor/mark API reads the
+//! primary one and collapses the set to it on write), movement over the rope's line/scalar queries, undo
 //! delegation with vim-flavored unit barriers, dirty tracking by
 //! version comparison, and saving as a *fallible request* on the task
 //! pool — never an op, never a wait.
@@ -32,9 +32,10 @@ history: undo_mod.UndoLog = .empty,
 /// them sorted and disjoint). NEVER empty: one selection is the degenerate
 /// case every single-cursor grammar lives in, and there is no second
 /// representation beside it — the cursor/mark API below (`cursorOffset`,
-/// `moveTo`, `selectedRange`, …) is a VIEW onto `selections[primary]`, so a
-/// grammar that knows nothing about multiple selections cannot drift from
-/// one that does (doc/configs.md §0.1).
+/// `moveTo`, `selectedRange`, …) READS `selections[primary]`, and every write
+/// through it collapses the set to that one selection first, so a grammar
+/// that knows nothing about multiple selections cannot strand secondaries a
+/// click or a jump left behind (doc/configs.md §0.1).
 ///
 /// Local view state: the handles live in the Document's AnchorSet (so every
 /// edit, local or merged, shifts them), but nothing here is serialized or
@@ -43,6 +44,12 @@ selections: std.ArrayList(Selection) = .empty,
 /// Index into `selections` of the selection the cursor/mark view reads —
 /// the one motions, the view's scroll-follow, and presence track.
 primary: usize = 0,
+/// Nonzero while a per-selection runner is VISITING the set (`beginVisit`/
+/// `visit`/`endVisit`): the selection being visited is then "the" selection,
+/// and a single-selection write addresses it alone instead of collapsing the
+/// set onto it. Outside a visit every single-selection write collapses first
+/// (`solo`), so no path can move one caret and leave the others behind.
+visiting: u32 = 0,
 /// Byte column the *headless/fallback* vertical motion aims for (sticky
 /// across short lines). Used when there is no view to consult — see
 /// `moveVertical`. The interactive path uses `goal_x` instead.
@@ -490,7 +497,7 @@ pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8)
 /// edit, byte for byte.
 pub fn applyUserEdits(self: *Editor, gpa: Allocator, items: []const Document.Replacement) Allocator.Error!void {
     try self.doc.replaceAll(gpa, items);
-    self.clearSelection();
+    self.liftAnchors();
     self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
     // Two carets can land on one offset (backspace from both sides of a
@@ -636,21 +643,53 @@ pub fn canRedo(self: *const Editor) bool {
 
 // ── Selection ───────────────────────────────────────────────────────
 
-// The mark verbs act on EVERY selection — dropping or lifting the anchor is
-// one gesture whatever the selection count (a grammar's `v` with three carets
-// starts three selections). Everything that reads "the" selection reads the
-// primary.
+// The single-selection API MEANS one selection. Every write through it —
+// `moveTo` and the motions over it, `placeCursor`, `selectRange`, `setMark`,
+// `clearSelection` — first collapses the set to its primary (`solo`), so a
+// caret placed by a click, a jump, or a grammar that knows nothing of
+// multiple selections never leaves stray secondaries behind to be typed
+// into. Several selections are written only through `setSelections`/
+// `addSelection`, and acted on one at a time only inside a visit.
 
-/// Drop an anchor at every selection's head (replacing any it had).
+/// Collapse the set to its primary, unless a per-selection runner is visiting
+/// it (then the visited selection is the one selection, and its siblings are
+/// the runner's to keep). Free for one selection.
+fn solo(self: *Editor) void {
+    if (self.visiting > 0 or self.selections.items.len == 1) return;
+    self.dropSecondaries();
+}
+
+/// Drop an anchor at the head (replacing any it had): the selection starts
+/// here and grows with the next motion.
 pub fn setMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
-    self.clearSelection();
-    for (self.selections.items) |*sel| {
-        sel.anchor = try self.doc.addAnchor(gpa, self.doc.anchorOffset(sel.head), .left);
+    self.solo();
+    const sel = &self.selections.items[self.primary];
+    const a = try self.doc.addAnchor(gpa, self.doc.anchorOffset(sel.head), .left);
+    if (sel.anchor) |m| self.doc.removeAnchor(m);
+    sel.anchor = a;
+}
+
+/// Lift the anchor, leaving one caret where the head is.
+pub fn clearSelection(self: *Editor) void {
+    self.solo();
+    const sel = &self.selections.items[self.primary];
+    if (sel.anchor) |m| {
+        self.doc.removeAnchor(m);
+        sel.anchor = null;
     }
 }
 
-/// Lift every selection's anchor, leaving its caret where the head is.
-pub fn clearSelection(self: *Editor) void {
+/// Select from `anchor` to `head` as THE selection: the anchor stays put, the
+/// caret lands on the head (a drag, a grammar's "select this node").
+pub fn selectRange(self: *Editor, gpa: Allocator, anchor: usize, head: usize) Allocator.Error!void {
+    self.placeCursor(anchor);
+    try self.setMark(gpa);
+    self.placeCursor(head);
+}
+
+/// Lift every selection's anchor, keeping every caret — what an edit at every
+/// selection leaves behind. Internal: the public verb is one selection's.
+fn liftAnchors(self: *Editor) void {
     for (self.selections.items) |*sel| {
         if (sel.anchor) |m| {
             self.doc.removeAnchor(m);
@@ -672,6 +711,29 @@ pub fn rangeOf(self: *const Editor, sel: Selection) ?Range {
     const b = self.doc.anchorOffset(sel.head);
     if (a == b) return null;
     return .{ .start = @min(a, b), .end = @max(a, b) };
+}
+
+// ── Visiting: the per-selection runners' primitive ──────────────────
+// `wl_run_range_each` and `wl_run_range_arg_each` run a command once per
+// selection, and that command speaks the single-selection API. Inside a visit
+// that API addresses the visited selection alone: the one context where "the
+// selection" is one of several on purpose.
+
+/// Open a visit (they nest). Pair with `endVisit`.
+pub fn beginVisit(self: *Editor) void {
+    self.visiting += 1;
+}
+
+pub fn endVisit(self: *Editor) void {
+    assert(self.visiting > 0);
+    self.visiting -= 1;
+}
+
+/// Make selection `i` the one the single-selection API addresses. Only a
+/// visit may: outside one, the next write would collapse the set onto it.
+pub fn visit(self: *Editor, i: usize) void {
+    assert(self.visiting > 0 and i < self.selections.items.len);
+    self.primary = i;
 }
 
 // ── Multiple selections ─────────────────────────────────────────────
@@ -746,6 +808,11 @@ pub fn removeSelection(self: *Editor, i: usize) void {
 
 /// Keep only the primary selection (helix `,`, ide's Escape).
 pub fn collapseToPrimary(self: *Editor) void {
+    self.dropSecondaries();
+    self.history.barrier();
+}
+
+fn dropSecondaries(self: *Editor) void {
     const keep = self.primarySelection();
     for (self.selections.items, 0..) |sel, i| {
         if (i != self.primary) self.releaseSelection(sel);
@@ -753,7 +820,6 @@ pub fn collapseToPrimary(self: *Editor) void {
     self.selections.items[0] = keep;
     self.selections.shrinkRetainingCapacity(1);
     self.primary = 0;
-    self.history.barrier();
 }
 
 fn releaseSelection(self: *Editor, sel: Selection) void {
@@ -846,11 +912,13 @@ fn mergeInto(self: *Editor, into: *Selection, other: Selection, span: Range) voi
 
 // ── Movement ────────────────────────────────────────────────────────
 // Every motion is an undo barrier: typing after moving starts a new
-// undo unit (the vim-flavored grouping). Motions move the PRIMARY head: a
-// grammar that moves every selection computes the targets itself and hands
-// them to `setSelections`.
+// undo unit (the vim-flavored grouping). A motion is a single-selection write:
+// it collapses the set to the primary and moves that (inside a visit, the
+// visited selection alone). A grammar that moves every selection computes the
+// targets itself and hands them to `setSelections`.
 
 pub fn moveTo(self: *Editor, offset: usize) void {
+    self.solo();
     self.doc.anchors.set(self.primarySelection().head, .{ .offset = offset, .bias = .right });
     // Moving one head can carry it onto or past another selection; keep the
     // set sorted and disjoint (free for a single selection).
