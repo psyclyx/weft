@@ -74,12 +74,14 @@ pub fn hNodeEnclosing(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 /// the symbol's name, its span the whole item it names. Stashed like a
 /// query's captures (read back via `wl_query_capture`), in document order;
 /// returns the count, or -1 without a grammar. Nested items come out as
-/// nested spans, so "what encloses this offset" is a scan over them. Core
-/// knows no language here: which nodes are symbols is the query's business.
+/// nested spans. Only items overlapping `[start, end)` are listed (each whole):
+/// "what encloses this offset" is `[offset, offset+1)`, which costs the
+/// caret's path through the tree rather than the file. Core knows no language
+/// here: which nodes are symbols is the query's business.
 pub fn hOutline(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
-    _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const range: @import("stemma").Range = .{ .start = @as(u32, @bitCast(args[0])), .end = @as(u32, @bitCast(args[1])) };
     p.queryCapsClear();
     results[0] = -1;
     const resolve = p.syntax_of orelse return;
@@ -92,7 +94,8 @@ pub fn hOutline(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     _ = syn.sync(p.gpa, &ed.doc) catch {};
     var syms: std.ArrayList(Sym) = .empty;
     defer syms.deinit(p.gpa);
-    syn.collectSymbols(p.gpa, &ed.doc, &syms) catch {
+    if (range.start > range.end) return;
+    syn.collectSymbols(p.gpa, &ed.doc, range, &syms) catch {
         for (syms.items) |s| p.gpa.free(s.name);
         return;
     };
