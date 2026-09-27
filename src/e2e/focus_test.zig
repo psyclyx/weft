@@ -169,15 +169,53 @@ test "e2e/focus: ide.js — a click focuses the sidebar ROW, typing jumps, F2 ed
     try expectRow(ed, "renamed.zig");
     app.proj.shot(ed, "focus-rename");
 
-    // Return commits: the edit ends and the listing's own apply runs, which
-    // asks first; Return again confirms, and the file is renamed on disk.
+    // Return commits: the edit ends and the listing's own apply runs. One
+    // name just typed is applied as typed — no question — and the file is
+    // renamed on disk.
     ed.press("Return", "");
     try t.expect(!ed.head.scene_selection.began);
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+    try t.expect(ed.head.interactions.active() == null);
+    try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f renamed.zig && test ! -e main.zig && printf ok", "ok"));
+}
+
+test "e2e/focus: ide.js — the listing asks before a delete, a draft of several rows, or a rename onto a name that exists" {
+    var app: IdeApp = undefined;
+    try sidebarApp(&app);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A rename onto a sibling's name would overwrite it: asked.
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    ed.press("F2", "");
+    ed.typeText("main.zig");
+    ed.press("Return", "");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("Escape", ""); // not now
+    try t.expect(ed.head.interactions.active() == null);
+    ed.run("view.revert");
+    try t.expect(!ed.session.system.semantic.holdsDraft(ed.toolView().?));
+
+    // A delete: asked, even alone.
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    ed.press("Delete", "");
+    ed.run("view.apply");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("Escape", "");
+
+    // With that delete still pending, a rename makes two rows: asked too,
+    // and confirming applies both.
+    ed.click(try pointAtName(ed, "zeta.txt"));
+    ed.applyWindow();
+    ed.press("F2", "");
+    ed.typeText("eta.txt");
+    ed.press("Return", "");
     try t.expect(ed.head.interactions.active() != null);
     ed.press("Return", "");
     try t.expect(ed.head.interactions.active() == null);
-    try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f renamed.zig && test ! -e main.zig && printf ok", "ok"));
+    try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f eta.txt && test ! -e zeta.txt && test ! -e m.txt && test -f main.zig && printf ok", "ok"));
 }
 
 test "e2e/focus: ide.js — Escape cancels an edit, putting the name back; moving off an edited row commits it" {
@@ -200,16 +238,14 @@ test "e2e/focus: ide.js — Escape cancels an edit, putting the name back; movin
     // apply and nothing asks.
     try t.expect(!ed.session.system.semantic.holdsDraft(ed.toolView().?));
 
-    // An edit the focus LEAVES is committed, not lost: the draft keeps the
-    // new name, and the listing asks to apply it.
+    // An edit the focus LEAVES is committed, not lost: the listing applies
+    // the one name typed, as Return would have.
     ed.press("F2", "");
     ed.typeText("n.txt");
     ed.press("Down", "");
     try t.expect(!ed.head.scene_selection.began);
-    try t.expect(ed.head.interactions.active() != null);
-    ed.press("Escape", ""); // the listing's own "not now"
     try t.expect(ed.head.interactions.active() == null);
-    try t.expect(ed.session.system.semantic.holdsDraft(ed.toolView().?));
+    try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f n.txt && test ! -e m.txt && printf ok", "ok"));
 }
 
 test "e2e/focus: ide.js — a slow second click on the focused row edits its name; a double click opens it instead" {

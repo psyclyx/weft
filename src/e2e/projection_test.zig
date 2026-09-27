@@ -139,7 +139,8 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
 
     ed.runStr("file.open", "a.txt");
     ed.applyWindow();
-    // Into the sidebar, and rename a row there: a draft, not yet applied.
+    // Into the sidebar, and delete a row there: a draft, not yet applied (a
+    // delete asks before it applies, whatever ends the gesture).
     const pane = try sidebarPane(ed);
     const view = try ed.ensureView();
     const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
@@ -150,17 +151,10 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
     const listing = (try paneEntry(ed, pane)).ref();
     try t.expectEqual(listing.id, ed.buffers.active_id);
     try ed.focusFilesName("a.txt");
-    const field = ed.head.scene_selection.field orelse return error.NoField;
-    const provider = ed.session.system.semantic.fields.get(field) orelse return error.StaleField;
-    var snap = try provider.snapshot(gpa);
-    defer snap.deinit();
-    try provider.edit(snap.value.revision, .{ .start = 0, .end = 0, .replacement = "draft-", .selection_after = .{ .anchor = 6, .caret = 6 } });
+    ed.press("Escape", ""); // the entered edit ends; the row stays focused
+    ed.press("Delete", "");
     const listing_view = ed.toolView() orelse return error.NoFilesView;
-    {
-        const draft = try ed.draftHere(gpa);
-        defer gpa.free(draft);
-        try t.expectEqualStrings("draft-a.txt", draft);
-    }
+    try t.expect(ed.session.system.semantic.holdsDraft(listing_view));
 
     // Another project: the sidebar follows it…
     ed.runStr("file.open", "other/b.txt");
@@ -168,10 +162,8 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
     try t.expectEqualStrings(under(&app.proj, &buf, "dir", "/other"), try sidebarShows(ed));
     // …and the listing holding the draft is still an entry, the draft in it.
     try t.expect(ed.buffers.resolve(listing) != null);
-    const text = try ed.semanticText(listing_view);
-    defer gpa.free(text);
-    try t.expect(std.mem.indexOf(u8, text, "draft-a.txt") != null);
-    // Nothing was applied: the file keeps its name.
+    try t.expect(ed.session.system.semantic.holdsDraft(listing_view));
+    // Nothing was applied: the file is still there.
     try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "a.txt"));
 }
 

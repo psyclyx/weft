@@ -1455,7 +1455,7 @@ test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "0 breakpoint") != null);
 }
 
-test "authoring/files: rename a semantic field, apply its dialog, and verify disk" {
+test "authoring/files: rename a semantic field, apply it, and verify disk" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1517,13 +1517,10 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     ed.press("Escape", "");
     try t.expect(try rowDraftEnds(ed, gpa, "new.txt"));
 
-    // Apply is an advertised semantic action. Its provider opens a head-local
-    // interaction; the dialog owns `y`, rather than introducing a files mode or
-    // polluting which-key/global bindings.
+    // Apply is an advertised semantic action. One name typed is applied as
+    // typed; the provider's dialog is for what could lose something (a delete,
+    // several rows, an overwrite).
     ed.chord("SPC v a");
-    try t.expectEqualStrings("which-key-like", ed.head.interactions.active().?.descriptor.presentation);
-    try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
-    ed.press("y", "y");
     try t.expect(ed.head.interactions.active() == null);
 
     // On disk: the provider applied the immutable plan as a rename, preserving

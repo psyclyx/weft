@@ -893,13 +893,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.typeText("new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-files-rename-plan");
+    // One name typed applies as typed: no dialog to answer.
     ed.chord("SPC v a");
-    try t.expect(ed.head.interactions.active() != null);
-    ed.press("n", "n"); // cancel leaves the retained plan and dialog closed
     try t.expect(ed.head.interactions.active() == null);
-    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "rename-dir/old.txt"));
-    ed.chord("SPC v a");
-    ed.press("y", "y");
     try t.expect(drainUntilOracle(&proj, &ed, "test -f rename-dir/new.txt && test ! -e rename-dir/old.txt && printf ok", "ok"));
 
     // Empty directory creation and permissions are independent generic

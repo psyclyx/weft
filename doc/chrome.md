@@ -400,9 +400,11 @@ What the build settled:
   input itself (`Head.textCommit`: the mode's commit command, else core's
   `insert-text` while an edit is begun), so ide stays in `ide-structural`
   and needs no field-resting mode. Committing ends the edit and, when the
-  text changed, runs the view's `view.apply` — the files listing then asks
-  its apply question as it always did. Moving the focus off the edited row
-  commits the same way. Delete mid-edit deletes text, never the row.
+  text changed, runs the view's `view.apply`. Whether that asks is the files
+  listing's policy, read off the draft (`Model.applyAsks`): one name typed —
+  a row renamed in place, a new row named — applies as typed; a delete, a
+  paste, several rows, or a name a sibling holds asks first. Moving the
+  focus off the edited row commits the same way. Delete mid-edit deletes text, never the row.
 - **Type-ahead** (`core/type_ahead.zig`) runs where an unbound printable key
   finds no commit, under `row`, with no edit in progress: a 1 s prefix
   searched from the focused row, one repeated key stepping through the rows

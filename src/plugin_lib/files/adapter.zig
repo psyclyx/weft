@@ -408,6 +408,9 @@ pub const Session = struct {
         try self.validateTarget();
         if (std.mem.eql(u8, request.action, semantic.action.standard.apply)) {
             if (self.apply_committed or !self.draft.hasPendingChanges()) return .declined;
+            // The draft says whether to ask (`Model.applyAsks`): a single
+            // name just typed applies as typed; the rest confirm first.
+            if (!self.draft.applyAsks()) return if (try self.applyConfirmed()) .handled else .declined;
             return .{ .interaction = self.applyConfirmation() };
         }
         if (std.mem.eql(u8, request.action, semantic.action.standard.confirm))

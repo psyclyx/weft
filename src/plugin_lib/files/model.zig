@@ -483,6 +483,36 @@ pub const Model = struct {
         return false;
     }
 
+    /// Whether applying this draft asks first — files' policy, read off the
+    /// draft and never off how the apply was reached, so a committed inline
+    /// edit and `:w` get the same answer. One name the user typed — a row
+    /// renamed in place, or a new row named — applies as typed. Anything
+    /// else asks: a delete, a paste or move, a permission change, several
+    /// rows at once, or a name a sibling already holds, which would
+    /// overwrite it.
+    pub fn applyAsks(self: *const Model) bool {
+        var changed: ?*const Row = null;
+        for (self.rows.items) |*row_ptr| {
+            if (!rowHasPendingChanges(row_ptr)) continue;
+            // A new row emptied again is nothing to apply (`rename`).
+            if (row_ptr.pending == .deleted and row_ptr.base == null) continue;
+            if (changed != null) return true;
+            changed = row_ptr;
+        }
+        const only = changed orelse return false;
+        const typed = switch (only.pending) {
+            .renamed => !only.mode_dirty,
+            .added => true,
+            else => false,
+        };
+        if (!typed or only.conflict != .none) return true;
+        for (self.rows.items) |*other| {
+            if (other.id == only.id or other.pending == .deleted) continue;
+            if (std.meta.eql(other.parent, only.parent) and std.mem.eql(u8, other.draft.name, only.draft.name)) return true;
+        }
+        return false;
+    }
+
     fn replaceBaseRevision(self: *Model, value: []const u8) !void {
         const next = try self.gpa.dupe(u8, value);
         if (self.base_revision) |previous| self.gpa.free(previous);
@@ -1791,6 +1821,42 @@ test "empty names retain rows as deletions and typing revives their origin" {
     try std.testing.expectEqual(@as(usize, 0), suppressed.value.operations.len);
     try files.rename(added, "restored");
     try std.testing.expectEqual(Pending.added, files.row(added).?.pending);
+}
+
+test "apply asks for a delete, a move, several rows or an overwrite — never for one name just typed" {
+    var files = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 34, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
+        .{ .identity = ref(35, 1), .name = "a", .revision = "r1", .kind = .regular },
+        .{ .identity = ref(36, 1), .name = "b", .revision = "r1", .kind = .regular },
+    } });
+    const a = files.rows.items[0].id;
+    const b = files.rows.items[1].id;
+    try std.testing.expect(!files.applyAsks());
+
+    // One rename in place, or one new row named: applies as typed.
+    try files.rename(a, "c");
+    try std.testing.expect(!files.applyAsks());
+    // …unless it takes a sibling's name, which would overwrite it.
+    try files.rename(a, "b");
+    try std.testing.expect(files.applyAsks());
+    // Two rows renamed: a bulk draft.
+    try files.rename(a, "c");
+    try files.rename(b, "d");
+    try std.testing.expect(files.applyAsks());
+    try files.rename(a, "a");
+    try files.rename(b, "b");
+    const added = try files.addFile(null, "new", &.{}, null);
+    try std.testing.expect(!files.applyAsks());
+    try files.rename(added, "");
+    try std.testing.expect(!files.applyAsks());
+
+    // A delete, a permission change: each asks, alone.
+    try files.markDelete(a);
+    try std.testing.expect(files.applyAsks());
+    try files.rename(a, "a");
+    try files.setMode(b, 0o600);
+    try std.testing.expect(files.applyAsks());
 }
 
 test "planner captures before source rename independent of row order" {
