@@ -208,7 +208,7 @@ pub const Answers = struct {
 const t = std.testing;
 
 fn gutterReq(pane: u32, key: Key, first: u32) Request {
-    return .{ .pane = pane, .entry = undefined, .key = key, .ask = .{ .gutter = .{ .first = first, .count = core.gutter.window, .caret = 0, .lines = 1 } } };
+    return .{ .pane = pane, .entry = undefined, .key = key, .ask = .{ .gutter = .{ .first = first, .count = core.gutter.window, .lines = 1 } } };
 }
 
 test "answers: a question asked twice before the loop answers is asked once" {

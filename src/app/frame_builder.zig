@@ -237,9 +237,11 @@ fn entryKey(tag: []const u8, buffer: *core.Buffers.Buffer, facts: core.facts.Fac
 }
 
 /// The question a pane's gutter asks this frame (`answers.Key`).
-fn gutterKey(buffer: *core.Buffers.Buffer, facts: core.facts.Facts, caret_line: usize, line_count: usize) answers_mod.Key {
+/// No caret in it: the gutter's question does not carry one (`core.gutter`),
+/// so a caret move is not a new question — a column counted from the caret
+/// is a formula the frame evaluates against its own snapshot.
+fn gutterKey(buffer: *core.Buffers.Buffer, facts: core.facts.Facts, line_count: usize) answers_mod.Key {
     var h = entryKey("gutter", buffer, facts);
-    h.update(std.mem.asBytes(&caret_line));
     h.update(std.mem.asBytes(&line_count));
     return h.final();
 }
@@ -285,7 +287,8 @@ pub fn gutterFrame(
         const batch = try arena.create(view_mod.ui_mesh.GutterBatch);
         batch.* = .{
             .windows = try answers.gutterWindows(arena, pane),
-            .key = gutterKey(buffer, facts, gf.caret_line, gf.line_count),
+            .key = gutterKey(buffer, facts, gf.line_count),
+            .caret_line = gf.caret_line,
         };
         gf.batch = batch;
         break;
@@ -697,7 +700,6 @@ pub const FrameBuilder = struct {
             self.answers.want(.{ .pane = p.pane, .entry = p.entry, .key = batch.key, .ask = .{ .gutter = .{
                 .first = std.math.cast(u32, first) orelse continue,
                 .count = core.gutter.window,
-                .caret = std.math.cast(u32, gf.caret_line) orelse continue,
                 .lines = std.math.cast(u32, gf.line_count) orelse continue,
             } } });
         }

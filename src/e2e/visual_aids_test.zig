@@ -46,6 +46,16 @@ fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     return out[0..n];
 }
 
+/// When the focused pane's newest gutter answer was stored — unchanged
+/// means nobody was asked again.
+fn gutterStamp(ed: *Editor) u64 {
+    var newest: u64 = 0;
+    for (ed.render.fb.answers.entries.items) |e| {
+        if (e.pane == ed.head.focused_pane and e.answer == .gutter) newest = @max(newest, e.stamp);
+    }
+    return newest;
+}
+
 fn cursor(ed: *Editor) usize {
     return ed.buffers.active().textEditor().?.cursorOffset();
 }
@@ -87,6 +97,21 @@ test "e2e/visual-aids: config.js numbers text entries relative to the caret, and
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[0].stops[0].x, 0.01);
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[5].stops[0].x, 0.01);
     app.proj.shot(ed, "visual-linenumbers");
+
+    // The column follows the caret on the frame it moves. The answer is a
+    // formula the renderer evaluates against the snapshot it draws, so the
+    // move asks the provider nothing — no new answer, none pending — and the
+    // very next frame is already renumbered from the new caret line.
+    const answered = gutterStamp(ed);
+    try t.expect(answered != 0);
+    ed.press("j", ""); // the caret on line 4 (index 3)
+    const moved = try ed.renderComposite();
+    gpa.free(moved);
+    try t.expectEqualStrings(" 4 ", try gutterText(ed, 3, &buf));
+    try t.expectEqualStrings(" 1 ", try gutterText(ed, 2, &buf));
+    try t.expectEqualStrings(" 3 ", try gutterText(ed, 0, &buf));
+    try t.expectEqual(answered, gutterStamp(ed));
+    for (ed.render.fb.answers.pending.items) |p| try t.expect(p.ask != .gutter);
 
     // A git status is a projection, not a file: the provider's predicate
     // (text posture, no tool) is evaluated by the host, so it is never asked

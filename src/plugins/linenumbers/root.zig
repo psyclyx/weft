@@ -17,6 +17,15 @@
 //!   · `hybrid` is accepted as a synonym for `relative`, the name some
 //!     editors give that same combination.
 //!
+//! **The answer is a formula, not cells.** Provider answers are asked between
+//! frames (doc/model.md §2.7), so cells numbered from the caret this plugin
+//! was asked with would lag a moving caret by a frame. Instead it answers
+//! the gutter's `rule` — "the caret distance (or the line's number), this
+//! wide" — and the renderer evaluates it against the snapshot it draws: the
+//! column is right on the frame the caret moves, and a caret move asks this
+//! plugin nothing at all. The caret line reads in the normal color, the rest
+//! as annotation, in both styles.
+//!
 //! **Width** is fixed per entry: every cell is padded to the digits of the
 //! entry's line count, plus one blank column, so the text never shifts as
 //! the caret moves or as a number crosses a power of ten on screen.
@@ -25,12 +34,10 @@ const std = @import("std");
 const weft = @import("weft");
 const gutter = @import("weft_gutter");
 
-const Style = enum { absolute, relative };
-
-fn style() Style {
+fn formula() gutter.Formula {
     const s = weft.config("style");
-    if (std.mem.eql(u8, s, "relative") or std.mem.eql(u8, s, "hybrid")) return .relative;
-    return .absolute;
+    if (std.mem.eql(u8, s, "relative") or std.mem.eql(u8, s, "hybrid")) return .caret_distance;
+    return .number;
 }
 
 fn describe() callconv(.c) void {}
@@ -43,47 +50,16 @@ fn init() callconv(.c) void {
     gutter.bind(.{ .all = &.{ .{ .posture = "text" }, .{ .tool = "" } } }, 100);
 }
 
-fn digits(n: usize) usize {
-    var d: usize = 1;
+fn digits(n: usize) u32 {
+    var d: u32 = 1;
     var v = n;
     while (v >= 10) : (v /= 10) d += 1;
     return d;
 }
 
-/// One window's text, all cells packed into this — each cell is at most
-/// `max_width` bytes, so a full window always fits.
-const max_width = 12;
-var text_buf: [gutter_window * max_width]u8 = undefined;
-var cells: [gutter_window]gutter.Cell = undefined;
-/// The host's window size (`core.gutter.window`); a larger ask is answered
-/// up to this many lines, and the host asks again past them.
-const gutter_window = 256;
-
-/// The cell for `line` (0-based), right-aligned in `width` digits and
-/// followed by one blank column.
-fn cellText(buf: []u8, line: usize, caret: usize, width: usize, s: Style) []const u8 {
-    const n = switch (s) {
-        .absolute => line + 1,
-        .relative => if (line == caret) line + 1 else if (line > caret) line - caret else caret - line,
-    };
-    return std.fmt.bufPrint(buf, "{d: >[1]} ", .{ n, width }) catch "";
-}
-
 fn on_slot_fire(session: i32) callconv(.c) void {
     const q = gutter.ask(@bitCast(session)) orelse return;
-    const s = style();
-    const width = @min(digits(@max(q.lines, 1)), max_width - 1);
-    const count = @min(q.count, gutter_window);
-    var used: usize = 0;
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const line = q.first + i;
-        if (line >= q.lines) break;
-        const text = cellText(text_buf[used..][0..max_width], line, q.caret, width, s);
-        used += text.len;
-        cells[i] = .{ .text = text, .role = if (line == q.caret) .normal else .annotation };
-    }
-    gutter.tell(@bitCast(session), q.first, cells[0..i]);
+    gutter.rule(@bitCast(session), .{ .formula = formula(), .width = digits(@max(q.lines, 1)) });
 }
 
 comptime {

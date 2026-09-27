@@ -350,6 +350,10 @@ pub const GutterBatch = struct {
     /// when every row it drew had one. Written while the layout reads, and
     /// read by the frame after it — the batch's one output.
     wanted: ?usize = null,
+    /// The caret line of the snapshot this frame draws — what an answer that
+    /// is a formula (`core.gutter.Rule`) is evaluated against, so a column
+    /// counted from the caret is right on the frame the caret moved.
+    caret_line: usize = 0,
 
     /// One answered window: lines `[first, first + core.gutter.window)` as of
     /// the question `key`.
@@ -363,11 +367,13 @@ pub const GutterBatch = struct {
         }
     };
 
-    /// One provider's cells, by the binding owner the slot host names it by.
+    /// One provider's cells, by the binding owner the slot host names it by
+    /// — or its formula, when it answered with one (`cells` is then empty).
     pub const Answer = struct {
         owner: []const u8,
         first: usize,
         cells: []const Seg,
+        rule: ?core.gutter.Rule = null,
     };
 
     /// The window `line` reads from: the one answering this frame's question,
@@ -384,14 +390,23 @@ pub const GutterBatch = struct {
         return stale;
     }
 
-    /// `owner`'s cell for `line`, or null when it said nothing there.
-    fn cell(self: *GutterBatch, owner: []const u8, line: usize) ?Seg {
+    /// `owner`'s cell for `line`, or null when it said nothing there. A
+    /// formula is evaluated here, against this frame's caret, into `gpa`.
+    fn cell(self: *GutterBatch, gpa: Allocator, owner: []const u8, line: usize) !?Seg {
         const w = self.windowFor(line) orelse return null;
         for (w.answers) |ans| {
             if (!std.mem.eql(u8, ans.owner, owner)) continue;
+            if (ans.rule) |rule| {
+                const width: usize = @min(@max(rule.width, 1), 20);
+                const on_caret = line == self.caret_line;
+                return .{
+                    .text = try std.fmt.allocPrint(gpa, "{d: >[1]} ", .{ rule.number(line, self.caret_line), width }),
+                    .role = core.surface.Role.fromInt(if (on_caret) rule.caret_role else rule.role),
+                };
+            }
             if (line < ans.first or line - ans.first >= ans.cells.len) return null;
             const c = ans.cells[line - ans.first];
-            return if (c.text.len == 0) null else c;
+            return if (c.text.len == 0) null else .{ .text = try gpa.dupe(u8, c.text), .role = c.role };
         }
         return null;
     }
@@ -400,6 +415,8 @@ pub const GutterBatch = struct {
 /// Decode one provider's `core.gutter` answer into `Seg`s owned by `gpa`. A
 /// malformed answer says nothing.
 pub fn decodeGutterAnswer(gpa: Allocator, owner: []const u8, payload: []const u8) !GutterBatch.Answer {
+    if (core.gutter.decodeRule(payload)) |rule|
+        return .{ .owner = try gpa.dupe(u8, owner), .first = 0, .cells = &.{}, .rule = rule };
     var cells: std.ArrayList(Seg) = .empty;
     var first: usize = 0;
     if (core.gutter.decodeTell(payload)) |told| {
@@ -440,7 +457,7 @@ pub fn gutterCellsForLine(bindings: []const *const container.Binding, gpa: Alloc
             // the same priority position its binding holds.
             .schema_provider => |ref| {
                 const batch = args.batch orelse continue;
-                if (batch.cell(ref.owner, args.line)) |c| try out.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = c.role });
+                if (try batch.cell(gpa, ref.owner, args.line)) |c| try out.append(gpa, c);
             },
             else => {},
         }
