@@ -1,6 +1,14 @@
-//! problems — every diagnostic of the open documents as one list, grouped by
-//! file, in a panel. Return (or a click) on a row opens the file at the
+//! problems — the provider for the `diagnostics` projection (doc/model.md
+//! §2.4): the diagnostics of a PLACE's open documents as one list, grouped
+//! by file, in a panel. Return (or a click) on a row opens the file at the
 //! diagnostic.
+//!
+//! `weft://here/diagnostics/<place directory>` is that list for one place —
+//! rows under the place (and rows a source names relative to it) — and
+//! `weft://here/diagnostics/all` every row. Another designation presented
+//! `as: "diagnostics"` is the list for the place it names
+//! (`{subject: {context: "place"}, as: "diagnostics"}`). `problems` brings
+//! the list of the place it is run in into the panel.
 //!
 //! The list is a semantic view (a scene of `action` rows under a heading per
 //! file), so the rows answer the standard vocabulary — up/down move, Return
@@ -36,6 +44,8 @@ var revision: u32 = 0;
 var rows: std.ArrayList(Row) = .empty;
 /// The source's last answer, to skip rebuilding a list that did not change.
 var last: std.ArrayList(u8) = .empty;
+/// The place directory the list is scoped to, or empty for every row.
+var scope: std.ArrayList(u8) = .empty;
 
 fn orDefault(key: []const u8, default: []const u8) []const u8 {
     const v = weft.config(key);
@@ -48,18 +58,57 @@ fn init() void {
     // The signal name is read ONCE, here: a subscription is for the life of
     // the plugin.
     _ = weft.signalSubscribe(orDefault("signal", "diagnostics"));
-    _ = weft.designationOpener("problems", "problems");
+    _ = weft.designationOpener("diagnostics", "problems-present");
 }
 
-/// `problems`: show the list in the panel and focus it there.
+/// `problems`: the list of the place this runs in, shown in the panel and
+/// focused there.
 fn open() void {
+    scope.clearRetainingCapacity();
+    scope.appendSlice(weft.allocator, weft.placeRoot()) catch return;
+    presentScoped();
+    weft.runStr("viewport-take", orDefault("viewport", "panel"));
+}
+
+/// The opener: `open weft://here/diagnostics/<place>`, or a place's
+/// designation `?as=diagnostics` — the list for that place, active.
+fn present() void {
+    const text = weft.argStr(0) orelse return;
+    const d = weft.semantic.durable.parse(text) orelse return weft.echo("problems: not a designation");
+    var buf: [4096]u8 = undefined;
+    const dir: []const u8 = switch (d.kind) {
+        .projection => |k| if (std.mem.eql(u8, k, "diagnostics"))
+            (if (std.mem.eql(u8, d.ref, "all")) "" else weft.placeOf(d, &buf) orelse "")
+        else
+            return weft.echo("problems: present a place as diagnostics"),
+        .directory => if (d.authority == .here) d.ref else return weft.echo("problems: only a local place has diagnostics here"),
+        else => return weft.echo("problems: present a place as diagnostics"),
+    };
+    scope.clearRetainingCapacity();
+    scope.appendSlice(weft.allocator, dir) catch return;
+    presentScoped();
+}
+
+/// Make the list's entry active, drawn, and named by the place it lists.
+fn presentScoped() void {
     weft.focusOrCreateBuffer(buffer_name);
     weft.toolBacking("problems");
-    // The entry IS the problems list (doc/model.md §2.1), re-run by name.
-    _ = weft.designate("weft://here/problems/all");
+    // The entry IS this place's diagnostics (doc/model.md §2.1), re-run by
+    // name.
+    var named: [4200]u8 = undefined;
+    const trimmed = std.mem.trimStart(u8, scope.items, "/");
+    const d: weft.semantic.durable.Designation = .{ .kind = .{ .projection = "diagnostics" }, .ref = if (trimmed.len == 0) "all" else trimmed };
+    _ = weft.designate(d.render(&named) catch "weft://here/diagnostics/all");
     rebuild(true);
     if (view_ref) |ref| _ = weft.semanticViewFocus(ref, null);
-    weft.runStr("viewport-take", orDefault("viewport", "panel"));
+}
+
+/// Whether a row's path is in the list's place: under it, or named
+/// relative to it. Every row, when the list is scoped to no place.
+fn inScope(path: []const u8) bool {
+    if (scope.items.len == 0 or !std.fs.path.isAbsolutePosix(path)) return true;
+    const base = std.mem.trimEnd(u8, scope.items, "/");
+    return std.mem.startsWith(u8, path, base) and path.len > base.len and path[base.len] == '/';
 }
 
 /// `problems-refresh`: re-read the source now (what the signal does).
@@ -106,6 +155,7 @@ fn rebuild(force: bool) void {
         const col = std.fmt.parseInt(usize, f.next() orelse continue, 10) catch continue;
         const sev = f.next() orelse continue;
         const msg = f.rest();
+        if (!inScope(path)) continue;
         if (!std.mem.eql(u8, path, current_path)) {
             // Rows arrive grouped by file (one source session per document);
             // a heading starts each group.
@@ -175,7 +225,8 @@ fn jumpTo(row: Row) void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "problems", .call = open, .summary = "list the diagnostics of the open documents in the panel" },
+    .{ .name = "problems", .call = open, .summary = "list this place's diagnostics in the panel" },
+    .{ .name = "problems-present", .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
     .{ .name = "problems-refresh", .call = refresh, .summary = "re-read the problems list's source now" },
 };
 

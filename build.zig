@@ -503,6 +503,9 @@ const guests = [_]Guest{
     // The offers projection (doc/model.md §2.4): what a context offers, as a
     // strip a toolbar viewport presents, a list, or a menu at the pointer.
     .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{.offers} },
+    // The symbols projection: an entry's outline as a tree of rows — what an
+    // outline viewport presents `as: "symbols"` (config/outline.js).
+    .{ .name = "symbols", .import = "guest_symbols_wasm", .install = true },
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },

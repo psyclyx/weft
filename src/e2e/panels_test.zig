@@ -118,15 +118,22 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
         try t.expect(std.mem.indexOf(u8, text, "p.zig") != null);
         try t.expect(std.mem.indexOf(u8, text, "2:7  error  bee is unused") != null);
     }
+    // The list is a projection: THIS place's diagnostics, by designation
+    // (doc/model.md §2.4) — what reopens it, and what the panel holds.
+    var want_buf: [4096]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "weft://here/diagnostics/{s}", .{app.proj.root[1..]});
+    try t.expectEqualStrings(want, shown.designationText());
 
     // The source changes and says so; the open list follows at the next
-    // frame boundary, with nothing re-run by hand.
-    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n");
+    // frame boundary, with nothing re-run by hand. A row from outside the
+    // place is not this place's.
+    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
     ed.applyWindow();
     {
         const text = try ed.semanticText(view);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "1:7  warning  a is shadowed") != null);
+        try t.expect(std.mem.indexOf(u8, text, "foreign") == null);
     }
 
     // Down to the second row, Return: p.zig opens in the EDITOR pane with the
