@@ -180,6 +180,70 @@ test "e2e/status: ide.js shows one bar along the whole window's bottom — no pa
     try t.expect(from_sidebar.has("a.zig"));
 }
 
+/// Whether any segment reads like a buffer position (`2/6`).
+fn hasBufferPos(line: *const Line) bool {
+    for (line.labels[0..line.n]) |l| {
+        const slash = std.mem.indexOfScalar(u8, l, '/') orelse continue;
+        _ = std.fmt.parseInt(usize, l[0..slash], 10) catch continue;
+        _ = std.fmt.parseInt(usize, l[slash + 1 ..], 10) catch continue;
+        return true;
+    }
+    return false;
+}
+
+test "e2e/status: the bar carries no one pane's detail, and a message on any line is brief" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.zig", "const a = 1;\n");
+    ed.applyWindow();
+    try frame(ed);
+
+    // Where the entry stands among the open ones, and what backs it, are a
+    // pane's own line's to say; the window's bar says neither.
+    const bar = try lineOf(ed, try barPane(ed));
+    errdefer bar.print();
+    try t.expect(!hasBufferPos(&bar));
+    try t.expect(!bar.has("(file)"));
+
+    // A message shows, and then it is gone: the startup echo does not sit on
+    // the bar for the rest of the session.
+    ed.runStr("app.echo", "a passing remark");
+    const said = core.task.nowNs();
+    ed.gpa.free(try ed.renderCompositeAt(said));
+    try t.expect((try lineOf(ed, try barPane(ed))).has("a passing remark"));
+    ed.gpa.free(try ed.renderCompositeAt(said + 30 * std.time.ns_per_s));
+    const later = try lineOf(ed, try barPane(ed));
+    errdefer later.print();
+    try t.expect(!later.has("a passing remark"));
+    try t.expect(later.has("a.zig")); // the rest of the bar stays
+}
+
+test "e2e/status: a pane's own line still says where its entry stands" {
+    const gpa = t.allocator;
+    var proj: h.Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: h.ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try h.bootConfigNamed(&ed, config_dir, "config.js", &loader);
+    try ed.buffers.setDefaultMode(gpa, ed.head.currentMode());
+    try core.file.writeBytes(gpa, "m.txt", "hello\n");
+    ed.runStr("file.open", "m.txt");
+    ed.applyWindow();
+    try frame(&ed);
+    const line = try lineOf(&ed, try primaryPane(&ed));
+    errdefer line.print();
+    try t.expect(hasBufferPos(&line));
+}
+
 /// The top rows of pane `pane` in the last frame — somewhere a click lands
 /// in its body.
 fn topOfPane(ed: *Editor, pane: u32) ?region.Rect {

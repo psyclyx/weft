@@ -123,6 +123,15 @@ pub fn flashDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return due;
 }
 
+// ── 5b. A message's lapse — the frame times it (`frame.EchoTiming`); this
+// wakes the loop when the one showing lapses, so the line redraws without
+// it. ──
+
+pub fn echoDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    const timing: *const @import("frame.zig").EchoTiming = @ptrCast(@alignCast(ctx.?));
+    return timing.due(now);
+}
+
 // ── 6. Client reconnect backoff — old site: `collab.tickCollab`'s
 // `next_reconnect_ns` compare, live only while offline with a --connect
 // target. ──

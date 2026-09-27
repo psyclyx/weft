@@ -740,7 +740,7 @@ pub const FrameBuilder = struct {
     /// frame knows of the entry — its mode, place, path, text — and the
     /// answers the plugins gave for it, with the question asked after the
     /// frame when none of them is to this one.
-    fn statusOf(self: *FrameBuilder, fx: *const FrameCtx, arena: std.mem.Allocator, buffer: *core.Buffers.Buffer, pane: u32, facts: core.facts.Facts, focused: bool, text: ?*const core.TextSnapshot, head: ?StatuslineArgs.Head) ![]const view_mod.ui_mesh.Seg {
+    fn statusOf(self: *FrameBuilder, fx: *const FrameCtx, arena: std.mem.Allocator, buffer: *core.Buffers.Buffer, pane: u32, facts: core.facts.Facts, focused: bool, text: ?*const core.TextSnapshot, head: ?StatuslineArgs.Head, bar: bool) ![]const view_mod.ui_mesh.Seg {
         const ed = buffer.textEditor();
         const name = if (ed) |e| e.backingPath() orelse buffer.name else buffer.name;
         const subject = answers_mod.subjectOf(buffer);
@@ -754,6 +754,7 @@ pub const FrameBuilder = struct {
             .caret = if (text) |tx| caretOf(tx) else null,
             .head = head,
             .plugin_answers = if (self.answers.status(pane, subject)) |e| e.answer.status else &.{},
+            .bar = bar,
         };
         const segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena, &args);
         if (args.plugin_reached) wantStatus(fx, &self.answers, pane, subject, buffer, facts, focused);
@@ -804,7 +805,7 @@ pub const FrameBuilder = struct {
         // pane that just moved to another entry draws none of the last one's.
         const subject = answers_mod.subjectOf(spec.buffer);
         // A pane with no status line of its own asks nothing for one.
-        if (hud.status_line) hud.statusline_segs = try self.statusOf(fx, arena, spec.buffer, spec.pane, spec.facts, spec.focused, if (text) |*tx| tx else null, spec.head);
+        if (hud.status_line) hud.statusline_segs = try self.statusOf(fx, arena, spec.buffer, spec.pane, spec.facts, spec.focused, if (text) |*tx| tx else null, spec.head, false);
         hud.gutter = try gutterFrame(arena, fx, &self.answers, spec.pane, spec.buffer, spec.facts, layers.diagnostics, bpLines(arena, fx.caps, ed));
 
         try input.panes.append(arena, .{
@@ -1041,13 +1042,18 @@ pub const FrameBuilder = struct {
             // production; see `View.build`'s doc.
             .pick = null,
         };
+        const echo_live = fx.echo_timing.live(&fx.head.echo, act.frame_start, configMs(fx.config, "editor", "echo-ms"));
+        if (echo_live != fx.echo_timing.was_live) fx.view_dirty.* = true; // shown, then gone
+        fx.echo_timing.was_live = echo_live;
         // What the head says on a status line: its messages and its
         // connection, and where the active entry stands among the open ones.
         const head_status: StatuslineArgs.Head = .{
             .buffer_pos = buffer_pos,
             .backing = backing_chip,
             .link = link_note,
-            .echo = if (fx.head.echo.items.len > 0) try arena.dupe(u8, fx.head.echo.items) else cursor_diag,
+            // A message while it is brief (`EchoTiming`), else what the line
+            // shows at rest: the diagnostic under the caret.
+            .echo = if (echo_live) try arena.dupe(u8, fx.head.echo.items) else cursor_diag,
             .feed = if (fx.buffers.status.get()) |s| try arena.dupe(u8, s) else null,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
@@ -1157,7 +1163,7 @@ pub const FrameBuilder = struct {
             } else continue;
             const buffer = fx.buffers.resolve(subject.entry) orelse continue;
             const is_focused = of == focused.pane().id;
-            const segs = try self.statusOf(fx, arena, buffer, of, if (is_focused) paneFacts(fx, buffer, fx.head.focused_pane) else paneFacts(fx, buffer, of), is_focused, if (subject.text) |*tx| tx else null, head_status);
+            const segs = try self.statusOf(fx, arena, buffer, of, if (is_focused) paneFacts(fx, buffer, fx.head.focused_pane) else paneFacts(fx, buffer, of), is_focused, if (subject.text) |*tx| tx else null, head_status, true);
             try input.panes.insert(arena, input.panes.items.len - 1, .{
                 .pane = slot.pane.id,
                 .entry = ob.ref(),

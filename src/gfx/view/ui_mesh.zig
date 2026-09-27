@@ -101,6 +101,10 @@ pub const Seg = struct {
     icon: []const u8 = "",
     /// What the segment's tooltip says; its command when empty. BORROWED.
     tooltip: []const u8 = "",
+    /// A fact about ONE pane's entry among its neighbours — where it stands
+    /// in the open list, what backs it — that reads on that pane's own line,
+    /// never on a bar presenting a context to the whole window.
+    pane_only: bool = false,
 
     /// A segment that says nothing of its importance sits in the middle.
     pub const default_priority = 50;
@@ -141,6 +145,9 @@ pub const StatuslineArgs = struct {
     /// a guest itself. Empty means a `.schema_provider` binding contributes
     /// nothing this frame.
     plugin_answers: []const StatuslineAnswer = &.{},
+    /// The line is a BAR — a row presenting a context (`status_projection`),
+    /// not a pane's own line: `pane_only` segments stay off it.
+    bar: bool = false,
     /// Set by `fireStatusline` when an eligible binding is a plugin's — the
     /// caller then knows this pane's status is a question worth asking.
     plugin_reached: bool = false,
@@ -284,14 +291,14 @@ fn docStateProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bo
 fn bufferPosProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const a = argsOf(raw);
     const bp = (a.head orelse return false).buffer_pos orelse return false;
-    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, bp), .role = .muted, .priority = 15, .tooltip = "Open entries" });
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, bp), .role = .muted, .priority = 15, .tooltip = "Open entries", .pane_only = true });
     return true;
 }
 
 fn backingProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const a = argsOf(raw);
     const b = (a.head orelse return false).backing orelse return false;
-    try a.out.append(gpa, .{ .text = try std.fmt.allocPrint(gpa, "({s})", .{b}), .role = .muted, .priority = 10 });
+    try a.out.append(gpa, .{ .text = try std.fmt.allocPrint(gpa, "({s})", .{b}), .role = .muted, .priority = 10, .pane_only = true });
     return true;
 }
 
@@ -411,6 +418,21 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
             },
             else => {},
         }
+    }
+    // Where the line is placed decides what reads on it, by each segment's
+    // own say — never by which config drew the bar.
+    if (args.bar) {
+        var kept: usize = 0;
+        for (out.items) |s| {
+            if (s.pane_only) {
+                gpa.free(s.text);
+                gpa.free(s.compact);
+                continue;
+            }
+            out.items[kept] = s;
+            kept += 1;
+        }
+        out.items.len = kept;
     }
     return out.toOwnedSlice(gpa);
 }

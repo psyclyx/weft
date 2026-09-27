@@ -12,7 +12,7 @@ pub fn ok_echo(ctx: *core.command.Context, msg: []const u8) !core.command.Value 
     return .nil;
 }
 
-pub fn setEcho(echo: *std.ArrayList(u8), gpa: std.mem.Allocator, msg: []const u8) void {
+pub fn setEcho(echo: *core.Head.Echo, gpa: std.mem.Allocator, msg: []const u8) void {
     echo.clearRetainingCapacity();
     echo.appendSlice(gpa, msg) catch {};
 }

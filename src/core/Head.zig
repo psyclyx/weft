@@ -66,7 +66,7 @@ resolved_group: std.ArrayList(bool) = .empty,
 /// head has its own, entirely independent picker.
 pick: Pick = .empty,
 /// This head's transient status-line message.
-echo: std.ArrayList(u8) = .empty,
+echo: Echo = .{},
 /// The selection of the scene this head shows (doc/model.md §2.6): the
 /// focused row — a stable view/node/field path, never a text cursor — is its
 /// PRIMARY extent; rows marked beside it are its others. One model with the
@@ -528,6 +528,41 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
 }
 
 /// Set the pending sequence (owned copy); "" clears it (no allocation).
+/// A head's one-line message. Every writer SAYS it — clears, then writes —
+/// and each saying is counted (`said`), so a reader tells a message said
+/// again from one still standing: the frame shows a message for
+/// `editor/echo-ms` from its saying, and a second "no hover" is a second
+/// saying though its text is the first's. The list's own methods, by the
+/// same names, so a writer cannot change the text without the count.
+pub const Echo = struct {
+    list: std.ArrayList(u8) = .empty,
+    /// What it says now — `list.items`, kept in step by every method.
+    items: []u8 = &.{},
+    /// Sayings so far.
+    said: u64 = 0,
+
+    pub fn clearRetainingCapacity(self: *Echo) void {
+        self.list.clearRetainingCapacity();
+        self.items = self.list.items;
+        self.said +%= 1;
+    }
+
+    pub fn appendSlice(self: *Echo, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
+        defer self.items = self.list.items;
+        try self.list.appendSlice(gpa, bytes);
+    }
+
+    pub fn print(self: *Echo, gpa: Allocator, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
+        defer self.items = self.list.items;
+        try self.list.print(gpa, fmt, args);
+    }
+
+    pub fn deinit(self: *Echo, gpa: Allocator) void {
+        self.list.deinit(gpa);
+        self.* = .{};
+    }
+};
+
 pub fn setPending(self: *Head, gpa: Allocator, seq: []const u8) Allocator.Error!void {
     if (seq.len == 0) {
         gpa.free(self.pending);

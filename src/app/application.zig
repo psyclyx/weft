@@ -36,6 +36,8 @@ pub const Application = struct {
     /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
     /// whenever a new flash starts.
     flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
+    /// When the head's message was said, for how long the frame shows it.
+    echo_timing: frame.EchoTiming = .{},
 
     next_backing_poll_ns: u64 = 0,
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
@@ -124,6 +126,7 @@ pub const Application = struct {
                 .flash_start_ns = &self.flash_start_ns,
                 .flash_was_active = &self.flash_was_active,
                 .flash_duration_ns = &self.flash_duration_ns,
+                .echo_timing = &self.echo_timing,
                 .config = args.config orelse &args.session.system.config_kv,
                 .cmd_ctx = &args.session.cmd_ctx,
             },

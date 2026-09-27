@@ -661,7 +661,7 @@ pub fn startListen(
     token: []const u8,
     access: core.session.Access,
     my_identity: *const core.identity.Identity,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
 ) void {
     sc.primary_doc = if (buffers.active().textEditor()) |ed| &ed.doc else null;
     sc.primary_tag = buffers.active_id;
@@ -701,7 +701,7 @@ pub fn applyIntents(
     connect_task: *?core.task.Handle(anyerror!i32),
     connect_hostport: *?[]u8,
     fd_link: *core.session.FdLink,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
     my_identity: *const core.identity.Identity,
     token: []const u8,
     user: []const u8,
@@ -817,7 +817,7 @@ pub fn tickCollab(
     pool: *core.task.Pool,
     connect: ?[]const u8,
     token: []const u8,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
 ) !bool {
     const gpa = sc.gpa;
     var dirty = false;

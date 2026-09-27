@@ -621,7 +621,7 @@ pub const Session = struct {
     /// section 6 W2a-1 moved it out of `Session`'s own storage) — this is
     /// the one spot app-side code says `session.echo()` instead of reaching
     /// into `session.head.echo` directly.
-    pub fn echo(self: *Session) *std.ArrayList(u8) {
+    pub fn echo(self: *Session) *core.Head.Echo {
         return &self.head.echo;
     }
 
