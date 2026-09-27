@@ -29,6 +29,7 @@ const wayland = @import("weft_platform").wayland;
 const cursor_config = @import("cursor_config.zig");
 const frame = @import("frame.zig");
 const collab = @import("collab.zig");
+const pointer = @import("pointer.zig");
 
 /// A source that never mutates, only marks readiness on an fd `step`
 /// already knows how to drain by itself (`onReady = null`, see
@@ -81,6 +82,16 @@ pub fn whichKeyDue(ctx: ?*anyopaque, now: u64) ?u64 {
     const self: *const WhichKeyCtx = @ptrCast(@alignCast(ctx.?));
     if (!self.menu.open or self.menu.shown or self.menu.forced) return null;
     return self.menu.open_ns + self.delay_ns;
+}
+
+// ── 3b. Tooltip delay — no old site: hover is new frame input
+// (`pointer.Hover`). Due once the pointer has rested on a target for the
+// delay; `Application.tickAsync` ripens it on that wake. ──
+
+pub fn tooltipDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    _ = now;
+    const hover: *const pointer.Hover = @ptrCast(@alignCast(ctx.?));
+    return hover.dueAt();
 }
 
 // ── 4. Backing poll cadence — old site: `frame.tickAsync`'s

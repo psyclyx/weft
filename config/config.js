@@ -570,4 +570,10 @@ weft.set("palette", "diag_error", "#fb4934");
 // says a hunk header is worth finding.
 weft.set("theme", "hunk", "emphasis");
 
+// How chrome — buttons, tabs, status, menus — looks, from the same family:
+// `text` is clean, cell-aligned text with no brackets; `text-icons` adds
+// small icons; `widget` draws rounded pills, real tabs and shadowed menus.
+// `theme.set-chrome widget` (or `theme.cycle-chrome`) switches it live.
+weft.set("theme", "chrome", "text");
+
 weft.echo("weft: config.js loaded");

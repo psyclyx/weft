@@ -24,6 +24,7 @@ const providers = @import("providers.zig");
 const collab = @import("collab.zig");
 const answers_mod = @import("answers.zig");
 const frame = @import("frame.zig");
+const pointer_mod = @import("pointer.zig");
 const FrameCtx = frame.FrameCtx;
 const Active = frame.Active;
 
@@ -439,6 +440,33 @@ fn selectedRows(arena: std.mem.Allocator, instance: anytype, focus: *const core.
     return out.items;
 }
 
+/// What the pointer rests on in `pane`, as this frame's input for the chrome
+/// style (`Hud.pointer`): the target, whether a button is held on it, and
+/// whether its tooltip is due. Nothing, for a pane the pointer is not over.
+fn pointerIn(fx: *const FrameCtx, pane: u32) view_mod.Hover {
+    const hover = fx.hover;
+    if (hover.target.pane != pane) return .{};
+    const g = &fx.head.pointer;
+    const held = g.kind == .press or g.kind == .drag;
+    return .{
+        .at = hover.at,
+        .chrome = if (hover.target.chrome) |c| .{
+            .kind = switch (c.kind) {
+                .tab => .tab,
+                .status => .status,
+            },
+            .index = c.index,
+            .part = switch (c.part) {
+                .body => .body,
+                .close => .close,
+            },
+        } else null,
+        .node = if (hover.target.node) |n| .{ .view = n.view, .node = n.node } else null,
+        .pressed = held and pointer_mod.Hover.Target.of(g.origin).eql(hover.target),
+        .tooltip = hover.ripe,
+    };
+}
+
 fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
     const active = fx.head.interactions.active() orelse return null;
     const descriptor = active.descriptor;
@@ -676,6 +704,7 @@ pub const FrameBuilder = struct {
         const layers = try PaneLayers.take(arena, live, window);
         input.snapshot_ns += stats_mod.nowNs() - t0;
         layers.apply(&hud);
+        hud.pointer = pointerIn(fx, spec.pane);
 
         // Every answer this pane draws or asks for is about its subject: a
         // pane that just moved to another entry draws none of the last one's.
@@ -770,6 +799,10 @@ pub const FrameBuilder = struct {
         const fb = act.fb;
         const arena = input.allocator();
 
+        // How chrome looks is read from its theme slot at the top of every
+        // frame, so whatever last bound it — config, theme, the live switch —
+        // is what this frame draws (doc/chrome.md §3.2).
+        self.view.resolveChrome(fx.ui_mesh, fx.cmd_ctx.capturedCtx().mergedFacts());
         const projection = scene.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         input.world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 

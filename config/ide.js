@@ -103,6 +103,9 @@ weft.set("editor", "flash-ms", "150");
 weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
 weft.set("linenumbers", "style", "absolute"); // the conventional gutter
 weft.set("palette", "arguments", "ask");
+// Chrome as widgets: rounded buttons, real tabs whose close glyph shows on
+// hover, icons, shadowed menus (doc/chrome.md §3.2).
+weft.set("theme", "chrome", "widget");
 // Which declared viewport C-b toggles — the fragment above calls it this.
 weft.set("ide", "sidebar", "sidebar");
 // Always on the toolbar, first: an intention shows its live availability

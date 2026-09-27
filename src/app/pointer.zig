@@ -28,11 +28,83 @@ const dispatch = @import("dispatch.zig");
 
 const Pointer = core.pointer;
 
+/// What the pointer rests on, as frame INPUT (doc/model.md §2.7,
+/// doc/chrome.md §3.3): the target under it — a pane's chrome part or scene
+/// node — and since when, for the tooltip delay. Hover is not a gesture: no
+/// keyspec, no dispatch, no keymap lookup. A new TARGET marks the frame
+/// dirty so the chrome style can light what is under the pointer; motion
+/// within one target costs nothing at all.
+pub const Hover = struct {
+    target: Target = .{},
+    /// The pointer, framebuffer pixels; null before it has moved.
+    at: ?[2]f32 = null,
+    since_ns: u64 = 0,
+    /// The pointer has rested on `target` past `delay_ns`: tooltips show.
+    ripe: bool = false,
+    delay_ns: u64 = 600 * std.time.ns_per_ms,
+
+    pub const Target = struct {
+        pane: ?u32 = null,
+        chrome: ?struct { kind: Pointer.Chrome.Of, index: u16, part: Pointer.Chrome.Part } = null,
+        node: ?Pointer.NodeRef = null,
+
+        pub fn of(hit: Pointer.Hit) Target {
+            return .{
+                .pane = if (hit.pane) |p| p.id else null,
+                .chrome = if (hit.chrome) |c| .{ .kind = c.kind, .index = c.index, .part = c.part } else null,
+                .node = hit.node,
+            };
+        }
+
+        pub fn eql(a: Target, b: Target) bool {
+            if (!std.meta.eql(a.pane, b.pane) or !std.meta.eql(a.chrome, b.chrome)) return false;
+            if (a.node == null or b.node == null) return a.node == null and b.node == null;
+            return a.node.?.node == b.node.?.node and a.node.?.view.eql(b.node.?.view);
+        }
+
+        /// Something a tooltip could be about.
+        fn named(self: Target) bool {
+            return self.chrome != null or self.node != null;
+        }
+    };
+
+    /// The pointer is at `hit` now. True when that is a different target —
+    /// the one change a frame has to show.
+    pub fn move(self: *Hover, hit: Pointer.Hit, now_ns: u64) bool {
+        self.at = .{ hit.x, hit.y };
+        const target: Target = .of(hit);
+        if (target.eql(self.target)) return false;
+        self.target = target;
+        self.since_ns = now_ns;
+        self.ripe = false;
+        return true;
+    }
+
+    /// When the tooltip for the current target is due; null when none is
+    /// pending. The loop's timer source (`loop_sources.tooltipDue`).
+    pub fn dueAt(self: *const Hover) ?u64 {
+        if (self.ripe or !self.target.named()) return null;
+        return self.since_ns + self.delay_ns;
+    }
+
+    /// Past the delay at `now_ns`: the tooltip shows. True on the one wake it
+    /// ripens, which is the frame that has to draw it.
+    pub fn ripen(self: *Hover, now_ns: u64) bool {
+        const due = self.dueAt() orelse return false;
+        if (now_ns < due) return false;
+        self.ripe = true;
+        return true;
+    }
+};
+
 /// Handle one pointer event whose position is already in framebuffer
 /// pixels. Returns whether anything was dispatched (the input edge).
 pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.PointerEvent) !bool {
     const g = &ctx.head.pointer;
     const hit = hitAt(driver, ctx.head, @floatCast(ev.x), @floatCast(ev.y));
+    // Hover is frame input, kept for every event kind: a press or a release
+    // moves it too (a click is where the pointer is).
+    if (driver.ctx.hover.move(hit, core.task.nowNs())) driver.ctx.view_dirty.* = true;
     const mods: Pointer.Mods = .{ .ctrl = ev.mods.ctrl, .alt = ev.mods.alt, .shift = ev.mods.shift, .logo = ev.mods.logo };
     var name_buf: [32]u8 = undefined;
     switch (ev.kind) {

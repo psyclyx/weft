@@ -26,6 +26,9 @@ pub const Application = struct {
     js_plugins: *std.ArrayList(*core.quickjs.JsPlugin),
 
     view_dirty: bool = true,
+    /// What the pointer rests on — frame input the pointer keeps and the
+    /// frame reads (`pointer.Hover`).
+    hover: pointer_mod.Hover = .{},
     last_frame_rect: region.Rect = .{},
     flash_gen: u64 = 0,
     flash_start_ns: u64 = 0,
@@ -115,6 +118,7 @@ pub const Application = struct {
                 .known_peers = args.known_peers,
                 .noted_host_fp = args.noted_host_fp,
                 .view_dirty = &self.view_dirty,
+                .hover = &self.hover,
                 .last_frame_rect = &self.last_frame_rect,
                 .flash_gen = &self.flash_gen,
                 .flash_start_ns = &self.flash_start_ns,
@@ -211,6 +215,9 @@ pub const Application = struct {
         for (self.js_plugins.items) |plugin| if (plugin.tick()) {
             damaged = true;
         };
+        // The pointer has rested long enough: the frame that shows the
+        // tooltip is due (the loop's `tooltip_delay` timer woke us for it).
+        if (self.hover.ripen(frame_start)) damaged = true;
         if (try self.services.call(self, active)) damaged = true;
         return damaged;
     }

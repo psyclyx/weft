@@ -40,8 +40,10 @@ const core = @import("weft_core");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");
+const theme_cmds = @import("theme_cmds.zig");
 const frame = @import("frame.zig");
 const ui_mesh = @import("weft_gfx").view.ui_mesh;
+const view_mod = @import("weft_gfx").view;
 const fs_platform = @import("weft_fs_platform");
 const fs = @import("weft_fs");
 const fs_runtime = @import("weft_fs_runtime");
@@ -169,6 +171,10 @@ pub const Session = struct {
         self.system.context.derived = providers.treeRevision;
         try ui_mesh.declareSlots(&self.system.container);
         try ui_mesh.bindDefaultStatusline(&self.system.container);
+        // How chrome looks is a theme value the view reads each frame; the
+        // switch commands bind it live (doc/chrome.md §3.2).
+        try view_mod.View.declareChromeSlots(&self.system.container);
+        try theme_cmds.register(gpa, &self.system.commands);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         try setup.registerCapabilityConsumers(gpa, &self.system.commands, &self.completion_ui, grammars);

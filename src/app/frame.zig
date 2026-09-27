@@ -176,6 +176,9 @@ pub const FrameCtx = struct {
     /// Damage flag: the build gates on it (skips a clean frame) and re-arms it
     /// for the frame after a flash so the flash is drawn then cleared.
     view_dirty: *bool,
+    /// What the pointer rests on (`pointer.Hover`): the pointer writes it,
+    /// the frame reads it into each pane's `Hud.pointer`.
+    hover: *@import("pointer.zig").Hover,
     /// Last render's pane frame, for click routing next frame.
     last_frame_rect: *region.Rect,
 

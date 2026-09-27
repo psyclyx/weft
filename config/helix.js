@@ -93,6 +93,10 @@ weft.set("palette", "cursor", "#fe8019");
 weft.set("palette", "selection", "#504945");
 weft.set("palette", "heading", "#fabd2f");
 weft.set("palette", "status", "#a89984");
+// How chrome looks: clean, cell-aligned text. `text-icons` adds small icons,
+// `widget` draws pills and real tabs; `theme.set-chrome widget` (or
+// `theme.cycle-chrome`) tries one live.
+weft.set("theme", "chrome", "text");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
 weft.action("eval");
