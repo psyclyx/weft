@@ -109,9 +109,6 @@ pub const Shape = struct {
     mixed: bool = false,
 };
 
-/// WIP (phase 4 in progress): refusal lands once every plugin declares.
-const refuse_undeclared = false;
-
 pub const Refusal = error{
     /// A command that declares no mapping met several extents.
     UndeclaredMapping,
@@ -126,7 +123,7 @@ pub const Refusal = error{
 /// toolbar greys is exactly a command dispatch would refuse.
 pub fn admits(arity: ?Arity, shape: Shape) ?Refusal {
     if (shape.count <= 1) return null;
-    const a = arity orelse return if (refuse_undeclared) error.UndeclaredMapping else null;
+    const a = arity orelse return error.UndeclaredMapping;
     return switch (a) {
         .homogeneous => if (shape.mixed) error.MixedExtents else null,
         .each, .whole => null,
@@ -299,7 +296,7 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
     const shape = shapeOf(ctx);
     if (admits(cmd.arity, shape)) |refused| return refused;
     if (shape.count <= 1 and over == null) return cmd.handler(ctx, cmd.data, args);
-    const arity = cmd.arity orelse return cmd.handler(ctx, cmd.data, args); // WIP: until every plugin declares
+    const arity = cmd.arity.?; // admitted with several extents: declared
     const each = switch (arity) {
         .whole, .homogeneous => return cmd.handler(ctx, cmd.data, args),
         .each => |e| e,
@@ -512,7 +509,7 @@ const testing = std.testing;
 
 test "admits: one extent runs anything; several refuse the undeclared and mixed homogeneous" {
     try testing.expectEqual(@as(?Refusal, null), admits(null, .{}));
-    if (refuse_undeclared) try testing.expectEqual(@as(?Refusal, error.UndeclaredMapping), admits(null, .{ .count = 2 }));
+    try testing.expectEqual(@as(?Refusal, error.UndeclaredMapping), admits(null, .{ .count = 2 }));
     try testing.expectEqual(@as(?Refusal, null), admits(.whole, .{ .count = 2, .mixed = true }));
     try testing.expectEqual(@as(?Refusal, null), admits(Arity.each_extent, .{ .count = 3 }));
     try testing.expectEqual(@as(?Refusal, null), admits(.homogeneous, .{ .count = 3 }));

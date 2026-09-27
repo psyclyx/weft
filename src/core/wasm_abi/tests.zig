@@ -4174,6 +4174,37 @@ test "wasm plugin: multiple selections — a per-selection yank distributes acro
     try expectDoc(gpa, ed, "one\ntwooneone two|two");
 }
 
+test "wasm plugin: a command that declares no mapping is refused on several selections, and says why" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "abc");
+    // One selection is the degenerate case: an undeclared command runs.
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-undeclared", &.{});
+    try expectDoc(gpa, ed, "?abc");
+
+    // Two: it would act on one of them, so it does not run at all — and the
+    // door a person reaches it through says why.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
+    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "ms-undeclared", &.{}));
+    try expectDoc(gpa, ed, "?abc");
+    command.invoke(&env.commands, &env.ctx, "ms-undeclared", &.{});
+    try t.expectEqualStrings("ms-undeclared: acts on one selection; several are selected", env.head.echo.items);
+    try expectDoc(gpa, ed, "?abc");
+    // Both selections survive the refusal.
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+}
+
 test "context: a wasm plugin publishes at a scope, a predicate reads it, and unloading retracts it" {
     const gpa = t.allocator;
     var env: Env = undefined;
