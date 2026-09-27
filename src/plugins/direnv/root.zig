@@ -17,10 +17,10 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "direnv.status", .arity = .whole, .call = status, .summary = "Say what direnv makes of this directory.", .label = "Show Direnv Status", .menu = "Terminal", .group = "direnv", .order = 1 },
-    .{ .name = "direnv.allow", .arity = .whole, .call = allow, .summary = "Allow this directory's .envrc.", .label = "Allow Direnv", .menu = "Terminal", .group = "direnv", .order = 2, .icon = "shield-check" },
-    .{ .name = "direnv.reload", .arity = .whole, .call = reload, .summary = "Re-read the environment direnv provides.", .label = "Reload Direnv Environment", .menu = "Terminal", .group = "direnv", .order = 3, .icon = "refresh" },
-    .{ .name = "direnv.apply", .arity = .whole, .call = apply, .summary = "Apply this directory's environment.", .label = "Apply Direnv Environment", .menu = "Terminal", .group = "direnv", .order = 4 },
+    .{ .name = "direnv.status", .arity = .whole, .call = status, .summary = "Say what direnv makes of this directory.", .label = "Show Direnv Status", .menu = "Terminal/Direnv", .group = "direnv", .order = 1 },
+    .{ .name = "direnv.allow", .arity = .whole, .call = allow, .summary = "Allow this directory's .envrc.", .label = "Allow Direnv", .menu = "Terminal/Direnv", .group = "direnv", .order = 2, .icon = "shield-check" },
+    .{ .name = "direnv.reload", .arity = .whole, .call = reload, .summary = "Re-read the environment direnv provides.", .label = "Reload Direnv Environment", .menu = "Terminal/Direnv", .group = "direnv", .order = 3, .icon = "refresh" },
+    .{ .name = "direnv.apply", .arity = .whole, .call = apply, .summary = "Apply this directory's environment.", .label = "Apply Direnv Environment", .menu = "Terminal/Direnv", .group = "direnv", .order = 4 },
 };
 
 /// The fill token `direnv.apply` waits on. Any other fill in this buffer (a

@@ -24,7 +24,7 @@ var plugin: files_guest.Plugin = undefined;
 const file_pick = 0;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "files.browse", .arity = .whole, .call = browse, .summary = "Browse a directory as a file tree.", .label = "Browse Files", .menu = "File", .group = "open", .order = 3, .icon = "folder-tree" },
+    .{ .name = "files.browse", .arity = .whole, .call = browse, .summary = "Browse a directory as a file tree.", .label = "Browse Files", .icon = "folder-tree" },
     .{ .name = "files.find", .arity = .whole, .call = find, .summary = "Find a file to edit.", .label = "Open File", .menu = "File", .group = "open", .order = 1, .icon = "file-search", .prompts = true },
     .{ .name = "files.places", .arity = .whole, .call = presentPlaces, .params = "designation", .summary = "List the places you are working in (weft://here/places/all).", .internal = true },
     .{ .name = "files.open-place", .arity = .whole, .call = openPlace, .params = "row", .summary = "Open the file tree of the place a row names.", .internal = true },

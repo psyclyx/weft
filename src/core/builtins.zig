@@ -915,8 +915,8 @@ const table = [_]command.Command{
     command.define("selection.copy", "Copy the selection.", cSelectionCopy).maps(.whole).present(.{ .label = "Copy", .menu = "Edit", .group = "clipboard", .order = 20, .icon = "copy" }),
     command.define("selection.cut", "Cut the selection.", cSelectionCut).maps(.whole).present(.{ .label = "Cut", .menu = "Edit", .group = "clipboard", .order = 10, .icon = "scissors" }),
     command.define("selection.delete", "Delete the selection.", cSelectionDelete).maps(.each_extent).present(.{ .label = "Delete", .menu = "Edit", .group = "clipboard", .order = 50 }),
-    command.define("selection.paste-before", "Paste before the selection.", cSelectionPasteBefore).maps(.whole).present(.{ .label = "Paste Before", .menu = "Edit", .group = "clipboard", .order = 30 }),
-    command.define("selection.paste-after", "Paste after the selection.", cSelectionPasteAfter).maps(.whole).present(.{ .label = "Paste After", .menu = "Edit", .group = "clipboard", .order = 40, .icon = "clipboard-paste" }),
+    command.define("selection.paste-before", "Paste before the selection.", cSelectionPasteBefore).maps(.whole).present(.{ .label = "Paste Before" }),
+    command.define("selection.paste-after", "Paste after the selection.", cSelectionPasteAfter).maps(.whole).present(.{ .label = "Paste", .menu = "Edit", .group = "clipboard", .order = 30, .icon = "clipboard-paste" }),
     command.define("target.open", "Open what the focused row or selection points at.", cTargetOpenFocused).maps(.each_extent).present(.{ .label = "Open" }),
     command.define("hierarchy.toggle-expanded", "Expand the focused row, or collapse it when it is open.", cHierarchyToggleExpanded).maps(.each_extent).present(.{ .label = "Expand/Collapse" }),
     // One row's verbs: a name edited, a row inserted beside it, its container

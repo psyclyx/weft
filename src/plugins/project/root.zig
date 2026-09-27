@@ -36,13 +36,42 @@ var list_buf: std.ArrayList(u8) = .empty;
 // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
 // second cost a grant over the whole filesystem.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "Remember this project so it shows up in recents.", .label = "Remember Project", .menu = "File", .group = "project", .order = 1 },
-    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the projects you were in recently.", .label = "Open Recent Project", .menu = "File", .group = "open", .order = 4, .icon = "history" },
+    // Plumbing and diagnostics: in the palette, not in a menu — a
+    // conventional File menu has no "remember" or "where is the root" row.
+    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "Remember this project so it shows up in recents.", .label = "Remember Project" },
+    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the files you visited recently.", .label = "List Recent Files" },
     .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "List recently visited project roots.", .internal = true },
-    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "Say where this project's root is.", .label = "Show Project Root", .menu = "File", .group = "project", .order = 2 },
+    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "Say where this project's root is.", .label = "Show Project Root" },
+    .{ .name = "project.open-recent", .arity = .whole, .call = openRecent, .summary = "Choose a file you visited recently and open it.", .label = "Open Recent", .prompts = true, .menu = "File", .group = "open", .order = 6, .icon = "history" },
 };
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
+}
+
+const pick_recent = 0;
+
+/// `project.open-recent`: the recent files, most recent first, as a picker —
+/// File › Open Recent….
+fn openRecent() void {
+    const list = weft.kvGet(recent_key) orelse "";
+    if (list.len == 0) return weft.echo("no recent files");
+    const owned = weft.allocator.dupe(u8, list) catch return;
+    defer weft.allocator.free(owned);
+    weft.pickBegin("recent", pick_recent);
+    weft.pickCategory("file");
+    var lines = std.mem.splitScalar(u8, owned, '\n');
+    while (lines.next()) |path| if (path.len > 0) weft.pickAdd(path, "");
+    weft.pickEnd();
+}
+
+fn onPickAccept(pick_id: u32) void {
+    if (pick_id != pick_recent) return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    switch (outcome) {
+        .candidate => |c| weft.runStr("file.open", c.text),
+        .input, .cancelled => {},
+    }
 }
 
 /// Every buffer focus records the file. The root no longer needs recording:

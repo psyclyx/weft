@@ -213,7 +213,9 @@ test "e2e/menubar: a click drops File beneath its title — rows in order, rules
 
     try clickTitle(ed, "File");
     const file = try menu(ed);
-    try expectPanel(file, "New File | Open File… Open Path… Browse Files Open Recent Project Open… Browse Remote Files… | Save Save As… | Close Editor Close Without Saving | Remember Project Show Project Root | Notes | Quit");
+    // What a conventional File menu holds: no plumbing (remembering a
+    // project, saying where its root is), no second row for one act.
+    try expectPanel(file, "New File | Open File… Open… Open Recent… Browse Remote Files… | Save Save As… | Close Editor Close Without Saving | Notes | Quit");
     // The key that runs each row in the editor, as ide.js binds it.
     try expectKeys(file, "Save", "C-s");
     try expectKeys(file, "Save As…", "C-S-s");
@@ -246,6 +248,19 @@ test "e2e/menubar: a click drops File beneath its title — rows in order, rules
     try clickTitle(ed, "File");
     try expectKeys(try menu(ed), "Save", "C-s");
     shot(&app, "menubar-file-ide-text");
+
+    // Open Recent… is one picker of the files visited, most recent first;
+    // choosing one opens it.
+    ed.press("Escape", "");
+    try ide.openFile(ed, "other.zig", "const o = 2;\n");
+    ed.applyWindow();
+    try clickTitle(ed, "File");
+    try clickRow(ed, try menu(ed), "Open Recent…");
+    try t.expect(ed.pick.active);
+    ed.typeText("main");
+    ed.press("Return", "");
+    try t.expect(!ed.pick.active);
+    try t.expect(std.mem.endsWith(u8, ed.bufferName(), "main.zig"));
 }
 
 /// config.js with the menubar fragment: the vim grammar's editor.

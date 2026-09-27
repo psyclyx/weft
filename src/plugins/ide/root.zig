@@ -695,7 +695,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide.target-line-end", .call = targetLineEnd, .arity = each, .summary = "Answer the end of a selection's line.", .internal = true },
     .{ .name = "ide.target-line-start", .call = targetLineStart, .arity = each, .summary = "Answer the start of a selection's line.", .internal = true },
     .{ .name = "ide.target-transfer", .call = targetTransfer, .arity = each, .summary = "Answer the text a clipboard key moves for a selection.", .internal = true },
-    .{ .name = "ide.open-path", .call = openPath, .arity = .whole, .summary = "Open a file by typing its path.", .label = "Open Path", .prompts = true, .menu = "File", .group = "open", .order = 2, .icon = "file" },
+    .{ .name = "ide.open-path", .call = openPath, .arity = .whole, .summary = "Open a file by typing its path.", .label = "Open Path", .prompts = true, .icon = "file" },
     .{ .name = "ide.toggle-sidebar", .call = toggleSidebar, .arity = .whole, .summary = "Show or hide the docked sidebar.", .label = "Sidebar", .menu = "View", .group = "panels", .order = 1, .icon = "sidebar", .toggle = "viewport.sidebar.shown" },
     .{ .name = "ide.add-next-match", .call = addNextMatch, .arity = .whole, .summary = "Select the word, then add the next occurrence of the selection.", .label = "Add Next Occurrence", .menu = "Selection", .group = "cursors", .order = 1 },
     .{ .name = "ide.select-all-matches", .call = selectAllMatches, .arity = .whole, .summary = "Select every occurrence of the selection.", .label = "Select All Occurrences", .menu = "Selection", .group = "cursors", .order = 2 },

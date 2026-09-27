@@ -31,8 +31,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "net.open", .arity = .whole, .call = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer.", .label = "Open Connection", .menu = "Run/Tools", .group = "net", .order = 2, .icon = "network", .prompts = true },
-    .{ .name = "net.open-tls", .arity = .whole, .call = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name.", .label = "Open TLS Connection", .menu = "Run/Tools", .group = "net", .order = 3, .icon = "network", .prompts = true },
+    .{ .name = "net.open", .arity = .whole, .call = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer.", .label = "Open Connection", .icon = "network", .prompts = true },
+    .{ .name = "net.open-tls", .arity = .whole, .call = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name.", .label = "Open TLS Connection", .icon = "network", .prompts = true },
     .{ .name = "net.send", .arity = .whole, .call = send, .params = "bytes", .summary = "Write bytes to this buffer's connection.", .label = "Send to Connection", .prompts = true },
     .{ .name = "net.close", .arity = .whole, .call = close, .summary = "Hang up this buffer's connection, leaving the others live.", .label = "Close Connection" },
 };
