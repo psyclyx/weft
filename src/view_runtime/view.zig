@@ -147,11 +147,16 @@ pub const Registry = struct {
     /// Mark `node` as what view `ref` reveals (doc/model.md §2.5). This is
     /// the ONLY thing a reveal writes: no head's focus and no entry's
     /// selection is reachable from here, so revealing can never move what
-    /// the user selected. False when the view is gone or lacks the node.
-    pub fn reveal(self: *Registry, ref: semantic.view.Ref, node: semantic.scene.NodeId) bool {
+    /// the user selected. Null reveals nothing (what was revealed is not in
+    /// this view, or not yet). False when the view is gone or lacks the
+    /// node, which reveals nothing too.
+    pub fn reveal(self: *Registry, ref: semantic.view.Ref, node: ?semantic.scene.NodeId) bool {
         const instance = self.get(ref) orelse return false;
-        if (instance.node(node) == null) return false;
-        self.slots.items[ref.slot].revealed = node;
+        const slot = &self.slots.items[ref.slot];
+        slot.revealed = null;
+        const id = node orelse return true;
+        if (instance.node(id) == null) return false;
+        slot.revealed = id;
         return true;
     }
 

@@ -173,6 +173,12 @@ fn validateBinding(b: Binding) PresentError!void {
 /// `weft.present`); `pane`/`presented` are the layout phase's bookkeeping,
 /// kept beside it so "declared but not yet on screen" is one lookup rather
 /// than a second parallel table that can disagree with this one.
+/// Where a pending reveal waits: the view asked, at the revision it answered.
+pub const RevealWait = struct {
+    view: semantic.view.Ref,
+    revision: u64,
+};
+
 pub const Declaration = struct {
     name: []u8,
     attrs: Attrs,
@@ -196,6 +202,11 @@ pub const Declaration = struct {
     /// The reveal is to be (re)applied at the next layout phase: after a
     /// presentation, or when the reveal key moved.
     reveal_due: bool = false,
+    /// A reveal the provider accepted but could not answer yet (it has
+    /// folders to read, off the layout pass): the view and the revision it
+    /// answered at. Asked again when that view republishes — the provider's
+    /// own "the children arrived" — and never before, so nothing polls.
+    reveal_waits: ?RevealWait = null,
     /// What a keyed subject resolved to when it was last presented — the
     /// designation opened, `as` included, or `""` for the empty state.
     /// Owned. Compared, never interpreted, so showing a hidden viewport
@@ -383,6 +394,14 @@ pub const Registry = struct {
             }
         }
         return any;
+    }
+
+    /// Whether any viewport's reveal waits on its provider — so the frame
+    /// boundary, having delivered the signals a provider does its reading
+    /// in, runs the layout phase once more to ask again.
+    pub fn revealsWaiting(self: *const Registry) bool {
+        for (self.list.items) |d| if (d.reveal_waits != null) return true;
+        return false;
     }
 
     /// The context keys any declared viewport follows — so the frame

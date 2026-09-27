@@ -221,7 +221,14 @@ pub const Application = struct {
         // Named signals plugins raised this wake (`wl_signal_emit`), heard at
         // the same boundary and for the same reason: never inside the
         // dispatch or poll that raised them.
-        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items)) damaged = true;
+        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items)) {
+            damaged = true;
+            // A provider that accepted a reveal reads there, off the layout
+            // pass, and republishes: one more layout pass asks it again, so
+            // the reveal lands in this wake rather than at the next input.
+            if (self.driver.ctx.viewports.revealsWaiting())
+                _ = self.driver.applyWindowIntents(&self.session.cmd_ctx);
+        }
         return damaged;
     }
 

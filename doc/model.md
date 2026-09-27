@@ -469,8 +469,15 @@ kept alive past its phase.
    while marked rows stayed marked beside it (a later Delete ran twice on
    one row). The files listing answers it from its own
    designation, which trusted publishers now state on the directory
-   descriptor (`fs.target.designation_fact_name`), opening one folder at a
-   time. `{command}` presenting is deleted.
+   descriptor (`fs.target.designation_fact_name`), by one (parent, name)
+   lookup per path level. It never reads in the layout pass that asks: a
+   reveal behind an unopened folder answers `.handled` (accepted, pending),
+   the provider reads every folder on the way at its own `files.reveal`
+   signal (the frame boundary) and publishes once, and the viewport, which
+   waits on the view's next revision (`Declaration.reveal_waits`), asks
+   again in the same wake. Folders a reveal opened fold again when a later
+   reveal does not pass through them, unless the user has toggled them.
+   `{command}` presenting is deleted.
    The `offers` plugin is the provider for kind `offers` (`primary`,
    `active`, `at-pointer`; `as` strip, list, menu) and replaces the toolbar
    and contextmenu plugins, both deleted; `plugin_lib/offers` is the one

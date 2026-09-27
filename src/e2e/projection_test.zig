@@ -616,3 +616,53 @@ test "e2e/projection: a reveal highlights beside the selection — the rows you 
     try t.expectEqual(primary, after.primaryRows().?);
     try t.expectEqual(marked, after.others.items[0]);
 }
+
+/// The view the sidebar's entry shows, and its published revision.
+fn sidebarView(ed: *Editor) !struct { ref: semantic_model.view.Ref, revision: u64 } {
+    const entry = try paneEntry(ed, try sidebarPane(ed));
+    const shown = if (entry.id == ed.buffers.active_id) ed.head.scene_selection.view else entry.scene_selection.view;
+    const ref = shown orelse entry.tool_view orelse return error.NoSidebarView;
+    const instance = ed.session.system.semantic.views.get(ref) orelse return error.StaleView;
+    return .{ .ref = ref, .revision = instance.descriptor.revision };
+}
+
+test "e2e/projection: a deep reveal opens its folders in one publish, off the layout pass — and folds them when it moves on" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try makeProjects(gpa);
+    try core.file.writeBytesMakingDirs(gpa, "deep/one/two", "deep/one/two/leaf.txt", "LEAF\n");
+    var buf: [4096]u8 = undefined;
+
+    ed.runStr("open", "a.txt");
+    ed.applyWindow();
+    const before = try sidebarView(ed);
+
+    // Three folders to open on the way: read at the frame boundary, not in
+    // the layout pass that asked, and published once — still in this wake.
+    ed.runStr("open", "deep/one/two/leaf.txt");
+    ed.applyWindow();
+    try t.expectEqualStrings(under(&app.proj, &buf, "file", "/deep/one/two/leaf.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
+    const deep = try sidebarView(ed);
+    try t.expect(deep.ref.eql(before.ref));
+    try t.expectEqual(before.revision + 1, deep.revision);
+    {
+        const text = try ed.semanticText(deep.ref);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "leaf.txt") != null);
+    }
+
+    // Back to a file at the top: the folders the reveal opened fold again,
+    // so the listing does not keep every folder the editor ever visited.
+    ed.runStr("open", "a.txt");
+    ed.applyWindow();
+    try t.expectEqualStrings(under(&app.proj, &buf, "file", "/a.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
+    {
+        const text = try ed.semanticText(deep.ref);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "leaf.txt") == null);
+        try t.expect(std.mem.indexOf(u8, text, "two") == null);
+    }
+}

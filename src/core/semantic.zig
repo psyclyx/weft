@@ -557,24 +557,41 @@ pub const Services = struct {
     /// focus and no entry's rows move, so revealing is never navigating, and
     /// the rows a person marked stay marked. The answer is read, not
     /// absorbed: a reveal can only ever name a node, so a provider answering
-    /// it with a transfer, a dialog or an open does nothing. False when the
-    /// provider declined (the view does not contain it) or answered anything
-    /// but a node of this view.
-    pub fn reveal(self: *Services, ref: semantic.view.Ref, designation: []const u8) bool {
-        const root = (self.views.get(ref) orelse return false).descriptor.root;
+    /// it with a transfer, a dialog or an open does nothing.
+    ///
+    /// A provider that must read first (folders to open) answers `.handled`:
+    /// accepted, `pending`. It reads off the frame path and republishes, and
+    /// the caller asks again then. Until a node is named the view reveals
+    /// nothing — never a row that no longer stands for what is revealed.
+    pub fn reveal(self: *Services, ref: semantic.view.Ref, designation: []const u8) Reveal {
+        const root = (self.views.get(ref) orelse return .declined).descriptor.root;
         const outcome = self.actions.ask(&self.views, .{
             .action = semantic.action.standard.reveal,
             .view = ref,
             .subject = root,
             .argument = designation,
-        }) catch return false;
+        }) catch .declined;
         // The provider may have republished while answering: the registry
         // checks the node against the view as it is now.
         return switch (outcome) {
-            .focus => |node| self.views.reveal(ref, node),
-            else => false,
+            .focus => |node| if (self.views.reveal(ref, node)) .revealed else .declined,
+            .handled => if (self.views.reveal(ref, null)) .pending else .declined,
+            else => blk: {
+                _ = self.views.reveal(ref, null);
+                break :blk .declined;
+            },
         };
     }
+
+    /// What asking a view to reveal something came to.
+    pub const Reveal = enum {
+        /// A node of the view is revealed.
+        revealed,
+        /// Accepted; the provider answers when it has read what it needs.
+        pending,
+        /// Not in this view: nothing is revealed.
+        declined,
+    };
 
     /// Return the closest target link on one head's retained focus path. The
     /// value is borrowed only for synchronous dispatch; the view registry owns

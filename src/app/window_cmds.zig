@@ -361,8 +361,12 @@ pub fn materializeViewports(
             decl.presented = true;
             if (presentDeclared(ctx, win_layout, buffers, gpa, head, keymap, registry, decl, node)) dirty = true;
         }
-        if (decl.reveal_due) {
+        // A new reveal replaces one still waiting; a waiting one is asked
+        // again once its view has republished (the provider read what it
+        // needed off the frame path), never before.
+        if (decl.reveal_due or revealAnswerDue(ctx, decl)) {
             decl.reveal_due = false;
+            decl.reveal_waits = null;
             if (revealIn(ctx, buffers, head, decl, node)) dirty = true;
         }
         // What it holds follows what it shows: navigating inside a listing
@@ -540,13 +544,14 @@ fn presentEmpty(
 /// Highlight `decl`'s reveal inside what `node` shows, without taking focus
 /// (`Services.reveal`): the provider expands to it and names the node, and
 /// that node becomes the VIEW's revealed highlight. Neither the head's nor
-/// the entry's selection is handed over, so neither can move. True when the
-/// highlight moved.
+/// the entry's selection is handed over, so neither can move. A provider
+/// that must read first answers later: the reveal then waits on the view's
+/// next revision (`reveal_waits`). True when the highlight changed.
 fn revealIn(
     ctx: *core.command.Context,
     buffers: *core.Buffers,
     head: *const core.Head,
-    decl: *const core.viewport.Declaration,
+    decl: *core.viewport.Declaration,
     node: *window_layout.Node,
 ) bool {
     const services = ctx.semantic orelse return false;
@@ -559,7 +564,27 @@ fn revealIn(
     };
     const shown = if (entry.id == buffers.active_id) head.scene_selection.view else entry.scene_selection.view;
     const view_ref = shown orelse entry.tool_view orelse return false;
-    return services.reveal(view_ref, wanted);
+    switch (services.reveal(view_ref, wanted)) {
+        .revealed, .declined => {},
+        .pending => decl.reveal_waits = .{
+            .view = view_ref,
+            .revision = (services.views.get(view_ref) orelse return true).descriptor.revision,
+        },
+    }
+    return true;
+}
+
+/// Whether `decl`'s waiting reveal can be answered now: its view published
+/// a revision past the one the provider accepted it at. A view that closed
+/// meanwhile ends the wait unasked.
+fn revealAnswerDue(ctx: *core.command.Context, decl: *core.viewport.Declaration) bool {
+    const wait = decl.reveal_waits orelse return false;
+    const services = ctx.semantic orelse return false;
+    const instance = services.views.get(wait.view) orelse {
+        decl.reveal_waits = null;
+        return false;
+    };
+    return instance.descriptor.revision != wait.revision;
 }
 
 /// Open `designation` again and show it in `node` — a viewport's closed

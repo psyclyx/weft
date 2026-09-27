@@ -13,11 +13,57 @@ const semantic = weft.semantic;
 const fs = weft.fs;
 const contract = fs.contract;
 
+/// What a reveal that has folders to read raises for itself: heard at the
+/// frame boundary (`Plugin.signal`), so the reading never runs in the layout
+/// pass that asked.
+pub const reveal_signal = "files.reveal";
+
+/// A draft's rows by (parent, name) — what a reveal walks, one lookup per
+/// name instead of a scan of every row at every level. Borrows the draft's
+/// names: built again whenever the draft it indexes changes.
+const NameIndex = struct {
+    map: std.HashMapUnmanaged(Key, usize, KeyContext, std.hash_map.default_max_load_percentage) = .empty,
+
+    /// A top-level row's parent, which has no id.
+    const top = std.math.maxInt(files.NodeId);
+    const Key = struct { parent: files.NodeId, name: []const u8 };
+    const KeyContext = struct {
+        pub fn hash(_: KeyContext, k: Key) u64 {
+            var h = std.hash.Wyhash.init(k.parent);
+            h.update(k.name);
+            return h.final();
+        }
+        pub fn eql(_: KeyContext, a: Key, b: Key) bool {
+            return a.parent == b.parent and std.mem.eql(u8, a.name, b.name);
+        }
+    };
+
+    fn deinit(self: *NameIndex, gpa: std.mem.Allocator) void {
+        self.map.deinit(gpa);
+    }
+
+    fn build(self: *NameIndex, gpa: std.mem.Allocator, draft: *const files.Model) !void {
+        self.map.clearRetainingCapacity();
+        try self.map.ensureTotalCapacity(gpa, @intCast(draft.rows.items.len));
+        for (draft.rows.items, 0..) |row, i| {
+            // The first row of a name wins, as a scan in row order would.
+            const slot = self.map.getOrPutAssumeCapacity(.{ .parent = row.parent orelse top, .name = row.draft.name });
+            if (!slot.found_existing) slot.value_ptr.* = i;
+        }
+    }
+
+    fn get(self: *const NameIndex, draft: *const files.Model, parent: ?files.NodeId, name: []const u8) ?*const files.Row {
+        const i = self.map.get(.{ .parent = parent orelse top, .name = name }) orelse return null;
+        return &draft.rows.items[i];
+    }
+};
+
 pub const Plugin = struct {
     gpa: std.mem.Allocator,
     sessions: std.ArrayList(*Session) = .empty,
     next_field_token: u32 = 1,
     started: bool = false,
+    reveal_signal_id: ?u32 = null,
 
     pub fn init(gpa: std.mem.Allocator) Plugin {
         return .{ .gpa = gpa };
@@ -28,7 +74,16 @@ pub const Plugin = struct {
         if (!weft.semanticActionProvider()) return error.Rejected;
         _ = try weft.semanticTargetHandlerRegister(1, "files.directory");
         _ = try weft.semanticRelationProviderRegister(1, "files.container");
+        self.reveal_signal_id = weft.signalSubscribe(reveal_signal);
         self.started = true;
+    }
+
+    /// A signal this plugin hears (export `on_signal` to here). The only one
+    /// is its own `files.reveal`: the reading reveals accepted in the layout
+    /// pass, done at the frame boundary.
+    pub fn signal(self: *Plugin, id: u32) void {
+        if (self.reveal_signal_id != id) return;
+        for (self.sessions.items) |session| session.revealWork();
     }
 
     /// The wasm instance owns guest memory wholesale; host teardown revokes
@@ -291,6 +346,18 @@ pub const Session = struct {
     loaded: bool = false,
     apply_committed: bool = false,
     scene_revision: u32 = 1,
+    /// A reveal accepted with folders still to read (`view.reveal` answered
+    /// `.handled`): its designation, owned, read at the `files.reveal`
+    /// signal — never in the layout pass that asked.
+    reveal_want: ?[]u8 = null,
+    /// A reveal whose reading failed, owned: asked again it declines rather
+    /// than waiting for a republish that is not coming.
+    reveal_failed: ?[]u8 = null,
+    /// The folders reveals opened, and the user has not touched since: a
+    /// later reveal that does not pass through one folds it again, so the
+    /// listing does not grow (and re-read on refresh) every folder the
+    /// editor ever visited.
+    reveal_opened: std.ArrayList(files.NodeId) = .empty,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
@@ -331,6 +398,9 @@ pub const Session = struct {
         self.closeAllRowTargets();
         self.closeAllFields();
         self.draft.deinit();
+        if (self.reveal_want) |w| self.plugin.gpa.free(w);
+        if (self.reveal_failed) |w| self.plugin.gpa.free(w);
+        self.reveal_opened.deinit(self.plugin.gpa);
         self.* = undefined;
     }
 
@@ -360,10 +430,13 @@ pub const Session = struct {
             try self.toggleExpanded(row);
             return .handled;
         }
-        if (std.mem.eql(u8, request.action, semantic.action.standard.reveal)) {
-            const node = (try self.reveal(request.argument)) orelse return .declined;
-            return .{ .focus = node };
-        }
+        if (std.mem.eql(u8, request.action, semantic.action.standard.reveal)) return switch (try self.reveal(request.argument)) {
+            .found => |node| .{ .focus = node },
+            // Accepted: the folders are read at the signal, and the view's
+            // republish is what has the viewport ask again.
+            .pending => .handled,
+            .absent => .declined,
+        };
         if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
             if (request.subject == files.rootNodeId()) return .{ .set_working_target = .{
                 .target = self.target,
@@ -477,18 +550,80 @@ pub const Session = struct {
         else
             try self.readChildren(&staged, row);
         try self.publishDraft(&staged);
+        // The user folded it: theirs now, never folded behind their back.
+        for (self.reveal_opened.items, 0..) |id, i| if (id == row) {
+            _ = self.reveal_opened.swapRemove(i);
+            break;
+        };
     }
 
-    /// `view.reveal`: the name of the row showing `argument` — the node
-    /// navigation rests on — a designation somewhere below this listing's
-    /// directory, with every directory between opened in place so the row
-    /// is on screen. Null when it is not below this
-    /// listing (another authority, another tree), or a name on the way is
-    /// not here. The listing's own designation is the one its publisher
-    /// bound it under, stated on its descriptor; the rest of the way is by
-    /// the names this draft already holds, reading a folder only when it has
-    /// to be opened.
-    fn reveal(self: *Session, argument: []const u8) !?semantic.scene.NodeId {
+    /// What a reveal came to.
+    const RevealAnswer = union(enum) {
+        /// The name node of the row that shows it.
+        found: semantic.scene.NodeId,
+        /// Below this listing, behind a folder not read yet: accepted, and
+        /// answered once the reading (at the `files.reveal` signal) has
+        /// republished the view.
+        pending,
+        /// Not below this listing, or not there.
+        absent,
+    };
+
+    /// `view.reveal`: the row showing `argument`, a designation somewhere
+    /// below this listing's directory. Answered from what the draft already
+    /// holds, one index lookup per name: found when every folder on the way
+    /// is open, else `pending` — this runs in the layout pass that asked, so
+    /// it never reads a directory (a peer's is a round trip) or publishes;
+    /// `revealWork` does, off that pass, once.
+    fn reveal(self: *Session, argument: []const u8) !RevealAnswer {
+        const gpa = self.plugin.gpa;
+        if (self.reveal_failed) |failed| {
+            if (std.mem.eql(u8, failed, argument)) return .absent;
+            gpa.free(failed);
+            self.reveal_failed = null;
+        }
+        const rest = (try self.revealPath(argument)) orelse return .absent;
+        var index: NameIndex = .{};
+        defer index.deinit(gpa);
+        try index.build(gpa, &self.draft);
+        var parent: ?files.NodeId = null;
+        var found: ?files.NodeId = null;
+        var closed = false;
+        var through: std.ArrayList(files.NodeId) = .empty;
+        defer through.deinit(gpa);
+        var names = std.mem.tokenizeScalar(u8, rest, '/');
+        while (names.next()) |name| {
+            const row = index.get(&self.draft, parent, name) orelse return .absent;
+            found = row.id;
+            if (names.peek() == null) break;
+            if (row.draft.kind != .directory) return .absent;
+            if (!row.expanded) {
+                closed = true;
+                break;
+            }
+            try through.append(gpa, row.id);
+            parent = row.id;
+        }
+        // Folders an earlier reveal opened that this one does not pass
+        // through are folded again — by the same deferred work.
+        const stale = for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) == null) break true;
+        } else false;
+        if (closed or stale) {
+            const owned = try gpa.dupe(u8, argument);
+            if (self.reveal_want) |w| gpa.free(w);
+            self.reveal_want = owned;
+            weft.signalEmit(reveal_signal);
+        }
+        if (closed) return .pending;
+        return .{ .found = try files.nameNodeId(found orelse return .absent) };
+    }
+
+    /// The part of `argument` below this listing's directory (`/`-separated
+    /// names), or null when it is not below it: another authority, another
+    /// tree. The listing's own designation is the one its publisher bound it
+    /// under, stated on its descriptor.
+    fn revealPath(self: *Session, argument: []const u8) !?[]const u8 {
         const durable = semantic.durable;
         const want = durable.parse(argument) orelse return null;
         if (!want.kind.isPath()) return null;
@@ -501,40 +636,78 @@ pub const Session = struct {
         if (!own.authority.eql(want.authority)) return null;
         const base = std.mem.trimEnd(u8, own.ref, "/");
         if (want.ref.len <= base.len or !std.mem.startsWith(u8, want.ref, base) or want.ref[base.len] != '/') return null;
+        return want.ref[base.len..];
+    }
 
+    /// The reading a reveal asked for, at the `files.reveal` signal — the
+    /// frame boundary, off the layout pass: open every folder on the way,
+    /// fold the ones earlier reveals opened that this one does not pass
+    /// through, and publish ONCE. The waiting viewport asks again when the
+    /// view republishes, and the answer is then `found`. A failure records
+    /// the reveal as failed, so asking again declines.
+    fn revealWork(self: *Session) void {
+        const want = self.reveal_want orelse return;
+        self.reveal_want = null;
+        self.openTowards(want) catch {
+            self.abortRowTargets();
+            if (self.reveal_failed) |w| self.plugin.gpa.free(w);
+            self.reveal_failed = want;
+            return;
+        };
+        self.plugin.gpa.free(want);
+    }
+
+    fn openTowards(self: *Session, want: []const u8) !void {
+        const gpa = self.plugin.gpa;
+        const rest = (try self.revealPath(want)) orelse return;
+        var staged = try self.stage();
+        defer staged.deinit();
+        var index: NameIndex = .{};
+        defer index.deinit(gpa);
+        try index.build(gpa, &staged);
+        var through: std.ArrayList(files.NodeId) = .empty;
+        defer through.deinit(gpa);
+        var opened: std.ArrayList(files.NodeId) = .empty;
+        defer opened.deinit(gpa);
         var parent: ?files.NodeId = null;
-        var found: ?files.NodeId = null;
-        var names = std.mem.tokenizeScalar(u8, want.ref[base.len..], '/');
+        var names = std.mem.tokenizeScalar(u8, rest, '/');
         while (names.next()) |name| {
-            const row = childNamed(&self.draft, parent, name) orelse return null;
-            const id = row.id;
-            found = id;
             if (names.peek() == null) break;
-            if (row.draft.kind != .directory) return null;
-            // Opened one folder at a time, each published before the next is
-            // read: a folder is read through its row's own target, which a
-            // row only has once the draft listing it is the live one.
+            const row = index.get(&staged, parent, name) orelse break;
+            if (row.draft.kind != .directory) break;
+            const id = row.id;
+            try through.append(gpa, id);
             if (!row.expanded) {
-                var staged = try self.stage();
-                defer staged.deinit();
+                // A folder is read through its row's own target; a row this
+                // walk just listed has none until the staged rows' targets
+                // are published (the scene publish below keeps them).
+                if (self.rowTarget(id) == null) try self.prepareRowTargets(&staged);
                 try self.readChildren(&staged, id);
-                try self.publishDraft(&staged);
+                try opened.append(gpa, id);
+                try index.build(gpa, &staged);
             }
             parent = id;
         }
-        return try files.nameNodeId(found orelse return null);
-    }
-
-    /// The row named `name` directly under `parent` (null: the listing's own
-    /// directory).
-    fn childNamed(draft: *const files.Model, parent: ?files.NodeId, name: []const u8) ?*const files.Row {
-        for (draft.rows.items) |*row| {
-            if (row.parent != parent) continue;
-            if (std.mem.eql(u8, row.draft.name, name)) return row;
+        var folded = false;
+        for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) != null) continue;
+            const row = staged.row(id) orelse continue;
+            if (!row.expanded) continue;
+            try staged.setExpanded(id, false);
+            folded = true;
         }
-        return null;
+        if (opened.items.len == 0 and !folded) return;
+        try self.publishDraft(&staged);
+        // What reveals hold open now: the folders on this path they opened.
+        var kept: usize = 0;
+        for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) == null) continue;
+            self.reveal_opened.items[kept] = id;
+            kept += 1;
+        }
+        self.reveal_opened.shrinkRetainingCapacity(kept);
+        try self.reveal_opened.appendSlice(gpa, opened.items);
     }
-
     /// Read one expanded row's directory through its own exact child target
     /// and reconcile the result into that row's scope.
     fn readChildren(self: *Session, staged: *files.Model, row: files.NodeId) !void {

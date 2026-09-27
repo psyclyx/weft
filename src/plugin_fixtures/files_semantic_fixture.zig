@@ -47,7 +47,12 @@ fn on_semantic_field_edit(token: u32) callconv(.c) void {
     plugin.fieldEdit(token);
 }
 
+fn on_signal(id: i32) callconv(.c) void {
+    if (id >= 0) plugin.signal(@intCast(id));
+}
+
 comptime {
+    weft.exportCallback("on_signal", &on_signal);
     weft.exportCallback("describe", &describe);
     weft.exportCallback("init", &init);
     weft.exportCallback("on_semantic_target_probe", &on_semantic_target_probe);
