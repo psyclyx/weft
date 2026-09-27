@@ -265,10 +265,12 @@ pub const Application = struct {
         const context = ctx.context orelse return false;
         const plugins = self.driver.ctx.plugins.items;
         const viewports = self.driver.ctx.viewports;
-        // A JS plugin registers its handler from JS (`weft.onContextChanged`),
-        // which the host cannot see, so a loaded one counts as listening; one
-        // with no handler returns from the delivery at once.
-        const hears = context.listeners.items.len > 0 or viewports.followsAny() or self.js_plugins.items.len > 0 or for (plugins) |pl| {
+        // A JS plugin says when it installs a handler (`weft.onContextChanged`,
+        // `JsPlugin.hears_context`); one that never does is never asked.
+        const js_hears = for (self.js_plugins.items) |jp| {
+            if (jp.hears_context) break true;
+        } else false;
+        const hears = context.listeners.items.len > 0 or viewports.followsAny() or js_hears or for (plugins) |pl| {
             if (core.wasm_host.hearsContext(pl)) break true;
         } else false;
         if (!hears) return false;

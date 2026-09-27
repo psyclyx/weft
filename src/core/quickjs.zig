@@ -276,6 +276,7 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
     .{ .name = "qjs_context_set", .handler = cContextSet },
     .{ .name = "qjs_context_get", .handler = cContextGet },
+    .{ .name = "qjs_context_listen", .handler = cContextListen },
     .{ .name = "qjs_context_changed", .handler = cContextChanged },
     .{ .name = "qjs_places", .handler = cPlaces },
     .{ .name = "qjs_subject_watch", .handler = cSubjectWatch },
@@ -432,6 +433,12 @@ pub const JsPlugin = struct {
     /// own claims and its own open entry, so neither can land a chunk in the
     /// other's transcript (§18's isolation gate).
     conversations: std.ArrayList(*Conversation) = .empty,
+    /// Whether the plugin has a context handler installed
+    /// (`weft.onContextChanged`, reported through `qjs_context_listen`). The
+    /// event goes only to a plugin that has one — the JS twin of a `.wasm`
+    /// plugin's `context_listener`, told rather than probed, since a JS
+    /// handler is a value the host cannot see.
+    hears_context: bool = false,
 
     const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
 
@@ -621,8 +628,10 @@ pub const JsPlugin = struct {
     /// The context event (`on_context_changed`'s JS twin): keys of the
     /// head's primary context moved; `weft.onContextChanged`'s handler hears
     /// them (read through `qjs_context_changed`). The app's frame boundary
-    /// decides WHEN, exactly as for a wasm plugin. Returns whether it ran.
+    /// decides WHEN, exactly as for a wasm plugin. Returns whether it ran:
+    /// never, for a plugin with no handler (`hears_context`).
     pub fn notifyContextChanged(self: *JsPlugin) bool {
+        if (!self.hears_context) return false;
         self.enter("weft_on_context_changed", &.{}) catch return false;
         return true;
     }
@@ -890,6 +899,14 @@ pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
 pub const cContextSet = jsDoor(context_doors.setBody, null);
 pub const cContextGet = jsDoor(context_doors.getBody, null);
 pub const cContextChanged = jsDoor(context_doors.changedBody, null);
+/// `weft.onContextChanged` installed (1) or removed (0) its handler. JS-only:
+/// a `.wasm` plugin's handler is an export the host finds for itself.
+fn cContextListen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    self.hears_context = args[0] != 0;
+}
 pub const cPlaces = jsDoor(context_doors.placesBody, null);
 pub const cSubjectWatch = jsDoor(context_doors.watchBody, null);
 /// The tool doors — `wasm_host/tool.zig`'s bodies: mark an entry this plugin

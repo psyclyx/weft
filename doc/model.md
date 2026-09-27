@@ -327,8 +327,10 @@ shared tree.
   that raises no signal.
 - **A JS plugin** declares no capabilities (no `describe()`), so it claims
   projection kinds only in its own namespace; it registers its
-  `onContextChanged`/`onSubjectChanged` handlers from JS, which the host
-  cannot see, so every loaded JS plugin is delivered the context event.
+  `onContextChanged`/`onSubjectChanged` handlers from JS. The host cannot
+  probe for a JS handler as it probes a wasm export, so
+  `weft.onContextChanged` tells it (`qjs_context_listen`), and the context
+  event goes only to the JS plugins that installed one.
 
 *Landed (2026-09-27): remote places.* `locus.Loci` is wired (on `System`,
 `Context.loci`) and keyed by identity — a peer by its fingerprint, a shell by

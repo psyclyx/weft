@@ -180,6 +180,10 @@ extern int host_context_get(const char *key, int key_len, char *out, int cap);
 // answers 0, -1 (not a designation) or -2 (too many).
 __attribute__((import_module("weft"), import_name("qjs_context_changed")))
 extern int host_context_changed(char *out, int cap);
+// Whether a context handler is installed (1) or not (0): the host delivers
+// the event only to a plugin that has one.
+__attribute__((import_module("weft"), import_name("qjs_context_listen")))
+extern void host_context_listen(int on);
 __attribute__((import_module("weft"), import_name("qjs_places")))
 extern int host_places(char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_subject_watch")))
@@ -1449,13 +1453,18 @@ static JSValue js_subject_watch(JSContext *ctx, JSValueConst this_val,
 }
 
 // weft.onContextChanged(fn): `fn(keys)` hears which keys of the primary
-// context moved — at most once per frame, never inside a dispatch.
+// context moved — at most once per frame, never inside a dispatch. The host
+// is told, so a plugin that never installs one is never called for it;
+// `weft.onContextChanged(null)` takes it back.
 static JSValue js_on_context_changed(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
     (void)this_val;
-    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    if (argc < 1) return JS_UNDEFINED;
+    const int listen = JS_IsFunction(ctx, argv[0]);
+    if (!listen && !JS_IsNull(argv[0]) && !JS_IsUndefined(argv[0])) return JS_UNDEFINED;
     JS_FreeValue(ctx, g_on_context_changed);
-    g_on_context_changed = JS_DupValue(ctx, argv[0]);
+    g_on_context_changed = listen ? JS_DupValue(ctx, argv[0]) : JS_UNDEFINED;
+    host_context_listen(listen);
     return JS_UNDEFINED;
 }
 

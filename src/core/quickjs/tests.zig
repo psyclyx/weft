@@ -391,6 +391,32 @@ test "quickjs: a JS plugin whose load fails leaves nothing it registered behind"
     try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("half.act", intent.factsFor(&env.ctx)));
 }
 
+test "quickjs: the context event reaches only a JS plugin that installed a handler" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // No handler: the plugin is never entered for the event.
+    var deaf = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "deaf", null,
+        \\weft.command("deaf.noop", () => {});
+    );
+    defer deaf.deinit();
+    try t.expect(!deaf.notifyContextChanged());
+
+    // A handler: delivered; taken back with null: not any more.
+    var ear = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ear", null,
+        \\weft.onContextChanged(() => {});
+        \\weft.command("ear.stop", () => weft.onContextChanged(null));
+    );
+    defer ear.deinit();
+    try t.expect(ear.notifyContextChanged());
+    _ = try command.run(&env.commands, &env.ctx, "ear.stop", &.{});
+    try t.expect(!ear.notifyContextChanged());
+}
+
 test "quickjs: a JS plugin publishes context through the wasm door's body, config gates on it, unloading retracts it" {
     const gpa = t.allocator;
     var env: Env = undefined;
