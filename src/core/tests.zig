@@ -1806,7 +1806,7 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
             for (syms.items) |s| gpa.free(s.name);
             syms.deinit(gpa);
         }
-        try syn.collectSymbols(gpa, &doc, &syms);
+        try syn.collectSymbols(gpa, &doc, .{ .start = 0, .end = doc.text().byteLen() }, &syms);
 
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);
@@ -1822,6 +1822,39 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
         }
         try t.expectEqualStrings(want.items, got.items);
     }
+}
+
+test "syntax: an outline over the caret's byte lists exactly what encloses it, the name included" {
+    // The breadcrumbs ask this way on every edit instead of reading the whole
+    // file's outline. tree-sitter returns a match whole when any of it
+    // overlaps the range, so the item's NAME comes back even though it lies
+    // before the caret — and items elsewhere in the file do not come back.
+    const gpa = t.allocator;
+    var rt: core.syntax.Runtime = .empty;
+    defer rt.deinit(gpa);
+    try rt.setSearchPath(gpa, @import("build_options").grammar_path);
+    try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = weftQuery("javascript-outline") });
+    const src =
+        \\function f() {}
+        \\class C { m() { return 1; } n() {} }
+        \\const g = () => {};
+    ;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, src);
+    const syn = try core.syntax.Syntax.create(gpa, &rt, rt.forPath("a.js").?, &doc);
+    defer syn.destroy();
+
+    const caret = std.mem.indexOf(u8, src, "return").?;
+    var syms: std.ArrayList(core.syntax.Syntax.Sym) = .empty;
+    defer {
+        for (syms.items) |s| gpa.free(s.name);
+        syms.deinit(gpa);
+    }
+    try syn.collectSymbols(gpa, &doc, .{ .start = caret, .end = caret + 1 }, &syms);
+    try t.expectEqual(@as(usize, 2), syms.items.len);
+    try t.expectEqualStrings("C", syms.items[0].name);
+    try t.expectEqualStrings("m", syms.items[1].name);
 }
 
 test "syntax: re-registering a grammar replaces it instead of piling up" {

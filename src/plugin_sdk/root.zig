@@ -1843,9 +1843,12 @@ pub fn query(scm: []const u8, r: Range) usize {
 /// The active entry's outline — the symbols its grammar's outline query
 /// names, in document order; read each with `queryCapture(i)` (its `name` is
 /// the symbol's, its span the whole item). Nested items are nested spans.
+/// Only items overlapping `r` are listed, each whole: the whole file is
+/// `[0, byteLen)`, and what encloses an offset is `[offset, offset+1)` — which
+/// costs the offset's path through the tree, not the file.
 /// Zero without a grammar or an outline query.
-pub fn outline() usize {
-    const n = e.wl_outline();
+pub fn outline(r: Range) usize {
+    const n = e.wl_outline(@intCast(r.start), @intCast(r.end));
     return if (n < 0) 0 else @intCast(n);
 }
 /// Hear the signal `name` as `on_signal(id)` (export it with

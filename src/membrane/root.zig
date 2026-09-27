@@ -353,7 +353,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_node_enclosing", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the smallest named node strictly enclosing `[start,end)` (expand-selection)" },
     .{ .name = "wl_query", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "run a tree-sitter query over `[start,end)`, stashing its captures" },
     .{ .name = "wl_query_capture", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "read the `i`-th capture from the last `wl_query`/`wl_node_children`" },
-    .{ .name = "wl_outline", .params = &.{}, .results = &.{.i32}, .group = .syntax, .doc = "the active entry's outline symbols (the grammar's outline query), stashed as captures in document order" },
+    .{ .name = "wl_outline", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the active entry's outline symbols overlapping `[start,end)` (the grammar's outline query), stashed as captures in document order" },
     .{ .name = "wl_node_children", .params = &.{.u32}, .results = &.{.i32}, .group = .syntax, .doc = "the named children of the smallest node at `off` (structural descent)" },
     .{ .name = "wl_claim_subbuffer", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "claim `[start,end)` as a subbuffer (a projection row's hidden identity)" },
     .{ .name = "wl_subbuffer_put_fact", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .syntax, .doc = "attach a key/value fact to a claimed subbuffer" },

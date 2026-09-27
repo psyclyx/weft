@@ -879,24 +879,33 @@ pub const Syntax = struct {
     /// resumes and folds in everything that queued up meanwhile as one
     /// incremental reparse — same shape as an ordinary edit.
     pub fn sync(self: *Syntax, gpa: Allocator, doc: *const Document) !bool {
-        var changed = false;
-        if (self.pending_initial) |job| {
-            const st = job.state.load(.acquire);
-            if (st == 0) return false; // still parsing
-            // `sync`/`destroy` are never both reachable for a live
-            // `Syntax` (the latter frees it) — the only claimant `sync`
-            // can ever observe here is the worker's own.
-            assert(st == InitialParseJob.claimed_by_worker);
-            self.tree = job.result;
-            self.pending_initial = null;
-            job.gpa.destroy(job);
-            changed = true;
-        }
+        const changed = self.adoptInitial();
+        if (self.pending_initial != null) return false; // still parsing
         const drained = try self.mirror.drain(gpa, doc, self, editCb);
         if (drained == 0) return changed;
         const new_tree = self.parse(doc.text(), self.tree);
         if (self.tree) |old| c.ts_tree_delete(old);
         self.tree = new_tree;
+        return true;
+    }
+
+    /// Adopt `createAsync`'s tree if its worker has finished; true when this
+    /// call adopted it. Cheap (one atomic load) and never parses, so the frame
+    /// loop can ask it every wake: the pool's completion wakes the loop, and a
+    /// tree that landed is the reason to draw again — the buffer has been
+    /// showing unhighlighted text until now. Without that ask nothing damaged
+    /// the frame, so a freshly opened file stayed uncolored until the next key.
+    pub fn adoptInitial(self: *Syntax) bool {
+        const job = self.pending_initial orelse return false;
+        const st = job.state.load(.acquire);
+        if (st == 0) return false; // still parsing
+        // `adoptInitial`/`destroy` are never both reachable for a live
+        // `Syntax` (the latter frees it) — the only claimant this can ever
+        // observe is the worker's own.
+        assert(st == InitialParseJob.claimed_by_worker);
+        self.tree = job.result;
+        self.pending_initial = null;
+        job.gpa.destroy(job);
         return true;
     }
 
@@ -997,11 +1006,19 @@ pub const Syntax = struct {
     /// the first identifier) rather than the field, and zig's `const Point =
     /// struct { x: u8 }` reported the first FIELD (`x`) as the type's name.
     /// A query says which node is the name, so neither is guessable.
-    pub fn collectSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, out: *std.ArrayList(Sym)) !void {
+    ///
+    /// Only matches that intersect `range` are listed (tree-sitter's own byte
+    /// range: a matched item that overlaps it comes back whole). The whole
+    /// document is `[0, len)`; "what encloses the caret" is `[caret, caret+1)`,
+    /// which visits only the nodes on the caret's path instead of the file —
+    /// on an 11.6k-line javascript file that is the difference between ~15ms
+    /// per edit and microseconds, and the breadcrumbs asked on every edit.
+    pub fn collectSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, range: stemma.Range, out: *std.ArrayList(Sym)) !void {
         const tree = self.tree orelse return;
         const query = self.compiled.outline orelse return;
         const cursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
         defer c.ts_query_cursor_delete(cursor);
+        _ = c.ts_query_cursor_set_byte_range(cursor, @intCast(range.start), @intCast(range.end));
         c.ts_query_cursor_exec(cursor, query, c.ts_tree_root_node(tree));
 
         const doc_len = doc.text().byteLen();
@@ -1235,7 +1252,7 @@ fn tsProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const capability.
         for (syms.items) |s| gpa.free(s.name);
         syms.deinit(gpa);
     }
-    try self.collectSymbols(gpa, req.doc, &syms);
+    try self.collectSymbols(gpa, req.doc, .{ .start = 0, .end = req.doc.text().byteLen() }, &syms);
 
     if (req.kind == .symbols) {
         const out = try gpa.alloc(capability.Symbol, syms.items.len);

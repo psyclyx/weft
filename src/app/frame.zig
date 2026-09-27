@@ -351,6 +351,11 @@ pub fn tickAsync(
             if (try ed.pollBacking(gpa) and b == abuf) dirty = true;
             if (was_stale and ed.save_state == .idle) try ed.requestSave(gpa);
             if (poll_due or ed.save_state == .stale) try ed.requestBackingPoll(gpa);
+            // A background initial parse that finished: its completion is
+            // what woke this loop, and the tree is the reason to draw again.
+            if (providers.resolveSyntax(b)) |syn| if (syn.adoptInitial()) {
+                dirty = true;
+            };
         }
     }
     // Drive any async pick source (completion race-and-refine, file

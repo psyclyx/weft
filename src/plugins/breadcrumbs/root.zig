@@ -9,25 +9,33 @@
 //! OUTLINE (`weft.outline`, the configured `outline.scm`), and "encloses"
 //! is a span test.
 //!
-//! **Cheap on caret moves.** The host asks once per built frame. The symbol
-//! list is cached against the document's snapshot witness, so a caret move
-//! is a scan over the cached spans; only an edit (a new document version)
-//! re-reads the outline, and nothing here ever asks a language server.
+//! **Cheap on every frame.** The host asks once per built frame, and this
+//! asks the outline only for the items overlapping the caret's byte — the
+//! caret's path through the tree, never the file. It used to read the WHOLE
+//! outline and cache it against the document's snapshot witness; that made
+//! every keystroke re-run the outline query over the entire file (~15ms per
+//! key on an 11.6k-line javascript file, the whole of a typing frame's cost),
+//! and silently lost crumbs past its 512-symbol cap. The answer is still
+//! cached, against the witness AND the caret, so an idle redraw asks nothing.
+//! Nothing here ever asks a language server.
 
 const std = @import("std");
 const weft = @import("weft");
 const statusline = @import("weft_statusline");
 
-const max_symbols = 512;
+/// Only what encloses the caret is ever read, so this bounds nesting depth.
+const max_symbols = 64;
 const max_crumbs = 6;
 
 const Symbol = struct { start: u32, end: u32, name_off: u32, name_len: u16 };
 
 var symbols: [max_symbols]Symbol = undefined;
 var symbol_count: usize = 0;
-var names: [1 << 14]u8 = undefined;
+var names: [1 << 12]u8 = undefined;
 /// The document version the cache describes; null when there is none.
 var cached: ?u32 = null;
+/// The caret the cache was read at.
+var cached_caret: u32 = 0;
 
 fn init() void {
     // Text entries only (a listing's rows are not a document's symbols), at
@@ -36,15 +44,16 @@ fn init() void {
     statusline.bind(.{ .all = &.{ .{ .posture = "text" }, .{ .tool = "" } } }, .core, 75);
 }
 
-/// Re-read the outline when the document moved since the cache was filled.
-fn refresh() void {
+/// Re-read what encloses `caret` when the document or the caret moved since
+/// the cache was filled.
+fn refresh(caret: u32) void {
     if (cached) |witness| {
-        if (weft.docSnapshotIsCurrent(witness)) return;
+        if (caret == cached_caret and weft.docSnapshotIsCurrent(witness)) return;
         weft.releaseDocSnapshot(witness);
         cached = null;
     }
     symbol_count = 0;
-    const n = weft.outline();
+    const n = weft.outline(.{ .start = caret, .end = @as(usize, caret) + 1 });
     var used: usize = 0;
     var i: usize = 0;
     while (i < n and symbol_count < max_symbols) : (i += 1) {
@@ -62,7 +71,10 @@ fn refresh() void {
     }
     // An empty outline is not cached: the grammar's first parse may simply
     // not have landed yet, and the next frame asks again.
-    if (symbol_count > 0) cached = weft.docSnapshot();
+    if (symbol_count > 0) {
+        cached = weft.docSnapshot();
+        cached_caret = caret;
+    }
 }
 
 fn nameOf(s: Symbol) []const u8 {
@@ -77,7 +89,7 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     const q = statusline.ask(handle) orelse return;
     // Only the focused pane's entry is the one the document doors read.
     if (!q.focused) return statusline.tell(handle, &.{});
-    refresh();
+    refresh(q.caret);
     var segs: [max_crumbs]statusline.Segment = undefined;
     var n: usize = 0;
     // Document order with nested items after their parents, so every
