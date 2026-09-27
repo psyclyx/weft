@@ -58,7 +58,7 @@
 //! borrows `*command.Context` and a handful of loose option pointers — not
 //! `*System`. `Manifest.ApplyCtx.loader` already carries a plugin loader
 //! optionally (`?PluginLoader`), so `System.applyManifest` accepts one the
-//! same way; the gate manifest (`config/agent-ux.js`) deliberately loads no
+//! same way; the gate manifest (the "second manifest" test below) deliberately loads no
 //! plugins ("a few binds, no heavy plugins" per the task) so this system
 //! is fully exercisable without also relocating the wasm engine/loop into
 //! `System` — another named, bounded follow-up rather than forced here.
@@ -269,6 +269,10 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // core holding bytes it cannot interpret. Nothing else about annotation
     // is core's — no category, no note, no policy about who may write one.
     try pick.declareAnnotation(&self.container);
+    // The gutter exchange, for the same reason: the frame decodes the cells a
+    // plugin answers with. What a cell says (a line number, a mark) is the
+    // plugin's.
+    try @import("gutter.zig").declare(&self.container);
     // How a projection ROLE reads, as bindings rather than a switch — so a
     // theme restyles a diff, or styles a role core never heard of, the same
     // way anything else overrides anything else.
@@ -994,7 +998,7 @@ test "system: GATE (c) — a manifest-driven provide scoped to one buffer's lang
 
     const m = try manifest.Manifest.create(gpa, "config", .config);
     try m.addAction("format-file");
-    try m.addProvide("format-file", "", "nix", "nix-fmt", 0); // lang=nix only
+    try m.addProvide("format-file", .{ .lang = "nix" }, "nix-fmt", 0, .{}); // lang=nix only
     try sys.applyManifest(gpa, m, null);
 
     const nix_id = try sys.buffers.create(gpa, "flake.nix");
@@ -1008,17 +1012,17 @@ test "system: GATE (c) — a manifest-driven provide scoped to one buffer's lang
     try t.expectEqual(@as(?[]const u8, null), sys.actions.resolve("format-file", c.actionCtx()));
 }
 
-test "system: the real config/agent-ux.js manifest hosts a SECOND system end-to-end" {
+test "system: a second manifest hosts a SECOND system end-to-end" {
     // "Hosting a second system = evaluating a second manifest into a second
-    // bundle" (§2.3), proven against the ACTUAL shipped file (not a Zig
-    // stand-in for it) — the same `evalToManifest` entry point `main.zig`
+    // bundle" (§2.3) — the same `evalToManifest` entry point `main.zig`
     // uses for the primary editor system, targeted at a headless System's
-    // own Context. Skips (not fails) when run outside the repo checkout —
-    // same discipline as quickjs.zig's "every shipped example config evals"
-    // test, which now also covers this file in its own path list.
+    // own Context.
     const gpa = t.allocator;
-    const src = @import("file.zig").readAlloc(gpa, "config/agent-ux.js") catch return;
-    defer gpa.free(src);
+    const src =
+        \\weft.bind("normal", "q", "agent-ux-quit");
+        \\weft.bind("normal", "SPC a s", "agent-ux-status");
+        \\weft.echo("agent-ux: minimal system loaded");
+    ;
 
     const pool = try task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();

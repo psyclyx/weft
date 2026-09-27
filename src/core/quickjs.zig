@@ -19,8 +19,8 @@ const task = @import("task.zig");
 const plugin_resources = @import("plugin_resources.zig");
 const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
-const status_feed = @import("status_feed.zig");
 const manifest_mod = @import("manifest.zig");
+const provide_json = @import("quickjs/provide.zig");
 const viewport_mod = @import("viewport.zig");
 const TranscriptDoc = @import("transcript.zig");
 const GraphDoc = @import("graph.zig");
@@ -41,6 +41,9 @@ const fs_gate = @import("wasm_host/fs.zig");
 const proc_doors = @import("wasm_host/proc.zig");
 const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
+const pointer_doors = @import("wasm_host/pointer.zig");
+const clipboard_doors = @import("wasm_host/clipboard.zig");
+const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -252,6 +255,11 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_selection", .handler = cSelection },
     .{ .name = "qjs_path", .handler = cPath },
     .{ .name = "qjs_jump", .handler = cJump },
+    .{ .name = "qjs_pointer", .handler = cPointer },
+    .{ .name = "qjs_clipboard_set", .handler = cClipboardSet },
+    .{ .name = "qjs_clipboard_get", .handler = cClipboardGet },
+    .{ .name = "qjs_jump_push", .handler = cJumpPush },
+    .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -759,6 +767,15 @@ const cLineAt = jsDoor(edit_doors.lineAtBody, null);
 const cSelection = jsDoor(edit_doors.selectionBody, null);
 const cPath = jsDoor(edit_doors.pathBody, null);
 const cJump = jsDoor(edit_doors.jumpBody, null);
+/// Where the pointer gesture being dispatched is — `wl_pointer`'s body.
+pub const cPointer = jsDoor(pointer_doors.pointerBody, null);
+/// The system clipboard — `wl_clipboard_*`'s bodies, behind the same
+/// config-only grant (a denial answers `denied`, thrown in JS).
+pub const cClipboardSet = jsDoor(clipboard_doors.setBody, .clipboard);
+pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
+/// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
+pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
+pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";
@@ -772,7 +789,7 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const start = ed.text().byteLen();
-    command.renderInto(gpa, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
+    command.renderInto(gpa, &ctx.buffers.status, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
 
@@ -902,7 +919,7 @@ pub fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: 
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
     const ed = b.textEditor() orelse return;
     try b.setTool(gpa, TranscriptDoc.projection_author);
-    try TranscriptDoc.fill(gpa, tr, &ed.doc, &conv.subs);
+    try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, &ed.doc, &conv.subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
     // safe to grab right here (nothing else claims on `ed.doc`
@@ -970,14 +987,14 @@ pub fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text:
     if (sub == null or sub.?.doc != doc) {
         // Slow path: no trustworthy cached claim (see this fn's doc
         // comment for the two cases) — a full re-fill is always correct.
-        try TranscriptDoc.fill(gpa, tr, doc, &conv.subs);
+        try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, doc, &conv.subs);
         conv.live_sub = TranscriptDoc.lastRowClaim(&conv.subs, doc);
         return;
     }
     // Fast path: grow the buffer and the one claim that names this row,
     // nothing else touched.
     const at = sub.?.resolve().end;
-    try command.renderInto(gpa, doc, .plugin, TranscriptDoc.projection_author, &.{
+    try command.renderInto(gpa, &self.activeCtx().buffers.status, doc, .plugin, TranscriptDoc.projection_author, &.{
         .{ .range = .{ .start = at, .end = at }, .bytes = text },
     });
     try sub.?.extendEnd(gpa, at + text.len);
@@ -1236,7 +1253,7 @@ fn cStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const text = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer self.gpa.free(text);
-    status_feed.set(text);
+    self.activeCtx().buffers.status.set(text);
 }
 
 /// weft.lineText() → the active buffer's current line (at the cursor), for a
@@ -1327,7 +1344,7 @@ pub fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const end = ed.text().byteLen();
-    command.renderInto(gpa, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
+    command.renderInto(gpa, &bufs.status, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// The framed blob the shim encodes — one decoder, shared with the guest ABI
@@ -1657,42 +1674,58 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         @import("builtins.zig").registerSemanticAction(gpa, br.activeCtx().commands, services, name) catch {};
 }
 
-/// weft.provide(action, mode, lang, cmd, prio) — register a provider. Empty
-/// mode/lang strings mean "don't care" (an unconstrained provider). Auto-
-/// declares the action if `weft.action` hasn't run yet (load order is free),
-/// but does NOT bind a trampoline command — a provider alone isn't a key
-/// target; declare (or another config's declare) owns the command bind.
+/// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`
+/// and the options arrive as JSON and are parsed by `quickjs/provide.zig`
+/// into the same `facts.Predicate` `wl_provide` decodes: every fact a config
+/// can name (mode, lang, tool, role, posture, locality), and a presentation (label,
+/// group, order) for the offer the provider wins. A `when` naming no fact is
+/// refused out loud rather than widened to everywhere. Auto-declares the
+/// action if `weft.action` hasn't run yet (load order is free), but does NOT
+/// bind a trampoline command — a provider alone isn't a key target; declare
+/// (or another config's declare) owns the command bind.
 fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.activeCtx().gpa;
     const action = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(action);
-    const mode = readStr(br, caller, args[2], args[3]) orelse return;
-    defer gpa.free(mode);
-    const lang = readStr(br, caller, args[4], args[5]) orelse return;
-    defer gpa.free(lang);
-    const cmd = readStr(br, caller, args[6], args[7]) orelse return;
+    const when = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(when);
+    const cmd = readStr(br, caller, args[4], args[5]) orelse return;
     defer gpa.free(cmd);
-    const priority = args[8];
+    const opts = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(opts);
+    var parsed = provide_json.parse(gpa, when, opts) catch |err| {
+        echoProvideMalformed(br, action, provide_json.describe(err));
+        return;
+    };
+    defer parsed.deinit(gpa);
     if (br.manifest) |m| {
-        m.addProvide(action, mode, lang, cmd, priority) catch {};
+        m.addProvide(action, parsed.predicate, cmd, parsed.priority, parsed.affordance) catch {};
         return;
     }
-    var pred_buf: [2]facts.Predicate = undefined;
     br.activeCtx().actions.provide(.{
         .action = action,
-        .predicate = facts.allOf(&pred_buf, &.{
-            if (mode.len > 0) .{ .mode = mode } else null,
-            if (lang.len > 0) .{ .lang = lang } else null,
-        }),
+        .predicate = parsed.predicate,
         .command = cmd,
-        .priority = priority,
+        .priority = parsed.priority,
         .owner = "config",
+        .affordance = parsed.affordance,
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br, action);
 }
 
-/// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
+fn echoProvideMalformed(br: *Bridge, action: []const u8, why: []const u8) void {
+    const ctx = br.activeCtx();
+    const msg = std.fmt.allocPrint(ctx.gpa, "provide '{s}': {s} — not registered", .{ action, why }) catch return;
+    defer ctx.gpa.free(msg);
+    std.log.warn("config: {s}", .{msg});
+    if (br.in_dispatch or br.loading) {
+        ctx.head.echo.clearRetainingCapacity();
+        ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    }
+}
+
+/// weft.statusSegment(text, role, priority, command) — stage a static `ui/statusline-
 /// seg` segment onto the manifest (doc/contextual-workspace-architecture.md
 /// §11, the mesh-reachability verb). CONFIG-ONLY: unlike
 /// `weft.provide`/`weft.action` this has no LIVE (resident-JS-plugin,
@@ -1710,8 +1743,10 @@ fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const role = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(role);
     const priority = args[4];
+    const on_click = readStr(br, caller, args[5], args[6]) orelse return;
+    defer gpa.free(on_click);
     if (br.manifest) |m| {
-        m.addStatusSegment(text, role, priority) catch {};
+        m.addStatusSegment(text, role, priority, on_click) catch {};
         return;
     }
     std.log.warn("weft.statusSegment: config-plane only (not available to a resident plugin yet)", .{});
@@ -1751,6 +1786,12 @@ pub fn cGrant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 const vp_cycles: i32 = 1 << 0;
 const vp_persistent: i32 = 1 << 1;
 const vp_focus_source: i32 = 1 << 2;
+const vp_takes_focus: i32 = 1 << 3;
+const vp_status_line: i32 = 1 << 4;
+/// `extent` is a row count, not per-mille of the frame.
+const vp_extent_rows: i32 = 1 << 5;
+/// `{shown: false}`: the viewport starts hidden.
+const vp_hidden: i32 = 1 << 6;
 
 /// `weft.viewport(name, opts)` — stage a viewport's attributes
 /// (doc/configuration.md §5.2). The edge arrives as a name and is PARSED
@@ -1775,17 +1816,22 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .persistent = flags & vp_persistent != 0,
         .dock = edge,
         .focus_source = flags & vp_focus_source != 0,
+        .takes_focus = flags & vp_takes_focus != 0,
+        .status_line = flags & vp_status_line != 0,
     };
-    const extent: f32 = @as(f32, @floatFromInt(args[5])) / 1000.0;
+    const extent: viewport_mod.Extent = if (flags & vp_extent_rows != 0)
+        .{ .rows = std.math.cast(u16, args[5]) orelse 1 }
+    else
+        .{ .fraction = @as(f32, @floatFromInt(args[5])) / 1000.0 };
     if (br.manifest) |m| {
-        m.addViewport(name, attrs, extent) catch {};
+        m.addViewport(name, attrs, extent, flags & vp_hidden != 0) catch {};
         return;
     }
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
 }
 
-/// `weft.present(viewport, {subject})` — stage what a declared viewport
-/// shows (§7).
+/// `weft.present(viewport, {subject, command})` — stage what a declared
+/// viewport shows (§7), and optionally the command that presents it.
 fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1794,8 +1840,10 @@ fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(name);
     const subject = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(subject);
+    const presenter = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(presenter);
     if (br.manifest) |m| {
-        m.addPresent(name, subject) catch {};
+        m.addPresent(name, subject, presenter) catch {};
         return;
     }
     std.log.warn("weft.present: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
@@ -1879,4 +1927,5 @@ fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
 
 test {
     _ = @import("quickjs/tests.zig");
+    _ = provide_json;
 }

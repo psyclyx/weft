@@ -46,6 +46,7 @@ pub extern "weft:abi/1" fn wl_doc_snapshot_release(handle: u32) void;
 pub extern "weft:abi/1" fn wl_slice(start: u32, end: u32, out_ptr: u32, out_cap: u32) u32;
 pub extern "weft:abi/1" fn wl_line_at(offset: u32, out_ptr: u32) void;
 pub extern "weft:abi/1" fn wl_selection(out_ptr: u32) u32;
+pub extern "weft:abi/1" fn wl_pointer(out_ptr: u32) u32;
 pub extern "weft:abi/1" fn wl_path(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_render(start: u32, end: u32, ptr: u32, len: u32) void;
@@ -53,6 +54,7 @@ pub extern "weft:abi/1" fn wl_edit_as(agent: u32, agent_len: u32, start: u32, en
 pub extern "weft:abi/1" fn wl_register(ptr: u32, len: u32) u32;
 pub extern "weft:abi/1" fn wl_jump(offset: u32) void;
 pub extern "weft:abi/1" fn wl_flash(start: u32, end: u32) void;
+pub extern "weft:abi/1" fn wl_flash_add(start: u32, end: u32) void;
 pub extern "weft:abi/1" fn wl_fold_clear() void;
 pub extern "weft:abi/1" fn wl_fold(start: u32, end: u32) void;
 pub extern "weft:abi/1" fn wl_decorate_clear() void;
@@ -75,11 +77,19 @@ pub extern "weft:abi/1" fn wl_anchor_range(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_set_result_range(handle: u32) void;
 pub extern "weft:abi/1" fn wl_run_range(ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_range_ends(handle: u32, out_ptr: u32) i32;
+pub extern "weft:abi/1" fn wl_view_range(out_ptr: u32) i32;
 pub extern "weft:abi/1" fn wl_range_retain(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_range_release(handle: u32) void;
 pub extern "weft:abi/1" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;
 pub extern "weft:abi/1" fn wl_arg_range(i: u32) i32;
 pub extern "weft:abi/1" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
+// Multiple selections: a `{primary, n × {anchor, head}}` u32 record; the
+// per-selection motion/operator pair runs a command once per selection.
+pub extern "weft:abi/1" fn wl_selections_get(out_ptr: u32, cap: u32) u32;
+pub extern "weft:abi/1" fn wl_selections_set(ptr: u32, n: u32) i32;
+pub extern "weft:abi/1" fn wl_run_range_each(ptr: u32, len: u32, out_ptr: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_run_range_arg_each(ptr: u32, len: u32, handles_ptr: u32, n: u32) void;
+pub extern "weft:abi/1" fn wl_undo_unit(open: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
 pub extern "weft:abi/1" fn wl_echo(ptr: u32, len: u32) void;
@@ -99,6 +109,7 @@ pub extern "weft:abi/1" fn wl_menu_mode(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_resting_mode(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_exit_to_resting() void;
 pub extern "weft:abi/1" fn wl_resting_posture(posture: u32, ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_binding_variant(facet: u32, mode_ptr: u32, mode_len: u32, variant_ptr: u32, variant_len: u32) void;
 pub extern "weft:abi/1" fn wl_posture() u32;
 pub extern "weft:abi/1" fn wl_declare_posture(posture: u32) void;
 pub extern "weft:abi/1" fn wl_provide(a: u32, al: u32, pred: u32, pred_len: u32, c: u32, cl: u32, prio: i32) void;
@@ -127,6 +138,10 @@ pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision:
 pub extern "weft:abi/1" fn wl_offer(i: u32, il: u32, c: u32, cl: u32, r: u32, rl: u32) u32;
 pub extern "weft:abi/1" fn wl_offers_commit() u32;
 pub extern "weft:abi/1" fn wl_offers_retract() void;
+// A chosen context's offers (0 active, 1 primary focus), as one record.
+pub extern "weft:abi/1" fn wl_offers_list(where: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_intent_invoke_at(where: u32, ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_provide_affordance(a: u32, al: u32, l: u32, ll: u32, g: u32, gl: u32, order: i32) u32;
 pub extern "weft:abi/1" fn wl_buffer_count() u32;
 pub extern "weft:abi/1" fn wl_buffer_id(i: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
@@ -178,8 +193,11 @@ pub extern "weft:abi/1" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32,
 pub extern "weft:abi/1" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
 pub extern "weft:abi/1" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
+pub extern "weft:abi/1" fn wl_outline() i32;
 pub extern "weft:abi/1" fn wl_node_children(off: u32) i32;
 pub extern "weft:abi/1" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_signal_subscribe(name_ptr: u32, name_len: u32) i32;
+pub extern "weft:abi/1" fn wl_signal_emit(name_ptr: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 pub extern "weft:abi/1" fn wl_tool_backing(ptr: u32, len: u32) void;
@@ -189,6 +207,16 @@ pub extern "weft:abi/1" fn wl_yank_range(start: u32, end: u32, linewise: u32, na
 pub extern "weft:abi/1" fn wl_register_text(out_ptr: u32, out_cap: u32, name: u32) u32;
 pub extern "weft:abi/1" fn wl_register_linewise(name: u32) u32;
 pub extern "weft:abi/1" fn wl_paste_at(base: u32, name: u32) void;
+// One value per selection: yank n ranges; read/restamp what selection
+// `index` of `count` pastes under the core distribution rule.
+pub extern "weft:abi/1" fn wl_yank_each(ptr: u32, n: u32, linewise: u32, name: u32) void;
+pub extern "weft:abi/1" fn wl_register_paste_value(index: u32, count: u32, out_ptr: u32, out_cap: u32, name: u32) u32;
+pub extern "weft:abi/1" fn wl_paste_value_at(base: u32, index: u32, count: u32, name: u32) void;
+pub extern "weft:abi/1" fn wl_clipboard_set(ptr: u32, len: u32) i32;
+pub extern "weft:abi/1" fn wl_clipboard_get(out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_jump_push() void;
+pub extern "weft:abi/1" fn wl_macro_recording() u32;
+pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;
@@ -234,6 +262,7 @@ pub extern "weft:abi/1" fn wl_shell_insert(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_repl_quit(handle: u32) void;
+pub extern "weft:abi/1" fn wl_repl_exited(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;

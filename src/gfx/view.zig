@@ -21,8 +21,10 @@ pub const Rect = View.Rect;
 const hud_mod = @import("view/hud.zig");
 pub const Hud = hud_mod.Hud;
 pub const CursorStyle = hud_mod.CursorStyle;
+pub const CaretPlace = hud_mod.CaretPlace;
 pub const MdInline = hud_mod.MdInline;
 pub const Tab = hud_mod.Tab;
+pub const ChromeHit = hud_mod.ChromeHit;
 
 /// The view's color palette (data + role→color lookups), from `view/Theme.zig`.
 pub const Theme = @import("view/Theme.zig");

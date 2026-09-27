@@ -54,9 +54,9 @@ pub const SemanticFileRegistration = struct {
 pub const SyntaxResolver = *const fn (buf: *Buffers.Buffer) ?*syntax.Syntax;
 
 /// The guest-side `Perm` enum order (weft.zig): fs_read, fs_write, net, proc,
-/// timer. Kept in lockstep with abi.Perm so a wasm plugin's declaration means
-/// the same thing as an in-process one's.
-pub const perm_count = 6;
+/// timer, env, clipboard. Kept in lockstep with abi.Perm so a wasm plugin's
+/// declaration means the same thing as an in-process one's.
+pub const perm_count = 7;
 
 pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 
@@ -118,6 +118,8 @@ const Phase = enum { describing, active };
 /// A live CRDT range the guest holds by opaque handle. The endpoints are
 /// document-owned anchors, not offsets paired with a version. `buffer` gives
 /// the handles their locus and rejects buffer-identity reuse after one closes.
+pub const UndoUnit = struct { at: Buffers.Ref, depth: usize };
+
 pub const RangeSlot = struct {
     buffer: Buffers.Ref,
     start: @import("../Document.zig").AnchorHandle,
@@ -284,6 +286,18 @@ result_buf: std.ArrayList(u8) = .empty,
 /// dispatch; a nested result can never overwrite its caller's result bytes.
 retired_result_bufs: std.ArrayList(std.ArrayList(u8)) = .empty,
 dispatch_depth: usize = 0,
+/// Undo units this guest opened with `wl_undo_unit(1)`, innermost last, each
+/// on the entry it was opened on and at the dispatch depth that opened it.
+/// A unit cannot outlive that dispatch: `closeUndoUnits` runs as the
+/// dispatch returns, so a guest that forgets to close one (or traps) never
+/// leaves an editor's barriers held shut.
+undo_units: std.ArrayList(UndoUnit) = .empty,
+/// Nonzero while this guest is ANSWERING a provider round (`on_slot_fire`:
+/// a gutter or status segment asked mid-layout, an annotation round asked
+/// from the frame loop). Answering conveys no authority: every door not
+/// declared safe to call then (`contract.render_safe`) refuses, enforced
+/// once where the doors are bound (`wasm_host.defineImports`).
+answering: u32 = 0,
 
 // The three guest-handle tables. Monotonic issuance, never-recycled numbers
 // and fail-closed exhaustion are `handles.Handles`'s, stated once there
@@ -315,6 +329,13 @@ query_caps: std.ArrayList(QueryCap) = .empty,
 /// The path of the buffer being activated (design §3): valid only during an
 /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
 cur_activate_path: []const u8 = &.{},
+/// Signal names this plugin listens for (`wl_signal_subscribe`); a name's
+/// index is the id `on_signal` hears it as. Owned.
+signal_subscriptions: std.ArrayList([]u8) = .empty,
+/// Signal names this plugin raised since the last frame boundary
+/// (`wl_signal_emit`), delivered by `wasm_host/activation.zig`'s
+/// `deliverSignals`. Owned.
+signals_raised: std.ArrayList([]u8) = .empty,
 
 /// This plugin.s node-tree projection over a text buffer, if it has published
 /// one (`wasm_host/projection.zig`). Held here, released in `deinit`, like
@@ -365,6 +386,10 @@ surface: surface_mod.Surface = .{},
 /// address it captures is the address it keeps.
 offers: plugin_offers.Publisher = undefined,
 offers_ready: bool = false,
+/// Whether this plugin exports `on_offers_changed` — learned on the first
+/// delivery (`wasm_host/intent.zig`'s `notifyOffersChanged`), so a plugin
+/// without it is asked once, not every change.
+offers_listener: enum { unknown, listening, deaf } = .unknown,
 
 // ── Sandboxed semantic field providers ──
 /// Stable heap proxies + host-owned snapshots for fields registered by this
@@ -442,14 +467,15 @@ pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
     const doc = &editor.doc;
     const len = doc.text().byteLen();
     if (start > end or end > len) return error.InvalidRange;
-    const a = try doc.addAnchor(self.gpa, start, .right);
-    errdefer doc.removeAnchor(a);
-    const b = try doc.addAnchor(self.gpa, end, .left);
-    errdefer doc.removeAnchor(b);
+    const ends = try doc.addRangeAnchors(self.gpa, .{ .start = start, .end = end });
+    errdefer {
+        doc.removeAnchor(ends.start);
+        doc.removeAnchor(ends.end);
+    }
     const handle = try self.ranges.open(self.gpa, .{
         .buffer = buffer.ref(),
-        .start = a,
-        .end = b,
+        .start = ends.start,
+        .end = ends.end,
     });
     errdefer _ = self.ranges.take(handle);
     try self.ephemeral_range_handles.append(self.gpa, handle);
@@ -564,10 +590,7 @@ pub fn activeRange(self: *WasmPlugin, handle: u32) ?*const RangeSlot {
 /// checked separately by `activeRange` before any guest-visible operation.
 pub fn resolveRange(self: *WasmPlugin, slot: *const RangeSlot) ?@import("stemma").Range {
     const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
-    const doc = &(buffer.textEditor() orelse return null).doc;
-    const a = doc.anchorOffset(slot.start);
-    const b = doc.anchorOffset(slot.end);
-    return .{ .start = @min(a, b), .end = @max(a, b) };
+    return (buffer.textEditor() orelse return null).doc.rangeOffsets(slot.start, slot.end);
 }
 
 pub fn borrowedRange(self: *WasmPlugin, slot: *const RangeSlot) ?position.LiveRange {
@@ -619,6 +642,45 @@ pub fn clearAllRanges(self: *WasmPlugin) void {
     while (it.next()) |slot| self.destroyRange(slot.*);
     self.ranges.clearRetainingCapacity();
     self.ephemeral_range_handles.clearRetainingCapacity();
+}
+
+/// `wl_undo_unit(1)`: open an undo unit on this call's entry. Only a command
+/// dispatch may (the unit is scoped to it); false otherwise, or when the entry
+/// holds no text. Nests — `UndoLog.beginUnit` counts, and the outermost bracket
+/// owns the unit, so a count loop of operators, each bracketing itself, is one.
+pub fn openUndoUnit(self: *WasmPlugin) bool {
+    if (self.dispatch_depth == 0) return false;
+    const entry = self.activeCtx().entry() orelse return false;
+    const ed = entry.textEditor() orelse return false;
+    self.undo_units.append(self.gpa, .{ .at = entry.ref(), .depth = self.dispatch_depth }) catch return false;
+    ed.history.beginUnit();
+    return true;
+}
+
+/// `wl_undo_unit(0)`: close the innermost unit THIS dispatch opened; false
+/// when it opened none (a close cannot reach a caller's unit).
+pub fn closeUndoUnit(self: *WasmPlugin) bool {
+    const last = self.undo_units.getLastOrNull() orelse return false;
+    if (last.depth != self.dispatch_depth) return false;
+    self.endUndoUnit(self.undo_units.pop().?);
+    return true;
+}
+
+/// Close every unit opened at dispatch depth `depth` or deeper — what a
+/// returning dispatch does for whatever its guest left open (and teardown,
+/// with 0, for everything).
+pub fn closeUndoUnits(self: *WasmPlugin, depth: usize) void {
+    while (self.undo_units.getLastOrNull()) |u| {
+        if (u.depth < depth) return;
+        self.endUndoUnit(self.undo_units.pop().?);
+    }
+}
+
+/// End `u` on its entry's editor — if that entry is still open; a closed one
+/// took its history (and the unit) with it.
+fn endUndoUnit(self: *WasmPlugin, u: UndoUnit) void {
+    const b = self.ctx.buffers.resolve(u.at) orelse return;
+    (b.textEditor() orelse return).history.endUnit();
 }
 
 pub fn clearRetiredResultBuffers(self: *WasmPlugin) void {
@@ -770,6 +832,10 @@ pub fn deinit(self: *WasmPlugin) void {
     }
     self.capsBuilderClear();
     self.caps_builder.deinit(gpa);
+    for (self.signal_subscriptions.items) |name| gpa.free(name);
+    self.signal_subscriptions.deinit(gpa);
+    for (self.signals_raised.items) |name| gpa.free(name);
+    self.signals_raised.deinit(gpa);
     // Offers die with the plugin: the table is retracted and every endpoint
     // it minted is refused from here on (the invoker's generation bumps).
     if (self.offers_ready) self.offers.deinit(gpa);
@@ -808,6 +874,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.query_caps.deinit(gpa);
     self.clearRetiredResultBuffers();
     self.retired_result_bufs.deinit(gpa);
+    self.closeUndoUnits(0);
+    self.undo_units.deinit(gpa);
     self.result_buf.deinit(gpa);
     self.pick_prompt.deinit(gpa);
     self.pick_category.deinit(gpa);

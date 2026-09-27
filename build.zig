@@ -45,7 +45,15 @@ const Guest = struct {
 /// is the tool-buffer surface `run`/`make`/`grep` share, `jsonrpc` is the
 /// framing under `lsp`, `files` is the portable draft model + its sandbox
 /// adapter, `rowkey` is the round trip between a projection row's key and the
-/// structured identity it names.
+/// structured identity it names, `gutter` is the guest half of the
+/// `ui/gutter-segment` round, `statusline` the guest half of
+/// `ui/statusline-seg`'s, `regex` is the Pike-VM pattern engine
+/// (doc/configs.md §0.2), with the one word-character rule `\b`, the word
+/// motions, text objects and C-d all ask, and `search` the query → matches
+/// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
+/// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
+/// draw over the visible text, and `put` the one-write-per-selection edit
+/// (one undo unit) helix's verbs and ide's transfer and line keys share.
 const Library = enum {
     prompt,
     invoke,
@@ -55,7 +63,14 @@ const Library = enum {
     sessions,
     files,
     annotate,
+    gutter,
     rowkey,
+    regex,
+    search,
+    labels,
+    affordances,
+    statusline,
+    put,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -69,16 +84,33 @@ const Library = enum {
             .sessions => "weft_sessions",
             .files => "weft_files",
             .annotate => "weft_annotate",
+            .gutter => "weft_gutter",
             .rowkey => "weft_rowkey",
+            .regex => "weft_regex",
+            .search => "weft_search",
+            .labels => "weft_labels",
+            .affordances => "weft_affordances",
+            .statusline => "weft_statusline",
+            .put => "weft_put",
         };
     }
 
     fn tier(self: Library) plugin_lib_tiers.Tier {
         return switch (self) {
-            .rowkey, .jsonrpc, .sessions => .protocol_data,
-            .annotate, .output, .files, .prompt => .service_presentation,
+            // `regex` sits alongside `rowkey`/`jsonrpc`/`sessions`: a pure,
+            // dependency-free data algorithm, not a presentation surface —
+            // and the lowest tier is what lets `ex` (editor_composition)
+            // depend on it once helix's `s`/`/` land on it.
+            // `affordances` is the one arrangement of offers (group, order)
+            // every piece of chrome shares — data in, data out.
+            .rowkey, .jsonrpc, .sessions, .regex, .affordances => .protocol_data,
+            // `search` is pure data too, but it sits on `regex`, so it
+            // takes the tier above.
+            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels => .service_presentation,
             .invoke => .interaction_orchestration,
-            .ex => .editor_composition,
+            // `put` edits a document on a grammar's behalf, as `ex` runs
+            // its commands: the top of the stack, depending on nothing.
+            .ex, .put => .editor_composition,
         };
     }
 
@@ -91,6 +123,7 @@ const Library = enum {
         return switch (self) {
             .invoke => &.{.prompt},
             .ex => &.{ .prompt, .invoke },
+            .search => &.{.regex},
             else => &.{},
         };
     }
@@ -364,6 +397,14 @@ const guests = [_]Guest{
     .{ .name = "deny", .import = "guest_deny_wasm", .install = false },
     .{ .name = "demo_config", .import = "guest_demo_config_wasm", .install = false },
     .{ .name = "headtest", .import = "guest_headtest_wasm", .install = false },
+    // The multiple-selection doors (doc/configs.md §0.1) across the membrane.
+    .{ .name = "multisel", .import = "guest_multisel_wasm", .install = false },
+    // The action-system doors (doc/configs.md §3.5) driven the way a toolbar
+    // drives them: offers for a chosen context, and the offers-changed event.
+    .{ .name = "offerwatch", .import = "guest_offerwatch_wasm", .install = false },
+    // A diagnostics source without a language server: rows set by a test,
+    // announced by the `diagnostics` signal, read by the problems panel.
+    .{ .name = "diagfeed", .import = "guest_diagfeed_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).
@@ -407,10 +448,11 @@ const guests = [_]Guest{
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
     .{ .name = "shell", .import = "guest_shell_wasm", .install = true },
-    .{ .name = "motions", .import = "guest_motions_wasm", .install = true },
-    .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true },
+    .{ .name = "motions", .import = "guest_motions_wasm", .install = true, .libraries = &.{.regex} },
+    .{ .name = "textobjects", .import = "guest_textobjects_wasm", .install = true, .libraries = &.{.regex} },
     .{ .name = "operators", .import = "guest_operators_wasm", .install = true },
-    .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "surround", .import = "guest_surround_wasm", .install = true },
+    .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{ .ex, .regex } },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
     .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
     .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
@@ -440,9 +482,29 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{.ex} },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels, .put } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
+    // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{ .regex, .put } },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
+    // Line numbers: binds `ui/gutter-segment` for text entries and answers a
+    // window of cells per round (absolute or caret-relative). No commands.
+    .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
+    // Jump labels on f/F/t/T over the visible range; composes with operators.
+    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
+    // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
+    .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
+    // The adaptive toolbar and the context menu (doc/configs.md §3.6): the
+    // primary context's offers as a docked strip of action nodes, and the
+    // offers under the pointer as a menu — both arranged by one library.
+    .{ .name = "toolbar", .import = "guest_toolbar_wasm", .install = true, .libraries = &.{.affordances} },
+    .{ .name = "contextmenu", .import = "guest_contextmenu_wasm", .install = true, .libraries = &.{.affordances} },
+    // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
+    // shell, and the caret's symbol trail on the status line.
+    .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
+    .{ .name = "problems", .import = "guest_problems_wasm", .install = true },
+    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true },
+    .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
 
 pub fn build(b: *std.Build) void {
@@ -1078,6 +1140,39 @@ pub fn build(b: *std.Build) void {
     });
     const guest_pure_tests = b.addTest(.{ .root_module = guest_pure });
     test_step.dependOn(&b.addRunArtifact(guest_pure_tests).step);
+
+    // The `regex` plugin library (doc/configs.md §0.2) is the same posture:
+    // a Pike VM with no `weft` import at all, so its parser/compiler/VM and
+    // its property test against a naive backtracking reference run natively
+    // rather than only inside whichever guest eventually links it.
+    const regex_lib = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/regex/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
+    test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
+
+    // The offer arrangement chrome shares (group, order) is plain data too.
+    const affordances_lib = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/affordances/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = affordances_lib })).step);
+
+    // The `search` library (query → regex, the prefilter, the match
+    // planning — the find bar and helix both link it) imports nothing but
+    // `weft_regex`, so it too runs natively — against the same library
+    // module the tests above exercise.
+    const find_search = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/search/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    find_search.addImport("weft_regex", regex_lib);
+    const find_search_tests = b.addTest(.{ .root_module = find_search });
+    test_step.dependOn(&b.addRunArtifact(find_search_tests).step);
 
     // ── The recordable instruments ──
     // The dispatch-latency baseline and the popup-layout goldens share ONE

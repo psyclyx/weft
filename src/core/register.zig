@@ -41,11 +41,16 @@ pub const Payload = struct {
     facts: []Fact,
 };
 
-/// Explicit register slots. Slot zero is unnamed; 1..26 are `a`..`z`.
+/// Explicit register slots. Slot zero is unnamed; 1..26 are `a`..`z`; 27
+/// is `/`, the last search pattern, which every grammar's search writes and
+/// every grammar can read (helix's `/` sets it, vim's `"/p` pastes it).
 /// Named yanks also update unnamed, while every read/restamp names its slot
 /// explicitly so a prefix cannot leak through ambient state.
 pub const Bank = struct {
-    slots: [27]Register = @splat(.empty),
+    pub const search: u8 = 27;
+    pub const slot_count = 28;
+
+    slots: [slot_count]Register = @splat(.empty),
 
     pub fn deinit(self: *Bank, gpa: Allocator) void {
         for (&self.slots) |*slot| slot.deinit(gpa);
@@ -53,22 +58,41 @@ pub const Bank = struct {
     }
 
     pub fn get(self: *Bank, name: u8) ?*Register {
-        if (name > 26) return null;
+        if (name >= slot_count) return null;
         return &self.slots[name];
     }
 
+    /// Put `bytes` in slot `name` as one charwise value with no ferried
+    /// identity — text that was typed, not yanked (a search pattern). Unlike
+    /// a yank it leaves unnamed alone: setting the search register is not a
+    /// copy, and must not replace what `p` pastes.
+    pub fn set(self: *Bank, gpa: Allocator, name: u8, bytes: []const u8) !void {
+        const selected = self.get(name) orelse return error.InvalidRegister;
+        var next = Register.empty;
+        errdefer next.deinit(gpa);
+        try next.text.appendSlice(gpa, bytes);
+        try next.spans.append(gpa, .{ .start = 0, .end = bytes.len });
+        selected.deinit(gpa);
+        selected.* = next;
+    }
+
     pub fn yank(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, range: Range, bytes: []const u8, linewise: bool) !void {
+        return self.yankEach(gpa, name, subs, doc, &.{.{ .range = range, .bytes = bytes }}, linewise);
+    }
+
+    /// Yank one value per selection into slot `name` (see `Register.yankEach`).
+    pub fn yankEach(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, pieces: []const Piece, linewise: bool) !void {
         const selected = self.get(name) orelse return error.InvalidRegister;
         // Prepare a complete independent snapshot for each destination before
         // swapping either one. This keeps named+unnamed capture atomic under
         // allocator failure.
         var next_selected = Register.empty;
         errdefer next_selected.deinit(gpa);
-        try next_selected.yank(gpa, subs, doc, range, bytes, linewise);
+        try next_selected.yankEach(gpa, subs, doc, pieces, linewise);
         var next_unnamed = Register.empty;
         if (name != 0) {
             errdefer next_unnamed.deinit(gpa);
-            try next_unnamed.yank(gpa, subs, doc, range, bytes, linewise);
+            try next_unnamed.yankEach(gpa, subs, doc, pieces, linewise);
         }
         selected.deinit(gpa);
         selected.* = next_selected;
@@ -81,17 +105,53 @@ pub const Bank = struct {
     }
 };
 
+/// One captured value: the range it came from and its live bytes.
+pub const Piece = struct { range: Range, bytes: []const u8 };
+
+/// Every value's bytes, JOINED: the values in order, a `\n` between two when
+/// the earlier does not already end in one. The joined text is the register's
+/// only byte storage — a single value is the whole text, so a single-cursor
+/// yank stores and reads exactly what it always did.
 text: std.ArrayList(u8) = .empty,
+/// Each value's span within `text`, one per selection that yanked, in
+/// selection (document) order. Empty until the first yank.
+spans: std.ArrayList(Range) = .empty,
 linewise: bool = false,
+/// Ferried identities, at offsets into the JOINED `text`.
 payloads: std.ArrayList(Payload) = .empty,
 
 pub const empty: Register = .{};
 
 pub fn deinit(self: *Register, gpa: Allocator) void {
     self.text.deinit(gpa);
+    self.spans.deinit(gpa);
     self.clearPayloads(gpa);
     self.payloads.deinit(gpa);
     self.* = .{};
+}
+
+/// How many values the register holds (one per yanking selection).
+pub fn valueCount(self: *const Register) usize {
+    return self.spans.items.len;
+}
+
+/// THE PASTE-DISTRIBUTION RULE — what selection `index` of `count` pastes.
+/// When the register holds exactly `count` values, each selection gets its own
+/// (selection i ← value i, in document order: helix's rule, so yanking three
+/// words with three carets and pasting with three carets moves each word to
+/// its own caret). Otherwise every selection gets the JOINED text — all the
+/// values, newline-separated — so nothing yanked is silently dropped (one
+/// caret pasting a three-selection yank gets all three; three carets pasting
+/// a one-value yank each get that value, which is the joined text of one).
+pub fn pasteSpan(self: *const Register, index: usize, count: usize) Range {
+    if (count == self.spans.items.len and index < count) return self.spans.items[index];
+    return .{ .start = 0, .end = self.text.items.len };
+}
+
+/// The bytes `pasteSpan(index, count)` names.
+pub fn pasteValue(self: *const Register, index: usize, count: usize) []const u8 {
+    const s = self.pasteSpan(index, count);
+    return self.text.items[s.start..s.end];
 }
 
 fn clearPayloads(self: *Register, gpa: Allocator) void {
@@ -127,19 +187,42 @@ pub fn yank(
     bytes: []const u8,
     linewise: bool,
 ) Allocator.Error!void {
+    return self.yankEach(gpa, subs, doc, &.{.{ .range = range, .bytes = bytes }}, linewise);
+}
+
+/// Capture one value per selection: `pieces` in selection order, each the
+/// live bytes of its range. Joined into `text` (see its doc) with each value's
+/// span recorded; each piece's subbuffer facts are snapshotted at offsets into
+/// the joined text. One piece is exactly `yank`.
+pub fn yankEach(
+    self: *Register,
+    gpa: Allocator,
+    subs: ?*const subbuffer.SubBuffers,
+    doc: *const Document,
+    pieces: []const Piece,
+    linewise: bool,
+) Allocator.Error!void {
     self.text.clearRetainingCapacity();
-    try self.text.appendSlice(gpa, bytes);
+    self.spans.clearRetainingCapacity();
     self.linewise = linewise;
     self.clearPayloads(gpa);
-    const sub_service = subs orelse return;
-    for (sub_service.list.items) |s| {
-        if (s.doc != doc) continue;
-        const r = s.resolve();
-        // Half-open overlap with [range.start, range.end); skip the disjoint.
-        if (r.end <= range.start or r.start >= range.end) continue;
-        const st = @max(r.start, range.start);
-        const en = @min(r.end, range.end);
-        try self.snapshot(gpa, s, st - range.start, en - st);
+    for (pieces) |piece| {
+        const t_items = self.text.items;
+        if (t_items.len > 0 and t_items[t_items.len - 1] != '\n') try self.text.append(gpa, '\n');
+        const base = self.text.items.len;
+        try self.text.appendSlice(gpa, piece.bytes);
+        try self.spans.append(gpa, .{ .start = base, .end = self.text.items.len });
+        const sub_service = subs orelse continue;
+        const range = piece.range;
+        for (sub_service.list.items) |s| {
+            if (s.doc != doc) continue;
+            const r = s.resolve();
+            // Half-open overlap with [range.start, range.end); skip the disjoint.
+            if (r.end <= range.start or r.start >= range.end) continue;
+            const st = @max(r.start, range.start);
+            const en = @min(r.end, range.end);
+            try self.snapshot(gpa, s, base + st - range.start, en - st);
+        }
     }
 }
 
@@ -172,8 +255,21 @@ fn snapshot(self: *Register, gpa: Allocator, s: *const subbuffer.SubBuffer, offs
 /// plain insert (no payloads) creates nothing. Best-effort per payload — a
 /// failed claim drops that one id rather than the whole paste.
 pub fn restamp(self: *const Register, gpa: Allocator, subs: *subbuffer.SubBuffers, doc: *Document, base: usize) void {
+    self.restampSpan(gpa, subs, doc, base, .{ .start = 0, .end = self.text.items.len });
+}
+
+/// `restamp` for the value selection `index` of `count` pasted
+/// (`pasteValue(index, count)`, inserted at `base`): only the identities that
+/// ride that value's bytes are re-claimed.
+pub fn restampValue(self: *const Register, gpa: Allocator, subs: *subbuffer.SubBuffers, doc: *Document, base: usize, index: usize, count: usize) void {
+    self.restampSpan(gpa, subs, doc, base, self.pasteSpan(index, count));
+}
+
+fn restampSpan(self: *const Register, gpa: Allocator, subs: *subbuffer.SubBuffers, doc: *Document, base: usize, span: Range) void {
     for (self.payloads.items) |pl| {
-        const sub = subs.claim(gpa, doc, .{ .start = base + pl.offset, .end = base + pl.offset + pl.len }) catch continue;
+        if (pl.offset < span.start or pl.offset + pl.len > span.end) continue;
+        const at = base + pl.offset - span.start;
+        const sub = subs.claim(gpa, doc, .{ .start = at, .end = at + pl.len }) catch continue;
         for (pl.facts) |f| sub.putFact(gpa, f.name, f.value) catch {};
     }
 }
@@ -231,6 +327,56 @@ test "register: an id-span ferries across yank→restamp; plain text carries non
     const typed_off = doc.text().byteLen() - 2;
     plain.restamp(gpa, &subs, &doc, doc.text().byteLen() - 3);
     try t.expect(subs.at(&doc, typed_off) == null); // no id on the typed line
+}
+
+test "register: one value per selection — distribute on a matching count, else paste the joined text" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    //             0123456789
+    try doc.insert(gpa, 0, "foo bar\nbaz\n");
+    var subs: subbuffer.SubBuffers = .empty;
+    defer subs.deinit(gpa);
+    // An identity rides "bar" only.
+    const row = try subs.claim(gpa, &doc, .{ .start = 4, .end = 7 });
+    try row.putFact(gpa, "id", "b");
+
+    var reg: Register = .empty;
+    defer reg.deinit(gpa);
+    try reg.yankEach(gpa, &subs, &doc, &.{
+        .{ .range = .{ .start = 0, .end = 3 }, .bytes = "foo" },
+        .{ .range = .{ .start = 4, .end = 7 }, .bytes = "bar" },
+        .{ .range = .{ .start = 8, .end = 12 }, .bytes = "baz\n" },
+    }, false);
+    try t.expectEqual(@as(usize, 3), reg.valueCount());
+    // Joined with a newline between values, none added after one that ends in one.
+    try t.expectEqualStrings("foo\nbar\nbaz\n", reg.slice());
+
+    // Three selections: each its own value.
+    try t.expectEqualStrings("foo", reg.pasteValue(0, 3));
+    try t.expectEqualStrings("bar", reg.pasteValue(1, 3));
+    try t.expectEqualStrings("baz\n", reg.pasteValue(2, 3));
+    // Any other count: everyone gets the whole joined text.
+    try t.expectEqualStrings("foo\nbar\nbaz\n", reg.pasteValue(0, 1));
+    try t.expectEqualStrings("foo\nbar\nbaz\n", reg.pasteValue(1, 2));
+
+    // The identity follows ITS value: pasting value 1 alone re-stamps it at
+    // that paste's base; pasting value 0 (no identity) creates none.
+    const end = doc.text().byteLen();
+    try doc.insert(gpa, end, "bar");
+    reg.restampValue(gpa, &subs, &doc, end, 1, 3);
+    try t.expectEqualStrings("b", (subs.at(&doc, end + 1) orelse return error.NoIdOnPaste).fact("id").?);
+    const end2 = doc.text().byteLen();
+    try doc.insert(gpa, end2, "foo");
+    reg.restampValue(gpa, &subs, &doc, end2, 0, 3);
+    try t.expect(subs.at(&doc, end2 + 1) == null);
+
+    // A single-value yank is one value spanning the whole text — the
+    // single-cursor register, unchanged.
+    try reg.yank(gpa, null, &doc, .{ .start = 0, .end = 3 }, "foo", true);
+    try t.expectEqual(@as(usize, 1), reg.valueCount());
+    try t.expectEqualStrings("foo", reg.pasteValue(0, 1));
+    try t.expectEqualStrings("foo", reg.pasteValue(2, 3));
 }
 
 test "register bank keeps named text after later unnamed delete yank" {

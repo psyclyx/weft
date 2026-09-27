@@ -34,6 +34,8 @@ const task = @import("../task.zig");
 const kv = @import("../kv.zig");
 const Buffers = @import("../Buffers.zig");
 const subbuffer = @import("../subbuffer.zig");
+/// Where a transcript fill announces a refusal; these tests read none.
+var test_status: @import("../status_feed.zig").Feed = .{};
 const pick_mod = @import("../pick.zig");
 const grants_mod = @import("../grants.zig");
 const manifest_mod = @import("../manifest.zig");
@@ -588,7 +590,7 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         defer doc_check.deinit(gpa);
         var subs_check: subbuffer.SubBuffers = .empty;
         defer subs_check.deinit(gpa);
-        try TranscriptDoc.fill(gpa, &plugin.conversation("*t*").?.transcript, &doc_check, &subs_check);
+        try TranscriptDoc.fill(gpa, &test_status, &plugin.conversation("*t*").?.transcript, &doc_check, &subs_check);
         const full = try doc_check.text().toOwnedSlice(gpa);
         defer gpa.free(full);
         try t.expectEqualStrings(full, got);
@@ -1310,8 +1312,9 @@ test "quickjs: every shipped example config evals without a JS error" {
     // config/ (the test runs with cwd at the project root).
     const file = @import("../file.zig");
     const paths = [_][]const u8{
-        "config/config.js", "config/config.northstar.js", "config/vim-minimal.js",
-        "config/helix.js",  "config/dual.js",             "config/agent-ux.js",
+        "config/config.js",   "config/helix.js",   "config/ide.js",
+        "config/defaults.js", "config/sidebar.js", "config/semantic.js",
+        "config/panel.js",    "config/toolbar.js",
     };
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();

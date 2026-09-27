@@ -83,6 +83,29 @@ pub const Posture = enum(u32) {
     }
 };
 
+/// A fact about an entry that a grammar may give its OWN key layer, bound
+/// over the mode the head is actually in. The head's mode never changes for
+/// it — insert/visual transitions stay the grammar's — only the table a key
+/// is looked up in does.
+///
+///   source      a file-backed document: code chords (goto-definition,
+///               comment, build) live here, not in a scratch or a listing.
+///   structural  an entry — or a focused semantic scene — that takes no
+///               text: the structured-view group lives here.
+///
+/// The grammar DECLARES which of its modes answers each facet
+/// (`weft.bindingVariant`); core pairs the declaration with the entry and
+/// knows no mode name. A mode with no declaration binds as itself.
+pub const BindingFacet = enum(u32) {
+    source,
+    structural,
+
+    pub fn fromWire(raw: u32) ?BindingFacet {
+        if (raw > @intFromEnum(BindingFacet.structural)) return null;
+        return @enumFromInt(raw);
+    }
+};
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -103,4 +126,10 @@ test "posture: the wire form round-trips and refuses a value outside the vocabul
     for ([_]Posture{ .text, .structural, .field, .capture }) |p|
         try t.expectEqual(p, Posture.fromWire(@intFromEnum(p)).?);
     try t.expectEqual(@as(?Posture, null), Posture.fromWire(4));
+}
+
+test "binding facet: the wire form round-trips and refuses a value outside the vocabulary" {
+    for ([_]BindingFacet{ .source, .structural }) |f|
+        try t.expectEqual(f, BindingFacet.fromWire(@intFromEnum(f)).?);
+    try t.expectEqual(@as(?BindingFacet, null), BindingFacet.fromWire(2));
 }

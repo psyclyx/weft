@@ -50,6 +50,7 @@ pub const Head = @import("Head.zig");
 pub const semantic = @import("semantic.zig");
 pub const target_open = @import("target_open.zig");
 pub const builtins = @import("builtins.zig");
+pub const pointer = @import("pointer.zig");
 pub const pick = @import("pick.zig");
 pub const surface = @import("surface.zig");
 pub const fs_source = @import("fs_source.zig");
@@ -71,6 +72,20 @@ pub const facts = @import("weft_facts");
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
+/// The gutter's plugin exchange: the `ui/gutter-segment` slot's name and schema.
+pub const gutter = @import("gutter.zig");
+/// The status line's plugin exchange: the `ui/statusline-seg` slot's name
+/// and schema.
+pub const status_segment = @import("status_segment.zig");
+/// The transient highlight over what an operation just touched: a set of
+/// ranges anchored on its document.
+pub const flash = @import("flash.zig");
+/// A head's position history and its travel (C-o/C-i), anchored so entries
+/// survive edits.
+pub const jumplist = @import("jumplist.zig");
+/// A head's system clipboard: an in-memory store, or the platform's once the
+/// shell installs a backend.
+pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
 pub const intent = @import("intent.zig");
@@ -122,4 +137,5 @@ test {
     _ = @import("identity.zig");
     _ = @import("weft_facts");
     _ = @import("container.zig");
+    _ = @import("repl_session.zig");
 }

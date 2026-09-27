@@ -19,6 +19,7 @@ const view_offers = @import("view_offers.zig");
 const action_here = @import("action_here.zig");
 const action_offers = @import("action_offers.zig");
 const Head = @import("Head.zig");
+const Buffers = @import("Buffers.zig");
 
 pub const Catalog = catalog_mod.Catalog;
 pub const IntentionId = catalog_mod.IntentionId;
@@ -142,14 +143,44 @@ const CoreOffer = struct {
     /// The EDITING offers do; the break-out (§10.4) is about how the entry
     /// takes input, so it stands exactly where text does not.
     needs_text: bool = true,
+    /// The one entry fact, beyond holding text, the row's availability reads.
+    gate: Gate = .none,
+
+    const Gate = enum {
+        none,
+        /// Disabled while the history holds no unit to reverse.
+        undo,
+        /// Disabled while the history holds no undone unit.
+        redo,
+        /// ABSENT unless the `save` action has an eligible provider here.
+        /// Not disabled: a git listing has nothing durable, which is
+        /// nonapplicable (§9.3), so a key's next arm must get its turn.
+        persists,
+    };
 };
 
 const core_offers = [_]CoreOffer{
-    .{ .intention = "std.history.undo", .command = "undo" },
-    .{ .intention = "std.history.redo", .command = "redo" },
-    .{ .intention = "std.persistence.save", .command = "save" },
+    .{ .intention = "std.history.undo", .command = "undo", .gate = .undo },
+    .{ .intention = "std.history.redo", .command = "redo", .gate = .redo },
+    // Not a text verb: WHAT is durable is the `save` providers' call (a files
+    // listing applies its draft), so the gate is theirs and holding text is
+    // not a precondition.
+    .{ .intention = "std.persistence.save", .command = "save", .needs_text = false, .gate = .persists },
     .{ .intention = "std.editing.insert-line-break", .command = "insert-newline" },
     .{ .intention = "std.input.break-out", .command = "posture-break-out", .needs_text = false },
+};
+
+/// The facts about the focused ENTRY core's table is computed from. A value,
+/// so "did it change" is one comparison and an unchanged entry republishes
+/// nothing.
+pub const Shape = struct {
+    has_text: bool = true,
+    can_undo: bool = true,
+    can_redo: bool = true,
+    /// Some provider of the `save` action is eligible here. Decided by the
+    /// providers' own predicates (core's `save-file` excludes tool
+    /// projections by locality) — never by naming a tool.
+    persists: bool = true,
 };
 
 /// A text-needing core offer on an editor-less entry gets `disabled` rather
@@ -159,6 +190,25 @@ const no_text: catalog_mod.Availability = .{ .disabled = .{
     .reason = "no-text",
     .message = "this entry holds no text",
 } };
+const nothing_to_undo: catalog_mod.Availability = .{ .disabled = .{
+    .reason = "nothing-to-undo",
+    .message = "there is no change to undo",
+} };
+const nothing_to_redo: catalog_mod.Availability = .{ .disabled = .{
+    .reason = "nothing-to-redo",
+    .message = "there is no undone change to redo",
+} };
+
+/// A core row's availability for `shape`, or null when the row is absent.
+fn coreAvailability(offer: CoreOffer, shape: Shape) ?catalog_mod.Availability {
+    if (offer.gate == .persists and !shape.persists) return null;
+    if (offer.needs_text and !shape.has_text) return no_text;
+    return switch (offer.gate) {
+        .undo => if (shape.can_undo) .enabled else nothing_to_undo,
+        .redo => if (shape.can_redo) .enabled else nothing_to_redo,
+        .none, .persists => .enabled,
+    };
+}
 
 fn invokeCore(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void {
     _ = data;
@@ -177,9 +227,12 @@ pub const Plane = struct {
     provider: catalog_mod.ProviderId = undefined,
     handle: Handle = undefined,
     rows: [core_offers.len]catalog_mod.Offer = undefined,
+    /// How many of `rows` the published table holds (an absent row is left
+    /// out, not published disabled).
+    row_count: usize = 0,
     revision: u64 = 0,
     /// The entry shape the published table was computed for.
-    has_text: bool = true,
+    shape: Shape = .{},
     /// Core's other built-in provider: the generic adapter that derives a
     /// focused view's std offers from its scene (`view_offers.zig`). Held
     /// here for the same reason as the editing table — a plane without its
@@ -212,10 +265,6 @@ pub const Plane = struct {
         for (intentions.std_intentions) |i| _ = try self.catalog.intention(i.name);
         self.provider = try self.catalog.provider("core.editing");
         self.handle = try self.invokers.register(gpa, "core.editing", invokeCore, null);
-        for (core_offers, 0..) |offer, i| self.rows[i] = .{
-            .intention = try self.catalog.intention(offer.intention),
-            .endpoint = self.handle.endpoint(@intCast(i)),
-        };
         try self.publishCore();
         self.views = try .init(gpa, self);
     }
@@ -231,25 +280,24 @@ pub const Plane = struct {
         self.* = undefined;
     }
 
-    /// Republish the view adapter's table when this head's focus or scene
+    /// Republish the view adapter's table when the scope's focus or scene
     /// moved. A signature comparison when nothing moved; no probe either way.
     pub fn syncFocus(
         self: *Plane,
         services: *const semantic.Services,
-        head: *const Head,
+        focus: *const Head.SemanticFocus,
         here: ?view_offers.Here,
     ) Allocator.Error!void {
-        _ = try self.views.refresh(&self.catalog, services, head, here);
+        _ = try self.views.refresh(&self.catalog, services, focus, here);
     }
 
-    /// What point is on, when the active entry is a text PROJECTION and its
+    /// What point is on, when the scope's entry is a text PROJECTION and its
     /// producer named the semantic view behind it. The view adapter derives
     /// what a listing affords from this, exactly as it derives a scene's from
     /// the focused node — one question, two planes.
-    fn hereFor(ctx: *command.Context) ?view_offers.Here {
-        const entry = ctx.buffers.active();
-        const view = entry.tool_view orelse return null;
-        if (action_here.subjectsHere(ctx).row) |node| return .{ .view = view, .node = node };
+    fn hereIn(ctx: *command.Context, scope: Scope) ?view_offers.Here {
+        const view = scope.entry.tool_view orelse return null;
+        if (action_here.subjectsIn(scope.entry).row) |node| return .{ .view = view, .node = node };
         // NO ROW IS NOT NOTHING. An empty directory has a listing, and what it
         // affords — paste, create — is the LISTING's, which is the same
         // fallback `action_here` makes when it offers a verb to the view after
@@ -271,21 +319,49 @@ pub const Plane = struct {
     /// Republish core's table when the focused entry's shape changes — the
     /// pushed-offer discipline: eligibility moves because a provider says so,
     /// never because something probed it mid-resolution.
-    pub fn syncEntryShape(self: *Plane, has_text: bool) Allocator.Error!void {
-        if (self.has_text == has_text and self.revision != 0) return;
-        self.has_text = has_text;
+    pub fn syncShape(self: *Plane, shape: Shape) Allocator.Error!void {
+        if (std.meta.eql(self.shape, shape) and self.revision != 0) return;
+        self.shape = shape;
         try self.publishCore();
     }
 
+    /// `syncShape` for a caller that knows only whether the entry holds text.
+    pub fn syncEntryShape(self: *Plane, has_text: bool) Allocator.Error!void {
+        return self.syncShape(.{ .has_text = has_text });
+    }
+
+    /// The shape of the scope's entry, read without touching it: the editor's
+    /// history answers undo/redo, and the `save` action's providers answer
+    /// whether anything here is durable.
+    fn shapeOf(self: *Plane, scope: Scope) Shape {
+        const persists = if (self.derived_attached)
+            self.derived.actions.resolveFacts("save", factsIn(scope)) != null
+        else
+            true;
+        const ed = scope.entry.textEditor() orelse
+            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists };
+        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists };
+    }
+
     fn publishCore(self: *Plane) Allocator.Error!void {
-        for (&self.rows, core_offers) |*row, offer|
-            row.availability = if (self.has_text or !offer.needs_text) .enabled else no_text;
+        var n: usize = 0;
+        for (core_offers, 0..) |offer, i| {
+            const availability = coreAvailability(offer, self.shape) orelse continue;
+            self.rows[n] = .{
+                // Interned at `init`, so a lookup: this path cannot fail on a name.
+                .intention = self.catalog.findIntention(offer.intention).?,
+                .endpoint = self.handle.endpoint(@intCast(i)),
+                .availability = availability,
+            };
+            n += 1;
+        }
+        self.row_count = n;
         self.revision += 1;
         _ = try self.catalog.publish(.{
             .provider = self.provider,
             .revision = self.revision,
             .tier = .core,
-            .offers = &self.rows,
+            .offers = self.rows[0..n],
         });
     }
 
@@ -308,18 +384,63 @@ pub const Plane = struct {
     /// are value comparisons when nothing moved, and an unchanged context
     /// leaves the clock alone, so a repeat is a cache hit.
     pub fn snapshotFor(self: *Plane, ctx: *command.Context) ?*const catalog_mod.Snapshot {
-        self.syncEntryShape(ctx.buffers.active().textEditor() != null) catch {};
-        if (ctx.semantic) |services| self.syncFocus(services, ctx.head, hereFor(ctx)) catch {};
+        return self.snapshotAt(ctx, .active);
+    }
+
+    /// The same snapshot for a CHOSEN context (`Where`): the active pane, or
+    /// the head's primary focus while a companion holds the keyboard. One
+    /// builder for both — the primary context is not a second resolver, it
+    /// is the same syncs fed a different scope.
+    ///
+    /// Core's own tables describe ONE context at a time, so describing the
+    /// primary from a sidebar republishes them for it; the next keypress in
+    /// the sidebar republishes them back. Both are signature comparisons
+    /// when nothing moved, and the two contexts keep separate cache keys.
+    pub fn snapshotAt(self: *Plane, ctx: *command.Context, where: Where) ?*const catalog_mod.Snapshot {
+        const scope = scopeOf(ctx, where);
+        self.syncShape(self.shapeOf(scope)) catch {};
+        if (ctx.semantic) |services| self.syncFocus(services, scope.focus, hereIn(ctx, scope)) catch {};
         // The third built-in provider, synced HERE rather than on the dispatch
         // path, because "what would this key do" and "what does this key do"
         // must read the same table. Hung off `dispatchSpec` first, and the
         // difference was visible immediately: `s` staged the row while
         // which-key, one call earlier, said nothing was offered.
-        self.syncDerived(ctx.gpa, factsFor(ctx)) catch {};
-        return self.catalog.snapshot(catalogContext(ctx)) catch |err| {
+        self.syncDerived(ctx.gpa, factsIn(scope)) catch {};
+        return self.catalog.snapshot(contextIn(ctx, scope)) catch |err| {
             std.log.warn("intent: catalog snapshot failed: {t}", .{err});
             return null;
         };
+    }
+
+    /// A value that moves exactly when what `where` offers moves — the rows
+    /// (intention, owner, availability, presentation) or the context they
+    /// describe (entry, mode). The offers-changed event fires on it, so it is
+    /// content, not the catalog epoch: describing the primary from a sidebar
+    /// flips core's tables back and forth without changing a single row, and
+    /// that must not read as a change.
+    pub fn signatureAt(self: *Plane, ctx: *command.Context, where: Where) u64 {
+        const scope = scopeOf(ctx, where);
+        const snap = self.snapshotAt(ctx, where) orelse return 0;
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&scope.entry_id));
+        h.update(scope.mode);
+        for (snap.candidates, 0..) |c, i| {
+            if (i != 0 and snap.candidates[i - 1].intention == c.intention) continue;
+            h.update(self.catalog.intentionName(c.intention));
+            h.update(c.owner);
+            switch (c.availability) {
+                .enabled => h.update("+"),
+                .disabled => |d| {
+                    h.update("-");
+                    h.update(d.reason);
+                },
+                .checking => h.update("?"),
+            }
+            h.update(c.affordance.label);
+            h.update(c.affordance.group);
+            if (c.affordance.order) |o| h.update(std.mem.asBytes(&o));
+        }
+        return h.final();
     }
 
     /// THE EFFECT DOOR. A decision is good only while the table it was
@@ -366,6 +487,31 @@ pub const Plane = struct {
             .ambiguous => |a| refused(buf, "{s}: ambiguous — {s} and {s} offer equally", .{ name, a.a.owner, a.b.owner }),
         };
     }
+
+    /// `invokeNamed` for a CHOSEN context: what a toolbar button does to the
+    /// editor it describes while the toolbar holds focus.
+    ///
+    /// Every route an offer runs acts on the active entry (that is how the
+    /// command door addresses a document), so an offer for the primary runs
+    /// with the primary entry brought to the head for the call and the head
+    /// put back after — the same round trip `presentIn` makes to open a
+    /// subject in another viewport. Resolution still happens at accept time,
+    /// in that entry, so a listing built one change ago cannot run a stale
+    /// endpoint. If the invoked verb itself moved the head elsewhere (an
+    /// open), that move stands.
+    pub fn invokeNamedAt(
+        self: *Plane,
+        ctx: *command.Context,
+        where: Where,
+        name: []const u8,
+        buf: []u8,
+    ) Invocation {
+        const scope = scopeOf(ctx, where);
+        if (scope.live) return self.invokeNamed(ctx, name, buf);
+        // A borrow, not navigation: the round trip records no jump.
+        return ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, invokeNamed, .{ self, ctx, name, buf }) catch |err|
+            refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
+    }
 };
 
 /// What `invokeNamed` did. `unknown` is not a refusal: the name is no
@@ -402,17 +548,123 @@ fn refused(buf: []u8, comptime fmt: []const u8, args: anytype) Invocation {
 /// anyone remembering to copy it. `catalogContext` adds only the clock
 /// (a cache key), which a fire has no use for.
 pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
-    const entry = ctx.buffers.active();
+    return factsIn(scopeOf(ctx, .active));
+}
+
+/// The facts of a chosen scope — `factsFor` is this for the active one, so
+/// the primary context is described by the same builder, never a copy.
+pub fn factsIn(scope: Scope) catalog_mod.Facts {
+    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane);
+}
+
+/// The facts of `entry` in `mode`, as pane `pane` shows it — `factsIn` for
+/// a scope, and what the frame asks a pane's chrome (status line, gutter)
+/// with, so every pane is described by this one builder too.
+pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
         .name = entry.name,
-        .mode = ctx.head.currentMode(),
+        .mode = mode,
         .lang = Actions.langOfName(entry.name),
         .tool = entry.tool,
         .role = entry.focusedRole(),
         .locality = localityOf(entry),
-        .pane = ctx.head.focused_pane,
+        .posture = @tagName(entry.posture(focus.field != null)),
+        .pane = pane,
     };
+}
+
+/// The mode an entry the head is NOT on is in: the one it saved when the
+/// head left it, else where its posture rests (an entry never visited).
+pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
+    if (entry.mode.len > 0) return entry.mode;
+    return buffers.restingModeFor(entry.posture(entry.semantic_focus.field != null));
+}
+
+// ── Chosen contexts ──────────────────────────────────────────────────
+
+/// WHICH context an offer question is about (doc/configs.md §3.5.2). The
+/// wire value is the enum's integer.
+pub const Where = enum(u32) {
+    /// The pane with the keyboard — what a keypress acts on.
+    active = 0,
+    /// The head's last PRIMARY focus (`Head.primary_focus`): the editor a
+    /// toolbar or sidebar describes even while it holds focus itself.
+    primary = 1,
+
+    pub fn fromWire(raw: u32) ?Where {
+        return std.enums.fromInt(Where, raw);
+    }
+};
+
+/// One context, spelled out: the entry, how the head addresses it, and which
+/// clock caches its snapshot. `live` is the entry the head is ON — its mode
+/// and semantic focus are the head's own; any other entry's are the ones it
+/// saved when the head left it (`Buffers.switchTo`).
+pub const Scope = struct {
+    entry: *Buffers.Buffer,
+    entry_id: Buffers.Id,
+    live: bool,
+    mode: []const u8,
+    pane: u32,
+    focus: *const Head.SemanticFocus,
+    clock: *Head.CatalogClock,
+};
+
+pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
+    const head = ctx.head;
+    const active: Scope = .{
+        .entry = ctx.buffers.active(),
+        .entry_id = ctx.buffers.active_id,
+        .live = true,
+        .mode = head.currentMode(),
+        .pane = head.focused_pane,
+        .focus = &head.semantic_focus,
+        .clock = &head.catalog_clock,
+    };
+    if (where == .active) return active;
+    // No primary recorded yet, or it IS where the head is: one context.
+    const primary = head.primary_focus orelse return active;
+    if (primary.entry == ctx.buffers.active_id) return active;
+    const entry = ctx.buffers.get(primary.entry) orelse return active;
+    return .{
+        .entry = entry,
+        .entry_id = primary.entry,
+        .live = false,
+        .mode = entry.mode,
+        .pane = primary.pane,
+        .focus = &entry.semantic_focus,
+        .clock = &head.primary_clock,
+    };
+}
+
+/// How to present `c`: what its provider declared, completed from the
+/// intention table (a std intention's label, its package as the group, its
+/// table position as the order) and, for anything else, from its name. A UI
+/// therefore always has a label and a group, and "missing placement metadata
+/// never hides an action" (§11.3) holds by construction.
+pub fn presentation(cat: *const Catalog, c: catalog_mod.Candidate) catalog_mod.Affordance {
+    const name = cat.intentionName(c.intention);
+    const known = intentions.find(name);
+    var out = c.affordance;
+    if (out.label.len == 0) out.label = if (known) |k| k.intention.label else lastSegment(name);
+    if (out.group.len == 0) out.group = packageOf(name);
+    if (out.order == null) if (known) |k| {
+        out.order = @intCast(k.index);
+    };
+    return out;
+}
+
+/// `std.history.undo` → `history`; `plugin.git.stage` → `git`.
+fn packageOf(name: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, name, '.');
+    _ = it.next();
+    return it.next() orelse name;
+}
+
+fn lastSegment(name: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
+    return name[dot + 1 ..];
 }
 
 /// WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
@@ -424,12 +676,16 @@ fn localityOf(entry: anytype) @import("weft_facts").Locality {
 }
 
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
-    const entry = ctx.buffers.active();
-    const facts = factsFor(ctx);
+    return contextIn(ctx, scopeOf(ctx, .active));
+}
+
+fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
+    const entry = scope.entry;
+    const facts = factsIn(scope);
     const locality = facts.locality;
     const path = facts.path;
     var h = std.hash.Wyhash.init(0);
-    h.update(ctx.head.currentMode());
+    h.update(scope.mode);
     h.update(entry.tool);
     // Fold the locality too. The `.facts` literal below and this signature
     // must always name the same fields: a fact the hash omits changes
@@ -439,7 +695,7 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
     // sitting on the line it applies to.
     h.update(&[_]u8{@intFromEnum(locality)});
     h.update(&[_]u8{@intFromBool(path != null)});
-    if (ctx.head.semantic_focus.view) |view| {
+    if (scope.focus.view) |view| {
         h.update(std.mem.asBytes(&view.slot));
         h.update(std.mem.asBytes(&view.generation));
         const rev: u64 = if (ctx.semantic) |s|
@@ -448,10 +704,10 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
             0;
         h.update(std.mem.asBytes(&rev));
     }
-    ctx.head.catalog_clock.observe(ctx.buffers.active_id, h.final());
+    scope.clock.observe(scope.entry_id, h.final());
     return .{
-        .key = ctx.head.catalog_clock.key,
-        .revision = ctx.head.catalog_clock.revision,
+        .key = scope.clock.key,
+        .revision = scope.clock.revision,
         .facts = facts,
     };
 }
@@ -586,4 +842,73 @@ test "intent: core offers go disabled for an editor-less entry, and say why" {
         try t.expect(r == .unavailable);
         try t.expectEqualStrings("no-text", r.unavailable.disabled.reason.reason);
     }
+}
+
+test "intent: history offers report nothing to undo, and save is absent where nothing persists" {
+    const gpa = t.allocator;
+    var plane: Plane = undefined;
+    try plane.init(gpa);
+    defer plane.deinit(gpa);
+
+    var buf: [2]IntentionId = undefined;
+    const undo = (try plane.armIds(&.{"std.history.undo"}, buf[0..1]))[0];
+    const save = (try plane.armIds(&.{"std.persistence.save"}, buf[1..2]))[0];
+
+    // A fresh text entry: undo is RELEVANT but impossible — disabled, with
+    // the reason a UI greys the button by — and a keypress refuses rather
+    // than running a later arm.
+    try plane.syncShape(.{ .can_undo = false, .can_redo = false });
+    {
+        const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 1 });
+        try t.expectEqualStrings("nothing-to-undo", snap.resolveOne(undo).unavailable.disabled.reason.reason);
+        try t.expect(snap.resolveOne(save) == .decision);
+    }
+    // An edit makes it ready.
+    try plane.syncShape(.{ .can_redo = false });
+    {
+        const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 2 });
+        try t.expect(snap.resolveOne(undo) == .decision);
+    }
+    // Where no `save` provider is eligible, the word is ABSENT — so a
+    // fallback list moves on to its next arm instead of stopping on it.
+    try plane.syncShape(.{ .persists = false });
+    {
+        const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 3 });
+        try t.expect(snap.resolveOne(save).unavailable == .no_offer);
+        try t.expectEqual(@as(usize, 0), snap.offersFor(save).len);
+    }
+    // An unchanged shape republishes nothing.
+    const epoch = plane.catalog.epoch;
+    try plane.syncShape(.{ .persists = false });
+    try t.expectEqual(epoch, plane.catalog.epoch);
+}
+
+test "intent: presentation completes what a provider left unsaid from the intention table" {
+    const gpa = t.allocator;
+    var plane: Plane = undefined;
+    try plane.init(gpa);
+    defer plane.deinit(gpa);
+    const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 1 });
+
+    const undo = plane.catalog.findIntention("std.history.undo").?;
+    const shown = presentation(&plane.catalog, snap.offersFor(undo)[0]);
+    try t.expectEqualStrings("Undo", shown.label);
+    try t.expectEqualStrings("history", shown.group);
+    try t.expect(shown.order != null);
+
+    // A provider's own words win; a plugin intention with none is labelled
+    // from its name and grouped by its plugin.
+    var c = snap.offersFor(undo)[0];
+    c.affordance = .{ .label = "Take back", .order = 3 };
+    const over = presentation(&plane.catalog, c);
+    try t.expectEqualStrings("Take back", over.label);
+    try t.expectEqualStrings("history", over.group);
+    try t.expectEqual(@as(?i32, 3), over.order);
+
+    c.intention = try plane.catalog.intention("plugin.git.stage");
+    c.affordance = .{};
+    const plugin_row = presentation(&plane.catalog, c);
+    try t.expectEqualStrings("stage", plugin_row.label);
+    try t.expectEqualStrings("git", plugin_row.group);
+    try t.expectEqual(@as(?i32, null), plugin_row.order);
 }

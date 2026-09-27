@@ -10,7 +10,6 @@ const Document = @import("../Document.zig");
 const wasm = @import("../wasm.zig");
 const grants_mod = @import("../grants.zig");
 const place_mod = @import("../place.zig");
-const status_feed = @import("../status_feed.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -24,6 +23,7 @@ pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
 pub const perm_env = 5;
+pub const perm_clipboard = 6;
 
 /// The membrane's one grant-gate vocabulary
 /// (doc/contextual-workspace-architecture.md §13.5), enum-closed so a
@@ -40,6 +40,9 @@ pub const Perm = enum(u32) {
     /// there. That is an escalation `proc` does not imply, so it is its own
     /// capability, config-visible in the approval diff.
     env = perm_env,
+    /// Read and take the system clipboard (`wasm_host/clipboard.zig`).
+    /// CONFIG-ONLY — see `configOnly`.
+    clipboard = perm_clipboard,
 
     pub fn label(self: Perm) []const u8 {
         return switch (self) {
@@ -49,7 +52,18 @@ pub const Perm = enum(u32) {
             .proc => "proc",
             .timer => "timer",
             .env => "env",
+            .clipboard => "clipboard",
         };
+    }
+
+    /// A capability a plugin cannot grant itself by declaring it: only a
+    /// config-authored `weft.grant` confers it. For the others, `describe()`
+    /// mints a baseline row and config narrows it; for these, declaring is
+    /// a statement of intent the approval surface can show, nothing more.
+    /// The clipboard is the first: it holds whatever the user last copied
+    /// anywhere on the desktop, and a plugin should not reach that by asking.
+    pub fn configOnly(self: Perm) bool {
+        return self == .clipboard;
     }
 };
 
@@ -90,7 +104,12 @@ pub const Perm = enum(u32) {
 /// visible (`weft.grant(who, cap, { root: … })`, `"/"` for unconfined).
 pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
     inline for (0..WasmPlugin.perm_count) |i| {
-        if (perms[i]) {
+        const cp: Perm = @enumFromInt(i);
+        if (cp.configOnly()) {
+            // Declared or not, only config confers it: adopt its row or hold
+            // nothing (`Perm.configOnly`).
+            out[i] = table.findLive(principal, cp.label()) orelse grants_mod.CapHandle.none;
+        } else if (perms[i]) {
             const p: Perm = @enumFromInt(i);
             if (table.findLive(principal, p.label())) |existing| {
                 out[i] = existing;
@@ -149,10 +168,16 @@ pub fn adoptGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, 
 /// silently bypassed, so every existing test that pokes `.perms[i] = true`
 /// directly (without ever touching a `HandleTable`) keeps behaving
 /// identically.
+///
+/// Except a CONFIG-ONLY capability (`Perm.configOnly`): only a config-authored
+/// grant confers it, and with no table there is no grant — so it is false
+/// without one, whatever `perms` says. That is a property of this check, not
+/// of how a principal happens to be wired.
 pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
     if (id.grant_table) |table| {
         return table.check(id.grant_handles[@intFromEnum(perm)]);
     }
+    if (comptime perm.configOnly()) return false;
     return id.perms[@intFromEnum(perm)];
 }
 
@@ -193,6 +218,12 @@ pub fn limitFor(id: anytype, comptime perm: Perm) grants_mod.Limit {
 /// requested" (§6 W4 gate) — a plugin with no table wired keeps the exact
 /// pre-W4 wording, since there is no revocation state to distinguish.
 pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) void {
+    // A config-only capability is never "not requested": asking confers
+    // nothing, so the fix to name is the grant.
+    const never: []const u8 = if (comptime perm.configOnly())
+        "config-only: grant it with weft.grant"
+    else
+        "not requested in describe()";
     const reason: []const u8 = if (p.grant_table) |table| switch (table.reasonFor(p.grant_handles[@intFromEnum(perm)])) {
         .revoked => "revoked",
         .scope_expired => "scope expired",
@@ -205,8 +236,8 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
         // which this plugin gate never consults — but the switch must stay
         // exhaustive over the shared enum, so all four are bucketed with the
         // same wording, defensively.
-        .never_granted, .ok, .out_of_limit, .collapsed, .out_of_ops, .dead_epoch => "not requested in describe()",
-    } else "not requested in describe()";
+        .never_granted, .ok, .out_of_limit, .collapsed, .out_of_ops, .dead_epoch => never,
+    } else never;
     caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
 }
 
@@ -301,6 +332,28 @@ pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn
                 if (!requirePerm(p, caller, perm)) return;
             }
             body(.{ .resources = &p.resources, .ctx = p.activeCtx() }, caller, args, results);
+        }
+    }.f;
+}
+
+/// The RENDER-PHASE door policy, applied once, where the doors are bound
+/// (`wasm_host.defineImports`): wrap `inner` so that while its guest is
+/// answering a provider round (`WasmPlugin.answering`) the call traps instead
+/// of running. A round fires during layout (a gutter, a status segment) or
+/// from the frame loop, and an answer is a read: a provider that edits, runs
+/// a command, sets selections or flashes mid-layout would change what the
+/// frame is in the middle of drawing. Only the doors `contract.render_safe`
+/// names — reads, and the answer doors themselves — go unwrapped, so a door
+/// added later is refused there until someone decides it is a read.
+pub fn answerGate(comptime inner: wasm.Linker.HostFn, comptime name: []const u8) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+            if (p.answering > 0) {
+                caller.trap("plugin '{s}' called {s} while answering a provider round: an answer may read, never act", .{ p.name, name });
+                return;
+            }
+            inner(data, caller, args, results);
         }
     }.f;
 }
@@ -501,10 +554,10 @@ pub fn resolveSpawnEnv(p: *WasmPlugin, gpa: std.mem.Allocator) ?std.process.Envi
 /// Surface a refusal the way a denied render already is: a host log line
 /// always, plus the status chip the status line renders, so a background
 /// refusal is visible without inventing a UI for it.
-pub fn noteSpawnRefusal(plugin: []const u8, why: []const u8) void {
+pub fn noteSpawnRefusal(ctx: *@import("../command.zig").Context, plugin: []const u8, why: []const u8) void {
     std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
     var buf: [128]u8 = undefined;
-    status_feed.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
+    ctx.buffers.status.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {
@@ -518,6 +571,20 @@ pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Docu
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "hasPerm: a config-only capability is false with no grant table, whatever the booleans say" {
+    // A principal outside the grant machinery (no table): the booleans stand
+    // for the ordinary capabilities, but none of them can confer the
+    // clipboard — only a config-authored grant does, and there is none.
+    const Bare = struct {
+        grant_table: ?*grants_mod.HandleTable = null,
+        grant_handles: [WasmPlugin.perm_count]grants_mod.CapHandle = @splat(grants_mod.CapHandle.none),
+        perms: [WasmPlugin.perm_count]bool = @splat(true),
+    };
+    const id: Bare = .{};
+    try t.expect(hasPerm(id, .fs_read));
+    try t.expect(!hasPerm(id, .clipboard));
+}
 
 test "mintGrantHandles: the composition rule — a pre-existing config-authored row is REUSED, never duplicated" {
     const gpa = t.allocator;

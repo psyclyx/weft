@@ -370,6 +370,200 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
     }
 }
 
+// ── Multiple selections (doc/configs.md §0.1) ───────────────────────
+
+fn expectEdText(gpa: Allocator, ed: *const Editor, want: []const u8) !void {
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings(want, s);
+}
+
+fn expectHeads(ed: *const Editor, want: []const usize) !void {
+    try t.expectEqual(want.len, ed.selectionCount());
+    for (want, 0..) |h, i| try t.expectEqual(h, ed.selectionEnds(i).head);
+}
+
+test "editor: one selection is the default, and the cursor/mark API is its view" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try ed.insertText(gpa, "hello");
+    ed.placeCursor(1);
+    try ed.setMark(gpa);
+    ed.moveRight();
+    ed.moveRight();
+    // The mark and cursor ARE the one selection's anchor and head.
+    try t.expectEqual(Editor.Ends{ .anchor = 1, .head = 3 }, ed.selectionEnds(0));
+    try t.expectEqual(stemma.Range{ .start = 1, .end = 3 }, ed.selectedRange().?);
+    ed.clearSelection();
+    try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 3 }, ed.selectionEnds(0));
+}
+
+test "editor: typing, backspace and delete land at every caret, in reverse order, as ONE undo unit" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.insertText(gpa, "aa bb cc");
+    try ed.setSelections(gpa, &.{ .{ .anchor = 2, .head = 2 }, .{ .anchor = 5, .head = 5 }, .{ .anchor = 8, .head = 8 } }, 2);
+    try ed.insertText(gpa, "XY");
+    try expectEdText(gpa, &ed, "aaXY bbXY ccXY");
+    // Every head rode its own insert (bias right), none an earlier one's.
+    try expectHeads(&ed, &.{ 4, 9, 14 });
+    try t.expectEqual(@as(usize, 14), ed.cursorOffset()); // the primary is still the third
+
+    // Typed twice with no motion between: one unit, as with one caret. Undo
+    // takes back all three carets' text at once.
+    try ed.insertText(gpa, "Z");
+    try expectEdText(gpa, &ed, "aaXYZ bbXYZ ccXYZ");
+    try t.expect(try ed.undo(gpa, .user_driven));
+    try expectEdText(gpa, &ed, "aa bb cc");
+
+    ed.history.barrier();
+    try ed.deleteBackward(gpa);
+    try expectEdText(gpa, &ed, "a b c");
+    try ed.deleteForward(gpa);
+    try expectEdText(gpa, &ed, "abc");
+    try t.expect(try ed.undo(gpa, .user_driven));
+    try expectEdText(gpa, &ed, "aa bb cc");
+}
+
+test "editor: selections replace their text; overlapping edit ranges and carets merge" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.insertText(gpa, "one two three");
+    // Two selections, one backwards: typing replaces each; both collapse to
+    // carets after their replacement.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 3 }, .{ .anchor = 7, .head = 4 } }, 0);
+    try ed.insertText(gpa, "1");
+    try expectEdText(gpa, &ed, "1 1 three");
+    try expectHeads(&ed, &.{ 1, 3 });
+    try t.expect(ed.selectedRange() == null);
+
+    // A backwards selection over "1 " and a caret at its far end both reach
+    // the space: the edit ranges overlap, so they union and the bytes go
+    // once; the two carets that then coincide become one.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 2, .head = 0 }, .{ .anchor = 2, .head = 2 } }, 1);
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+    try ed.deleteBackward(gpa);
+    try expectEdText(gpa, &ed, "1 three");
+    try expectHeads(&ed, &.{0});
+
+    // setSelections normalizes: sorted, overlaps unioned, primary follows its
+    // selection (here into the union).
+    try ed.setSelections(gpa, &.{ .{ .anchor = 4, .head = 6 }, .{ .anchor = 0, .head = 2 }, .{ .anchor = 5, .head = 7 } }, 2);
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+    try t.expectEqual(Editor.Ends{ .anchor = 0, .head = 2 }, ed.selectionEnds(0));
+    try t.expectEqual(Editor.Ends{ .anchor = 4, .head = 7 }, ed.selectionEnds(1));
+    try t.expectEqual(@as(usize, 1), ed.primary);
+}
+
+test "editor: selections are CRDT anchors — a concurrent peer edit shifts every one" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.insertText(gpa, "ab cd ef");
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 2 }, .{ .anchor = 3, .head = 5 } }, 0);
+    // A peer inserts inside each selection, as one commit.
+    const peer = try ed.doc.addPeer(gpa, "peer");
+    try ed.doc.peerReplaceAll(gpa, peer, &.{
+        .{ .range = .{ .start = 1, .end = 1 }, .bytes = "--" },
+        .{ .range = .{ .start = 4, .end = 4 }, .bytes = "++" },
+    });
+    try expectEdText(gpa, &ed, "a--b c++d ef");
+    try t.expectEqual(Editor.Ends{ .anchor = 0, .head = 4 }, ed.selectionEnds(0));
+    try t.expectEqual(Editor.Ends{ .anchor = 5, .head = 9 }, ed.selectionEnds(1));
+
+    // add/remove/collapse keep the primary honest.
+    try ed.addSelection(gpa, .{ .anchor = 11, .head = 11 });
+    try t.expectEqual(@as(usize, 3), ed.selectionCount());
+    try t.expectEqual(@as(usize, 11), ed.cursorOffset());
+    ed.removeSelection(0);
+    try t.expectEqual(@as(usize, 11), ed.cursorOffset());
+    ed.collapseToPrimary();
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(@as(usize, 11), ed.cursorOffset());
+    ed.removeSelection(0); // the last selection stays
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+}
+
+test "editor: every single-selection write collapses the set; only a visit addresses one of several" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "aa bb cc dd");
+    const three: []const Editor.Ends = &.{ .{ .anchor = 0, .head = 2 }, .{ .anchor = 3, .head = 5 }, .{ .anchor = 6, .head = 8 } };
+
+    // A click / jump: one caret, where it was placed.
+    try ed.setSelections(gpa, three, 1);
+    ed.placeCursor(10);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(@as(usize, 10), ed.cursorOffset());
+    // Dropping or lifting the mark, a motion, a selected range: likewise.
+    try ed.setSelections(gpa, three, 1);
+    ed.clearSelection();
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(@as(usize, 5), ed.cursorOffset());
+    try ed.setSelections(gpa, three, 0);
+    try ed.setMark(gpa);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try ed.setSelections(gpa, three, 2);
+    ed.moveLeft();
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try ed.setSelections(gpa, three, 0);
+    try ed.selectRange(gpa, 9, 11);
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(stemma.Range{ .start = 9, .end = 11 }, ed.selectedRange().?);
+    // So the next keystroke types once.
+    try ed.insertText(gpa, "!");
+    try expectEdText(gpa, &ed, "aa bb cc !");
+
+    // Inside a visit the single-selection API is the visited selection's:
+    // its siblings survive a motion of it.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 } }, 0);
+    ed.beginVisit();
+    ed.visit(1);
+    ed.placeCursor(4);
+    ed.endVisit();
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+    try expectHeads(&ed, &.{ 0, 4 });
+}
+
+test "editor: insert-text through the edit door types at every selection, and refuses all-or-nothing" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try testHost(gpa, &host);
+    defer host.deinit(gpa);
+
+    const ed = host.editor();
+    try ed.insertText(gpa, "x y");
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "!" }});
+    try expectEdText(gpa, ed, "x! y!");
+    _ = try core.command.run(&host.commands, &host.ctx, "delete-backward", &.{});
+    try expectEdText(gpa, ed, "x y");
+
+    // A view grade refuses the whole multi-caret edit; nothing half-lands.
+    ed.doc.my_grant = .view;
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "?" }});
+    try expectEdText(gpa, ed, "x y");
+}
+
 test "editor: vertical movement with goal column, utf-8 safe" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
@@ -1169,7 +1363,12 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
-    try t.expectEqualStrings("normal-source", host.buffers.active().bindingMode("normal"));
+    // A document binds through the source layer its grammar DECLARED; with no
+    // declaration the mode binds as itself. Core names neither mode.
+    try t.expectEqualStrings("normal", host.buffers.active().bindingMode(&host.keymap, "normal"));
+    try host.keymap.declareVariant(gpa, "normal", .source, "normal-source");
+    try t.expectEqualStrings("normal-source", host.buffers.active().bindingMode(&host.keymap, "normal"));
+    try t.expectEqualStrings("other", host.buffers.active().bindingMode(&host.keymap, "other"));
 }
 
 test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks" {

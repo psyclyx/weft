@@ -5,26 +5,36 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const core_layers = @import("../layers.zig");
+const core_flash = @import("../flash.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
 /// vim-goggles: a guest (an operator) flashes the range it just acted on
-/// (`wl_flash(start, end)`). The range + a generation counter live here; the
-/// frame loop times the fade and the view draws it. Name-based/global, like the
-/// other host↔frame-loop bridges.
-var g_flash: struct { start: u32 = 0, end: u32 = 0, gen: u64 = 0 } = .{};
-pub const Flash = struct { start: usize, end: usize, gen: u64 };
-pub fn flashState() Flash {
-    return .{ .start = g_flash.start, .end = g_flash.end, .gen = g_flash.gen };
-}
+/// (`wl_flash(start, end)`), replacing whatever was flashing. The set lives on
+/// the ACTIVE document (`core/flash.zig`) — anchored, so it rides an edit —
+/// and the frame loop times the fade and the view draws it.
 pub fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = data;
     _ = caller;
     _ = results;
-    const start: u32 = @bitCast(args[0]);
-    const end: u32 = @bitCast(args[1]);
-    g_flash = .{ .start = @min(start, end), .end = @max(start, end), .gen = g_flash.gen + 1 };
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    const doc = ctx.document() orelse return;
+    const r: core_flash.Range = .{ .start = @as(u32, @bitCast(args[0])), .end = @as(u32, @bitCast(args[1])) };
+    ctx.caps.flash.set(p.gpa, &ctx.caps.layers, doc, r, .edit) catch {};
+}
+
+/// `wl_flash_add(start, end)`: add a range to the set the last `wl_flash`
+/// started, so one operation over several selections flashes all of them and
+/// they fade together.
+pub fn hFlashAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    const doc = ctx.document() orelse return;
+    const r: core_flash.Range = .{ .start = @as(u32, @bitCast(args[0])), .end = @as(u32, @bitCast(args[1])) };
+    ctx.caps.flash.add(p.gpa, &ctx.caps.layers, doc, r) catch {};
 }
 
 const folds_layer_name = "folds";
@@ -47,7 +57,7 @@ pub fn hDecorateClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 /// anchored at `anchor` — virtual text drawn BESIDE the line (never in the
 /// document, so it takes no commit and `yy` never yanks it), colored by `role`
 /// (a styles-palette class). `placement`: 1=virtual_before, 2=virtual_after,
-/// 3=eol, 4=gutter (0=range is ignored — decorations only). A no-op if the
+/// 3=eol, 4=gutter, 5=overlay (0=range is ignored — decorations only). A no-op if the
 /// layer wasn't claimed this round. This is the metadata-is-decoration door:
 /// files's perms/size/arrow/mark, an inlay hint, a blame chip.
 pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -61,6 +71,7 @@ pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         2 => .virtual_after,
         3 => .eol,
         4 => .gutter,
+        5 => .overlay,
         else => return,
     };
     const role: u32 = @bitCast(args[2]);

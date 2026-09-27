@@ -43,6 +43,7 @@ const config_kv = @import("../wasm_host/config_kv.zig");
 const declare = @import("../wasm_host/declare.zig");
 const dispatch = @import("../wasm_host/dispatch.zig");
 const edit = @import("../wasm_host/edit.zig");
+const pointer = @import("../wasm_host/pointer.zig");
 const fs = @import("../wasm_host/fs.zig");
 const intent = @import("../wasm_host/intent.zig");
 const keymap = @import("../wasm_host/keymap.zig");
@@ -54,6 +55,8 @@ const proc = @import("../wasm_host/proc.zig");
 const proj = @import("../wasm_host/projection.zig");
 const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
+const clipboard = @import("../wasm_host/clipboard.zig");
+const history = @import("../wasm_host/history.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
@@ -113,14 +116,24 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_set_result_range", .handler = edit.hSetResultRange },
     .{ .name = "wl_run_range", .handler = edit.hRunRange },
     .{ .name = "wl_range_ends", .handler = edit.hRangeEnds },
+    .{ .name = "wl_view_range", .handler = edit.hViewRange },
     .{ .name = "wl_range_retain", .handler = edit.hRangeRetain },
     .{ .name = "wl_range_release", .handler = edit.hRangeRelease },
     .{ .name = "wl_run_range_arg", .handler = edit.hRunRangeArg },
     .{ .name = "wl_arg_range", .handler = edit.hArgRange },
     .{ .name = "wl_edit_range", .handler = edit.hEditRange },
+    .{ .name = "wl_selections_get", .handler = edit.hSelectionsGet },
+    .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
+    .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
+    .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
+    .{ .name = "wl_undo_unit", .handler = edit.hUndoUnit },
+
+    // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
+    .{ .name = "wl_pointer", .handler = pointer.hPointer },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .handler = layers.hFlash },
+    .{ .name = "wl_flash_add", .handler = layers.hFlashAdd },
     .{ .name = "wl_fold_clear", .handler = layers.hFoldClear },
     .{ .name = "wl_fold", .handler = layers.hFold },
     .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },
@@ -160,6 +173,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_resting_mode", .handler = keymap.hRestingMode },
     .{ .name = "wl_exit_to_resting", .handler = keymap.hExitToResting },
     .{ .name = "wl_resting_posture", .handler = keymap.hRestingPosture },
+    .{ .name = "wl_binding_variant", .handler = keymap.hBindingVariant },
     .{ .name = "wl_posture", .handler = keymap.hPosture },
     .{ .name = "wl_declare_posture", .handler = keymap.hDeclarePosture },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
@@ -193,6 +207,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_offer", .handler = intent.hOffer },
     .{ .name = "wl_offers_commit", .handler = intent.hOffersCommit },
     .{ .name = "wl_offers_retract", .handler = intent.hOffersRetract },
+    .{ .name = "wl_offers_list", .handler = intent.hOffersList },
+    .{ .name = "wl_intent_invoke_at", .handler = intent.hIntentInvokeAt },
+    .{ .name = "wl_provide_affordance", .handler = intent.hProvideAffordance },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .handler = buffers.hBufferCount },
@@ -251,12 +268,15 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_node_enclosing", .handler = syntax.hNodeEnclosing },
     .{ .name = "wl_query", .handler = syntax.hQuery },
     .{ .name = "wl_query_capture", .handler = syntax.hQueryCapture },
+    .{ .name = "wl_outline", .handler = syntax.hOutline },
     .{ .name = "wl_node_children", .handler = syntax.hNodeChildren },
     .{ .name = "wl_claim_subbuffer", .handler = syntax.hClaimSubbuffer },
     .{ .name = "wl_subbuffer_put_fact", .handler = syntax.hSubbufferPutFact },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
+    .{ .name = "wl_signal_subscribe", .handler = activation.hSignalSubscribe },
+    .{ .name = "wl_signal_emit", .handler = activation.hSignalEmit },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
@@ -266,6 +286,18 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_register_text", .handler = register.hRegisterText },
     .{ .name = "wl_register_linewise", .handler = register.hRegisterLinewise },
     .{ .name = "wl_paste_at", .handler = register.hPasteAt },
+    .{ .name = "wl_yank_each", .handler = register.hYankEach },
+    .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
+    .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
+    .{ .name = "wl_register_set", .handler = register.hRegisterSet },
+
+    // ── clipboard.zig — the head's system clipboard (config-only grant) ──
+    .{ .name = "wl_clipboard_set", .handler = clipboard.hClipboardSet },
+    .{ .name = "wl_clipboard_get", .handler = clipboard.hClipboardGet },
+
+    // ── history.zig — the head's jumplist and macro recorder ──────────
+    .{ .name = "wl_jump_push", .handler = history.hJumpPush },
+    .{ .name = "wl_macro_recording", .handler = history.hMacroRecording },
 
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },
@@ -337,6 +369,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_repl_start", .handler = sessions.hReplStart },
     .{ .name = "wl_repl_send", .handler = sessions.hReplSend },
     .{ .name = "wl_repl_quit", .handler = sessions.hReplQuit },
+    .{ .name = "wl_repl_exited", .handler = sessions.hReplExited },
     .{ .name = "wl_net_connect", .handler = sessions.hNetConnect },
     .{ .name = "wl_net_send", .handler = sessions.hNetSend },
     .{ .name = "wl_net_close", .handler = sessions.hNetClose },
@@ -403,6 +436,66 @@ fn zip() [contract_data.imports.len]Entry {
 /// mirror the extern in src/plugin_sdk/root.zig by hand (comptime-verified, see
 /// that file).
 pub const imports: [contract_data.imports.len]Entry = zip();
+
+/// The doors a guest may call while ANSWERING a provider round
+/// (`WasmPlugin.answering` — a gutter or status segment asked during layout,
+/// an annotation round asked from the frame loop). Reads of the document,
+/// the editor, the workspace and configuration; the guest's own range and
+/// witness handles; and the answer doors themselves. Everything else — every
+/// edit, run, selection, flash, layer, mode, pick, process, write — is
+/// bound through `wasm_host/plugin.zig`'s `answerGate` and traps. An ALLOW
+/// list on purpose: a door added later is refused mid-round until someone
+/// decides it is a read, rather than admitted until someone notices it acts.
+pub const render_safe = [_][]const u8{
+    // Diagnostics and arguments; the document and editor; the tree;
+    // configuration and registers; the workspace; the answer itself.
+    "wl_log",                      "wl_arg_count",                  "wl_arg_int",
+    "wl_arg_str",                  "wl_cursor",                     "wl_byte_len",
+    "wl_slice",                    "wl_line_at",                    "wl_selection",
+    "wl_path",                     "wl_editor_step",                "wl_selections_get",
+    "wl_view_range",               "wl_pointer",                    "wl_breakpoint_offsets",
+    "wl_doc_snapshot",             "wl_doc_snapshot_is_current",    "wl_doc_snapshot_release",
+    "wl_anchor_range",             "wl_range_ends",                 "wl_range_release",
+    "wl_node_at",                  "wl_node_enclosing",             "wl_query",
+    "wl_query_capture",            "wl_outline",                    "wl_node_children",
+    "wl_kv_get",                   "wl_config_get",                 "wl_register_text",
+    "wl_register_linewise",        "wl_register_paste_value",       "wl_macro_recording",
+    "wl_buffer_count",             "wl_buffer_id",                  "wl_buffer_name",
+    "wl_buffer_active",            "wl_buffer_readonly",            "wl_buffer_path",
+    "wl_buffer_dirty",             "wl_buffer_lang",                "wl_buffer_byte_len",
+    "wl_buffer_tool",              "wl_place_root",                 "wl_place_id",
+    "wl_place_has",                "wl_posture",                    "wl_mode_names",
+    "wl_binding_table",            "wl_command_count",              "wl_command_name",
+    "wl_command_summary",          "wl_command_owner",              "wl_command_arity",
+    "wl_command_arity_required",   "wl_command_arg",                "wl_offer_count",
+    "wl_offer_name",               "wl_offer_provider",             "wl_offer_reason",
+    "wl_menu_binding_count",       "wl_menu_binding_key",           "wl_menu_binding_cmd",
+    "wl_menu_binding_is_group",    "wl_menu_binding_intent_status", "wl_menu_binding_intent",
+    "wl_menu_binding_intent_note", "wl_annotate_len",               "wl_annotate_read",
+    "wl_payload_read",             "wl_payload_push",
+};
+
+/// Whether `name` is callable while answering a provider round.
+pub fn renderSafe(comptime name: []const u8) bool {
+    @setEvalBranchQuota(100_000);
+    inline for (render_safe) |safe| {
+        if (comptime std.mem.eql(u8, safe, name)) return true;
+    }
+    return false;
+}
+
+comptime {
+    // Every name the list admits is a real door: a rename cannot leave a
+    // stale row admitting nothing (or, worse, a future door of that name).
+    @setEvalBranchQuota(100_000);
+    for (render_safe) |safe| {
+        var found = false;
+        for (contract_data.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, safe)) found = true;
+        }
+        if (!found) @compileError("contract.render_safe names '" ++ safe ++ "', which is no wl_* import");
+    }
+}
 
 fn wasmType(comptime params: []const contract_data.ValType, comptime results: []const contract_data.ValType) wasm.ExternType {
     return .{
@@ -579,6 +672,8 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
     .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
     .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
+    .{ .name = "wl_clipboard_set", .perm = .clipboard }, // clipboard.zig hClipboardSet: wasmDoor gate .clipboard
+    .{ .name = "wl_clipboard_get", .perm = .clipboard }, // clipboard.zig hClipboardGet: wasmDoor gate .clipboard
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {
@@ -630,6 +725,7 @@ const head_gated_list = [_][]const u8{
     "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
     "wl_semantic_action", // semantic.zig hSemanticAction
+    "wl_intent_invoke_at", // intent.zig hIntentInvokeAt
 };
 
 test "membrane contract: table .head_gated metadata agrees with the handlers' actual requireDispatch gates" {

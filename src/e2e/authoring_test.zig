@@ -353,24 +353,35 @@ test "authoring: switching back to an open file lands in an editable mode" {
     try t.expect(std.mem.indexOf(u8, disk, "beta") != null);
 }
 
-test "authoring: `f` finds a char, `;` repeats it, `,` repeats reversed" {
+test "authoring: `f` snipes a char, `;` repeats it, `,` repeats reversed" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
 
-    // Dots at indices 3, 7, 11. We navigate by find/repeat, then `x` deletes the
-    // char under the cursor — the deleted position is how we observe where we
-    // landed without poking cursor internals.
+    // config.js binds f/;/, to snipe. Dots at indices 3, 7, 11 and a lone
+    // `q`. We navigate by find/repeat, then `x` deletes the char under the
+    // cursor — the deleted position is how we observe where we landed
+    // without poking cursor internals.
     authorFile(ed, "f.txt",
         \\foo.bar.baz.qux
         \\
     );
 
+    // One `q` in view: `f q` lands on it exactly, like vim's `f`.
+    ed.chord("g g");
+    ed.press("f", "");
+    ed.typeText("q");
+    try t.expectEqualStrings("normal", ed.mode());
+    try t.expectEqual(@as(usize, 12), ed.buffers.active().textEditor().?.cursorOffset());
+
+    // Three dots: each gets a label, nearest first (a, s, d).
     ed.chord("g g");
     ed.press("f", ""); // f<char>
-    ed.typeText("."); // → first dot (index 3)
+    ed.typeText("."); // three hits → labels
+    try t.expectEqualStrings("snipe-label", ed.mode());
+    ed.typeText("a"); // → the nearest dot (index 3)
     ed.press("semicolon", ""); // ; → next dot (index 7)
     ed.press("semicolon", ""); // ; → next dot (index 11)
     ed.press("comma", ""); // , → reversed, back to the dot at index 7

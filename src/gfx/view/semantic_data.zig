@@ -22,4 +22,8 @@ pub const Overlay = struct {
     /// The bundled presenter recognizes a few conventional hints and gives
     /// unknown values the dialog default; core does not enumerate them.
     presentation: []const u8 = &.{},
+    /// Where the pointer last went down, in window pixels — what the
+    /// `pointer` hint anchors to. The `caret` hint anchors to the caret the
+    /// presenter itself just laid out.
+    pointer: ?[2]f32 = null,
 };

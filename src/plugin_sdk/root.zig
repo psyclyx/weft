@@ -44,6 +44,7 @@ pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 /// `contract_data` is: a guest-side copy of a wire enum is exactly the drift
 /// this membrane exists to prevent.
 pub const Posture = @import("weft_input").Posture;
+pub const BindingFacet = @import("weft_input").BindingFacet;
 
 /// D2's schema language + marshaller (schema/root.zig), imported under the
 /// SAME name a guest's own code uses to reach it directly for a build-time-
@@ -98,8 +99,9 @@ fn p(x: anytype) u32 {
 
 pub const Range = struct { start: usize, end: usize };
 pub const Level = enum(u32) { debug = 0, info = 1, warn = 2, err = 3 };
-/// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer).
-pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5 };
+/// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer, env,
+/// clipboard). `clipboard` is config-only: declaring it grants nothing.
+pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5, clipboard = 6 };
 
 // ── Group A: core ────────────────────────────────────────────────────
 pub fn log(level: Level, msg: []const u8) void {
@@ -232,11 +234,67 @@ pub fn lineAt(offset: usize) Range {
     e.wl_line_at(@intCast(offset), p(&pair));
     return .{ .start = pair[0], .end = pair[1] };
 }
+/// The offset where 1-based line `number` starts, clamped to the last line
+/// (line 0 is line 1) — what "go to line N" means in every grammar (ide's
+/// C-g, helix's `<n>gg`, the `:N` of vim's and helix's command line).
+/// Reads through the shared scratch.
+pub fn lineStart(number: usize) usize {
+    var need = number -| 1; // line breaks to pass
+    var last: usize = 0; // where the last line seen starts
+    var pos: usize = 0;
+    const total = byteLen();
+    while (need > 0 and pos < total) {
+        const chunk = slice(pos, total);
+        if (chunk.len == 0) break;
+        for (chunk, pos..) |c, at| {
+            if (c != '\n') continue;
+            last = at + 1;
+            need -= 1;
+            if (need == 0) break;
+        }
+        pos += chunk.len;
+    }
+    return last;
+}
 /// The current selection range, or null.
 pub fn selection() ?Range {
     var pair: [2]u32 = undefined;
     if (e.wl_selection(p(&pair)) == 0) return null;
     return .{ .start = pair[0], .end = pair[1] };
+}
+/// The pointer gesture being dispatched, for a command bound to one
+/// (`mouse-1`, `double-mouse-1`, `drag-mouse-1`, …): where it happened.
+pub const PointerKind = enum(u32) { none, press, release, drag, wheel, hover, _ };
+pub const Pointer = struct {
+    kind: PointerKind,
+    button: u32,
+    clicks: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    /// The byte offset under the pointer, in a pane showing text.
+    offset: ?u32,
+    /// The scene node under the pointer, in a pane showing a scene.
+    node: ?u64,
+    /// Whether the pane under the pointer is the focused one (a click-through
+    /// command focuses it before acting).
+    focused: bool,
+};
+/// The pointer facts of this dispatch, or null when there is no gesture.
+pub fn pointer() ?Pointer {
+    var w: [8]u32 = undefined;
+    if (e.wl_pointer(p(&w)) == 0) return null;
+    return .{
+        .kind = @enumFromInt(w[0]),
+        .button = w[1],
+        .clicks = w[2],
+        .ctrl = w[3] & 1 != 0,
+        .alt = w[3] & 2 != 0,
+        .shift = w[3] & 4 != 0,
+        .offset = if (w[4] == 0xffff_ffff) null else w[4],
+        .node = if (w[7] & 4 != 0) @as(u64, w[6]) << 32 | w[5] else null,
+        .focused = w[7] & 2 != 0,
+    };
 }
 /// The active buffer's backing path, or null. Valid until the next read call.
 pub fn path() ?[]const u8 {
@@ -280,6 +338,27 @@ pub fn jump(offset: usize) void {
 pub fn flash(start: usize, end: usize) void {
     e.wl_flash(@intCast(start), @intCast(end));
 }
+/// Add `[start, end)` to the set the last `flash` started — one operation
+/// over several ranges (every selection, every changed line) fades as one.
+pub fn flashAdd(start: usize, end: usize) void {
+    e.wl_flash_add(@intCast(start), @intCast(end));
+}
+/// Flash every range in `ranges` as one set. Nothing flashes for an empty
+/// slice.
+pub fn flashRanges(ranges: []const Range) void {
+    if (ranges.len == 0) return;
+    flash(ranges[0].start, ranges[0].end);
+    for (ranges[1..]) |r| flashAdd(r.start, r.end);
+}
+/// The byte range of the active entry the user can SEE — what its pane
+/// showed in the last frame, after scrolling and folds — or null when the
+/// pane showed something else (or nothing yet). A visible-range search (a
+/// jump-label plugin) reads this instead of guessing a screenful.
+pub fn viewRange() ?Range {
+    var pair: [2]u32 = undefined;
+    if (e.wl_view_range(p(&pair)) < 0) return null;
+    return .{ .start = pair[0], .end = pair[1] };
+}
 
 // ── Styles (tool-buffer coloring): publish per-byte-range StyleClass spans over
 // the ACTIVE buffer, painted by the view through the theme (same door as
@@ -321,7 +400,7 @@ pub fn fold(start: usize, end: usize) void {
 }
 
 /// How a decoration is placed beside the text (never in the document).
-pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4, overlay = 5 };
 /// Reclaim + empty the decorations layer (republish the full set after).
 pub fn decorateClear() void {
     e.wl_decorate_clear();
@@ -379,7 +458,7 @@ pub const Annotations = struct {
     /// How an annotation span presents. `range` is a face over `[start, end)`;
     /// the rest are display-only decorations anchored at `start` (the same set
     /// `DecoPlacement` names for the active buffer).
-    pub const Placement = enum(u32) { range = 0, virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+    pub const Placement = enum(u32) { range = 0, virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4, overlay = 5 };
 
     /// Claim layer `name` on the entry with compact id `entry` (from
     /// `bufferId`). Null when the entry is unknown, holds no text, or `name`
@@ -440,6 +519,116 @@ pub fn step(from: usize, dir: Dir, kind: Kind) usize {
 /// Select `[r.start, r.end)` (mark at start, cursor at end).
 pub fn setSelection(r: Range) void {
     e.wl_set_selection(@intCast(r.start), @intCast(r.end));
+}
+
+// ── Multiple selections ───────────────────────────────────────────────
+// Core holds N selections per editor; everything above (`cursor`,
+// `selection`, `jump`, `setSelection`) reads and writes the PRIMARY one. A
+// grammar that works on all of them reads the set, computes the new one, and
+// hands it back — add/remove/collapse below are exactly that, not doors.
+
+/// One selection's endpoints. `anchor == head` is a caret.
+pub const Selection = struct {
+    anchor: usize,
+    head: usize,
+
+    pub fn range(s: Selection) Range {
+        return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
+    }
+};
+
+/// The selection set: document order, `primary` indexing into `items`.
+pub const Selections = struct { primary: usize, items: []Selection };
+
+/// How many selections `selections()` can carry in one read.
+pub const max_selections = 1024;
+var sel_words: [1 + 2 * max_selections]u32 = undefined;
+var sel_items: [max_selections]Selection = undefined;
+
+/// The active editor's selection count (0 for an entry with no text).
+pub fn selectionCount() usize {
+    return e.wl_selections_get(p(&sel_words), 0);
+}
+
+/// The active editor's selections, into a private scratch (valid until the
+/// next call). Past `max_selections`, the rest are not reported.
+pub fn selections() Selections {
+    const total = e.wl_selections_get(p(&sel_words), max_selections);
+    const n = @min(total, max_selections);
+    for (sel_items[0..n], 0..) |*s, i| s.* = .{ .anchor = sel_words[1 + 2 * i], .head = sel_words[2 + 2 * i] };
+    return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
+}
+
+/// Replace every selection (at least one). Core normalizes the set — sorted,
+/// overlaps merged — so read it back rather than assume the indices held.
+pub fn setSelections(items: []const Selection, primary: usize) bool {
+    if (items.len == 0 or items.len > max_selections) return false;
+    sel_words[0] = @intCast(primary);
+    for (items, 0..) |s, i| {
+        sel_words[1 + 2 * i] = @intCast(s.anchor);
+        sel_words[2 + 2 * i] = @intCast(s.head);
+    }
+    return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
+}
+
+/// Add a selection and make it the primary (helix `C`, ide's add-next-match).
+pub fn addSelection(s: Selection) bool {
+    const set = selections();
+    if (set.items.len >= max_selections) return false;
+    // `set.items` is `sel_items[0..n]`: grow it in place.
+    sel_items[set.items.len] = s;
+    return setSelections(sel_items[0 .. set.items.len + 1], set.items.len);
+}
+
+/// Drop selection `i` (never the last one); the primary stays put, or moves
+/// to the selection before a removed primary.
+pub fn removeSelection(i: usize) bool {
+    const set = selections();
+    if (set.items.len <= 1 or i >= set.items.len) return false;
+    const primary = if (set.primary > i or (set.primary == i and i > 0)) set.primary - 1 else set.primary;
+    // `set.items` is `sel_items[0..n]`: close the gap in place.
+    std.mem.copyForwards(Selection, sel_items[i .. set.items.len - 1], sel_items[i + 1 .. set.items.len]);
+    return setSelections(sel_items[0 .. set.items.len - 1], primary);
+}
+
+/// Keep only the primary selection (helix `,`).
+pub fn collapseSelections() bool {
+    const set = selections();
+    if (set.items.len == 0) return false;
+    return setSelections(set.items[set.primary..][0..1], 0);
+}
+
+/// Run a motion once per selection (each read as "the cursor") and fill
+/// `out` with one live-range handle per selection, null where the motion
+/// returned none. Returns the filled prefix of `out`.
+pub fn runRangeEach(cmd: []const u8, out: []?u32) []?u32 {
+    var raw: [max_selections]i32 = undefined;
+    const cap = @min(out.len, max_selections);
+    const total: usize = @intCast(@max(0, e.wl_run_range_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(cap))));
+    const n = @min(total, cap);
+    for (out[0..n], raw[0..n]) |*o, h| o.* = if (h < 0) null else @intCast(h);
+    return out[0..n];
+}
+
+/// Run an operator once per range handle — reverse offset order, one undo
+/// unit. Null entries (a selection the motion found nothing for) are skipped.
+pub fn runRangeArgEach(cmd: []const u8, handles: []const ?u32) void {
+    var raw: [max_selections]i32 = undefined;
+    const n = @min(handles.len, max_selections);
+    for (raw[0..n], handles[0..n]) |*r, h| r.* = if (h) |v| @intCast(v) else -1;
+    if (n == 0) return;
+    e.wl_run_range_arg_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(n));
+}
+
+/// Call `f(args…)` as ONE undo unit of the entry this command is about:
+/// whatever it edits, across however many commands, one undo takes back. Units
+/// nest and the outermost owns the unit, so a count loop over operators that
+/// are each one unit (`runRangeArgEach`) is one unit too. The host closes the
+/// unit if `f` does not return (a unit never outlives the command dispatch).
+pub fn undoUnit(comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    _ = e.wl_undo_unit(1);
+    defer _ = e.wl_undo_unit(0);
+    return @call(.auto, f, args);
 }
 
 /// Anchor `[r.start, r.end)` in the active CRDT document and return an opaque
@@ -690,6 +879,14 @@ pub fn exitToResting() void {
 pub fn restingPosture(rests_in: Posture, mode: []const u8) void {
     e.wl_resting_posture(@intFromEnum(rests_in), p(mode.ptr), @intCast(mode.len));
 }
+/// DECLARE that while the head is in `mode`, an entry with `facet` looks its
+/// keys up in `variant` — a layer over `mode` (give it a `setFallback` to
+/// `mode`) that never changes the head's actual mode. How a grammar gets
+/// code chords in documents only, or a structured-view group in listings
+/// only, without core knowing any of its mode names.
+pub fn bindingVariant(facet: BindingFacet, mode: []const u8, variant: []const u8) void {
+    e.wl_binding_variant(@intFromEnum(facet), p(mode.ptr), @intCast(mode.len), p(variant.ptr), @intCast(variant.len));
+}
 /// How the addressed entry RESTS under input (§10.4) — the one read a
 /// grammar needs. It asks the DECLARATION; no tool identity, mode name, or
 /// view liveness crosses this boundary.
@@ -869,6 +1066,111 @@ pub fn invokeIntention(name: []const u8) Invocation {
     if (n < 0) return .unknown;
     if (n == 0) return .invoked;
     return .{ .refused = intent_scratch[0..@intCast(n)] };
+}
+
+// ── Offers for a CHOSEN context (a toolbar, a context menu) ──────────
+/// Which context an offer question is about. `primary` is the head's last
+/// primary-focus pane (the editor, never a docked companion), so a toolbar
+/// or sidebar that holds focus itself still describes the editor.
+pub const OfferContext = enum(u32) { active = 0, primary = 1 };
+
+pub const OfferAvailability = enum(u8) { enabled = 0, disabled = 1, checking = 2 };
+
+/// One offer, as `offersIn` reads it. Every string borrows `offers_scratch`
+/// until the next `offersIn`. `label` and `group` are always filled (the
+/// host completes them from the intention table); `order` is a hint, lower
+/// first, null when nothing said.
+pub const Offer = struct {
+    intention: []const u8,
+    provider: []const u8,
+    availability: OfferAvailability,
+    /// The stable reason code when not enabled; empty when it is.
+    reason: []const u8,
+    label: []const u8,
+    group: []const u8,
+    order: ?i32,
+};
+
+var offers_scratch: [1 << 16]u8 = undefined;
+
+/// The rows of one `offersIn` read, in the host's stable order. Iterate with
+/// `next`; grouping and ordering by `group`/`order` is the UI's policy.
+pub const Offers = struct {
+    bytes: []const u8,
+    count: u32,
+    at: usize = 4,
+    index: u32 = 0,
+
+    pub fn next(self: *Offers) ?Offer {
+        if (self.index >= self.count) return null;
+        const availability = std.enums.fromInt(OfferAvailability, self.byte()) orelse return null;
+        const has_order = self.byte() != 0;
+        const order: i32 = @bitCast(self.word());
+        var parts: [5][]const u8 = undefined;
+        for (&parts) |*part| {
+            const n = self.word();
+            if (self.at + n > self.bytes.len) return null;
+            part.* = self.bytes[self.at..][0..n];
+            self.at += n;
+        }
+        self.index += 1;
+        return .{
+            .availability = availability,
+            .order = if (has_order) order else null,
+            .intention = parts[0],
+            .provider = parts[1],
+            .reason = parts[2],
+            .label = parts[3],
+            .group = parts[4],
+        };
+    }
+
+    fn byte(self: *Offers) u8 {
+        if (self.at >= self.bytes.len) return 0;
+        defer self.at += 1;
+        return self.bytes[self.at];
+    }
+
+    fn word(self: *Offers) u32 {
+        if (self.at + 4 > self.bytes.len) return 0;
+        defer self.at += 4;
+        return std.mem.readInt(u32, self.bytes[self.at..][0..4], .little);
+    }
+};
+
+/// Everything `where` offers right now, one consistent snapshot. Empty when
+/// there is no catalog (or the record outgrew the scratch).
+pub fn offersIn(where: OfferContext) Offers {
+    const n = e.wl_offers_list(@intFromEnum(where), p(&offers_scratch), offers_scratch.len);
+    if (n < 4 or n > offers_scratch.len) return .{ .bytes = &.{}, .count = 0 };
+    const bytes = offers_scratch[0..@intCast(n)];
+    return .{ .bytes = bytes, .count = std.mem.readInt(u32, bytes[0..4], .little) };
+}
+
+/// `invokeIntention` in a chosen context: resolved and run THERE, so a
+/// toolbar's Undo undoes the editor it describes. Only from a dispatch (a
+/// command or a click), like any other change to where the head is.
+pub fn invokeIntentionIn(where: OfferContext, name: []const u8) Invocation {
+    const n = e.wl_intent_invoke_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
+    if (n < 0) return .unknown;
+    if (n == 0) return .invoked;
+    return .{ .refused = intent_scratch[0..@intCast(n)] };
+}
+
+/// How THIS plugin's providers of `action` present their offer where they
+/// win (a toolbar label, a group, an order hint). Presentation only — it
+/// changes nothing about which provider wins. Call after `provide`; returns
+/// how many of this plugin's providers took it.
+pub fn provideAffordance(action: []const u8, a: struct { label: []const u8 = "", group: []const u8 = "", order: ?i32 = null }) usize {
+    return e.wl_provide_affordance(
+        p(action.ptr),
+        @intCast(action.len),
+        p(a.label.ptr),
+        @intCast(a.label.len),
+        p(a.group.ptr),
+        @intCast(a.group.len),
+        a.order orelse std.math.minInt(i32),
+    );
 }
 
 // ── Publishing THIS plugin's offers ──────────────────────────────────
@@ -1538,6 +1840,26 @@ pub fn query(scm: []const u8, r: Range) usize {
     const n = e.wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
     return if (n < 0) 0 else @intCast(n);
 }
+/// The active entry's outline — the symbols its grammar's outline query
+/// names, in document order; read each with `queryCapture(i)` (its `name` is
+/// the symbol's, its span the whole item). Nested items are nested spans.
+/// Zero without a grammar or an outline query.
+pub fn outline() usize {
+    const n = e.wl_outline();
+    return if (n < 0) 0 else @intCast(n);
+}
+/// Hear the signal `name` as `on_signal(id)` (export it with
+/// `exportCallback`); returns the id, the same one for the same name.
+/// Signals arrive at the frame boundary, never inside a dispatch.
+pub fn signalSubscribe(name: []const u8) ?u32 {
+    const id = e.wl_signal_subscribe(p(name.ptr), @intCast(name.len));
+    return if (id < 0) null else @intCast(id);
+}
+/// Raise the signal `name` for every plugin listening for it. Carries no
+/// payload: a listener asks through ordinary commands for what changed.
+pub fn signalEmit(name: []const u8) void {
+    _ = e.wl_signal_emit(p(name.ptr), @intCast(name.len));
+}
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {
@@ -1608,6 +1930,127 @@ pub fn pasteAt(base: usize) void {
 }
 pub fn pasteAtIn(name: u8, base: usize) void {
     e.wl_paste_at(@intCast(base), name);
+}
+
+/// Yank one value per selection: each of `ranges` (selection order) becomes
+/// its own value in register `name`.
+pub fn yankEachIn(name: u8, ranges: []const Range, linewise: bool) void {
+    // `sel_words` is free here: `ranges` may alias `sel_items`, never it.
+    const words = sel_words[0 .. 2 * max_selections];
+    const n = @min(ranges.len, max_selections);
+    if (n == 0) return;
+    for (ranges[0..n], 0..) |r, i| {
+        words[2 * i] = @intCast(r.start);
+        words[2 * i + 1] = @intCast(r.end);
+    }
+    e.wl_yank_each(p(words.ptr), @intCast(n), @intFromBool(linewise), name);
+}
+/// What selection `index` of `count` pastes from register `name` — its own
+/// value when the register holds exactly `count`, else every value joined
+/// (core's one distribution rule, `register.zig`'s `pasteSpan`). Private
+/// scratch, valid until the next call.
+pub fn registerPasteValueIn(name: u8, index: usize, count: usize) []const u8 {
+    const n = e.wl_register_paste_value(@intCast(index), @intCast(count), p(&reg_scratch), reg_scratch.len, name);
+    return reg_scratch[0..@intCast(n)];
+}
+/// `pasteAtIn` for the value selection `index` of `count` pasted at `base`.
+pub fn pasteValueAtIn(name: u8, base: usize, index: usize, count: usize) void {
+    e.wl_paste_value_at(@intCast(base), @intCast(index), @intCast(count), name);
+}
+
+// ── System clipboard (grant: clipboard — CONFIG-ONLY) ─────────────────
+// The desktop clipboard of the head dispatching you. Declaring `.clipboard`
+// in `describe()` confers nothing; the user's config grants it
+// (`weft.grant("<plugin>", "clipboard")`), and without that grant both calls
+// TRAP. Which register mirrors the clipboard is the grammar's choice: ide
+// mirrors the unnamed register, vim keeps `"+`.
+
+var clip_buf: std.ArrayList(u8) = .empty;
+
+/// Take the clipboard with `bytes`. False when the host could not store them.
+pub fn clipboardSet(bytes: []const u8) bool {
+    return e.wl_clipboard_set(p(bytes.ptr), @intCast(bytes.len)) == 0;
+}
+/// The clipboard's text ("" when empty), or null when it could not be read.
+/// Borrowed until the next call.
+pub fn clipboardGet() ?[]const u8 {
+    // A real buffer from the first call: an empty slice's pointer is not an
+    // address the host may be asked to bounds-check.
+    if (clip_buf.items.len == 0) clip_buf.resize(allocator, 4096) catch return null;
+    var n = e.wl_clipboard_get(p(clip_buf.items.ptr), @intCast(clip_buf.items.len));
+    if (n < 0) return null;
+    if (@as(usize, @intCast(n)) > clip_buf.items.len) {
+        clip_buf.resize(allocator, @intCast(n)) catch return null;
+        n = e.wl_clipboard_get(p(clip_buf.items.ptr), @intCast(clip_buf.items.len));
+        if (n < 0) return null;
+    }
+    return clip_buf.items[0..@min(@as(usize, @intCast(n)), clip_buf.items.len)];
+}
+
+/// What a paste from the clipboard puts in — the ONE rule every grammar that
+/// mirrors a register onto the clipboard pastes by (ide's C-v, helix's
+/// `SPC p P R`, vim's `"+p`).
+pub const ClipboardPaste = union(enum) {
+    /// The clipboard could not be read.
+    unavailable,
+    /// It holds nothing.
+    empty,
+    /// It still holds the unnamed register's text: paste the REGISTER, so a
+    /// cut-and-paste stays a move (its ferried identity) and a line stays a
+    /// line (its linewise flag).
+    register,
+    /// Text from elsewhere (borrowed until the next clipboard read).
+    foreign: []const u8,
+};
+
+/// Classify the clipboard against the unnamed register. TRAPS without the
+/// `clipboard` grant, like `clipboardGet`: a grammar asks only when its
+/// config said the register mirrors the clipboard.
+pub fn clipboardPasteSource() ClipboardPaste {
+    const clip = clipboardGet() orelse return .unavailable;
+    if (clip.len == 0) return .empty;
+    if (clipboardHoldsRegister(clip, registerTextIn(0), registerLinewiseIn(0))) return .register;
+    return .{ .foreign = clip };
+}
+
+/// Does clipboard text `clip` hold register text `own`? The same bytes, or —
+/// for a linewise register — its text plus the one line break a line is
+/// copied to the desktop with (vim's `"+yy`, and every other editor), which
+/// the register itself may not carry.
+pub fn clipboardHoldsRegister(clip: []const u8, own: []const u8, linewise: bool) bool {
+    if (std.mem.eql(u8, clip, own)) return true;
+    return linewise and clip.len == own.len + 1 and clip[own.len] == '\n' and std.mem.eql(u8, clip[0..own.len], own);
+}
+
+// ── History: the jumplist and macros ──────────────────────────────────
+// Core keeps a per-head jumplist and macro registers; the grammar decides what
+// is a jump and which keys record. Travel and replay are commands:
+// `run("jump-back")`, `runStr("jump-forward", "3")`, `run("jumplist-pick")`,
+// `runStr("macro-record-start", "a")`, `run("macro-record-stop")`,
+// `run("macro-record-toggle")` (register `@`), `runStr2("macro-play", "a",
+// "3")`, `run("macro-play")` (the last one played or recorded).
+
+/// Remember the caret as a jump (before a search, a goto, a big motion).
+/// Moving between entries is recorded by core already.
+pub fn jumpPush() void {
+    e.wl_jump_push();
+}
+/// The register a macro is recording into, or null — for a status chip, and
+/// for a `q` that stops a recording or starts one.
+pub fn macroRecording() ?u8 {
+    const r = e.wl_macro_recording();
+    return if (r == 0) null else @intCast(r);
+}
+
+/// The `/` register: the last search pattern, shared by every grammar (core
+/// `register.Bank.search`). A search writes it with `registerSet`; anyone
+/// reads it with `registerTextIn(register_search)`.
+pub const register_search: u8 = 27;
+
+/// Put typed `bytes` in register `name` as one value. Unlike a yank it
+/// ferries no identity and leaves the unnamed register alone.
+pub fn registerSet(name: u8, bytes: []const u8) void {
+    e.wl_register_set(p(bytes.ptr), @intCast(bytes.len), name);
 }
 
 // ── Generic semantic views ────────────────────────────────────────────
@@ -2147,6 +2590,13 @@ pub fn replSend(handle: u32, line: []const u8) void {
 /// Terminate a REPL session.
 pub fn replQuit(handle: u32) void {
     e.wl_repl_quit(handle);
+}
+/// How a REPL session's child ended — its exit code, or 128 + the signal
+/// that killed it — once everything it printed is in its buffer; null while
+/// it runs (or for a handle that names no session).
+pub fn replExited(handle: u32) ?u8 {
+    const code = e.wl_repl_exited(handle);
+    return if (code < 0) null else @intCast(code);
 }
 
 /// Spawn a persistent subprocess whose stdout comes BACK to the guest (via

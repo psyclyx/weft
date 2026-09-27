@@ -185,7 +185,16 @@ pub const FrameCtx = struct {
     flash_gen: *u64,
     flash_start_ns: *u64,
     flash_was_active: *bool,
-    flash_duration_ns: u64,
+    /// How long a flash shows. Re-read from `config` (`editor/flash-ms`) each
+    /// time a new flash starts, so a config reload takes effect on the next
+    /// one; the value it held before is the fallback.
+    flash_duration_ns: *u64,
+    /// The `weft.set` values the frame reads live (`editor/flash-ms`,
+    /// `editor/flash-undo`). Null in an embedding with no configuration.
+    config: ?*const core.kv.Store = null,
+    /// The live dispatch context. A plugin gutter provider's slot round
+    /// fires under it, so the provider answers for this head.
+    cmd_ctx: *core.command.Context,
 };
 
 /// The per-frame-varying handles passed to `buildFrame` (the active buffer's
@@ -251,6 +260,7 @@ pub const Driver = struct {
             self.ctx.head,
             self.ctx.keymap,
             self.ctx.viewports,
+            self.view,
         );
         if (window_cmds.applyIntents(
             self.window_ctx,

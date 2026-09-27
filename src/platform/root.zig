@@ -32,20 +32,31 @@
 //! - `consumeResized` — edge-triggered resize flag, polled once per wake.
 //! - `nextKeyEvent` — the ordered key queue `app/dispatch.zig:dispatchKey`
 //!   drains, one `KeyEvent` per call until empty.
-//! - `consumeMousePressed` — edge-triggered left-click, read by
-//!   `app/dispatch.zig:handlePointer`.
+//! - `nextPointerEvent` — the ordered pointer queue (`PointerEvent`: press
+//!   and release per button with modifiers and a click count, motion, wheel
+//!   steps), drained by the shell into `app/pointer.zig` one event per call
+//!   until empty. The gesture rules (click counting, wheel steps, motion
+//!   coalescing) live in `pointer.zig`'s `Gestures`, which a platform feeds
+//!   rather than re-derives.
 //! - `repeatDueNs` — the key-repeat timer source's pure due-time query
 //!   (`app/loop_sources.zig:keyRepeatDue`).
+//! - `clipboardText`/`clipboardSet` — the system clipboard (doc/configs.md
+//!   §3.3): the last-known selection text, and taking the selection. Reads
+//!   never block; a platform with a desktop reads each offer as it is
+//!   announced (`clipboard.zig`), one with none keeps a `clipboard.Store`.
+//! - `clipboardFd` — readable when a clipboard transfer can make progress
+//!   (-1 when a platform has none); registered once as a scheduler source,
+//!   serviced inside `pumpEvents`.
 //! Plus fields sampled directly (no method — they're read-mostly state, not
 //! edge-triggered events): `display`/`surface` (raw native handles — see
-//! "the SurfaceSource leak" below), `mouse_x`/`mouse_y`/`mouse_down`.
-//! `bufferScale()` is a method so accepted scale and resize-pending state
-//! remain owned by the platform reducer.
+//! "the SurfaceSource leak" below). `bufferScale()` is a method so accepted
+//! scale and resize-pending state remain owned by the platform reducer.
 //!
-//! `consumeWheel` exists on `Window` but is dead — no caller wires it to a
-//! scroll command today. Left OUT of the contract deliberately: the
-//! contract is "what's actually consumed", not "everything public";
-//! resurrecting scroll-by-wheel is unrelated to P3.
+//! Pointer input used to be sampled here too (`mouse_x`/`mouse_y`/
+//! `mouse_down`, an edge-triggered left click, and a dead `consumeWheel`):
+//! only the left button was ever read, modifiers never reached it, and
+//! nothing could tell a double click from two clicks. It is a queue of
+//! events now, like keys.
 //!
 //! ## leaks found (wayland-specific surface reaching past the seam)
 //!
@@ -95,6 +106,9 @@
 //!    trivial, so it stays **W-later**, not patched here.
 
 const std = @import("std");
+pub const pointer = @import("pointer.zig");
+pub const PointerEvent = pointer.PointerEvent;
+pub const clipboard = @import("clipboard.zig");
 
 /// One raw modifier state, sampled at key-event time. Portable in principle
 /// (every platform this doc anticipates has some notion of ctrl/alt/shift/
@@ -125,8 +139,8 @@ pub const KeyEvent = struct {
     }
 };
 
-/// Verify `T` implements the Platform contract enumerated above: the ten
-/// lifecycle/query/event methods, plus the five directly-sampled fields.
+/// Verify `T` implements the Platform contract enumerated above: the
+/// lifecycle/query/event methods, plus the two directly-sampled handles.
 /// Deliberately duck-typed (decl-by-name + "is a function"/"field exists"),
 /// not signature-exact — pinning exact parameter/field TYPES here would
 /// falsely claim the seam already abstracts over e.g. the native
@@ -143,13 +157,16 @@ pub fn assertPlatform(comptime T: type) void {
         "consumeResized",
         "bufferScale",
         "nextKeyEvent",
-        "consumeMousePressed",
+        "nextPointerEvent",
         "repeatDueNs",
         // keysymName: consumed by dispatch (which-key labels). A non-xkb
         // platform names its own key identities — entangled with the
         // W-later keysym-as-xkb-u32 leak (see KeyEvent.keysym's doc), but a
         // second impl must still provide SOME naming, so it's contract.
         "keysymName",
+        "clipboardText",
+        "clipboardSet",
+        "clipboardFd",
     }) |name| {
         if (!@hasDecl(T, name)) @compileError(@typeName(T) ++ ": missing Platform method `" ++ name ++ "`");
         if (@typeInfo(@TypeOf(@field(T, name))) != .@"fn") @compileError(@typeName(T) ++ ": `" ++ name ++ "` must be a function");
@@ -157,9 +174,6 @@ pub fn assertPlatform(comptime T: type) void {
     inline for (.{
         "display",
         "surface",
-        "mouse_x",
-        "mouse_y",
-        "mouse_down",
     }) |name| {
         if (!@hasField(T, name)) @compileError(@typeName(T) ++ ": missing Platform field `" ++ name ++ "`");
     }
@@ -180,9 +194,9 @@ const HeadlessPlatformSkeleton = struct {
     fb_h: u32 = 0,
     display: usize = 0, // stand-in "native handle" — any type satisfies @hasField
     surface: usize = 0,
-    mouse_x: f64 = 0,
-    mouse_y: f64 = 0,
-    mouse_down: [3]bool = @splat(false),
+    gestures: pointer.Gestures = .{},
+    /// No desktop: the clipboard is this store (see `clipboardSet`).
+    clip: clipboard.Store = .{},
 
     fn init(width: u32, height: u32, title: [*:0]const u8, app_id: [*:0]const u8) !*HeadlessPlatformSkeleton {
         _ = .{ width, height, title, app_id };
@@ -217,14 +231,23 @@ const HeadlessPlatformSkeleton = struct {
         _ = self;
         return null;
     }
-    fn consumeMousePressed(self: *HeadlessPlatformSkeleton, button: usize) bool {
-        _ = .{ self, button };
-        return false;
+    fn nextPointerEvent(self: *HeadlessPlatformSkeleton) ?PointerEvent {
+        return self.gestures.next();
     }
     fn keysymName(buf: []u8, keysym: u32) []const u8 {
         _ = buf;
         _ = keysym;
         return "";
+    }
+    fn clipboardText(self: *const HeadlessPlatformSkeleton) []const u8 {
+        return self.clip.text();
+    }
+    fn clipboardSet(self: *HeadlessPlatformSkeleton, bytes: []const u8) void {
+        self.clip.set(std.heap.c_allocator, bytes) catch {};
+    }
+    fn clipboardFd(self: *const HeadlessPlatformSkeleton) i32 {
+        _ = self;
+        return -1;
     }
     fn repeatDueNs(self: *const HeadlessPlatformSkeleton) ?u64 {
         _ = self;
@@ -251,5 +274,7 @@ test {
     // imported for its types does not put its tests in the binary — these
     // five configure-reducer tests had never run. A module owns its tests.
     _ = @import("resize.zig");
+    _ = pointer;
+    _ = clipboard;
     _ = wayland;
 }

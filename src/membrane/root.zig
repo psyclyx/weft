@@ -55,6 +55,9 @@ pub const export_prefix = "weft:abi/1/";
 pub const Group = enum {
     declare,
     edit,
+    /// `wasm_host/pointer.zig` — where the pointer gesture being dispatched
+    /// is: the facts a command bound to `mouse-1` needs to act at the click.
+    pointer,
     layers,
     /// `wasm_host/annotate.zig` — the third-party decoration package
     /// (doc/contextual-workspace-architecture.md §11.7): named annotation
@@ -80,6 +83,12 @@ pub const Group = enum {
     activation,
     tool,
     register,
+    /// `wasm_host/clipboard.zig` — the dispatching head's system clipboard,
+    /// behind a config-only `clipboard` grant.
+    clipboard,
+    /// `wasm_host/history.zig` — the dispatching head's jumplist and macro
+    /// recorder: push a jump, ask whether a macro is recording.
+    history,
     semantic,
     proc,
     sessions,
@@ -105,7 +114,7 @@ pub const Group = enum {
 /// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
 /// gates alone — modeled honestly as the pair it always is, rather than
 /// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -190,14 +199,24 @@ pub const imports = [_]Entry{
     .{ .name = "wl_set_result_range", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "set the command result from an anchored live-range handle" },
     .{ .name = "wl_run_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a command by name and import its returned borrowed live range (await-a-motion)" },
     .{ .name = "wl_range_ends", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "resolve an anchored live-range handle to its current `[start,end)`" },
+    .{ .name = "wl_view_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "write the `[start,end)` byte range the focused pane showed of the addressed entry last frame; -1 if it showed another" },
     .{ .name = "wl_range_retain", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "retain a live-range handle across command dispatches; 0 on success" },
     .{ .name = "wl_range_release", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "release one anchored live-range handle (idempotent)" },
     .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing an anchored live range as its single borrowed argument" },
     .{ .name = "wl_arg_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "import a borrowed live-range command arg into this plugin's anchored range table" },
     .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over an anchored live-range handle through the gated edit door" },
+    .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{anchor,head}` pairs (document order); returns the selection count" },
+    .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
+    .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
+    .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
+    .{ .name = "wl_undo_unit", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "open (1) or close (0) an undo unit on the addressed entry; nests (the outermost owns the unit), scoped to the dispatch that opened it; 0 on success" },
+
+    // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
+    .{ .name = "wl_pointer", .params = &.{.u32}, .results = &.{.u32}, .group = .pointer, .doc = "write the pointer gesture being dispatched (kind, button, clicks, mods, offset and scene node under the pointer) as eight u32 words; 0 when there is none" },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
-    .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw" },
+    .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: replace the flash set with `[start,end)` on the active document, for the frame loop to fade and the view to draw" },
+    .{ .name = "wl_flash_add", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "add `[start,end)` to the flash set the last `wl_flash` started (one operation, several ranges, one fade)" },
     .{ .name = "wl_fold_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's fold layer and empty it" },
     .{ .name = "wl_fold", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "hide `[start,end)` as an invisible/folded span" },
     .{ .name = "wl_decorate_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's decorations layer and empty it" },
@@ -237,6 +256,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_resting_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a buffer can rest in (`baseMode` stops there)" },
     .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "leave a transient mode back to the active buffer's resting mode" },
     .{ .name = "wl_resting_posture", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare the mode this grammar rests in for an input posture (§10.4)" },
+    .{ .name = "wl_binding_variant", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare the mode a grammar mode binds through for an entry facet (source document / structural)" },
     .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
     .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
@@ -270,6 +290,11 @@ pub const imports = [_]Entry{
     .{ .name = "wl_offer", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "stage one offer row: an intention, one of this plugin's own commands, and the reason it cannot run (empty = enabled)" },
     .{ .name = "wl_offers_commit", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "publish the staged table as this plugin's whole offer set" },
     .{ .name = "wl_offers_retract", .params = &.{}, .results = &.{}, .group = .intent, .doc = "withdraw this plugin's offers entirely" },
+    // A CHOSEN context (doc/configs.md §3.5): 0 = the active pane, 1 = the
+    // head's primary focus, which a toolbar describes while it holds focus.
+    .{ .name = "wl_offers_list", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "every offer in a chosen context (0 active, 1 primary focus) as one record: availability, order, intention, provider, reason, label, group; returns the record length (written only if it fits), -1 if unknown" },
+    .{ .name = "wl_intent_invoke_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .head_gated = true, .doc = "resolve an intention in a chosen context and invoke it THERE through the effect door; 0 = invoked, -1 = not an intention, else a refusal written to guest memory" },
+    .{ .name = "wl_provide_affordance", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{.u32}, .group = .intent, .doc = "how this plugin's providers of an action present their offer (label, group, order; minInt = no order); presentation only, returns how many providers took it" },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .params = &.{}, .results = &.{.u32}, .group = .buffers, .doc = "the number of open buffers" },
@@ -328,12 +353,15 @@ pub const imports = [_]Entry{
     .{ .name = "wl_node_enclosing", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the smallest named node strictly enclosing `[start,end)` (expand-selection)" },
     .{ .name = "wl_query", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "run a tree-sitter query over `[start,end)`, stashing its captures" },
     .{ .name = "wl_query_capture", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "read the `i`-th capture from the last `wl_query`/`wl_node_children`" },
+    .{ .name = "wl_outline", .params = &.{}, .results = &.{.i32}, .group = .syntax, .doc = "the active entry's outline symbols (the grammar's outline query), stashed as captures in document order" },
     .{ .name = "wl_node_children", .params = &.{.u32}, .results = &.{.i32}, .group = .syntax, .doc = "the named children of the smallest node at `off` (structural descent)" },
     .{ .name = "wl_claim_subbuffer", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "claim `[start,end)` as a subbuffer (a projection row's hidden identity)" },
     .{ .name = "wl_subbuffer_put_fact", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .syntax, .doc = "attach a key/value fact to a claimed subbuffer" },
 
     // ── activation.zig — the focus event ────────────────────────────────
     .{ .name = "wl_activate_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "the path of the buffer taking focus (host→guest activation, borrowed)" },
+    .{ .name = "wl_signal_subscribe", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "hear a named signal as `on_signal(id)`; returns the id, -1 refused" },
+    .{ .name = "wl_signal_emit", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "raise a named signal for every listener, delivered at the next frame boundary" },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
@@ -343,6 +371,18 @@ pub const imports = [_]Entry{
     .{ .name = "wl_register_text", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "read an explicit register slot's bytes into guest memory" },
     .{ .name = "wl_register_linewise", .params = &.{.u32}, .results = &.{.u32}, .group = .register, .doc = "whether an explicit register slot holds a linewise yank" },
     .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
+    .{ .name = "wl_yank_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture n `[start,end)` ranges as one value each (one per selection) into an explicit register slot" },
+    .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
+    .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
+    .{ .name = "wl_register_set", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "put typed bytes in an explicit register slot as one value, leaving unnamed alone (the `/` search register)" },
+
+    // ── clipboard.zig — the dispatching head's system clipboard ───────────
+    .{ .name = "wl_clipboard_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .clipboard, .perm = .clipboard, .doc = "take the system clipboard with `<bytes>` (0 ok, -1 failed); the grant is config-only" },
+    .{ .name = "wl_clipboard_get", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .clipboard, .perm = .clipboard, .doc = "the system clipboard's text into guest memory (clamped); returns the full length" },
+
+    // ── history.zig — the dispatching head's jumplist and macro recorder ──
+    .{ .name = "wl_jump_push", .params = &.{}, .results = &.{}, .group = .history, .doc = "remember the caret as a jump in the head's jumplist (a grammar decides what a jump is)" },
+    .{ .name = "wl_macro_recording", .params = &.{}, .results = &.{.u32}, .group = .history, .doc = "the register a macro is recording into (its byte), or 0 when none is" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
@@ -414,6 +454,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_repl_start", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .proc_timer, .doc = "start a persistent REPL streaming into a named comint buffer" },
     .{ .name = "wl_repl_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write a line to a REPL session's stdin" },
     .{ .name = "wl_repl_quit", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "quit a REPL session (kill+join; handle stays valid but dead)" },
+    .{ .name = "wl_repl_exited", .params = &.{.u32}, .results = &.{.i32}, .group = .sessions, .doc = "how a REPL session's child ended: its exit code (128 + a killing signal) once its output is delivered, else -1" },
     .{ .name = "wl_net_connect", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .net, .doc = "dial `host:port` (TCP/TLS), streaming into a named buffer" },
     .{ .name = "wl_net_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write bytes to a connected net session" },
     .{ .name = "wl_net_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "close a net session" },
@@ -514,6 +555,8 @@ pub const exports = [_]Export{
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
+    .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
+    .{ .name = "on_offers_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "what the head's primary context offers moved (focus, mode, entry, provider set, availability); at most once per frame, at the frame boundary, never inside a dispatch" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
@@ -553,9 +596,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 232;
-const max_export_count: usize = 18;
-const max_semantic_operation_count: usize = 250;
+const max_import_count: usize = 256;
+const max_export_count: usize = 20;
+const max_semantic_operation_count: usize = 276;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -683,7 +726,7 @@ test "membrane contract data: every export entry is well-formed, documented, and
     try t.expectEqual(@as(usize, max_export_count), census.exports);
 }
 
-test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini callback" {
+test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini callback" {
     try t.expectEqualStrings("1", abi_major);
     try t.expectEqualStrings("weft:abi/1", abi_namespace);
     try t.expectEqualStrings("weft:abi/1/", export_prefix);
@@ -699,7 +742,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
             try t.expectEqualStrings("run", entry.name);
         },
     };
-    try t.expectEqual(@as(usize, 17), full);
+    try t.expectEqual(@as(usize, 19), full);
     try t.expectEqual(@as(usize, 1), mini);
     try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
     for (legacy_callback_names, 0..) |name, i| {
@@ -710,7 +753,7 @@ test "membrane contract data: ABI v1 owns seventeen full callbacks and one mini 
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 231), census.imports);
-    try t.expectEqual(@as(usize, 18), census.exports);
-    try t.expectEqual(@as(usize, 249), census.semantic_operations);
+    try t.expectEqual(@as(usize, 256), census.imports);
+    try t.expectEqual(@as(usize, 20), census.exports);
+    try t.expectEqual(@as(usize, 276), census.semantic_operations);
 }

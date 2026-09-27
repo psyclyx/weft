@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const command = @import("command.zig");
+const Editor = @import("Editor.zig");
 const Context = command.Context;
 const Value = command.Value;
 const facts = @import("weft_facts");
@@ -243,29 +244,35 @@ fn editErr(e: anyerror) anyerror!Value {
     return ok;
 }
 
+/// The text edits act at EVERY selection: `target`'s range at each (the
+/// selection, or the caret / the scalar beside it), through the one gated
+/// door as one commit. With a single selection this is exactly
+/// `ctx.edit(ed.insertRange()/backspaceRange()/forwardRange(), bytes)`.
+fn editAtSelections(ctx: *Context, ed: *Editor, target: Editor.EditTarget, bytes: []const u8) anyerror!Value {
+    const ranges = try ed.editRanges(ctx.gpa, target);
+    defer ctx.gpa.free(ranges);
+    ctx.editEach(ranges, bytes) catch |e| return editErr(e);
+    return ok;
+}
+
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .from(args.text) })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), args.text) catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, args.text);
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_previous)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    const r = ed.backspaceRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .backward, "");
 }
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_next)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    const r = ed.forwardRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .forward, "");
 }
 
 /// A refused unwind reports "nothing happened" — the door already announced
@@ -280,13 +287,28 @@ fn undid(result: @import("undo.zig").Error!bool) anyerror!Value {
 fn cUndo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return undid(ed.undo(ctx.gpa, ctx.undoGate()));
+    const before = ed.doc.commitCount();
+    const did = ed.undo(ctx.gpa, ctx.undoGate());
+    flashChanged(ctx, &ed.doc, before);
+    return undid(did);
 }
 
 fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return undid(ed.redo(ctx.gpa, ctx.undoGate()));
+    const before = ed.doc.commitCount();
+    const did = ed.redo(ctx.gpa, ctx.undoGate());
+    flashChanged(ctx, &ed.doc, before);
+    return undid(did);
+}
+
+/// Record what an undo/redo just put back as an `undo` flash. Only core sees
+/// that span — the grammar that pressed the key never learns which bytes
+/// came back — so core records it, and the frame shows it only where the
+/// configuration asks (`editor/flash-undo`).
+fn flashChanged(ctx: *Context, doc: *@import("Document.zig"), before: usize) void {
+    const span = @import("flash.zig").changedSince(doc, before) orelse return;
+    ctx.caps.flash.set(ctx.gpa, &ctx.caps.layers, doc, span, .undo) catch {};
 }
 
 /// The default `save` provider: write the buffer to its file backing. `save` is
@@ -468,8 +490,7 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, "\n");
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
@@ -477,8 +498,7 @@ fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     if (fieldHere(ctx)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
-    ctx.edit(ed.insertRange(), "\t") catch |e| return editErr(e);
-    return ok;
+    return editAtSelections(ctx, ed, .insert, "\t");
 }
 
 /// Is point inside a PROJECTION's editable span — a field made of text?
@@ -498,6 +518,12 @@ fn fieldHere(ctx: *Context) bool {
 fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.head, ctx.keymap);
+    return ok;
+}
+
+fn cBufferPrevious(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.prevId(), ctx.head, ctx.keymap);
     return ok;
 }
 
@@ -650,6 +676,26 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     return ok;
 }
 
+/// Show or hide a DECLARED viewport by name — the one door a "toggle the
+/// sidebar" key needs, without core learning what a sidebar is. It records
+/// the intent on the declaration; the layout phase docks or undocks to match.
+fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
+    _ = registry.toggle(args.name) catch return .{ .string = "no viewport by that name" };
+    return ok;
+}
+
+/// Bring the ACTIVE entry into a declared viewport, show the viewport, and
+/// focus it there — replacing whatever it showed. How a plugin puts its own
+/// entry (a terminal, a list of problems) in a panel the config declared:
+/// focus-or-create the entry, then take it. The pane the command ran in keeps
+/// what it showed; the layout phase realizes the move.
+fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
+    registry.takeEntry(args.name, ctx.buffers.active().ref()) catch return .{ .string = "no viewport by that name" };
+    return ok;
+}
+
 fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     return switch (p) {
         .command => |c| c,
@@ -668,14 +714,10 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
 /// `explain-binding eval` answers exactly the question
 /// `Actions.resolve("eval", ...)` would have asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
-    const entry = ctx.buffer();
-    const f: facts.Facts = .{
-        .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
-        .name = entry.name,
-        .mode = ctx.head.currentMode(),
-        .lang = Actions.langOfName(entry.name),
-        .tool = entry.tool,
-    };
+    // The one fact builder resolution itself uses (`intent.factsFor`), so the
+    // explanation cannot disagree with what a key or a toolbar would run — a
+    // provider keyed on `role`, `locality` or `posture` is explained too.
+    const f: facts.Facts = @import("intent.zig").factsFor(ctx);
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();
 
@@ -704,6 +746,7 @@ const table = [_]command.Command{
     command.define("explain-binding", "Explain which Container binding wins an action slot for the active buffer's facts.", cExplainBinding),
     command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
     command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
+    command.define("buffer-previous", "Focus the previous buffer (cyclic).", cBufferPrevious),
     command.define("buffer-back", "Return to the previously active buffer (tool `q`).", cBufferBack),
     command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
     command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),
@@ -728,6 +771,8 @@ const table = [_]command.Command{
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
     command.define("echo", "Show a message on the status line.", cEcho),
+    command.define("viewport-toggle", "Show or hide a declared viewport.", cViewportToggle),
+    command.define("viewport-take", "Show the active entry in a declared viewport, and focus it there.", cViewportTake),
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
@@ -759,16 +804,33 @@ const table = [_]command.Command{
     command.define("insert-tab", "Insert a tab at the cursor.", cInsertTab),
 };
 
+/// `save-file`'s eligibility: any entry whose bytes are not a tool projection.
+const not_a_projection: facts.Predicate = .{ .locus = .tool };
+
 /// Register every built-in and the default keymap. The default mode is
 /// plain modeless editing; a config replaces any of it by rebinding.
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), head: *@import("Head.zig"), actions: *@import("action.zig")) !void {
     for (table) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
+    // The generic pointer commands: the modeless floor for a click, a drag,
+    // and a wheel step. Which gesture runs which is config (defaults.js).
+    try @import("pointer.zig").install(gpa, commands);
+    // The jumplist's travel (C-o/C-i and a picker). Which keys, and which
+    // motions count as jumps, is the grammar's.
+    try @import("jumplist.zig").install(gpa, commands);
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
     // (files/git) provides its own `save` scoped to its tool identity, which
-    // wins in its buffer. The default provider writes the file backing.
+    // wins in its buffer. The default provider writes the file backing, so it
+    // claims only entries whose bytes are NOT a tool's projection: a git status
+    // listing has nothing durable to write, and saying so here — by a fact, in
+    // the provider's own eligibility — is what lets `std.persistence.save` be
+    // absent there instead of offered and then refused (`intent.zig`).
+    //
+    // Priority -1 keeps it the FLOOR it was when it was unconstrained: the
+    // `not` makes it one conjunct specific, which would otherwise tie (and
+    // collide at bind) with every projection's own one-conjunct `tool` save.
     try command.registerAction(gpa, commands, actions, "save", .pick);
-    try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
+    try actions.provide(.{ .action = "save", .predicate = .{ .not = &not_a_projection }, .command = "save-file", .priority = -1, .owner = "core" });
 
     // Retiring an entry is an ACTION too, for the same reason `save` is: what a
     // tool's entry is worth is the tool's question. The default provider drops
@@ -780,6 +842,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // Input models express leaving a transient/tool locus as an intent. Vim's
     // `q` is one such mapping; another editor can choose another key, and a
     // more specific provider can override this buffer-history implementation.
+    // It is deliberately NOT the jumplist's back: leaving a tool must leave
+    // it, while the last jump is often inside the same entry (`jumplist.zig`).
     try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
     try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
 

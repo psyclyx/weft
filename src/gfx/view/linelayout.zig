@@ -56,7 +56,36 @@ pub const StyleInputs = struct {
     /// from `Hud.gutter` unchanged — null (today's default) means no
     /// gutter cells render, at the cost of one pointer copy per frame.
     gutter: ?ui_mesh.GutterFrame = null,
+    /// Width, in cells, of the sign column `gutter`-placement decorations
+    /// draw in (a breakpoint dot, a severity mark): 0 when no feed places
+    /// one, so an entry with none pays no column. Fixed for the frame, so a
+    /// row with a mark and a row without start their text in the same column.
+    mark_cols: usize = 0,
 };
+
+/// A row's text length in cells: one per scalar (the mono grid's rule).
+fn cellWidth(text: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(text) catch text.len;
+}
+
+/// The sign column's width over every `gutter`-placed span the entry's feeds
+/// hold: the widest mark plus a separating blank, or 0 when there is none.
+fn markCols(deco: ?*const core.layers.Layer, anno: []const *const core.layers.Layer) usize {
+    var widest: usize = 0;
+    if (deco) |dl| {
+        for (0..dl.spanCount()) |i| {
+            const s = dl.resolvedSpan(i);
+            if (s.placement == .gutter) widest = @max(widest, cellWidth(s.message));
+        }
+    }
+    for (anno) |al| {
+        for (0..al.spanCount()) |i| {
+            const s = al.resolvedSpan(i);
+            if (s.placement == .gutter) widest = @max(widest, cellWidth(s.message));
+        }
+    }
+    return if (widest == 0) 0 else widest + 1;
+}
 
 /// The face + size + color a markdown attribute renders as.
 const InlineStyle = struct {
@@ -144,10 +173,23 @@ pub fn resolveStyleInputs(
         }
     }
     s.gutter = hud.gutter;
+    s.mark_cols = markCols(s.deco, s.anno_layers);
     return s;
 }
 
 // ── Line layout (the shared primitive) ───────────────────────────
+
+/// Whether a block caret covers `off`: its glyph (a label's included) then
+/// draws in `cursor_text`, legible on the caret. `flips` holds every
+/// caret's draw offset in document order — each selection has one, not
+/// only the primary.
+fn flipped(flips: []const usize, off: usize) bool {
+    return std.sort.binarySearch(usize, flips, off, struct {
+        fn order(target: usize, item: usize) std.math.Order {
+            return std.math.order(target, item);
+        }
+    }.order) != null;
+}
 
 pub fn layoutLine(
     v: *View,
@@ -160,12 +202,12 @@ pub fn layoutLine(
     cols_visible: usize,
     md: ?MdInline,
     styles: StyleInputs,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     return if (md) |m|
-        layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flip_off)
+        layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flips)
     else
-        layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flip_off);
+        layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flips);
 }
 
 /// Plain buffers: one mono cell per scalar on the pixel grid (uniform
@@ -181,7 +223,7 @@ fn layoutMonoLine(
     y_top: f32,
     cols_visible: usize,
     styles: StyleInputs,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     const line = rope.lineRange(row);
     const baseline_y = y_top + v.ascent;
@@ -195,50 +237,76 @@ fn layoutMonoLine(
     // them, and they're never in the document — `yy` yanks only the real line.
     var pfx_bytes: std.ArrayList(u8) = .empty;
     var col: usize = 0;
-    if (styles.gutter) |gf| col = try layoutGutterPrefix(v, scratch, gf, line, row, cols_visible, &pfx_bytes, &cells);
+    // The sign column first (breakpoint dots, severity marks), then the
+    // `ui/gutter-segment` cells, then the row's own virtual prefix.
+    if (styles.mark_cols > 0) col = try layoutMarkColumn(v, scratch, styles, line, cols_visible, &pfx_bytes, &cells);
+    if (styles.gutter) |gf| col = try layoutGutterPrefix(v, scratch, gf, line, row, cols_visible, &pfx_bytes, &cells, col);
     if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells, col);
     // Third-party feeds compose onto the same prefix, after the entry's own
     // decorations: one more producer of leading cells, not a new mechanism.
     for (styles.anno_layers) |al| col = try layoutRowPrefix(v, scratch, al, line, cols_visible, &pfx_bytes, &cells, col);
-    const pfx_len = pfx_bytes.items.len;
 
+    // Overlays draw OVER real cells: a covered cell sources its glyph from
+    // the overlay's text instead of the document's. The text, its stops, and
+    // the caret are untouched — a label hides a glyph, it never moves one.
+    var overlays: Overlays = .{};
+    overlays.collect(styles, line);
+
+    // The shaped buffer is built cell by cell after the prefix: each cell
+    // appends exactly the bytes its glyph comes from (a real scalar, a tab's
+    // space, or an overlay's scalar), so every shaped glyph has its cell.
     var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
     var byte: usize = 0;
     while (it.nextCodepointSlice()) |s| : (col += 1) {
         if (col >= cols_visible) break;
         const abs = line.start + byte;
-        const color = if (flip_off != null and flip_off.? == abs)
-            v.theme.cursor_text
-        else if (styles.diag) |d| (if (abs >= styles.diag_base and abs - styles.diag_base < d.len and d[abs - styles.diag_base] != 0)
-            (if (d[abs - styles.diag_base] == 1) v.theme.diag_error else v.theme.diag_warn)
-        else
-            hlColor(v, styles, abs)) else hlColor(v, styles, abs);
-        // A tab's glyph (a space, substituted below) sits at its own
-        // column; the NEXT cell jumps to the tab stop, so the tab reads
-        // as blank whitespace. Offset↔stop stays 1:1 — the caret is exact.
-        try cells.append(scratch, .{
-            // Source indexes the shaped buffer, whose real text sits after the
-            // virtual prefix bytes — so shift real cells past `pfx_len`.
-            .source = .{ .start = @intCast(pfx_len + byte), .end = @intCast(pfx_len + byte + s.len) },
-            .column = @intCast(col),
-            .color = color,
-        });
+        const b0 = pfx_bytes.items.len;
+        if (overlays.next(abs)) |ov| {
+            try pfx_bytes.appendSlice(scratch, ov.cp);
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(b0), .end = @intCast(pfx_bytes.items.len) },
+                .column = @intCast(col),
+                .color = if (flipped(flips, abs)) v.theme.cursor_text else ov.color(v),
+            });
+        } else {
+            const color = if (flipped(flips, abs))
+                v.theme.cursor_text
+            else if (styles.diag) |d| (if (abs >= styles.diag_base and abs - styles.diag_base < d.len and d[abs - styles.diag_base] != 0)
+                (if (d[abs - styles.diag_base] == 1) v.theme.diag_error else v.theme.diag_warn)
+            else
+                hlColor(v, styles, abs)) else hlColor(v, styles, abs);
+            // A tab's glyph (a space) sits at its own column; the NEXT cell
+            // jumps to the tab stop, so the tab reads as blank whitespace.
+            // Offset↔stop stays 1:1 — the caret is exact.
+            if (s.len == 1 and s[0] == '\t') try pfx_bytes.append(scratch, ' ') else try pfx_bytes.appendSlice(scratch, s);
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(b0), .end = @intCast(pfx_bytes.items.len) },
+                .column = @intCast(col),
+                .color = color,
+            });
+        }
         try stops.append(la, .{ .off = @intCast(abs), .x = v.origin_x + @as(f32, @floatFromInt(col)) * v.cell_w });
         byte += s.len;
         if (s.len == 1 and s[0] == '\t') col = layout.tabStopAfter(col) - 1; // loop's +1 lands on the stop
     }
     try stops.append(la, .{ .off = @intCast(line.start + byte), .x = v.origin_x + @as(f32, @floatFromInt(col)) * v.cell_w });
+    // An overlay running past the line's end (a two-letter label on its last
+    // character, or one anchored at the newline) finishes in the empty cells
+    // beyond it.
+    var tail_col = col;
+    while (overlays.rest()) |ov| : (tail_col += 1) {
+        if (tail_col >= cols_visible) break;
+        const b0 = pfx_bytes.items.len;
+        try pfx_bytes.appendSlice(scratch, ov.cp);
+        try cells.append(scratch, .{
+            .source = .{ .start = @intCast(b0), .end = @intCast(pfx_bytes.items.len) },
+            .column = @intCast(tail_col),
+            .color = ov.color(v),
+        });
+    }
 
     if (cells.items.len > 0) {
-        // Shaped buffer = the virtual prefix bytes, then the real line (tabs→
-        // space). Prefix cells source into the head; real cells into the tail.
-        const shbuf = try scratch.alloc(u8, pfx_len + byte);
-        @memcpy(shbuf[0..pfx_len], pfx_bytes.items);
-        @memcpy(shbuf[pfx_len..], text[0..byte]);
-        for (shbuf[pfx_len..]) |*b| {
-            if (b.* == '\t') b.* = ' ';
-        }
-        const shaped = try text_engine.shape(scratch, &v.face_set.mono, shbuf, .{});
+        const shaped = try text_engine.shape(scratch, &v.face_set.mono, pfx_bytes.items, .{});
         try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
     }
     return .{
@@ -333,17 +401,21 @@ fn layoutGutterPrefix(
     cols_visible: usize,
     pfx_bytes: *std.ArrayList(u8),
     cells: *std.ArrayList(text_engine.Cell),
+    start_col: usize,
 ) !usize {
-    if (gf.bindings.len == 0) return 0;
+    if (gf.bindings.len == 0) return start_col;
     var args: ui_mesh.GutterLineArgs = .{
         .line = row,
         .row = line,
+        .caret_line = gf.caret_line,
+        .line_count = gf.line_count,
         .diag_layer = gf.diag_layer,
         .bp_lines = gf.bp_lines,
         .theme = &v.theme,
+        .batch = gf.batch,
     };
     const segs = try ui_mesh.gutterCellsForLine(gf.bindings, scratch, &args);
-    var col: usize = 0;
+    var col: usize = start_col;
     for (segs) |seg| {
         const color = seg.fg_override orelse v.theme.roleColor(seg.role);
         var it = (std.unicode.Utf8View.init(seg.text) catch continue).iterator();
@@ -361,6 +433,136 @@ fn layoutGutterPrefix(
     }
     return col;
 }
+
+/// Lay out this row's sign column: every `gutter`-placed span anchored on the
+/// row (the entry's own decorations, then the annotation feeds), joined and
+/// padded to `styles.mark_cols` so the column is the same width on every row.
+/// A mark wider than the column is cut, never allowed to push the text.
+fn layoutMarkColumn(
+    v: *View,
+    scratch: Allocator,
+    styles: StyleInputs,
+    line: stemma.Range,
+    cols_visible: usize,
+    pfx_bytes: *std.ArrayList(u8),
+    cells: *std.ArrayList(text_engine.Cell),
+) !usize {
+    const width = @min(styles.mark_cols, cols_visible);
+    var col: usize = 0;
+    const Walk = struct {
+        fn layer(vv: *View, sc: Allocator, dl: *const core.layers.Layer, ln: stemma.Range, w: usize, c: *usize, pb: *std.ArrayList(u8), cs: *std.ArrayList(text_engine.Cell)) !void {
+            for (0..dl.spanCount()) |i| {
+                const s = dl.resolvedSpan(i);
+                if (s.placement != .gutter) continue;
+                if (s.start < ln.start or s.start > ln.end) continue;
+                const color = vv.theme.styleColor(styleClassOf(s.kind));
+                var it = (std.unicode.Utf8View.init(s.message) catch continue).iterator();
+                while (it.nextCodepointSlice()) |cp| {
+                    // Keep the column's last cell blank: it separates the
+                    // mark from what follows.
+                    if (c.* + 1 >= w) return;
+                    const b0 = pb.items.len;
+                    try pb.appendSlice(sc, cp);
+                    try cs.append(sc, .{
+                        .source = .{ .start = @intCast(b0), .end = @intCast(b0 + cp.len) },
+                        .column = @intCast(c.*),
+                        .color = color,
+                    });
+                    c.* += 1;
+                }
+            }
+        }
+    };
+    if (styles.deco) |dl| try Walk.layer(v, scratch, dl, line, width, &col, pfx_bytes, cells);
+    for (styles.anno_layers) |al| try Walk.layer(v, scratch, al, line, width, &col, pfx_bytes, cells);
+    return width;
+}
+
+/// A span's `kind` as a styles-palette class, clamped rather than trusted
+/// (StyleClass is contiguous 0..=muted).
+fn styleClassOf(kind: u32) StyleClass {
+    const raw: u8 = @truncate(kind);
+    return if (raw <= @intFromEnum(StyleClass.muted)) @enumFromInt(raw) else .muted;
+}
+
+/// The row's `overlay`-placed spans, consumed left to right as the layout
+/// walks the row's cells: at a span's anchor it starts covering cells with
+/// its text, one scalar per cell, until the text runs out.
+const Overlays = struct {
+    const max = 32;
+    items: [max]Item = undefined,
+    n: usize = 0,
+    /// The next span not yet reached.
+    at: usize = 0,
+    /// The span whose text is covering cells now, and how much of it is left.
+    live: ?Live = null,
+
+    const Item = struct { start: usize, kind: u32, message: []const u8 };
+    const Live = struct { rest: []const u8, kind: u32 };
+    pub const Cp = struct {
+        cp: []const u8,
+        kind: u32,
+        fn color(self: Cp, v: *const View) [4]f32 {
+            return v.theme.styleColor(styleClassOf(self.kind));
+        }
+    };
+
+    fn collect(self: *Overlays, styles: StyleInputs, line: stemma.Range) void {
+        if (styles.deco) |dl| self.add(dl, line);
+        for (styles.anno_layers) |al| self.add(al, line);
+        std.mem.sort(Item, self.items[0..self.n], {}, struct {
+            fn lt(_: void, a: Item, b: Item) bool {
+                return a.start < b.start;
+            }
+        }.lt);
+    }
+
+    fn add(self: *Overlays, dl: *const core.layers.Layer, line: stemma.Range) void {
+        for (0..dl.spanCount()) |i| {
+            const s = dl.resolvedSpan(i);
+            if (s.placement != .overlay or s.message.len == 0) continue;
+            if (s.start < line.start or s.start > line.end) continue;
+            if (self.n == max) return;
+            self.items[self.n] = .{ .start = s.start, .kind = s.kind, .message = s.message };
+            self.n += 1;
+        }
+    }
+
+    /// The overlay scalar covering the cell at document offset `abs`, if any.
+    /// A span reached while another is still covering replaces it — the
+    /// later anchor wins its own cell.
+    fn next(self: *Overlays, abs: usize) ?Cp {
+        while (self.at < self.n and self.items[self.at].start <= abs) : (self.at += 1) {
+            if (self.items[self.at].start == abs)
+                self.live = .{ .rest = self.items[self.at].message, .kind = self.items[self.at].kind };
+        }
+        return self.take();
+    }
+
+    /// What is left of the covering span once the row's text has ended.
+    fn rest(self: *Overlays) ?Cp {
+        // A span anchored exactly at the line end (past the last scalar)
+        // starts here too.
+        if (self.live == null and self.at < self.n)
+            self.live = .{ .rest = self.items[self.at].message, .kind = self.items[self.at].kind };
+        self.at = self.n;
+        return self.take();
+    }
+
+    fn take(self: *Overlays) ?Cp {
+        const lv = if (self.live) |*l| l else return null;
+        if (lv.rest.len == 0) {
+            self.live = null;
+            return null;
+        }
+        const n = std.unicode.utf8ByteSequenceLength(lv.rest[0]) catch 1;
+        const cp = lv.rest[0..@min(n, lv.rest.len)];
+        const out: Cp = .{ .cp = cp, .kind = lv.kind };
+        lv.rest = lv.rest[cp.len..];
+        if (lv.rest.len == 0) self.live = null;
+        return out;
+    }
+};
 
 /// Per-byte non-caret, non-diagnostic color. Precedence: a third-party
 /// annotation role wins (it was published ABOUT this entry, so hiding it under
@@ -399,7 +601,7 @@ fn layoutMarkdownLine(
     row: usize,
     y_top: f32,
     md: MdInline,
-    flip_off: ?usize,
+    flips: []const usize,
 ) !layout.VisualLine {
     const line = rope.lineRange(row);
     const text = try readLine(scratch, rope, line, 4096);
@@ -407,13 +609,15 @@ fn layoutMarkdownLine(
         if (b.* == '\t') b.* = ' ';
     }
 
-    // The caret cluster [lo, hi) whose glyph flips to cursor_text.
+    // The caret cluster [lo, hi) whose glyph flips to cursor_text: the first
+    // caret on the line (a styled run carries one flip range).
     var caret_lo: usize = std.math.maxInt(usize);
     var caret_hi: usize = 0;
-    if (flip_off) |co| {
+    for (flips) |co| {
         if (co >= line.start and co < line.start + text.len) {
             caret_lo = co;
             caret_hi = nextScalar(text, line.start, co);
+            break;
         }
     }
 
@@ -609,7 +813,7 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
     try testing.expect(si.deco == layer);
 
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
     // The caret at the line start (offset 0) sits AFTER the 5-column prefix —
     // the decoration displaced the text without becoming part of it.
@@ -652,7 +856,7 @@ test "gutter: a bound line-numbers provider draws leading cells through the real
 
     const si: StyleInputs = .{ .gutter = .{ .bindings = bindings } };
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
     // Row 0 → "1 " = 2 leading gutter cells; diag/breakpoint providers opt
     // out (no layer, no bp lines), contributing nothing. The caret at
@@ -667,6 +871,93 @@ test "gutter: a bound line-numbers provider draws leading cells through the real
     const s = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try testing.expectEqualStrings("main.zig\n", s);
+}
+
+test "gutter placement: a breakpoint mark draws in a sign column every row shares" {
+    const gpa = testing.allocator;
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer v.deinit();
+
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "one\ntwo\n");
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+    // What the `debug` plugin publishes for a breakpoint on line 2.
+    const layer = try store.claim(gpa, &doc, "decorations", .local, "debug");
+    try layer.appendSpan(gpa, .{ .start = 4, .end = 4, .kind = @intFromEnum(StyleClass.removed), .message = "\u{25CF}", .placement = .gutter });
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const hud: Hud = .{ .mode = "normal", .decorations_layer = layer };
+    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 3);
+    try testing.expectEqual(@as(usize, 2), si.mark_cols); // the dot + a blank
+
+    // The marked row draws the dot at column 0; BOTH rows start their text at
+    // column 2, so a mark never pushes one line out of alignment.
+    var runs: std.ArrayList(Run) = .empty;
+    const marked = try layoutLine(&v, a, a, &runs, doc.text(), 1, 0, 40, null, si, &.{});
+    try testing.expectApproxEqAbs(v.origin_x + 2 * v.cell_w, marked.stops[0].x, 0.01);
+    try testing.expectEqual(@as(u32, 0), runs.items[0].place.cell[0].column);
+    try testing.expectEqual(v.theme.styleColor(.removed), runs.items[0].place.cell[0].color);
+    var plain_runs: std.ArrayList(Run) = .empty;
+    const plain = try layoutLine(&v, a, a, &plain_runs, doc.text(), 0, 0, 40, null, si, &.{});
+    try testing.expectApproxEqAbs(v.origin_x + 2 * v.cell_w, plain.stops[0].x, 0.01);
+    // …and a row without a mark draws nothing in the column: "one" only.
+    try testing.expectEqual(@as(usize, 3), plain_runs.items[0].place.cell.len);
+}
+
+test "overlay placement: a label covers its cell without moving any text" {
+    const gpa = testing.allocator;
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer v.deinit();
+
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "alpha beta\n");
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+    // Two jump labels, the way `snipe` publishes them: over the `a` at 4 and
+    // the `a` at 9 (the last character — a two-letter label runs past it).
+    const labels = try store.claimAnnotation(gpa, &doc, "snipe", "snipe");
+    labels.begin(gpa);
+    try labels.appendSpan(gpa, .{ .start = 4, .end = 4, .kind = @intFromEnum(StyleClass.removed), .message = "s", .placement = .overlay });
+    try labels.appendSpan(gpa, .{ .start = 9, .end = 9, .kind = @intFromEnum(StyleClass.removed), .message = "df", .placement = .overlay });
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const feeds = try store.annotations(a, &doc);
+    const hud: Hud = .{ .mode = "normal", .annotations = feeds };
+    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
+    var runs: std.ArrayList(Run) = .empty;
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
+
+    // No prefix, and every stop where it was: the caret maps exactly.
+    try testing.expectApproxEqAbs(v.origin_x, vl.stops[0].x, 0.01);
+    try testing.expectApproxEqAbs(v.origin_x + 4 * v.cell_w, vl.stops[4].x, 0.01);
+    // "alpha beta" is 10 cells, plus the label's second letter past the end.
+    const cells = runs.items[0].place.cell;
+    try testing.expectEqual(@as(usize, 11), cells.len);
+    try testing.expectEqual(@as(u32, 10), cells[10].column);
+    // The covered cells take the label's color; their neighbors keep theirs.
+    try testing.expectEqual(v.theme.styleColor(.removed), cells[4].color);
+    try testing.expectEqual(v.theme.styleColor(.removed), cells[9].color);
+    try testing.expectEqual(v.theme.foreground, cells[3].color);
+    // The glyph sources are the labels' bytes, not the text's.
+    try testing.expectEqual(@as(usize, 11), runs.items[0].shaped.glyphs.len);
+
+    // Under a block caret — any selection's, not only the primary's — a
+    // glyph draws in `cursor_text`, a label's included, so it stays legible.
+    var flipped_runs: std.ArrayList(Run) = .empty;
+    _ = try layoutLine(&v, a, a, &flipped_runs, doc.text(), 0, 0, 40, null, si, &.{ 0, 4, 6 });
+    const flipped_cells = flipped_runs.items[0].place.cell;
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[0].color);
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[4].color);
+    try testing.expectEqual(v.theme.cursor_text, flipped_cells[6].color);
+    try testing.expectEqual(v.theme.foreground, flipped_cells[5].color);
+    try testing.expectEqual(v.theme.styleColor(.removed), flipped_cells[9].color);
 }
 
 test "annotations: the presentation composites third-party feeds it was never told about" {
@@ -704,7 +995,7 @@ test "annotations: the presentation composites third-party feeds it was never to
     // The placed feed draws leading cells, exactly like a projection's own
     // decorations, and displaces the caret without entering the document.
     var runs: std.ArrayList(Run) = .empty;
-    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
     try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
     try testing.expectApproxEqAbs(v.origin_x + 7 * v.cell_w, vl.stops[0].x, 0.01);
 
@@ -714,6 +1005,6 @@ test "annotations: the presentation composites third-party feeds it was never to
     const stale = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 2);
     try testing.expect(stale.anno == null);
     var stale_runs: std.ArrayList(Run) = .empty;
-    const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, null);
+    const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, &.{});
     try testing.expectApproxEqAbs(v.origin_x, stale_line.stops[0].x, 0.01);
 }

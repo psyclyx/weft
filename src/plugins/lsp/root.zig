@@ -75,10 +75,14 @@ const posRequest = request.posRequest;
 const base_cmds = [_]weft.CommandEntry{
     .{ .name = "hover", .call = cmdHover, .summary = "describe the symbol under the cursor" },
     .{ .name = "goto-definition", .call = cmdDefinition, .summary = "jump to the definition" },
+    .{ .name = "goto-type-definition", .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
+    .{ .name = "goto-implementation", .call = cmdImplementation, .summary = "jump to the implementation" },
     .{ .name = "references", .call = cmdReferences, .summary = "list references to the symbol" },
     .{ .name = "symbols", .call = cmdSymbols, .summary = "pick a symbol in this file" },
     .{ .name = "next-diagnostic", .call = cmdNextDiag, .summary = "go to the next diagnostic" },
     .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .summary = "go to the previous diagnostic" },
+    .{ .name = "diagnostics", .call = cmdDiagnostics, .summary = "pick a diagnostic in this file" },
+    .{ .name = "diagnostics-list", .call = cmdDiagnosticsList, .summary = "every stored diagnostic, one `path\tline\tcol\tseverity\tmessage` row each (a string result)" },
     .{ .name = "lsp-format", .call = cmdFormat, .summary = "format the buffer through the language server" },
     .{ .name = "rename", .call = cmdRename, .summary = "rename the symbol everywhere" },
     .{ .name = "signature-help", .call = cmdSignature, .summary = "show the call signature here" },
@@ -269,6 +273,12 @@ fn cmdHover() void {
 fn cmdDefinition() void {
     fire(.definition);
 }
+fn cmdTypeDefinition() void {
+    fire(.type_definition);
+}
+fn cmdImplementation() void {
+    fire(.implementation);
+}
 fn cmdReferences() void {
     fire(.references);
 }
@@ -419,6 +429,67 @@ fn gotoDiag(fwd: bool) void {
     weft.echo(line);
 }
 
+/// Pick among this document's diagnostics, in the order the server sent
+/// them; accepting one jumps there (`onPickAccept`, like a reference).
+fn cmdDiagnostics() void {
+    const s = lookupActive() orelse return weft.echo("lsp: no diagnostics");
+    if (s.diag.n == 0) return weft.echo("lsp: no diagnostics");
+    const snapshot = s.diag.snapshot orelse return staleDiagnostics(s);
+    if (!weft.docSnapshotIsCurrent(snapshot)) return staleDiagnostics(s);
+    resetPickTargets();
+    weft.pickBegin("diagnostic", pick_id_results);
+    var i: usize = 0;
+    while (i < s.diag.n) : (i += 1) {
+        const off = targetOffset(s.diag.targets[i]) orelse continue;
+        if (!addPickTarget(off)) break;
+        const label: []const u8 = switch (s.diag.sev[i]) {
+            1 => "error",
+            2 => "warning",
+            3 => "info",
+            else => "hint",
+        };
+        var buf: [512]u8 = undefined;
+        const msg = s.diag.message(i);
+        const text = std.fmt.bufPrint(&buf, "{s}: {s}", .{ label, msg[0..@min(msg.len, 400)] }) catch label;
+        weft.pickAdd(text, "");
+    }
+    weft.pickEnd();
+}
+
+var list_buf: [1 << 15]u8 = undefined;
+
+/// Every session's stored diagnostics as the command's string result, one
+/// `path\tline\tcol\tseverity\tmessage` row each (1-based line and column,
+/// as the server placed them) — what a list of problems reads when the
+/// `diagnostics` signal says they moved. Rows past the buffer are dropped
+/// whole; tabs and newlines in a message become spaces.
+fn cmdDiagnosticsList() void {
+    var w: usize = 0;
+    outer: for (sessions.items) |s| {
+        const path = if (std.mem.startsWith(u8, s.uri, "file://")) s.uri["file://".len..] else s.uri;
+        var i: usize = 0;
+        while (i < s.diag.n) : (i += 1) {
+            const label: []const u8 = switch (s.diag.sev[i]) {
+                1 => "error",
+                2 => "warning",
+                3 => "info",
+                else => "hint",
+            };
+            const row = std.fmt.bufPrint(list_buf[w..], "{s}\t{d}\t{d}\t{s}\t", .{ path, s.diag.line[i] + 1, s.diag.col[i] + 1, label }) catch break :outer;
+            const msg = s.diag.message(i);
+            if (w + row.len + msg.len + 1 > list_buf.len) break :outer;
+            w += row.len;
+            for (msg) |c| {
+                list_buf[w] = if (c == '\t' or c == '\n' or c == '\r') ' ' else c;
+                w += 1;
+            }
+            list_buf[w] = '\n';
+            w += 1;
+        }
+    }
+    weft.setResultStr(list_buf[0..w]);
+}
+
 fn staleDiagnostics(s: *Session) void {
     releaseDiagnostics(s);
     weft.decorateClear();
@@ -485,7 +556,7 @@ fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
     p.id = 0; // answered
     switch (kind) {
         .hover => presentHover(p, result),
-        .definition => presentDefinition(s, result),
+        .definition, .type_definition, .implementation => presentDefinition(s, result),
         .references => presentLocations(s, result, "reference"),
         .symbols => presentSymbols(result),
         .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
@@ -555,6 +626,8 @@ fn onDiagnostics(s: *Session, params: ?rpc.Value) void {
         const sev: u8 = if (d.object.get("severity")) |sv| (if (sv == .integer) @intCast(@max(1, @min(4, sv.integer))) else 1) else 1;
         s.diag.targets[s.diag.n] = captureTarget(off) orelse continue;
         s.diag.sev[s.diag.n] = sev;
+        s.diag.line[s.diag.n] = std.math.cast(u32, pos.line) orelse 0;
+        s.diag.col[s.diag.n] = std.math.cast(u32, pos.col) orelse 0;
         const ml = @min(msg.len, s.diag.msgs.len - mw);
         @memcpy(s.diag.msgs[mw..][0..ml], msg[0..ml]);
         s.diag.moff[s.diag.n] = mw;
@@ -564,6 +637,7 @@ fn onDiagnostics(s: *Session, params: ?rpc.Value) void {
     }
     if (s.diag.n == 0) releaseDiagnostics(s);
     paintDiagnostics(s);
+    weft.signalEmit(session_mod.diagnostics_signal);
     if (dropped) weft.echo(std.fmt.comptimePrint("lsp: >{d} diagnostics — some omitted", .{MAX_DIAG}));
 }
 

@@ -310,6 +310,9 @@ pub const Ctx = struct {
         self.scopes.append(.{ .kind = .system });
         self.scopes.append(.{ .kind = .head, .facts = .{ .pane = ctx.head.focused_pane } });
         const buf = ctx.buffers.active();
+        // `posture` is how the entry rests right now, so a provider can say
+        // "in text" (`{posture: "text"}`) rather than name the modes that
+        // happen to mean it.
         self.scopes.append(.{ .kind = .buffer, .facts = .{
             .path = buf.name,
             .name = buf.name,
@@ -317,6 +320,7 @@ pub const Ctx = struct {
             .tool = buf.tool,
             .role = buf.focusedRole(),
             .locality = localityOf(buf),
+            .posture = @tagName(buf.posture(ctx.head.semantic_focus.field != null)),
         } });
         self.scopes.append(.{ .kind = .subbuffer });
         self.scopes.append(.{ .kind = .mode, .facts = .{ .mode = ctx.head.currentMode() } });

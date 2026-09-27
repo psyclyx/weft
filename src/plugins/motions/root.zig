@@ -9,6 +9,8 @@
 
 const std = @import("std");
 const weft = @import("weft");
+/// The one word-character rule `\b` also uses.
+const regex = @import("weft_regex");
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
@@ -78,7 +80,7 @@ fn firstNonBlank() void {
 const Class = enum { space, word, punct };
 fn classOf(b: u8) Class {
     if (b == ' ' or b == '\t' or b == '\n' or b == '\r') return .space;
-    if (std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80) return .word;
+    if (regex.isWordByte(b)) return .word;
     return .punct;
 }
 /// Whitespace-only class (for WORD motions: everything non-space is one run).

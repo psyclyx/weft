@@ -191,6 +191,24 @@ pub const Disabled = struct {
     remediation: ?IntentionId = null,
 };
 
+/// How a UI may PRESENT an offer — architecture §9.1's fallback
+/// `ActionPresentation` plus the placement half of an `AffordanceContribution`
+/// (§11.3-11.4): a label, a logical group, and an ordering hint.
+///
+/// Presentation only. Nothing in this module reads it while ranking or
+/// resolving, so a provider cannot buy precedence with a label, and an offer
+/// with none is still enumerated (§11.3: "missing placement metadata never
+/// hides an action from generic discovery"). Empty/null fields mean "no
+/// opinion"; `intent.presentation` fills them from the intention table.
+pub const Affordance = struct {
+    /// Human label ("Undo", "New file"). Borrowed like every offer string.
+    label: []const u8 = "",
+    /// Logical group id a toolbar or menu clusters by ("history").
+    group: []const u8 = "",
+    /// Ordering hint within the group; lower sorts first.
+    order: ?i32 = null,
+};
+
 /// One row of a pushed table: "for this intention, in contexts matching this
 /// predicate, I offer this endpoint." Pure data — no callback, no closure.
 pub const Offer = struct {
@@ -216,6 +234,9 @@ pub const Offer = struct {
     /// into a decl_index coin-flip — so a stand-in publisher says who each row
     /// is really from, and the order stays true.
     attribution: ?[]const u8 = null,
+    /// How a UI presents this row. Carried through to `Candidate`, never
+    /// consulted by the order.
+    affordance: Affordance = .{},
 
     /// DERIVED, never pushed: conjunct count of the eligibility predicate,
     /// plus one for an endpoint-class constraint. A provider raises its rank
@@ -274,6 +295,8 @@ pub const Candidate = struct {
     /// Position in the provider's authored table.
     decl_index: u32,
     revision: u64,
+    /// The offer's presentation, borrowed from its table. Not a sort key.
+    affordance: Affordance = .{},
 };
 
 /// doc/configuration.md §7.2's total order, HIGHER wins:
@@ -740,6 +763,7 @@ pub const Catalog = struct {
                     .specificity = offer.specificity(),
                     .decl_index = @intCast(i),
                     .revision = table.revision,
+                    .affordance = offer.affordance,
                 });
             }
         }
@@ -827,6 +851,7 @@ pub const Catalog = struct {
                     .specificity = offer.specificity(),
                     .decl_index = @intCast(i),
                     .revision = table.revision,
+                    .affordance = offer.affordance,
                 } });
             }
         }

@@ -173,9 +173,7 @@ pub fn hProjSelect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const lo = @min(n.start + @as(usize, @intCast(@max(args[1], 0))), n.body);
     const hi = @min(n.start + @as(usize, @intCast(@max(args[2], 0))), n.body);
     if (lo >= hi) return;
-    editor.placeCursor(lo);
-    editor.setMark(p.gpa) catch return;
-    editor.placeCursor(hi);
+    editor.selectRange(p.gpa, lo, hi) catch return;
 }
 
 /// `wl_proj_rows(out, cap) -> i32`: what every EDITABLE row says NOW, as
@@ -284,7 +282,7 @@ fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind:
         .rerender => view.render() catch return null,
     };
     const end = editor.text().byteLen();
-    command.renderInto(gpa, doc, .plugin, p.name, &.{
+    command.renderInto(gpa, &p.activeCtx().buffers.status, doc, .plugin, p.name, &.{
         .{ .range = .{ .start = 0, .end = end }, .bytes = text },
     }) catch return null;
 

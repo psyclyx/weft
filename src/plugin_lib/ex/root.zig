@@ -296,25 +296,9 @@ fn lastLine() usize {
     return newlinesIn(0, weft.byteLen()) + 1;
 }
 
-/// Byte offset of the start of 1-based line `n` (clamped to EOF).
-fn lineStartOffset(n: usize) usize {
-    if (n <= 1) return 0;
-    var need = n - 1; // newlines to pass
-    const total = weft.byteLen();
-    var pos: usize = 0;
-    while (pos < total) {
-        const chunk = weft.slice(pos, total);
-        if (chunk.len == 0) break;
-        for (chunk, 0..) |c, k| {
-            if (c == '\n') {
-                need -= 1;
-                if (need == 0) return pos + k + 1;
-            }
-        }
-        pos += chunk.len;
-    }
-    return total;
-}
+/// Byte offset of the start of 1-based line `n`, clamped to the last line —
+/// the SDK's one "go to line N", which helix's `<n>gg` and ide's C-g use too.
+const lineStartOffset = weft.lineStart;
 fn lineEndOffset(n: usize) usize {
     return weft.lineAt(lineStartOffset(n)).end;
 }

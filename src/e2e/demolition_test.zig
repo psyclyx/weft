@@ -555,3 +555,53 @@ test "demolition: the plugin-plane read doors are ONE body reached two ways" {
         try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, null)), qjs_handler);
     }
 }
+
+// And for the pointer facts: `wl_pointer` and `qjs_pointer` are one body, so a
+// config's `mouse-1` command and a wasm plugin's read the same click.
+test "demolition: the pointer-facts door is ONE body reached two ways" {
+    const pointer_doors = h.core.wasm_host.pointer_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const HostFn = @TypeOf(pointer_doors.hPointer);
+
+    var wl_handler: ?HostFn = null;
+    for (wl_bound.imports) |entry| {
+        if (std.mem.eql(u8, entry.name, "wl_pointer")) wl_handler = entry.handler;
+    }
+    try t.expectEqual(@as(?HostFn, pointer_doors.hPointer), wl_handler);
+
+    var qjs_handler: ?HostFn = null;
+    inline for (quickjs.plugin_handlers) |entry| {
+        if (comptime std.mem.eql(u8, entry.name, "qjs_pointer")) qjs_handler = entry.handler;
+    }
+    try t.expectEqual(@as(?HostFn, quickjs.jsDoor(pointer_doors.pointerBody, null)), qjs_handler);
+}
+
+// The clipboard and history doors, likewise: one body each, the clipboard pair
+// gated on the SAME config-only grant on both planes. A gate one plane grows
+// and the other lacks makes the pointers stop matching here.
+test "demolition: the clipboard and history doors are ONE body reached two ways" {
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const clip = h.core.wasm_host.clipboard_doors;
+    const hist = h.core.wasm_host.history_doors;
+    const HostFn = @TypeOf(clip.hClipboardSet);
+    const cases = .{
+        .{ "clipboard_set", clip.hClipboardSet, quickjs.jsDoor(clip.setBody, .clipboard) },
+        .{ "clipboard_get", clip.hClipboardGet, quickjs.jsDoor(clip.getBody, .clipboard) },
+        .{ "jump_push", hist.hJumpPush, quickjs.jsDoor(hist.jumpPushBody, null) },
+        .{ "macro_recording", hist.hMacroRecording, quickjs.jsDoor(hist.macroRecordingBody, null) },
+    };
+    inline for (cases) |c| {
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ c[0])) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[1]), wl_handler);
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ c[0])) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[2]), qjs_handler);
+    }
+}

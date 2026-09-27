@@ -45,3 +45,28 @@ weft.bind("menu-nav", "PageUp", "which-key-page-up");
 weft.bind("menu", "Escape", "menu-escape");
 weft.bind("menu", "C-g", "menu-escape");
 weft.bind("menu", "F1", "which-key-now");
+
+// ── The pointer ────────────────────────────────────────────────────────
+// A click is a key (`src/core/pointer.zig` has the grammar): `mouse-1` is the
+// primary button going down, `double-`/`triple-` the second and third quick
+// press, `drag-mouse-1` motion with it held, `up-mouse-1` its release,
+// `wheel-up`/`wheel-down` one wheel step, and `C-`/`M-`/`S-` modifiers go in
+// front. These are the everyday meanings, on the global layer so every
+// grammar gets them; a config or a mode rebinds any of them like any key.
+//
+// `pointer-click` focuses the pane under the pointer first, so a click in an
+// unfocused pane lands where it points (click-through). A double or triple
+// click re-places the caret until a grammar gives it a meaning of its own; it
+// never presses a button, a tab or a status segment a second time (only a
+// gesture's first click acts).
+weft.bind("global", "mouse-1", "pointer-click");
+weft.bind("global", "double-mouse-1", "pointer-click");
+weft.bind("global", "triple-mouse-1", "pointer-click");
+// A click on a tab shows it and one on its close glyph closes it (pointer-click
+// reads the chrome under the pointer); a middle click anywhere on a tab closes
+// it. A status segment that names a command runs it on a click.
+weft.bind("global", "mouse-2", "pointer-close-tab");
+weft.bind("global", "drag-mouse-1", "pointer-drag-select");
+weft.bind("global", "S-mouse-1", "pointer-extend-selection");
+weft.bind("global", "wheel-up", "scroll-wheel-up");
+weft.bind("global", "wheel-down", "scroll-wheel-down");

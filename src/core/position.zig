@@ -39,9 +39,7 @@ pub const LiveRange = struct {
 
     pub fn resolve(self: LiveRange, document: *const Document) ?stemma.Range {
         if (self.document != document) return null;
-        const start = document.anchorOffset(self.start);
-        const end = document.anchorOffset(self.end);
-        return .{ .start = @min(start, end), .end = @max(start, end) };
+        return document.rangeOffsets(self.start, self.end);
     }
 };
 

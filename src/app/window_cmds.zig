@@ -18,9 +18,6 @@ pub const WindowCtx = struct {
     focus_dir: ?window_layout.Dir = null,
     move_dir: ?window_layout.Dir = null,
     focus_next: bool = false, // cycle focus (legacy `focus-other`)
-    click_focus: bool = false, // focus the pane at (click_x, click_y)
-    click_x: f32 = 0,
-    click_y: f32 = 0,
 };
 
 /// Which window operation a bound command requests (mapped to a WindowCtx
@@ -186,18 +183,6 @@ pub fn applyIntents(
             dirty = true;
         }
     }
-    if (win_ctx.click_focus) {
-        win_ctx.click_focus = false;
-        const focused = window_layout.headFocus(win_layout, head);
-        focused.pane().top_row = view.top_row;
-        if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) |hit| {
-            if (hit != focused) {
-                window_layout.setHeadFocus(head, hit, win_layout);
-                applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
-                dirty = true;
-            }
-        }
-    }
     if (applyPlacement(win_layout, buffers, gpa, head, keymap, policy)) dirty = true;
     // Reconcile the focused pane with the active buffer. WHICH WAY depends on
     // the viewport: an ordinary pane follows the active entry (buffer
@@ -258,8 +243,9 @@ fn applyPlacement(
     if (decision == .source) return false;
     if (decision == .none) {
         // Opened, but given no viewport: put the acting pane's own entry back
-        // in front so the mirror below does not show it anyway.
-        buffers.switchTo(gpa, focused.pane().buffer_id, head, keymap) catch {};
+        // in front so the mirror below does not show it anyway. Putting it
+        // back is not navigation: no jump.
+        core.Buffers.quietly(head, core.Buffers.switchTo, .{ buffers, gpa, focused.pane().buffer_id, head, keymap }) catch {};
         return true;
     }
     const primary = win_layout.primaryPane() orelse return false;
@@ -298,22 +284,89 @@ pub fn materializeViewports(
     head: *core.Head,
     keymap: *const core.Keymap,
     registry: *core.viewport.Registry,
+    view: *view_mod.View,
 ) bool {
     var dirty = false;
     for (registry.list.items) |*decl| {
         const edge = decl.attrs.dock orelse continue;
-        if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
-            const panel = win_layout.dock(edge, decl.extent, buffers.active_id, decl.attrs) catch continue;
-            decl.pane = panel.leaf.id;
+        if (!decl.shown) {
+            // Hidden: undock it through the ordinary close, which already
+            // knows how a dock collapses and where a head parked in it
+            // recovers to. Its entry stays open, so showing it again
+            // re-presents the same listing rather than a fresh one.
+            if (decl.pane) |id| if (win_layout.paneById(id)) |node| {
+                _ = win_layout.closeFocused(node) catch continue;
+                dirty = true;
+            };
+            decl.pane = null;
             decl.presented = false;
+            continue;
+        }
+        // A pending take, only while its entry is still open.
+        const take: ?core.Buffers.Id = if (decl.take) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
+        decl.take = null;
+        if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
+            // Dock showing what it showed last (or is being handed), never a
+            // second view of the active document when there is one.
+            const kept: ?core.Buffers.Id = if (decl.entry) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
+            const first = take orelse kept orelse buffers.active_id;
+            const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
+            decl.pane = panel.leaf.id;
+            // Something to show already: an entry kept across a hide stays
+            // what it was, rather than being re-presented over.
+            decl.presented = kept != null and take == null;
             dirty = true;
         }
-        if (decl.presented or decl.subject.len == 0) continue;
+        const node = win_layout.paneById(decl.pane.?) orelse continue;
+        if (take) |id| {
+            takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
+            decl.entry = heldRef(buffers, id);
+            decl.presented = true; // what was taken replaces what was declared
+            dirty = true;
+            continue;
+        }
+        if (decl.presented or !decl.hasPresentation()) {
+            if (decl.entry == null) decl.entry = heldRef(buffers, node.pane().buffer_id);
+            continue;
+        }
         decl.presented = true;
-        presentIn(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, decl.subject);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
+        decl.entry = heldRef(buffers, node.pane().buffer_id);
         dirty = true;
     }
     return dirty;
+}
+
+/// What a viewport remembers of the entry it shows: its generation-checked
+/// ref, so a slot reused after that entry closes is never taken for it.
+fn heldRef(buffers: *core.Buffers, id: core.Buffers.Id) ?core.Buffers.Ref {
+    return (buffers.get(id) orelse return null).ref();
+}
+
+/// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`
+/// shows `entry`, and the head's focus moves there when the pane takes focus.
+/// The pane the head leaves keeps its OWN entry — the command that made
+/// `entry` active ran in it, but the focused-pane mirror has not run yet
+/// this phase, so nothing was written over it.
+fn takeInto(
+    win_layout: *window_layout.Layout,
+    view: *view_mod.View,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: *window_layout.Node,
+    entry: core.Buffers.Id,
+) void {
+    node.pane().buffer_id = entry;
+    node.pane().top_row = 0;
+    if (!node.pane().attrs.takes_focus) return;
+    const focused = window_layout.headFocus(win_layout, head);
+    if (node != focused) {
+        focused.pane().top_row = view.top_row;
+        window_layout.setHeadFocus(head, node, win_layout);
+    }
+    applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
 }
 
 /// "Present resource R in viewport V" (§7) — an ordinary operation, not a
@@ -336,13 +389,50 @@ pub fn presentIn(
     pane: window_layout.PaneId,
     subject: []const u8,
 ) void {
+    presentBy(ctx, win_layout, buffers, gpa, head, keymap, pane, "open", subject);
+}
+
+/// `presentIn` through any presenting command, not only `open`: whatever
+/// entry `command` leaves active is what `pane` shows. It is how a plugin's
+/// own entry, which has no path to open, reaches a declared viewport
+/// (`weft.present(v, {command})`). `subject` is the command's one argument,
+/// or none when empty.
+pub fn presentBy(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    pane: window_layout.PaneId,
+    command: []const u8,
+    subject: []const u8,
+) void {
     const node = win_layout.paneById(pane) orelse return;
+    // The head goes and comes back: a presentation, not navigation, so
+    // neither switch is a jump (nor is `buffer-back`'s entry disturbed).
+    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject });
+}
+
+fn presentRoundTrip(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: anytype,
+    command: []const u8,
+    subject: []const u8,
+) void {
     const restore = buffers.active_id;
-    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = subject }}) catch return;
+    const prev = buffers.prev_id;
+    const arg = [_]core.command.Value{.{ .string = subject }};
+    _ = core.command.run(ctx.commands, ctx, command, if (subject.len > 0) &arg else &.{}) catch return;
     node.pane().buffer_id = buffers.active_id;
     node.pane().top_row = 0;
-    if (buffers.active_id != restore)
-        buffers.switchTo(gpa, restore, head, keymap) catch {};
+    if (buffers.active_id == restore) return;
+    buffers.switchTo(gpa, restore, head, keymap) catch return;
+    buffers.prev_id = prev;
 }
 
 /// Publish this head's focused viewport on the primary-focus feed (§7). The
@@ -353,6 +443,17 @@ pub fn presentIn(
 fn publishFocus(win_layout: *window_layout.Layout, head: *core.Head, focus: *core.focus_feed.Feed) void {
     const pane = window_layout.headFocus(win_layout, head).pane();
     focus.publish(.{ .viewport = pane.id, .entry = pane.buffer_id, .attrs = pane.attrs });
+    // The head's own record of its primary focus, by the SAME attribute the
+    // feed's companions filter on — so "what a toolbar describes" and "what
+    // an outline follows" cannot disagree about which pane is primary.
+    if (pane.attrs.focus_source) {
+        head.primary_focus = .{ .pane = pane.id, .entry = pane.buffer_id };
+    } else if (head.primary_focus) |*p| {
+        // Focus is on a companion, but the primary pane it left may since
+        // show something else (an open from the sidebar lands there): follow
+        // the pane, or forget it once the pane is gone.
+        if (win_layout.paneById(p.pane)) |node| p.entry = node.pane().buffer_id else head.primary_focus = null;
+    }
 }
 
 /// After a window op moved focus (or changed the focused pane's content),

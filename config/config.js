@@ -10,11 +10,8 @@
 // the kernel applies as one value, so load ORDER below is for the reader, not
 // for the machine.
 //
-// Companion: config.northstar.js is this same surface re-narrated in
-// north-star terms (manifests, systems, trust roots). It is the argument that
-// the end-state model costs the degenerate case nothing; this file is the
-// daily driver. The M3/M4 parity gate compares the two as ONE surface, so a
-// line added here must land there too.
+// Siblings: helix.js is the same editor under Helix's grammar; ide.js is the
+// conventional, mouse-and-keyboard, non-modal flow.
 //
 // The whole config plane:
 //   weft.plugin(name)              — load a reference plugin (or a .wasm/.js path)
@@ -28,10 +25,13 @@
 //                                    {mode, lang} at fire time
 //   weft.semanticAction(name)      — declare an open focused-view action command
 //   weft.viewport(name, attrs)     — compose the workspace: a pane's attributes
-//   weft.present(viewport, {subject}) — show a resource in one
+//                                    {edge, extent (a share, or {rows}), cycles,
+//                                    persistent, followFocus, takesFocus, statusLine}
+//   weft.present(viewport, {subject} | {command}) — show a resource in one, or
+//                                    what a command leaves active (a plugin's entry)
 //   weft.set(owner, key, value)    — a value binding; every key has an OWNER
 //   weft.menu(name)                — declare a prefix-menu keymap mode
-//   weft.statusSegment(text, role, prio) — a static status-line segment
+//   weft.statusSegment(text, role, prio[, cmd]) — a static status-line segment; a click runs cmd
 //   weft.run(command, ...args)     — invoke a command now, up to eight string args
 //   weft.echo(message) / weft.log(message)
 
@@ -50,6 +50,7 @@ weft.plugin("palette");     // "std" UI: command/buffer palette, status line
 weft.plugin("motions");     // word/WORD/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("surround");    // add/delete/replace a delimiter pair — operators too
 weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
 weft.plugin("ts");          // tree-sitter navigation: expand-selection, select-function
 weft.set("languages", "query-root", "assets");
@@ -81,6 +82,13 @@ weft.plugin("files");       // file browser; the target handler owns its semanti
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
+weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
+weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
+weft.plugin("contextmenu"); // mouse-3: what the thing under the pointer offers
+weft.plugin("panel");       // panel-toggle: the bottom panel (config/panel.js) on and off
+weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
+weft.plugin("terminal");    // a LINE-MODE shell in the panel (SPC o t) — no terminal emulation
+weft.plugin("breadcrumbs"); // path › symbol › symbol for the caret, on the status line
 
 // ── BREADTH, written down ────────────────────────────────────────────
 // A plugin that asks for `fs_read`/`fs_write` in describe() and gets no
@@ -145,6 +153,10 @@ weft.use("defaults");
 // declines to hold for you.
 // weft.use("sidebar");
 
+// `panel` docks a bottom panel that starts hidden: the problems list and the
+// terminal each bring themselves into it (SPC o p, SPC o t), one at a time.
+weft.use("panel");
+
 // ── Values: weft.set(owner, key, value) ──────────────────────────────
 // Every value has an OWNER — the plugin (or core namespace) that reads it.
 // There is no grab-bag namespace; an unknown owner is refused, not stored.
@@ -152,6 +164,13 @@ weft.set("lsp", "zig", "zls");            // a server per language: weft.set("ls
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
+weft.set("editor", "flash-undo", "on");   // undo/redo flash what they put back, too
+// "relative": distance from the caret, with the caret line's own number —
+// vim's `number relativenumber`. Or "absolute".
+weft.set("linenumbers", "style", "relative");
+// Where an operator-pending snipe (`d f`, `c t`, …) hands its range: vim's
+// pending operator.
+weft.set("snipe", "operator", "vim-operate");
 weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust, C-0 resets
 // Each section gives an id, title, candidate-source command, activation
 // command, and maximum count. Source commands return newline-delimited lists.
@@ -203,6 +222,10 @@ weft.set("palette", "signature", "on");     // show each row's <parameters>
 // persistence, and going back.
 
 weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
+// The pointer's secondary button opens a menu of what the thing under it
+// offers — a row, the text, a git hunk — in any mode, vim's included: the
+// menu's own keys (Up/Down/Return/Escape) are its interaction's, not a mode.
+weft.bind("global", "mouse-3", "contextmenu");
 
 // The keymap derives groups from longer chords. Give those prefixes names for
 // which-key; an unnamed prefix intentionally falls back to "+prefix".
@@ -222,7 +245,6 @@ weft.group("normal", "SPC w", "Split & focus windows");
 weft.group("normal", "SPC q", "Quit editor");
 weft.group("normal", "SPC h", "Help & permissions");
 weft.group("normal", "SPC t", "Text toggles");
-weft.group("normal-structural", "SPC v", "Structured actions");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
@@ -277,10 +299,32 @@ weft.bind("normal", ".", "repeat-change");
 // in-buffer jump: type a pattern, Return lands on the match.
 weft.bind("normal", "/", "consult-line");
 
-// `C-o` — back where you came from, vim's jump-list key. The intention first:
-// a focused view that knows its own history answers it; otherwise the generic
-// buffer-back action does.
-weft.bind("normal", "C-o", ["std.navigation.back", "navigate-back"]);
+// `f F t T` — snipe instead of vim's line-bound find: the search covers what
+// the pane SHOWS, one hit jumps, several get labels you pick with one more
+// key. `; ,` repeat it. In operator-pending mode (`d f x`, `c t )`) the chosen
+// hit becomes the operator's range, across lines — see the `snipe` values
+// above. Vim's own `find-*` commands stay registered, just unbound here.
+for (const [key, dir] of [["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
+  weft.bind("normal", key, `snipe-${dir}`);
+  weft.bind("op-pending", key, `snipe-op-${dir}`);
+}
+weft.bind("normal", ";", "snipe-repeat");
+weft.bind("normal", ",", "snipe-repeat-rev");
+
+// `C-o` / `C-i` — vim's jumplist. The intention first: a focused view that
+// knows its own history answers it; otherwise the head's jumplist does, which
+// core fills on every move between entries and vim fills on `G`, `gg`, `%`.
+// `q` in a tool is a different verb (leave it) and stays `navigate-back`.
+weft.bind("normal", "C-o", ["std.navigation.back", "jump-back"]);
+weft.bind("normal", "C-i", "jump-forward");
+weft.bind("normal", "SPC s j", "jumplist-pick");
+
+// `q<reg>` / `@<reg>` / `@@` — macros are vim's (it binds them); the recorder
+// is core, so a macro replays through every plugin a typed key reaches.
+// `"+` / `"*` — the system clipboard as a vim register. Reading it reads
+// whatever you last copied anywhere, so it is a grant, and only config can
+// give it.
+weft.grant("vim", "clipboard");
 
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");
@@ -357,6 +401,9 @@ weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o C", "console-send");
 weft.bind("normal", "SPC o a", "llm-ask-line"); // one-shot: each ask is its own instance
 weft.bind("normal", "SPC o h", "http-get");     // fetch a URL into its own *http* buffer
+weft.bind("normal", "SPC o p", "problems");     // the diagnostics list, in the bottom panel
+weft.bind("normal", "SPC o t", "terminal");     // the shell, in the bottom panel
+weft.bind("normal", "SPC o P", "panel-toggle"); // hide or show whichever the panel holds
 
 // SPC a — coding agents (ACP). Each `agent-start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo
@@ -473,57 +520,12 @@ weft.bind("normal", "SPC t w", "trim-trailing-buffer");
 weft.bind("normal-source", "SPC t c", "comment-line");
 
 // ── SPC v — structured views ─────────────────────────────────────────
-// Only generic structural scenes get this group. Dedicated tool modes (git,
-// output, picker) keep their own smaller maps, so these actions do not appear
-// in source files or generated listings. A scene may still decline a relevant
-// intention it does not offer. Dialog inputs belong to the active interaction.
-//
-// Both groups are eval-time code building manifest data: adding another view
-// action is one row, and a plugin never needs to know which tool or config
-// supplied the binding.
-function bindActionGroup(mode, prefix, bindings) {
-  for (var i = 0; i < bindings.length; i++) {
-    var binding = bindings[i];
-    // Semantic action names are an open plugin/view protocol; declaring the
-    // command here keeps the table data-shaped.
-    weft.semanticAction(binding[1]);
-    weft.bind(mode, prefix + " " + binding[0], binding[1]);
-  }
-}
-
-// Where a standard intention already covers the operation, the key binds the
-// INTENTION: the focused view's own vocabulary publishes the offer, so no
-// trampoline command has to exist for the name at all.
-function bindIntentionGroup(mode, prefix, bindings) {
-  for (var i = 0; i < bindings.length; i++) {
-    weft.bind(mode, prefix + " " + bindings[i][0], [bindings[i][1]]);
-  }
-}
-
-weft.bind("normal-structural", "SPC v j", "cursor-down");
-weft.bind("normal-structural", "SPC v k", "cursor-up");
-bindIntentionGroup("normal-structural", "SPC v", [
-  ["o", "std.target.activate"],
-  ["-", "std.hierarchy.step-out"],
-  ["TAB", "std.hierarchy.toggle-expanded"],
-  ["y", "std.transfer.yank"],
-  ["x", "std.transfer.delete-to-register"],
-  ["p", "std.transfer.paste"],
-]);
-// The residue: operations no standard intention names yet, still reached by
-// their open action name. This list shrinks as the vocabulary grows.
-bindActionGroup("normal-structural", "SPC v", [
-  ["c", "workspace.set-working-target"],
-  ["e", "field.edit"],
-  ["d", "selection.delete"],
-  ["m", "fs.permissions.edit"],
-  ["n", "fs.entry.create-file"],
-  ["N", "fs.entry.create-directory"],
-  ["P", "selection.paste-before"],
-  ["r", "view.refresh"],
-  ["R", "view.revert"],
-  ["a", "view.apply"],
-]);
+// The structured-view group lives in a fragment, config/semantic.js, because
+// helix.js binds the same group: one table, every grammar's structural layer
+// (the mode vim declares `normal` binds through in a listing). Its keys are
+// intentions where a standard word names the operation and open action names
+// for the residue — read the fragment for both tables.
+weft.use("semantic");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

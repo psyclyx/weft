@@ -7,10 +7,166 @@
 //! the reader hits EOF, then JOINS it before freeing — never a use-after-free.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
 const task = @import("task.zig");
+
+/// The terminal-control filter's state between chunks: where it is, and how
+/// long the escape sequence in progress has run.
+pub const Controls = struct {
+    mode: Mode = .text,
+    /// Bytes of the escape sequence in progress (0 outside one).
+    len: u16 = 0,
+
+    pub const text: Controls = .{};
+
+    /// `cr`: a carriage return was the last byte, and what follows decides
+    /// what it meant.
+    pub const Mode = enum { text, cr, escape, csi, osc, osc_escape };
+
+    fn inSequence(self: Controls) bool {
+        return switch (self.mode) {
+            .escape, .csi, .osc, .osc_escape => true,
+            .text, .cr => false,
+        };
+    }
+};
+
+/// The longest escape sequence the filter swallows. Real ones are a few
+/// bytes (a window title, a hyperlink: tens); one still open past this is a
+/// stray ESC or a program that died mid-sequence, and swallowing on would
+/// eat every later byte of output. Past it the filter gives up on the
+/// sequence and shows text again.
+pub const max_sequence = 256;
+
+/// Append `in` to `out` without its terminal controls. The buffer a session
+/// streams into is plain text with no terminal behind it, so an interactive
+/// shell's colors, cursor moves and window titles would land as literal
+/// bytes: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL | ESC \`) sequences,
+/// other two-byte escapes and bells are dropped. Newlines, tabs and printable
+/// text pass. A carriage return before a newline is dropped; one before
+/// anything else returns to the start of the line, so what follows replaces
+/// the line so far instead of running on after it — zsh's end-of-output mark
+/// (`%`, a row of blanks, `\r \r`) then leaves nothing in front of the
+/// prompt. Only the part of the line still in `out` can be replaced: what
+/// was delivered already stays. Returns the state to resume from, since a
+/// sequence may straddle two reads.
+///
+/// A sequence is BOUNDED, so a malformed one cannot hide the output after
+/// it: a newline ends any sequence in progress (no control sequence spans
+/// lines, and the newline itself is kept), and one still open past
+/// `max_sequence` bytes is abandoned there.
+pub fn stripControls(gpa: Allocator, from: Controls, in: []const u8, out: *std.ArrayList(u8)) !Controls {
+    var state = from;
+    for (in) |b| {
+        if (state.mode == .cr) {
+            if (b == '\n' or b == '\r') {
+                if (b == '\n') try out.append(gpa, b);
+                state.mode = if (b == '\n') .text else .cr;
+                continue;
+            }
+            out.items.len = if (std.mem.lastIndexOfScalar(u8, out.items, '\n')) |nl| nl + 1 else 0;
+            state.mode = .text;
+        }
+        if (state.inSequence()) {
+            if (b == '\n') {
+                state = .text;
+                try out.append(gpa, b);
+                continue;
+            }
+            state.len += 1;
+            if (state.len > max_sequence) state = .text; // runaway: this byte is text again
+        }
+        switch (state.mode) {
+            .text => switch (b) {
+                0x1b => state = .{ .mode = .escape },
+                '\r' => state.mode = .cr,
+                0x07, 0x08 => {},
+                else => try out.append(gpa, b),
+            },
+            .cr => unreachable,
+            .escape => switch (b) {
+                '[' => state.mode = .csi,
+                ']' => state.mode = .osc,
+                else => state = .text, // a two-byte escape: drop both
+            },
+            .csi => if (b >= 0x40 and b <= 0x7e) {
+                state = .text;
+            },
+            .osc => switch (b) {
+                0x07 => state = .text,
+                0x1b => state.mode = .osc_escape,
+                else => {},
+            },
+            .osc_escape => if (b == '\\') {
+                state = .text;
+            } else {
+                state.mode = .osc;
+            },
+        }
+    }
+    return state;
+}
+
+test "repl_session: terminal controls are stripped, even split across reads" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var st = try stripControls(gpa, .text, "\x1b[1;32mgreen\x1b[0m\r\n\x1b]0;title\x07$ ", &out);
+    try std.testing.expectEqualStrings("green\n$ ", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\x1b[3", &out);
+    try std.testing.expectEqual(Controls.Mode.csi, st.mode);
+    st = try stripControls(gpa, st, "1mb\x1b]2;t\x1b", &out);
+    st = try stripControls(gpa, st, "\\c\x1b=d", &out);
+    try std.testing.expectEqualStrings("abcd", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+}
+
+test "repl_session: a lone carriage return starts the line over" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // zsh's PROMPT_SP: the mark, blanks to the margin, then `\r \r` — split
+    // across two reads — and the prompt.
+    var st = try stripControls(gpa, .text, "done\n\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m     \r \r", &out);
+    try std.testing.expectEqual(Controls.Mode.cr, st.mode);
+    st = try stripControls(gpa, st, "\x1b]2;t\x07zsh> ", &out);
+    try std.testing.expectEqualStrings("done\nzsh> ", out.items);
+    // A CRLF is a newline, and a progress line keeps only its last state.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\r\nb 10%\rb 99%\r", &out);
+    st = try stripControls(gpa, st, "\nc", &out);
+    try std.testing.expectEqualStrings("a\nb 99%\nc", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+}
+
+test "repl_session: a malformed sequence cannot swallow the output after it" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // An OSC that never terminates (a program killed mid-title): the next
+    // line still shows, across reads.
+    var st = try stripControls(gpa, .text, "one\n\x1b]0;half a tit", &out);
+    st = try stripControls(gpa, st, "le\ntwo\n", &out);
+    try std.testing.expectEqualStrings("one\n\ntwo\n", out.items);
+    try std.testing.expectEqual(Controls.text, st);
+    // A CSI with no final byte does not eat the newline that follows it.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "a\x1b[12;\nb\n", &out);
+    try std.testing.expectEqualStrings("a\nb\n", out.items);
+    // And one with no newline in sight is abandoned past `max_sequence`.
+    out.clearRetainingCapacity();
+    st = try stripControls(gpa, st, "\x1b]", &out);
+    const junk: [max_sequence]u8 = @splat('x');
+    st = try stripControls(gpa, st, &junk, &out);
+    st = try stripControls(gpa, st, "visible", &out);
+    try std.testing.expect(std.mem.endsWith(u8, out.items, "visible"));
+    try std.testing.expectEqual(Controls.text, st);
+}
 
 pub const Session = struct {
     gpa: Allocator,
@@ -29,7 +185,12 @@ pub const Session = struct {
     child: std.process.Child,
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
+    /// Where the terminal-control filter stands between two chunks: an
+    /// escape sequence may be split across reads.
+    controls: Controls = .text,
     reader: task.Handle(void),
+    /// The child's exit code once `exitCode` has seen it end.
+    exit_code: ?u8 = null,
 
     /// Spawn `argv` as a persistent child with piped stdio and start its reader.
     pub fn start(
@@ -97,7 +258,7 @@ pub const Session = struct {
                 const chunk = r.buffered();
                 if (chunk.len > 0) {
                     s.out_mutex.lock();
-                    s.out_buf.appendSlice(s.gpa, chunk) catch {};
+                    s.controls = stripControls(s.gpa, s.controls, chunk, &s.out_buf) catch s.controls;
                     s.out_mutex.unlock();
                     r.toss(chunk.len);
                 }
@@ -119,12 +280,41 @@ pub const Session = struct {
         const ed = b.textEditor() orelse return false;
         const doc = &ed.doc;
         const end = ed.text().byteLen();
-        command.renderInto(s.gpa, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {
+        command.renderInto(s.gpa, &s.ctx.buffers.status, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {
             s.out_buf.clearRetainingCapacity();
             return false;
         };
         s.out_buf.clearRetainingCapacity();
         return true;
+    }
+
+    /// Frame thread: how the child ended — its exit code, or 128 + the signal
+    /// that killed it — or null while it runs. Also null until everything it
+    /// printed has been delivered (the reader saw end-of-stream and the
+    /// accumulator is drained), so whoever reports the exit reports it after
+    /// the last output, never in the middle of it. The child is only PEEKED
+    /// at (`WNOWAIT`): `deinit` still reaps it, without blocking.
+    pub fn exitCode(s: *Session) ?u8 {
+        if (s.exit_code) |c| return c;
+        if (builtin.os.tag != .linux) return null;
+        if (!s.reader.residentExited()) return null;
+        {
+            s.out_mutex.lock();
+            defer s.out_mutex.unlock();
+            if (s.out_buf.items.len > 0) return null;
+        }
+        const pid = s.child.id orelse return null;
+        const linux = std.os.linux;
+        var info = std.mem.zeroes(linux.siginfo_t);
+        const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
+        if (linux.errno(rc) != .SUCCESS or info.fields.common.first.piduid.pid == 0) return null;
+        const status: u8 = @truncate(@as(u32, @bitCast(info.fields.common.second.sigchld.status)));
+        s.exit_code = switch (@as(linux.CLD, @enumFromInt(info.code))) {
+            .EXITED => status,
+            .KILLED, .DUMPED => 128 +| status,
+            else => return null,
+        };
+        return s.exit_code;
     }
 
     /// Frame thread: write `line` (a newline is appended if absent) to stdin.

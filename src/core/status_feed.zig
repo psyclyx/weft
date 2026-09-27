@@ -1,9 +1,15 @@
 //! A GENERIC plugin-published status chip for the status line — the persistent
 //! sibling of `echo`. The core knows nothing of what it says: a task's progress,
 //! a repl's state, an agent's "waiting". Any plugin publishes via `weft.status`.
-//! A process-wide slot (not a `Context`/`FrameCtx` field) so the membrane can
-//! set it without threading a new field through every Context construction site;
-//! the frame builder reads it into the `Hud` each frame. Empty = no chip.
+//! One `Feed` per system, held by its `Buffers` (which every producer, a
+//! background job included, already reaches); the frame builder reads it into
+//! the `Hud` each frame. Empty = no chip.
+//!
+//! It was a process-wide slot once, to spare threading a field through every
+//! Context construction site. A second system in the same process (a test
+//! binary booting one editor after another, a collab host) then showed the
+//! first one's chip: a debug session that ended in one editor said "done" in
+//! the status line of the next editor to start.
 //!
 //! W2a-2 note (doc/cwa-prior-docs-audit.md §5): this is a plugin→user BROADCAST (a
 //! system-scoped event — one plugin publishing "building…" means it for
@@ -17,16 +23,30 @@
 
 const std = @import("std");
 
-var buf: [160]u8 = undefined;
-var len: usize = 0;
+pub const Feed = struct {
+    buf: [160]u8 = undefined,
+    len: usize = 0,
 
-/// Set the status chip text (truncated to the slot). Empty clears it.
-pub fn set(text: []const u8) void {
-    len = @min(text.len, buf.len);
-    @memcpy(buf[0..len], text[0..len]);
-}
+    /// Set the status chip text (truncated to the slot). Empty clears it.
+    pub fn set(self: *Feed, text: []const u8) void {
+        self.len = @min(text.len, self.buf.len);
+        @memcpy(self.buf[0..self.len], text[0..self.len]);
+    }
 
-/// The current chip, or null when empty.
-pub fn get() ?[]const u8 {
-    return if (len == 0) null else buf[0..len];
+    /// The current chip, or null when empty.
+    pub fn get(self: *const Feed) ?[]const u8 {
+        return if (self.len == 0) null else self.buf[0..self.len];
+    }
+};
+
+test "two feeds do not share a chip" {
+    var a: Feed = .{};
+    var b: Feed = .{};
+    a.set("○ *debug* · done");
+    try std.testing.expectEqualStrings("○ *debug* · done", a.get().?);
+    try std.testing.expect(b.get() == null);
+    b.set("x");
+    a.set("");
+    try std.testing.expect(a.get() == null);
+    try std.testing.expectEqualStrings("x", b.get().?);
 }

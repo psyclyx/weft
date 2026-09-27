@@ -7,6 +7,7 @@ const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const Sym = @import("../syntax.zig").Syntax.Sym;
 
 /// The editor of the entry this call is about — the active one, or the entry a
 /// background delivery captured (`command.Context.entry`).
@@ -66,6 +67,44 @@ pub fn hNodeEnclosing(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
         }
     }
     results[0] = -1;
+}
+
+/// The active entry's OUTLINE: the symbols its grammar's outline query
+/// (`outline.scm`, configured with the grammar) names — each capture's name is
+/// the symbol's name, its span the whole item it names. Stashed like a
+/// query's captures (read back via `wl_query_capture`), in document order;
+/// returns the count, or -1 without a grammar. Nested items come out as
+/// nested spans, so "what encloses this offset" is a scan over them. Core
+/// knows no language here: which nodes are symbols is the query's business.
+pub fn hOutline(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.queryCapsClear();
+    results[0] = -1;
+    const resolve = p.syntax_of orelse return;
+    const buffer = p.activeCtx().buffer();
+    const syn = resolve(buffer) orelse return;
+    const ed = buffer.textEditor() orelse return;
+    // Bring the tree up to the document first: a symbol list read between
+    // an edit and the next frame's reparse would otherwise describe the text
+    // before the edit.
+    _ = syn.sync(p.gpa, &ed.doc) catch {};
+    var syms: std.ArrayList(Sym) = .empty;
+    defer syms.deinit(p.gpa);
+    syn.collectSymbols(p.gpa, &ed.doc, &syms) catch {
+        for (syms.items) |s| p.gpa.free(s.name);
+        return;
+    };
+    std.mem.sort(Sym, syms.items, {}, struct {
+        fn before(_: void, a: Sym, b: Sym) bool {
+            return a.start < b.start or (a.start == b.start and a.end > b.end);
+        }
+    }.before);
+    for (syms.items) |s| p.query_caps.append(p.gpa, .{ .name = s.name, .start = s.start, .end = s.end }) catch {
+        p.gpa.free(s.name);
+    };
+    results[0] = @intCast(p.query_caps.items.len);
 }
 
 /// Run a tree-sitter query (`scm`) over `[start, end)`; stash its captures on

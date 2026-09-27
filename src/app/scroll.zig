@@ -23,6 +23,11 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .{ "scroll-page-down", "Scroll down a page (moves the cursor).", scrollPageDown },
         .{ "scroll-page-up", "Scroll up a page (moves the cursor).", scrollPageUp },
         .{ "center-line", "Center the current line in the viewport.", centerLine },
+        .{ "scroll-line-to-top", "Scroll the current line to the top of the viewport.", scrollLineToTop },
+        .{ "scroll-line-to-bottom", "Scroll the current line to the bottom of the viewport.", scrollLineToBottom },
+        .{ "scroll-goto-view-top", "Move the cursor to the viewport's first line.", scrollGotoViewTop },
+        .{ "scroll-goto-view-middle", "Move the cursor to the viewport's middle line.", scrollGotoViewMiddle },
+        .{ "scroll-goto-view-bottom", "Move the cursor to the viewport's last line.", scrollGotoViewBottom },
     }) |spec| {
         _ = try commands.bind(gpa, spec[0], .{
             .name = spec[0],
@@ -114,5 +119,56 @@ pub fn centerLine(ctx: *core.command.Context, data: ?*anyopaque, _: []const core
     const ed = ctx.buffers.active().textEditor() orelse return .nil;
     const cur_row = ed.text().offsetToPoint(ed.cursorOffset()).row;
     sc.view.top_row = cur_row -| (viewportRows(sc) / 2);
+    return .nil;
+}
+
+/// Scroll so the cursor's line is the viewport's first row (vim `zt`).
+pub fn scrollLineToTop(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
+    const sc = scrollOf(data);
+    const ed = ctx.buffers.active().textEditor() orelse return .nil;
+    sc.view.top_row = ed.text().offsetToPoint(ed.cursorOffset()).row;
+    return .nil;
+}
+
+/// Scroll so the cursor's line is the viewport's last row (vim `zb`).
+pub fn scrollLineToBottom(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
+    const sc = scrollOf(data);
+    const ed = ctx.buffers.active().textEditor() orelse return .nil;
+    const cur_row = ed.text().offsetToPoint(ed.cursorOffset()).row;
+    sc.view.top_row = cur_row -| (viewportRows(sc) -| 1);
+    return .nil;
+}
+
+/// Where in the viewport `scrollGotoView` lands: its first, middle or last row.
+const ViewRow = enum { top, middle, bottom };
+
+/// Move the cursor to a row of what the viewport shows, without scrolling
+/// (helix `gt`/`gc`/`gb`, vim `H`/`M`/`L`). Collapses the selection, like
+/// every other scroll that moves the cursor.
+fn scrollGotoView(ctx: *core.command.Context, sc: *ScrollCtx, where: ViewRow) void {
+    const ed = ctx.buffers.active().textEditor() orelse return;
+    const rope = ed.text();
+    const last = rope.lineCount() -| 1;
+    const rows = @max(viewportRows(sc), 1);
+    const bottom = @min(sc.view.top_row + rows - 1, last);
+    const row = switch (where) {
+        .top => @min(sc.view.top_row, last),
+        .middle => @min(sc.view.top_row, last) + (bottom -| sc.view.top_row) / 2,
+        .bottom => bottom,
+    };
+    ed.clearSelection();
+    ed.placeCursor(rope.lineRange(row).start);
+}
+
+pub fn scrollGotoViewTop(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
+    scrollGotoView(ctx, scrollOf(data), .top);
+    return .nil;
+}
+pub fn scrollGotoViewMiddle(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
+    scrollGotoView(ctx, scrollOf(data), .middle);
+    return .nil;
+}
+pub fn scrollGotoViewBottom(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
+    scrollGotoView(ctx, scrollOf(data), .bottom);
     return .nil;
 }

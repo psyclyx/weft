@@ -16,6 +16,8 @@ const providers = @import("providers.zig");
 const window_cmds = @import("window_cmds.zig");
 const session_mod = @import("session.zig");
 const dispatch = @import("dispatch.zig");
+const pointer_mod = @import("pointer.zig");
+const platform = @import("weft_platform");
 
 pub const Application = struct {
     session: *session_mod.Session,
@@ -28,11 +30,17 @@ pub const Application = struct {
     flash_gen: u64 = 0,
     flash_start_ns: u64 = 0,
     flash_was_active: bool = false,
+    /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
+    /// whenever a new flash starts.
+    flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
 
     next_backing_poll_ns: u64 = 0,
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
     last_activate_len: usize = 0,
     last_active: core.Buffers.Id,
+    /// What the primary context offered when listeners were last told
+    /// (`notifyOffersChanged`); null before the first delivery.
+    offers_seen: ?u64 = null,
     which_key_delay_ns: u64,
     lifecycle: lifecycle_mod.Lifecycle,
 
@@ -68,6 +76,9 @@ pub const Application = struct {
         view: *view_mod.View,
         which_key_delay_ns: u64 = 200 * std.time.ns_per_ms,
         flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
+        /// The `weft.set` store the frame reads live (flash timing). The
+        /// harness passes its own; null means the system's.
+        config: ?*const core.kv.Store = null,
         blink_period_ns: u64 = 530 * std.time.ns_per_ms,
         before_async: Hook = .{},
         services: Hook = .{},
@@ -84,6 +95,7 @@ pub const Application = struct {
             .lifecycle = .{ .blink_period_ns = args.blink_period_ns },
             .before_async = args.before_async,
             .services = args.services,
+            .flash_duration_ns = args.flash_duration_ns,
         };
         self.driver = .{
             .ctx = .{
@@ -111,13 +123,25 @@ pub const Application = struct {
                 .flash_gen = &self.flash_gen,
                 .flash_start_ns = &self.flash_start_ns,
                 .flash_was_active = &self.flash_was_active,
-                .flash_duration_ns = args.flash_duration_ns,
+                .flash_duration_ns = &self.flash_duration_ns,
+                .config = args.config orelse &args.session.system.config_kv,
+                .cmd_ctx = &args.session.cmd_ctx,
             },
             .attach_deps = args.attach_deps,
             .window_ctx = args.window_ctx,
             .layout = args.layout,
             .view = args.view,
         };
+        // The pointer commands' layout door reads through the driver, so a
+        // `bindTarget` swap is seen by the next click without re-installing.
+        args.session.cmd_ctx.panes = pointer_mod.panesDoor(&self.driver);
+    }
+
+    /// Inject one pointer event, its position in framebuffer pixels, through
+    /// the same dispatch door keys use (`app/pointer.zig`). The platform
+    /// scales from its surface coordinates; the head brackets identity.
+    pub fn pointer(self: *Application, ev: platform.PointerEvent) !void {
+        if (try pointer_mod.handle(&self.driver, &self.session.cmd_ctx, ev)) self.lifecycle.noteInput();
     }
 
     /// Inject one canonical key event — the physical keyspec plus whatever
@@ -128,8 +152,8 @@ pub const Application = struct {
         self.lifecycle.noteInput();
     }
 
-    /// Record input already translated by a platform adapter (pointer input or
-    /// a platform head which bracketed dispatch under its own identity).
+    /// Record input already translated by a platform adapter (a platform
+    /// head which bracketed dispatch under its own identity).
     pub fn noteInput(self: *Application) void {
         self.lifecycle.noteInput();
     }
@@ -196,7 +220,42 @@ pub const Application = struct {
     }
 
     pub fn applyWindowIntents(self: *Application) bool {
-        return self.driver.applyWindowIntents(&self.session.cmd_ctx);
+        var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
+        if (self.notifyOffersChanged()) damaged = true;
+        // Named signals plugins raised this wake (`wl_signal_emit`), heard at
+        // the same boundary and for the same reason: never inside the
+        // dispatch or poll that raised them.
+        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items)) damaged = true;
+        return damaged;
+    }
+
+    /// The offers-changed event (doc/configs.md §3.5.3): tell listening
+    /// plugins that what the head's PRIMARY context offers moved, so chrome (a
+    /// toolbar) redraws without polling.
+    ///
+    /// Here, after the layout phase, because that is where primary focus is
+    /// recorded — so a focus move, a mode change, an entry switch, a provider
+    /// registration and an availability flip made anywhere in this wake are
+    /// all visible, and are delivered as ONE event. It runs at the frame
+    /// boundary, never inside a dispatch, so a listener re-entering the offer
+    /// doors cannot recurse into the dispatch that caused the change. The
+    /// comparison is over the offers' content (`Plane.signatureAt`), so a
+    /// frame where nothing a toolbar shows moved fires nothing.
+    fn notifyOffersChanged(self: *Application) bool {
+        const plugins = self.driver.ctx.plugins.items;
+        for (plugins) |pl| {
+            if (core.wasm_host.hearsOffers(pl)) break;
+        } else return false;
+        const ctx = &self.session.cmd_ctx;
+        const plane = ctx.intent orelse return false;
+        const signature = plane.signatureAt(ctx, .primary);
+        if (self.offers_seen) |seen| if (seen == signature) return false;
+        self.offers_seen = signature;
+        var ran = false;
+        for (plugins) |pl| {
+            if (core.wasm_host.notifyOffersChanged(pl)) ran = true;
+        }
+        return ran;
     }
 
     pub fn observe(self: *Application, active: frame.Driver.Prepared) bool {

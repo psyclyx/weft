@@ -12,8 +12,8 @@
 //! completes: `System.create` heap-pins the bundle (`*System`, never
 //! relocated), so `cmd_ctx`'s system-scoped pointers can be REPOINTED in place
 //! by `core.System.Host.swap` instead of dangling on a move. `host` hosts
-//! every system this process knows about (today: "editor", and — if
-//! `config/agent-ux.js` is present — "agent-ux"); `system` is a convenience
+//! every system this process knows about (the desktop app hosts only
+//! "editor"; tests host a second); `system` is a convenience
 //! alias for whichever one `cmd_ctx` currently targets, kept in sync by
 //! `rebindSystem` below. Reaching a bundle field is mechanical:
 //! `session.buffers` (old) → `session.system.buffers` (now) — Zig has no
@@ -1079,9 +1079,8 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     defer sess.deinit(gpa);
     const editor_sys = sess.system;
 
-    // A second, minimal hosted system — exactly what `main.zig` hosts from
-    // `config/agent-ux.js`, built directly here so this test needs no file
-    // I/O.
+    // A second, minimal hosted system, built directly here so this test
+    // needs no file I/O.
     const agent_sys = try core.System.create(gpa, pool, "agent-ux", "user");
     try agent_sys.keymap.bind(gpa, "chat", "q", "agent-ux-quit-noop", core.Keymap.prio_plugin, "test");
     try sess.host.hostSystem(agent_sys);

@@ -8,7 +8,8 @@
 //! `SPC f f` uses), not modes: `C-x` holds pending, which-key shows its
 //! completions, `C-x C-f` completes. The editor owns only intra-buffer
 //! motion/kill/yank here; the C-x/C-c tree that reaches other plugins
-//! (find-file, git, files) is config data (emacs.js).
+//! (find-file, git, files) is the loading config's to bind — none of the
+//! configs shipped in `config/` loads this plugin today.
 //! Delete this plugin and weft is still modeless — `default` is the floor.
 
 const std = @import("std");
@@ -138,6 +139,9 @@ fn initExtra() void {
     // why this needs no opt-out.
     weft.setFallback("emacs-structural", "emacs");
     weft.setFallback("emacs-source", "emacs");
+    // A document's code chords layer over `emacs` by declaration. The
+    // structural layer needs none: emacs RESTS in `emacs-structural` there.
+    weft.bindingVariant(.source, "emacs", "emacs-source");
     weft.restingPosture(.text, "emacs");
     weft.restingPosture(.structural, "emacs-structural");
     // The break-out capture can never take away — retained in both resting
@@ -147,7 +151,7 @@ fn initExtra() void {
 
     // Intra-buffer keys. Movement, kill/yank — the everyday editing chords. The
     // C-x/C-c prefix TREE (find-file, save, buffers, windows, git, files) is
-    // config data (emacs.js) since it reaches other plugins; these are the
+    // the loading config's data since it reaches other plugins; these are the
     // editor's own. C-space (set-mark), C-g (keyboard-quit → clear-selection),
     // C-s (save), Backspace, and the arrows come from the `default` fallback —
     // so std.persistence.save (emacs's own convention is C-x C-s) and Return's

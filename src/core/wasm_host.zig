@@ -48,10 +48,6 @@ pub fn hostEnviron() @import("std").process.Environ {
 }
 pub const resolvePeerWp = plugin.resolvePeerWp;
 
-const layers = @import("wasm_host/layers.zig");
-pub const Flash = layers.Flash;
-pub const flashState = layers.flashState;
-
 const fs = @import("wasm_host/fs.zig");
 pub const PeerFsBridge = fs.PeerFsBridge;
 pub const setPeerFsBridge = fs.setPeerFsBridge;
@@ -60,6 +56,11 @@ pub const deliverToBuffer = fs.deliverToBuffer;
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
+pub const deliverSignals = activation.deliverSignals;
+
+const intent_doors = @import("wasm_host/intent.zig");
+pub const notifyOffersChanged = intent_doors.notifyOffersChanged;
+pub const hearsOffers = intent_doors.hearsOffers;
 
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
 /// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
@@ -97,6 +98,31 @@ pub const edit_doors = struct {
     pub const jumpBody = edit.jumpBody;
 };
 
+/// The pointer-facts door, whose one body both membranes run. Re-exported
+/// for the same function-pointer proof as `edit_doors`.
+const pointer = @import("wasm_host/pointer.zig");
+pub const pointer_doors = struct {
+    pub const pointerBody = pointer.pointerBody;
+    pub const hPointer = pointer.hPointer;
+};
+
+/// The clipboard and history doors, whose one body each both membranes run.
+/// Re-exported for the same function-pointer proof.
+const clipboard = @import("wasm_host/clipboard.zig");
+pub const clipboard_doors = struct {
+    pub const setBody = clipboard.setBody;
+    pub const getBody = clipboard.getBody;
+    pub const hClipboardSet = clipboard.hClipboardSet;
+    pub const hClipboardGet = clipboard.hClipboardGet;
+};
+const history = @import("wasm_host/history.zig");
+pub const history_doors = struct {
+    pub const jumpPushBody = history.jumpPushBody;
+    pub const macroRecordingBody = history.macroRecordingBody;
+    pub const hJumpPush = history.hJumpPush;
+    pub const hMacroRecording = history.hMacroRecording;
+};
+
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
 
@@ -117,8 +143,13 @@ pub const initSemanticRelationBridge = semantic_relation.initBridge;
 /// `defineFn` per entry, tagged with the plugin so the callback recovers its
 /// state. The contract table is the only place an import's name/arity/
 /// handler are declared; nothing here hand-lists them anymore.
+///
+/// This is also where the render-phase door policy lives: every door but the
+/// ones `contract.render_safe` names is bound through `plugin.answerGate`, so
+/// a guest answering a provider round cannot act through any of them.
 pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
-    for (contract.imports) |entry| {
-        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, entry.handler, p);
+    inline for (contract.imports) |entry| {
+        const handler = comptime if (contract.renderSafe(entry.name)) entry.handler else plugin.answerGate(entry.handler, entry.name);
+        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, handler, p);
     }
 }

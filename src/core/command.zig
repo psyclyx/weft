@@ -161,6 +161,9 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The shell's pane operations for pointer commands (focus and scroll
+    /// the pane under the pointer). `null` in embeddings without panes.
+    panes: ?@import("pointer.zig").Panes = null,
     /// The system's declared viewports (`weft.viewport`/`weft.present`).
     /// `null` in embeddings with no workspace composition; a viewport
     /// declaration is then reported as dropped rather than silently staged
@@ -199,9 +202,10 @@ pub const Context = struct {
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
         const mode = self.head.currentMode();
-        if (std.mem.eql(u8, mode, "normal") and self.head.semantic_focus.path() != null)
-            return "normal-structural";
-        return self.buffers.active().bindingMode(mode);
+        if (self.head.semantic_focus.path() != null) {
+            if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
+        }
+        return self.buffers.active().bindingMode(self.keymap, mode);
     }
 
     /// WHERE this dispatch's effects run (`doc/place.md`).
@@ -452,6 +456,34 @@ pub const Context = struct {
         return self.applyEdit(r, bytes, self.user_initiated);
     }
 
+    /// INTERACTIVE edit at several places at once — one per selection. The
+    /// same door as `edit` (read-only and doc-region gates, then the grade
+    /// gate), asked of EVERY range before any lands: a refusal anywhere
+    /// refuses the whole edit, so N carets never half-type. The ranges must be
+    /// ascending and disjoint (`Editor.editRanges`), and land as ONE commit —
+    /// one undo unit. One range is exactly `edit`.
+    pub fn editEach(self: *Context, ranges: []const Document.Range, bytes: []const u8) EditError!void {
+        if (ranges.len == 1) return self.edit(ranges[0], bytes);
+        if (ranges.len == 0) return;
+        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        for (ranges) |r| {
+            if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
+            switch (self.checkDocRegion(r.start, r.end)) {
+                .ok => {},
+                .out_of_limit => return error.OutOfLimit,
+                .collapsed => return error.Collapsed,
+            }
+        }
+        const items = try self.gpa.alloc(Document.Replacement, ranges.len);
+        defer self.gpa.free(items);
+        for (ranges, items) |r, *it| it.* = .{ .range = r, .bytes = bytes };
+        const ed = try self.textEditor();
+        const doc = &ed.doc;
+        if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
+        if (self.joinsUserUndo(self.user_initiated)) return ed.applyUserEdits(self.gpa, items);
+        try doc.peerReplaceAll(self.gpa, try self.principal.peerOn(doc), items);
+    }
+
     /// The UNDO door: this principal's authority over an inverse edit, as the
     /// gate `undo.UndoLog` must clear at its apply site. Undo re-applies text,
     /// so it asks exactly what `edit` asks — the grade gate, then
@@ -538,9 +570,7 @@ pub const Context = struct {
         const ed = try self.textEditor();
         const doc = &ed.doc;
         if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
-        const joins_user_undo = self.principal.role == .user or
-            (join_user and self.principal.role == .plugin);
-        if (joins_user_undo) {
+        if (self.joinsUserUndo(join_user)) {
             try ed.applyUserEdit(self.gpa, r, bytes);
             return;
         }
@@ -550,6 +580,14 @@ pub const Context = struct {
         if (!r.isEmpty()) try doc.peerDelete(self.gpa, pid, r);
         if (bytes.len > 0) try doc.peerInsert(self.gpa, pid, r.start, bytes);
         _ = try doc.peerCommit(self.gpa, pid);
+    }
+
+    /// Whether an edit by this principal lands in the user's single undo
+    /// history (the user, or a helper plugin acting on the user's keystroke)
+    /// rather than the principal's own selective-undo peer.
+    fn joinsUserUndo(self: *const Context, join_user: bool) bool {
+        return self.principal.role == .user or
+            (join_user and self.principal.role == .plugin);
     }
 };
 
@@ -572,6 +610,7 @@ pub const RenderError = Document.AddPeerError || error{Unauthorized};
 /// a plugin that simply produced nothing.
 pub fn renderInto(
     gpa: Allocator,
+    status: *status_feed.Feed,
     doc: *Document,
     role: authority.Role,
     name: []const u8,
@@ -582,7 +621,7 @@ pub fn renderInto(
         .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
     };
     if (!grade.canEdit()) {
-        noteRenderRefusal(name, "view access");
+        noteRenderRefusal(status, name, "view access");
         return error.Unauthorized;
     }
     const pid = try doc.peerNamed(gpa, name);
@@ -593,11 +632,11 @@ pub fn renderInto(
 /// generic `weft.status` chip the status line already renders — the same
 /// surface a plugin publishes progress on, so a denied producer is visible
 /// to the user without inventing a UI for it.
-fn noteRenderRefusal(name: []const u8, why: []const u8) void {
+fn noteRenderRefusal(status: *status_feed.Feed, name: []const u8, why: []const u8) void {
     std.log.warn("render refused: '{s}' — {s}", .{ name, why });
     var buf: [96]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "render refused: {s} ({s})", .{ name, why }) catch "render refused";
-    status_feed.set(text);
+    status.set(text);
 }
 
 /// [FIX 2] (doc/extensibility-native-surface.md, release-blocking): apply a capability
@@ -667,6 +706,7 @@ pub const ApplyActionError = RenderError || error{ NotAnAction, StaleVersion, Ou
 
 pub fn applyActionResult(
     gpa: Allocator,
+    status: *status_feed.Feed,
     doc: *Document,
     fired: position.StampedRange,
     result: *const capability.Result,
@@ -697,7 +737,7 @@ pub fn applyActionResult(
             return a.range.start < b.range.start;
         }
     }.lessThan);
-    try renderInto(gpa, doc, .plugin, result.provider, items);
+    try renderInto(gpa, status, doc, .plugin, result.provider, items);
     return items.len;
 }
 
@@ -1738,7 +1778,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult refuses an out-of-range 
     });
     const bad_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const bad_result = &env.caps.session(bad_session).?.all()[0];
-    try t.expectError(error.OutOfRange, applyActionResult(gpa, doc, fired, bad_result));
+    try t.expectError(error.OutOfRange, applyActionResult(gpa, &env.buffers.status, doc, fired, bad_result));
     // Refused wholesale: the document is untouched.
     const unchanged = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(unchanged);
@@ -1780,7 +1820,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batc
     });
     const good_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const good_result = &env.caps.session(good_session).?.all()[0];
-    const applied = try applyActionResult(gpa, doc, fired, good_result);
+    const applied = try applyActionResult(gpa, &env.buffers.status, doc, fired, good_result);
     try t.expectEqual(@as(usize, 1), applied);
 
     const after = try doc.text().toOwnedSlice(gpa);
@@ -1856,17 +1896,15 @@ test "command: a refused background render is observable (log + status chip)" {
     defer env.deinit();
     const doc = env.ctx.document().?;
 
-    status_feed.set("");
     doc.my_grant = .view; // this replica may read, never write
-    try t.expectError(error.Unauthorized, renderInto(gpa, doc, .plugin, "ci-plugin", &.{
+    try t.expectError(error.Unauthorized, renderInto(gpa, &env.buffers.status, doc, .plugin, "ci-plugin", &.{
         .{ .range = .{ .start = 0, .end = 0 }, .bytes = "3 failing" },
     }));
 
     // No Head to echo on, so the chip is the user-visible seam.
-    const chip = status_feed.get() orelse return error.TestUnexpectedResult;
+    const chip = env.buffers.status.get() orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
     try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
-    status_feed.set("");
 }
 
 // ── place: the ambient answer to "where does this run" (doc/place.md) ──

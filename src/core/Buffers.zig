@@ -25,8 +25,10 @@ const assert = std.debug.assert;
 const semantic = @import("weft_semantic");
 const Editor = @import("Editor.zig");
 const Posture = @import("weft_input").Posture;
+const BindingFacet = @import("weft_input").BindingFacet;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
+const jumplist = @import("jumplist.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
@@ -57,6 +59,10 @@ default_mode: []u8 = &.{},
 /// asking what tool it is looking at. Empty = undeclared, which falls back
 /// through `restingModeFor`.
 posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
+/// The status chip plugins publish (`weft.status`) and background refusals
+/// are announced on — this system's, beside its entries, so a second system
+/// in the process never shows this one's chip.
+status: @import("status_feed.zig").Feed = .{},
 
 pub const Id = u32;
 
@@ -231,15 +237,22 @@ pub const Buffer = struct {
         return if (declared == .structural and field_focused) .field else declared;
     }
 
-    pub fn bindingMode(self: *Buffer, mode: []const u8) []const u8 {
+    /// The facet this entry's keys layer by, if any: a document binds its
+    /// `source` layer, an entry that takes no text its `structural` one.
+    /// Which MODE answers a facet is the grammar's declaration
+    /// (`Keymap.variantFor`), never this entry's business.
+    pub fn bindingFacet(self: *Buffer) ?BindingFacet {
         const document = self.source_keys or if (self.textEditor()) |ed| ed.backingPath() != null else false;
-        if (std.mem.eql(u8, mode, "normal")) {
-            if (document) return "normal-source";
-            if (self.posture(false) == .structural) return "normal-structural";
-        }
-        if (document and std.mem.eql(u8, mode, "helix-normal")) return "helix-source";
-        if (document and std.mem.eql(u8, mode, "emacs")) return "emacs-source";
-        return mode;
+        if (document) return .source;
+        if (self.posture(false) == .structural) return .structural;
+        return null;
+    }
+
+    /// The mode `mode`'s keys are looked up in for this entry: the declared
+    /// variant for its facet, else `mode` itself.
+    pub fn bindingMode(self: *Buffer, keymap: *const Keymap, mode: []const u8) []const u8 {
+        const facet = self.bindingFacet() orelse return mode;
+        return keymap.variantFor(mode, facet) orelse mode;
     }
 
     /// DECLARE this entry's posture, overriding the derivation. Declaring
@@ -510,6 +523,11 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
     const old = self.active();
+    // Moving between entries is a jump, and only here does core see every
+    // one: remember where this head was (`jumplist.zig`). Travel along the
+    // list itself, and a borrow that puts the head back (`withEntry`,
+    // `quietly`), is muted there.
+    try jumplist.push(&head.jumps, gpa, self, jumplist.here(self));
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
     // guarantees a text buffer never inherits a tool's editable field.
@@ -572,6 +590,50 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         }
     }
     self.active_id = id;
+}
+
+/// Borrow entry `id` for one call that is NOT navigation — a toolbar verb
+/// acting on the editor it describes, a tab's close glyph: bring it to
+/// `head`, run `f(args)`, and put the head back. Neither switch records a
+/// jump, and the entry `buffer-back` returns to is left as it was, so the
+/// round trip leaves no trace in the head's history. The head goes back
+/// unless `f` moved it on from the borrowed entry to another live one (an
+/// open the verb performed stands, and records its own jump); when `f`
+/// closed the borrowed entry, it goes back all the same.
+pub fn withEntry(
+    self: *Buffers,
+    gpa: Allocator,
+    id: Id,
+    head: *Head,
+    keymap: *const Keymap,
+    comptime f: anytype,
+    args: anytype,
+) Error!@typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    if (id == self.active_id) return @call(.auto, f, args);
+    const home = self.active_id;
+    const home_prev = self.prev_id;
+    const borrowed = (self.get(id) orelse return @call(.auto, f, args)).ref();
+    try self.switchQuietly(gpa, id, head, keymap);
+    defer if (self.active_id == id or self.resolve(borrowed) == null) {
+        if (self.get(home) != null) self.switchQuietly(gpa, home, head, keymap) catch {};
+        if (self.active_id == home) self.prev_id = home_prev;
+    };
+    return @call(.auto, f, args);
+}
+
+/// Run `f(args)` with `head`'s jump recording muted: whatever entry switches
+/// it makes are not navigation (a presentation into another viewport that
+/// puts the head back).
+pub fn quietly(head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    head.jumps.muted += 1;
+    defer head.jumps.muted -= 1;
+    return @call(.auto, f, args);
+}
+
+fn switchQuietly(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
+    head.jumps.muted += 1;
+    defer head.jumps.muted -= 1;
+    try self.switchTo(gpa, id, head, keymap);
 }
 
 /// Turn the view currently focused on `head` into (or reattach it to) a
@@ -645,16 +707,27 @@ pub fn nextId(self: *const Buffers) Id {
     return self.active_id;
 }
 
+/// The live buffer before the active one, cyclically (`nextId` reversed).
+pub fn prevId(self: *const Buffers) Id {
+    const n = self.slots.items.len;
+    var i = (self.active_id + n - 1) % n;
+    while (i != self.active_id) : (i = (i + n - 1) % n) {
+        if (self.slots.items[i] != null) return @intCast(i);
+    }
+    return self.active_id;
+}
+
 /// Close a buffer. Closing the active buffer focuses the next one;
 /// closing the last replaces it with a fresh scratch. Dirty checks are
-/// the caller's policy.
+/// the caller's policy. Leaving an entry that is about to die is no jump: a
+/// position in it could never be returned to.
 pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const b = self.get(id) orelse return;
     if (self.count() == 1) {
         const fresh = try self.create(gpa, "*scratch*");
-        try self.switchTo(gpa, fresh, head, keymap);
+        try self.switchQuietly(gpa, fresh, head, keymap);
     } else if (id == self.active_id) {
-        try self.switchTo(gpa, self.nextId(), head, keymap);
+        try self.switchQuietly(gpa, self.nextId(), head, keymap);
     }
     self.slots.items[id] = null;
     self.destroyBuffer(gpa, b);

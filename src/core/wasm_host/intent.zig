@@ -16,7 +16,9 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const catalog = @import("../catalog.zig");
+const intent_mod = @import("../intent.zig");
 const plugin_offers = @import("../plugin_offers.zig");
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -105,6 +107,192 @@ pub fn hIntentInvoke(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         .unknown => -1,
         .refused => |why| @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), why) catch 0),
     };
+}
+
+// ── Offers for a CHOSEN context (doc/configs.md §3.5.2-4) ────────────
+//
+// The reads above answer for the ACTIVE pane, which is the palette's
+// question. A toolbar asks a different one: it may hold focus itself and
+// still has to describe the editor. `where` (`intent.Where`) picks the
+// context — 0 active, 1 the head's primary focus — and the whole
+// enumeration crosses as ONE record per call, so the snapshot a UI reads
+// cannot move between its rows, and nothing index-addressed has to be kept
+// in step across calls.
+
+/// Longest record one enumeration writes; a context offering more is cut at
+/// a row boundary (the count says how many made it).
+const record_max = 1 << 16;
+
+/// `wl_offers_list(where, out, cap)`: every offer in the chosen context as
+/// one little-endian record —
+///
+///   u32 count, then per row:
+///     u8  availability (0 enabled, 1 disabled, 2 checking)
+///     u8  has_order, i32 order
+///     5 × (u32 len, bytes): intention, provider, reason, label, group
+///
+/// with the presentation already completed from the intention table
+/// (`intent.presentation`), so every row has a label and a group. Returns
+/// the record's length, or -1 for an unknown `where` or no catalog. Nothing
+/// is written unless the whole record fits `cap`; the length still answers,
+/// so a guest can grow its buffer and ask again.
+pub fn hOffersList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse {
+        results[0] = -1;
+        return;
+    };
+    const ctx = p.activeCtx();
+    const plane = ctx.intent orelse {
+        results[0] = -1;
+        return;
+    };
+    const snap = plane.snapshotAt(ctx, where) orelse {
+        results[0] = -1;
+        return;
+    };
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(p.gpa);
+    encodeOffers(p.gpa, &out, &plane.catalog, snap) catch {
+        results[0] = -1;
+        return;
+    };
+    const cap: usize = @intCast(@as(u32, @bitCast(args[2])));
+    if (out.items.len <= cap) _ = caller.writeMemory(@intCast(args[1]), cap, out.items) catch 0;
+    results[0] = @intCast(out.items.len);
+}
+
+/// The record `hOffersList` writes, built from one snapshot. Separate so a
+/// unit test reads exactly the bytes a guest would.
+pub fn encodeOffers(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    cat: *const catalog.Catalog,
+    snap: *const catalog.Snapshot,
+) std.mem.Allocator.Error!void {
+    try out.appendNTimes(gpa, 0, 4);
+    var count: u32 = 0;
+    for (snap.candidates, 0..) |c, i| {
+        if (i != 0 and snap.candidates[i - 1].intention == c.intention) continue; // the leader only
+        const mark = out.items.len;
+        const shown = intent_mod.presentation(cat, c);
+        try out.append(gpa, switch (c.availability) {
+            .enabled => 0,
+            .disabled => 1,
+            .checking => 2,
+        });
+        try out.append(gpa, @intFromBool(shown.order != null));
+        try putU32(gpa, out, @bitCast(shown.order orelse 0));
+        const reason: []const u8 = switch (c.availability) {
+            .enabled => "",
+            .disabled => |d| d.reason,
+            .checking => "checking",
+        };
+        for ([_][]const u8{ cat.intentionName(c.intention), c.owner, reason, shown.label, shown.group }) |s| {
+            try putU32(gpa, out, @intCast(s.len));
+            try out.appendSlice(gpa, s);
+        }
+        if (out.items.len > record_max) {
+            out.shrinkRetainingCapacity(mark);
+            break;
+        }
+        count += 1;
+    }
+    std.mem.writeInt(u32, out.items[0..4], count, .little);
+}
+
+fn putU32(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) std.mem.Allocator.Error!void {
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, v, .little);
+    try out.appendSlice(gpa, &b);
+}
+
+/// `wl_intent_invoke_at(where, name, out, cap)`: `wl_intent_invoke` for a
+/// chosen context — resolved and run THERE (`Plane.invokeNamedAt`), so a
+/// toolbar's Undo undoes the editor it describes, not the toolbar. Same
+/// result convention: 0 invoked, -1 not an intention (or unknown `where`),
+/// else the refusal's length.
+///
+/// HEAD-GATED, unlike `wl_intent_invoke`: running in the primary context
+/// moves which entry the head is on for the call (`Plane.invokeNamedAt`),
+/// and moving the head is a dispatching entry's business — never a
+/// background callback's, such as the `on_offers_changed` that told a
+/// toolbar to redraw.
+pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    if (!shared.requireDispatch(p, caller, "wl_intent_invoke_at")) return;
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse {
+        results[0] = -1;
+        return;
+    };
+    const ctx = p.activeCtx();
+    const plane = ctx.intent orelse {
+        results[0] = -1;
+        return;
+    };
+    const name = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(name);
+    var buf: [reason_max]u8 = undefined;
+    results[0] = switch (plane.invokeNamedAt(ctx, where, name, &buf)) {
+        .invoked => 0,
+        .unknown => -1,
+        .refused => |why| @intCast(caller.writeMemory(@intCast(args[3]), @intCast(args[4]), why) catch 0),
+    };
+}
+
+/// Fire the offers-changed event (`on_offers_changed`) at one plugin: what
+/// the head's primary context offers just moved. The caller (the app's frame
+/// phase, `app/application.zig`'s `notifyOffersChanged`) decides WHEN — once
+/// per frame at most, at the frame boundary, never from inside a dispatch —
+/// and this only delivers.
+/// A plugin that does not export the callback is remembered as deaf after the
+/// first try, so it costs nothing on later changes. Returns whether it ran.
+pub fn notifyOffersChanged(p: *WasmPlugin) bool {
+    if (p.offers_listener == .deaf) return false;
+    contract.callOptionalExport("on_offers_changed", &p.instance, .{}) catch |err| {
+        if (err == error.MissingExport) p.offers_listener = .deaf;
+        return false;
+    };
+    p.offers_listener = .listening;
+    return true;
+}
+
+/// Could this plugin be listening? Unknown counts as yes — it is asked once.
+pub fn hearsOffers(p: *const WasmPlugin) bool {
+    return p.offers_listener != .deaf;
+}
+
+/// `order` value meaning "no ordering hint" on `wl_provide_affordance`.
+pub const no_order: i32 = std.math.minInt(i32);
+
+/// `wl_provide_affordance(action, label, group, order)`: how THIS plugin's
+/// providers of `action` present their offer where they win — the wasm twin
+/// of `weft.provide`'s `{label, group, order}` option. Presentation only;
+/// it changes no resolution. Returns how many providers took it (0: this
+/// plugin provides no such action).
+pub fn hProvideAffordance(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    results[0] = 0;
+    const action = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(action);
+    const label = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(label);
+    const group = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(group);
+    // The owner `wl_provide` bound under — one identity per plugin.
+    var owner_buf: [128]u8 = undefined;
+    const owner = std.fmt.bufPrint(&owner_buf, "plugin.{s}", .{p.name}) catch return;
+    const n = p.activeCtx().actions.setAffordance(action, owner, .{
+        .label = label,
+        .group = group,
+        .order = if (args[6] == no_order) null else args[6],
+    }) catch return;
+    results[0] = @intCast(n);
 }
 
 // ── Publishing a plugin's OWN offers ─────────────────────────────────
@@ -217,4 +405,50 @@ pub fn hOffersRetract(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (!p.offers_ready) return;
     p.offers.retract(p.gpa);
+}
+
+const t = std.testing;
+
+test "wl_offers_list's record: one row per offered intention, presentation completed, reasons carried" {
+    const gpa = t.allocator;
+    var plane: intent_mod.Plane = undefined;
+    try plane.init(gpa);
+    defer plane.deinit(gpa);
+    try plane.syncShape(.{ .can_undo = false });
+    const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 1 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try encodeOffers(gpa, &out, &plane.catalog, snap);
+
+    // Read it back the way the SDK's `Offers.next` does.
+    const bytes = out.items;
+    try t.expectEqual(@as(u32, @intCast(snap.intentionCount())), std.mem.readInt(u32, bytes[0..4], .little));
+    var at: usize = 4;
+    var saw_undo = false;
+    var rows: u32 = 0;
+    while (at < bytes.len) : (rows += 1) {
+        const availability = bytes[at];
+        const has_order = bytes[at + 1] != 0;
+        at += 6;
+        var parts: [5][]const u8 = undefined;
+        for (&parts) |*part| {
+            const n = std.mem.readInt(u32, bytes[at..][0..4], .little);
+            part.* = bytes[at + 4 ..][0..n];
+            at += 4 + n;
+        }
+        // Every row can be shown: a label and a group always.
+        try t.expect(parts[3].len > 0 and parts[4].len > 0);
+        if (std.mem.eql(u8, parts[0], "std.history.undo")) {
+            saw_undo = true;
+            try t.expectEqual(@as(u8, 1), availability); // disabled…
+            try t.expectEqualStrings("nothing-to-undo", parts[2]); // …and why
+            try t.expectEqualStrings("core.editing", parts[1]);
+            try t.expectEqualStrings("Undo", parts[3]);
+            try t.expectEqualStrings("history", parts[4]);
+            try t.expect(has_order);
+        }
+    }
+    try t.expect(saw_undo);
+    try t.expectEqual(@as(u32, @intCast(snap.intentionCount())), rows);
 }

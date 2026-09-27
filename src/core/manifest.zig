@@ -137,7 +137,19 @@ pub const GroupDecl = struct { mode: []u8, prefix: []u8, name: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
-pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: []u8, priority: i32 };
+/// `weft.provide(action, when, cmd, prio | opts)`. The predicate is held in
+/// its WIRE form (`facts.encode`) — owned bytes, so the decl is plain data a
+/// manifest hash reads and a reload compares, and applying it decodes through
+/// the same codec `wl_provide` uses.
+pub const ProvideDecl = struct {
+    action: []u8,
+    predicate: []u8,
+    command: []u8,
+    priority: i32,
+    label: []u8,
+    group: []u8,
+    order: ?i32,
+};
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunArg = struct { value: []u8 };
 pub const RunDecl = struct { command: []u8, args: []RunArg };
@@ -164,6 +176,10 @@ pub const StatusSegmentDecl = struct {
     text: []u8,
     role: []u8,
     priority: i32,
+    /// The command a click on the segment runs (`weft.statusSegment`'s
+    /// optional fourth argument), or `""` for none. The segment stays
+    /// static; only what clicking it does is named.
+    command: []u8 = &.{},
     /// `role`'s parsed `core.surface.Role` — resolved ONCE at BIND time,
     /// inside `StatusSegBinder.bind`'s implementation (`gfx/view/ui_mesh.
     /// zig`'s `bindManifestSegment`), not at fire time: the fire path
@@ -245,8 +261,12 @@ pub const ManifestGrantDecl = struct {
 pub const ViewportDecl = struct {
     name: []u8,
     attrs: viewport_mod.Attrs,
-    /// The panel's share of the frame (0..1); ignored when undocked.
-    extent: f32,
+    /// The panel's share of the frame, or its height in rows; ignored when
+    /// undocked.
+    extent: viewport_mod.Extent,
+    /// `{shown: false}`: the viewport starts hidden (a panel opened on
+    /// demand). Only its first declaration reads this.
+    hidden: bool = false,
 };
 
 /// `weft.present(viewport, {subject})` (doc/configuration.md §5.2) — which
@@ -257,6 +277,8 @@ pub const ViewportDecl = struct {
 pub const PresentDecl = struct {
     viewport: []u8,
     subject: []u8,
+    /// The presenting command (`{command}`), or `""` for `open`.
+    command: []u8,
 };
 
 pub const SlotDeclDecl = struct {
@@ -408,9 +430,10 @@ pub const Manifest = struct {
         self.semantic_actions.deinit(gpa);
         for (self.provides.items) |d| {
             gpa.free(d.action);
-            gpa.free(d.mode);
-            gpa.free(d.lang);
+            gpa.free(d.predicate);
             gpa.free(d.command);
+            gpa.free(d.label);
+            gpa.free(d.group);
         }
         self.provides.deinit(gpa);
         for (self.values.items) |d| {
@@ -432,6 +455,7 @@ pub const Manifest = struct {
         for (self.status_segments.items) |d| {
             gpa.free(d.text);
             gpa.free(d.role);
+            gpa.free(d.command);
         }
         self.status_segments.deinit(gpa);
         for (self.slots.items) |d| {
@@ -450,6 +474,7 @@ pub const Manifest = struct {
         for (self.presents.items) |d| {
             gpa.free(d.viewport);
             gpa.free(d.subject);
+            gpa.free(d.command);
         }
         self.presents.deinit(gpa);
         gpa.destroy(self);
@@ -499,14 +524,25 @@ pub const Manifest = struct {
     pub fn addSemanticAction(self: *Manifest, name: []const u8) !void {
         try self.semantic_actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
     }
-    pub fn addProvide(self: *Manifest, action: []const u8, mode: []const u8, lang: []const u8, cmd: []const u8, priority: i32) !void {
-        try self.provides.append(self.gpa, .{
-            .action = try self.gpa.dupe(u8, action),
-            .mode = try self.gpa.dupe(u8, mode),
-            .lang = try self.gpa.dupe(u8, lang),
-            .command = try self.gpa.dupe(u8, cmd),
+    pub fn addProvide(
+        self: *Manifest,
+        action: []const u8,
+        predicate: facts.Predicate,
+        cmd: []const u8,
+        priority: i32,
+        affordance: @import("catalog.zig").Affordance,
+    ) !void {
+        const gpa = self.gpa;
+        const d: ProvideDecl = .{
+            .action = try gpa.dupe(u8, action),
+            .predicate = try facts.encode(gpa, predicate),
+            .command = try gpa.dupe(u8, cmd),
             .priority = priority,
-        });
+            .label = try gpa.dupe(u8, affordance.label),
+            .group = try gpa.dupe(u8, affordance.group),
+            .order = affordance.order,
+        };
+        try self.provides.append(gpa, d);
     }
     pub fn addValue(self: *Manifest, owner: []const u8, key: []const u8, value: []const u8) !void {
         try self.values.append(self.gpa, .{ .owner = try self.gpa.dupe(u8, owner), .key = try self.gpa.dupe(u8, key), .value = try self.gpa.dupe(u8, value) });
@@ -539,11 +575,18 @@ pub const Manifest = struct {
     pub fn addLog(self: *Manifest, message: []const u8) !void {
         try self.logs.append(self.gpa, .{ .message = try self.gpa.dupe(u8, message) });
     }
-    pub fn addStatusSegment(self: *Manifest, text: []const u8, role: []const u8, priority: i32) !void {
+    pub fn addStatusSegment(self: *Manifest, text: []const u8, role: []const u8, priority: i32, on_click: []const u8) !void {
+        const owned_text = try self.gpa.dupe(u8, text);
+        errdefer self.gpa.free(owned_text);
+        const owned_role = try self.gpa.dupe(u8, role);
+        errdefer self.gpa.free(owned_role);
+        const owned_command = try self.gpa.dupe(u8, on_click);
+        errdefer self.gpa.free(owned_command);
         try self.status_segments.append(self.gpa, .{
-            .text = try self.gpa.dupe(u8, text),
-            .role = try self.gpa.dupe(u8, role),
+            .text = owned_text,
+            .role = owned_role,
             .priority = priority,
+            .command = owned_command,
         });
     }
     /// Stage a `weft.slot` declaration. `schema` is deep-cloned
@@ -566,19 +609,28 @@ pub const Manifest = struct {
             .root = try self.gpa.dupe(u8, root),
         });
     }
-    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: f32) !void {
+    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent, hidden: bool) !void {
         try self.viewports.append(self.gpa, .{
             .name = try self.gpa.dupe(u8, name),
             .attrs = attrs,
-            .extent = std.math.clamp(extent, 0.05, 0.95),
+            .extent = switch (extent) {
+                .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
+                .rows => |n| .{ .rows = @max(n, 1) },
+            },
+            .hidden = hidden,
         });
     }
-    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8) !void {
+    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8, presenter: []const u8) !void {
         const owned = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned);
+        const owned_subject = try self.gpa.dupe(u8, subject);
+        errdefer self.gpa.free(owned_subject);
+        const owned_presenter = try self.gpa.dupe(u8, presenter);
+        errdefer self.gpa.free(owned_presenter);
         try self.presents.append(self.gpa, .{
             .viewport = owned,
-            .subject = try self.gpa.dupe(u8, subject),
+            .subject = owned_subject,
+            .command = owned_presenter,
         });
     }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
@@ -629,10 +681,14 @@ pub const Manifest = struct {
         hLen(h, self.provides.items.len);
         for (self.provides.items) |d| {
             hStr(h, d.action);
-            hStr(h, d.mode);
-            hStr(h, d.lang);
+            hStr(h, d.predicate);
             hStr(h, d.command);
             h.update(std.mem.asBytes(&d.priority));
+            hStr(h, d.label);
+            hStr(h, d.group);
+            const order: i32 = d.order orelse 0;
+            h.update(std.mem.asBytes(&order));
+            h.update(&[_]u8{@intFromBool(d.order != null)});
         }
         hLen(h, self.values.items.len);
         for (self.values.items) |d| {
@@ -655,6 +711,7 @@ pub const Manifest = struct {
             hStr(h, d.text);
             hStr(h, d.role);
             h.update(std.mem.asBytes(&d.priority));
+            hStr(h, d.command);
         }
         hLen(h, self.grants.items.len);
         for (self.grants.items) |d| {
@@ -691,14 +748,27 @@ pub const Manifest = struct {
                 @intFromBool(d.attrs.cycles),
                 @intFromBool(d.attrs.persistent),
                 @intFromBool(d.attrs.focus_source),
+                @intFromBool(d.attrs.takes_focus),
+                @intFromBool(d.attrs.status_line),
+                @intFromBool(d.hidden),
                 if (d.attrs.dock) |e| @as(u8, @intFromEnum(e)) + 1 else 0,
             });
-            h.update(std.mem.asBytes(&d.extent));
+            switch (d.extent) {
+                .fraction => |f| {
+                    h.update(&[_]u8{0});
+                    h.update(std.mem.asBytes(&f));
+                },
+                .rows => |n| {
+                    h.update(&[_]u8{1});
+                    h.update(std.mem.asBytes(&n));
+                },
+            }
         }
         hLen(h, self.presents.items.len);
         for (self.presents.items) |d| {
             hStr(h, d.viewport);
             hStr(h, d.subject);
+            hStr(h, d.command);
         }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
@@ -824,17 +894,18 @@ pub const Manifest = struct {
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
-            var pred_buf: [2]facts.Predicate = undefined;
+            // The bytes were encoded from a parsed predicate by this module;
+            // a decode failure is corruption, and it narrows to nothing.
+            const predicate = facts.decode(gpa, d.predicate) catch continue;
+            defer facts.free(gpa, predicate);
             actx.ctx.actions.provide(.{
                 .action = d.action,
-                .predicate = facts.allOf(&pred_buf, &.{
-                    if (optStr(d.mode)) |m| .{ .mode = m } else null,
-                    if (optStr(d.lang)) |l| .{ .lang = l } else null,
-                }),
+                .predicate = predicate,
                 .command = d.command,
                 .priority = d.priority,
                 .owner = self.owner,
                 .tier = self.tier,
+                .affordance = .{ .label = d.label, .group = d.group, .order = d.order },
             }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(actx.ctx, gpa, d.action);
         }
         for (self.values.items) |d| {
@@ -906,8 +977,8 @@ pub const Manifest = struct {
         // reportable typo, never a silently ignored line.
         if (actx.ctx.viewports) |registry| {
             for (self.viewports.items) |d|
-                registry.declare(gpa, d.name, d.attrs, d.extent) catch {};
-            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject) catch |e|
+                registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
+            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject, d.command) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
             std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});
@@ -1348,10 +1419,6 @@ pub const Manifest = struct {
         }
     }
 };
-
-fn optStr(s: []const u8) ?[]const u8 {
-    return if (s.len > 0) s else null;
-}
 
 /// `hash()`'s framing primitives (R3 fix): every string is LENGTH-prefixed
 /// and every decl LIST is length-prefixed before its items, so bare byte

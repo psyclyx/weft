@@ -40,10 +40,12 @@ const render = @import("render.zig");
 const Theme = @import("Theme.zig");
 const hud_mod = @import("hud.zig");
 const Hud = hud_mod.Hud;
-const buildTabStrip = hud_mod.buildTabStrip;
 
 const font_id_mono = fonts.font_id_mono;
 const margin: f32 = 8;
+/// A pane's frame is its body inset by this on every side — what a row-sized
+/// dock adds to its rows (`window_layout.Rows.inset` is twice it).
+pub const pane_margin = margin;
 
 const View = @This();
 
@@ -82,6 +84,18 @@ pub const Run = struct {
 /// extracted submodules only (see `Run`).
 pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 
+/// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
+/// head, or — `inside`, on a forward selection — the start of the last
+/// character it covers.
+pub fn caretDrawOffset(ed: *const core.Editor, i: usize, place: hud_mod.CaretPlace) usize {
+    const ends = ed.selectionEnds(i);
+    if (place == .head or ends.head <= ends.anchor) return ends.head;
+    const rope = ed.text();
+    var off = ends.head - 1;
+    while (off > ends.anchor and rope.byteAt(off) & 0xc0 == 0x80) off -= 1;
+    return off;
+}
+
 gpa: Allocator,
 face_set: fonts.FaceSet,
 theme: Theme,
@@ -102,6 +116,21 @@ frame_layout: layout.Layout = .{ .lines = &.{} },
 /// Like `frame_layout`, these live in `layout_arena` until the next frame.
 semantic_hits: []const semantic.Hit = &.{},
 semantic_active: bool = false,
+/// The last `build`'s scene hit regions, active or not: an unfocused pane's
+/// rows are clickable too. `recordPane` files them with the pane.
+build_hits: []const semantic.Hit = &.{},
+/// The last `build`'s CHROME hit regions — tab parts and status segments —
+/// filed with the pane by `recordPane` like `build_hits`. Arena-backed.
+build_chrome: []const hud_mod.ChromeHit = &.{},
+/// The box the last `build`'s floating overlay drew in, which may reach past
+/// the pane's own rect; `recordPane` files it with the pane.
+build_float: ?region.Rect = null,
+/// Every pane's hit geometry from the last frame, so the pointer can ask
+/// what is under it in ANY pane, not only the focused one — a click in an
+/// unfocused pane must land where it points. Arena-backed like
+/// `frame_layout`; reset with it.
+pane_maps: [max_pane_maps]PaneMap = undefined,
+pane_map_count: usize = 0,
 semantic_last_view: ?@import("weft_semantic").view.Ref = null,
 semantic_last_node: ?@import("weft_semantic").scene.NodeId = null,
 /// The current build's content origin (its frame inset by `margin`) — a
@@ -265,6 +294,81 @@ pub fn resetFrame(self: *View) void {
     _ = self.layout_arena.reset(.retain_capacity);
     self.semantic_hits = &.{};
     self.semantic_active = false;
+    self.build_hits = &.{};
+    self.build_chrome = &.{};
+    self.pane_map_count = 0;
+}
+
+pub const max_pane_maps = 64;
+
+/// One pane's hit geometry as last built: its rect, its text layout (empty
+/// for a scene), and its scene hit regions (empty for text).
+pub const PaneMap = struct {
+    pane: u32,
+    rect: region.Rect,
+    lines: layout.Layout,
+    hits: []const semantic.Hit,
+    /// The pane's chrome regions (tab parts, status segments). A point on
+    /// one of these is on the chrome, not on the text or scene beneath.
+    chrome: []const hud_mod.ChromeHit = &.{},
+    /// The pane's floating overlay box (a menu), wherever it lies in the
+    /// frame. A point inside it is the pane's, whichever pane is beneath.
+    float: ?region.Rect = null,
+
+    /// The chrome region (a tab part, a status segment) under (x, y).
+    pub fn chromeAt(self: *const PaneMap, x: f32, y: f32) ?hud_mod.ChromeHit {
+        for (self.chrome) |c| if (c.rect.contains(x, y)) return c;
+        return null;
+    }
+
+    /// The byte offset under (x, y), or null when the pane shows no text.
+    pub fn offsetAt(self: *const PaneMap, x: f32, y: f32) ?usize {
+        if (self.lines.lines.len == 0 or self.hits.len != 0) return null;
+        return self.lines.offsetAtPoint(x, y);
+    }
+
+    /// The topmost scene hit region under (x, y).
+    pub fn hitAt(self: *const PaneMap, x: f32, y: f32) ?semantic.Hit {
+        var index = self.hits.len;
+        while (index > 0) {
+            index -= 1;
+            if (self.hits[index].rect.contains(x, y)) return self.hits[index];
+        }
+        return null;
+    }
+};
+
+/// File the geometry the last `build` produced under `pane`, drawn into
+/// `rect`. Called once per pane per frame, right after its build.
+pub fn recordPane(self: *View, pane: u32, rect: region.Rect) void {
+    if (self.pane_map_count >= max_pane_maps) return;
+    self.pane_maps[self.pane_map_count] = .{
+        .pane = pane,
+        .rect = rect,
+        .lines = self.frame_layout,
+        .hits = self.build_hits,
+        .chrome = self.build_chrome,
+        .float = self.build_float,
+    };
+    self.pane_map_count += 1;
+}
+
+/// `cols` cells starting at column `col` of the row whose top is `y`.
+pub fn cellsRect(self: *const View, y: f32, col: usize, cols: usize) region.Rect {
+    return .{
+        .x = self.origin_x + @as(f32, @floatFromInt(col)) * self.cell_w,
+        .y = y,
+        .w = @as(f32, @floatFromInt(cols)) * self.cell_w,
+        .h = self.line_h,
+    };
+}
+
+/// The pane under (x, y): the one whose floating overlay covers the point
+/// (it paints on top), else the one whose last-built rect contains it.
+pub fn paneAtPoint(self: *const View, x: f32, y: f32) ?*const PaneMap {
+    for (self.pane_maps[0..self.pane_map_count]) |*m| if (m.float) |f| if (f.contains(x, y)) return m;
+    for (self.pane_maps[0..self.pane_map_count]) |*m| if (m.rect.contains(x, y)) return m;
+    return null;
 }
 
 pub fn semanticHitAtPoint(self: *const View, x: f32, y: f32) ?semantic.Hit {
@@ -305,6 +409,8 @@ pub fn build(
     pick_dock: region.Rect,
     world_to_pixel: scene.Transform2D,
 ) !Built {
+    self.build_hits = &.{};
+    self.build_chrome = &.{};
     // Carve the pane's frame into regions (no element computes an offset
     // against another): content is the frame inset by `margin`; a top
     // tab strip and a bottom HUD (status line + optional panel) are cut
@@ -327,7 +433,9 @@ pub fn build(
         tab_rect = c.strip;
         stack = c.rest;
     }
-    const status_cut = stack.cutBottom(self.line_h);
+    // A pane that declares no status line (a one-row strip) gives the row
+    // to its body.
+    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
     const status_rect = status_cut.strip;
     const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
     const panel_rect = panel_cut.strip;
@@ -336,7 +444,7 @@ pub fn build(
     self.md_active = hud.semantic_view == null and hud.md_inline != null;
 
     const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
-    const cursor_off = if (editor) |ed| ed.cursorOffset() else 0;
+    const cursor_off = if (editor) |ed| caretDrawOffset(ed, ed.primary, hud.caret_place) else 0;
 
     var runs: std.ArrayList(Run) = .empty;
     defer {
@@ -366,6 +474,7 @@ pub fn build(
             document_body.w = width;
         }
         const hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, hud, document_body, top_row);
+        self.build_hits = hits;
         if (document.active) {
             self.semantic_active = true;
             self.semantic_hits = hits;
@@ -376,7 +485,10 @@ pub fn build(
         scrollToCursor(ed, top_row, rows_visible);
         if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
         const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
-        const flip_off: ?usize = if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
+        // Every block caret flips the glyph it covers, not only the primary's.
+        var flips: std.ArrayList(usize) = .empty;
+        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selections.items.len) |i|
+            try flips.append(scratch, caretDrawOffset(ed, i, hud.caret_place));
 
         // Lay out the body's visible rows into the frame arena (the geometry
         // map outlives the frame for hit-testing). The caller resets the
@@ -390,7 +502,7 @@ pub fn build(
         while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
             if (ed.rowHidden(row)) continue;
             const runs_mark = runs.items.len;
-            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
+            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flips.items);
             if (shown != 0 and y_top + vl.height > body_limit_y) {
                 runs.items.len = runs_mark;
                 break;
@@ -401,10 +513,20 @@ pub fn build(
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 
-        const selection = ed.selectedRange();
-        if (selection) |sel| try decoration.selectionRects(self, scratch, &rects, sel, self.theme.selection);
-        if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
-        if (hud.cursor_on) try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
+        // Every selection draws, the primary like any other: one wash per
+        // selection and one caret per head (the single-selection case is the
+        // one-iteration loop of what this always drew).
+        for (ed.selections.items) |sel| {
+            if (ed.rangeOf(sel)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
+        }
+        for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
+        if (hud.cursor_on) {
+            try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
+            for (0..ed.selections.items.len) |i| {
+                if (i == ed.primary) continue;
+                try decoration.caretRect(self, scratch, &rects, caretDrawOffset(ed, i, hud.caret_place), hud.cursor_style, self.theme.cursor);
+            }
+        }
         if (hud.presence_layer) |pl| {
             for (0..pl.spanCount()) |i| {
                 const span = pl.resolvedSpan(i);
@@ -423,14 +545,51 @@ pub fn build(
         self.frame_layout = .{ .lines = &.{} };
     }
 
+    // Chrome hit regions, filed with the pane (`recordPane`) so a click on
+    // a tab or a status segment resolves to WHAT it is on, not to the text
+    // under the strip. Arena-backed like the geometry map.
+    var chrome: std.ArrayList(hud_mod.ChromeHit) = .empty;
+    const chrome_gpa = self.layout_arena.allocator();
+
     // Top buffer-tab strip, into its own region.
     if (hud.tabs) |tabs| {
         var tbuf: [1024]u8 = undefined;
-        const strip = buildTabStrip(&tbuf, tabs);
-        try statusline.appendPlainRun(self, scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
+        var parts: [128]hud_mod.TabPart = undefined;
+        const strip = hud_mod.buildTabStripParts(&tbuf, tabs, &parts);
+        try statusline.appendPlainRun(self, scratch, &runs, &rects, strip.text, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
+        for (strip.parts) |part| {
+            if (part.col >= cols_visible) break;
+            try chrome.append(chrome_gpa, .{
+                .rect = self.cellsRect(tab_rect.?.y, part.col, @min(part.cols, cols_visible - part.col)),
+                .kind = .tab,
+                .index = part.index,
+                .part = part.part,
+                .entry = tabs[part.index].id,
+            });
+        }
     }
 
-    try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
+    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa });
+    self.build_chrome = chrome.items;
+    self.build_float = null;
+
+    // Thin pane dividers: a 1px line on each internal (shared) edge of
+    // the pane's frame. Drawn on the frame boundary — outside the
+    // `content` inset — so it never touches a glyph. Subtle: the dim
+    // status grey, like the very slight lines between vim splits.
+    {
+        const bd = hud.pane_border;
+        const c = self.theme.status;
+        const th: f32 = 1;
+        if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
+        if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
+        if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
+        if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
+    }
+
+    // Everything from here on floats: it paints after the pane's text, so
+    // a popup's own fill hides what is beneath it.
+    const float: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
     // Floating surfaces (which-key popup, files/git, a guest's caret
     // popup like the `lsp` plugin's hover) float within the BODY region —
     // never over the status/tab/panel rects, which are carved out. Hand the
@@ -465,27 +624,23 @@ pub fn build(
     }
     // A dialog is the active head-local interaction and therefore paints
     // above passive/legacy surfaces. Its keys still route through the
-    // interaction stack, not through an editor mode or which-key.
+    // interaction stack, not through an editor mode or which-key. One hung
+    // at a point floats in `float_bounds` (the frame), over other panes; the
+    // pane is built last, so it paints over them too.
     if (hud.semantic_overlay) |overlay| {
         self.semantic_active = true;
-        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect);
+        const caret_at: ?[2]f32 = if (self.frame_layout.lineForOffset(cursor_off)) |li| blk: {
+            const c = self.frame_layout.lines[li].caretAt(cursor_off);
+            break :blk .{ c.x, c.y_top + c.height };
+        } else null;
+        const drawn = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, hud, body_rect, hud.float_bounds orelse body_rect, caret_at);
+        self.semantic_hits = drawn.hits;
+        self.build_float = drawn.box;
+        // The dialog is on top: it is what a click on this pane reaches.
+        self.build_hits = self.semantic_hits;
     }
 
-    // Thin pane dividers: a 1px line on each internal (shared) edge of
-    // the pane's frame. Drawn on the frame boundary — outside the
-    // `content` inset — so it never touches a glyph. Subtle: the dim
-    // status grey, like the very slight lines between vim splits.
-    {
-        const bd = hud.pane_border;
-        const c = self.theme.status;
-        const th: f32 = 1;
-        if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
-        if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
-    }
-
-    var built = try render.render(self, world_to_pixel, runs.items, rects.items);
+    var built = try render.render(self, world_to_pixel, runs.items, rects.items, float);
     if (hud.brand_mark) if (dashboardMarkSize(self, body_rect)) |size| {
         const first = built.items.len;
         built.items = try self.gpa.realloc(built.items, first + 2);
@@ -563,6 +718,20 @@ pub fn pickDockHeight(self: *const View, pick: ?*const core.Pick) f32 {
     return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
 }
 
+/// Pixel height the window-bottom dock needs: the picker's (`pickDockHeight`)
+/// or the tallest active `.bottom`-placed surface a plugin published (a find
+/// bar), whichever is taller. Both draw into the one dock, so both size it —
+/// counting only the picker left a plugin's bottom surface drawing into a
+/// zero-height strip, which is to say not at all.
+pub fn dockHeight(self: *const View, pick: ?*const core.Pick, surfaces: []const *const core.surface.Surface) f32 {
+    var rows: usize = 0;
+    for (surfaces) |surf| {
+        if (surf.active and surf.placement == .bottom) rows = @max(rows, surf.rows.items.len);
+    }
+    const surface_h = @as(f32, @floatFromInt(@min(rows, Hud.max_pick_rows + 1))) * self.line_h;
+    return @max(self.pickDockHeight(pick), surface_h);
+}
+
 // ── Tests ──
 
 const testing = std.testing;
@@ -584,6 +753,25 @@ test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
     var rope2 = try stemma.Rope.fromSlice(gpa, "\t\tx");
     defer rope2.deinit(gpa);
     try testing.expectApproxEqAbs(margin + 8 * cw, try view.xOfOffsetOnRow(&rope2, 2), 0.5);
+}
+
+test "dock: a plugin's bottom surface sizes the dock with no pick open" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var bar: core.surface.Surface = .{};
+    defer bar.deinit(gpa);
+    bar.begin(gpa, .bottom);
+    bar.addRow(gpa);
+    bar.addSpan(gpa, "Find: x", .normal);
+    bar.addRow(gpa);
+    bar.addSpan(gpa, "Replace: y", .normal);
+    bar.end(gpa, null);
+    const surfaces = [_]*const core.surface.Surface{&bar};
+    try testing.expectApproxEqAbs(2 * view.line_h, view.dockHeight(null, &surfaces), 0.01);
+    // A corner surface floats over the body; it carves nothing.
+    bar.placement = .corner;
+    try testing.expectApproxEqAbs(@as(f32, 0), view.dockHeight(null, &surfaces), 0.01);
 }
 
 test "monospace parity gate: view-computed vertical target == old column target" {

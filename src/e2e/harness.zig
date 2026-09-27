@@ -144,6 +144,12 @@ pub const Editor = struct {
     /// has no such hook; the demo recorder uses it only to pace the same input
     /// stream an ordinary E2E test drives.
     input_observer: ?InputObserver = null,
+    /// The pointer, driven the way a platform drives it: raw button/motion/
+    /// wheel facts into the same gesture reducer `platform/wayland.zig`
+    /// feeds, on a synthetic millisecond clock, so click counting is the
+    /// platform's and not the test's.
+    gestures: weft.platform.pointer.Gestures = .{},
+    pointer_ms: u32 = 0,
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
@@ -182,6 +188,8 @@ pub const Editor = struct {
         self.frame_noted_host_fp = null;
         self.input_observer = null;
         self.vulkan_head = null;
+        self.gestures = .{};
+        self.pointer_ms = 0;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init(gpa);
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
@@ -233,6 +241,7 @@ pub const Editor = struct {
             .window_ctx = &self.win_ctx,
             .layout = self.win_layout,
             .view = &self.render.fb.view,
+            .config = &self.config_kv,
         });
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         // The app's provider-aware open/close (shadows the core versions): opening
@@ -481,6 +490,135 @@ pub const Editor = struct {
         _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    // ── The pointer ──
+    // Positions are framebuffer pixels of the last built frame (the harness
+    // renders at buffer scale 1, so surface and framebuffer agree). Every
+    // gesture goes platform reducer → `Application.pointer` → the keymap,
+    // exactly the desktop's path, then one application wake.
+
+    pub const Mods = weft.platform.Mods;
+
+    fn drainPointer(self: *Editor) void {
+        while (self.gestures.next()) |ev| self.application.pointer(ev) catch {};
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    /// Move the pointer (a drag while a button is held).
+    pub fn pointerMove(self: *Editor, xy: [2]f32, mods: Mods) void {
+        self.pointer_ms += 16;
+        self.gestures.motion(xy[0], xy[1], mods);
+        self.drainPointer();
+    }
+
+    /// One button edge at the pointer's current position.
+    pub fn pointerButton(self: *Editor, button: u8, pressed: bool, mods: Mods) void {
+        self.gestures.button(button, pressed, self.pointer_ms, mods);
+        self.drainPointer();
+    }
+
+    /// A full click of `button` at `xy`: far enough in time from the last
+    /// press that it counts as a single click.
+    pub fn clickWith(self: *Editor, xy: [2]f32, button: u8, mods: Mods) void {
+        self.pointer_ms += weft.platform.pointer.multi_click_ms * 4;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(button, true, mods);
+        self.pointer_ms += 30;
+        self.pointerButton(button, false, mods);
+    }
+
+    pub fn click(self: *Editor, xy: [2]f32) void {
+        self.clickWith(xy, 1, .{});
+    }
+
+    /// Another primary click at `xy` inside the multi-click window of the
+    /// previous one — the second (or third) click of a double (triple) click.
+    pub fn clickAgain(self: *Editor, xy: [2]f32) void {
+        self.pointer_ms += 50;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(1, true, .{});
+        self.pointer_ms += 30;
+        self.pointerButton(1, false, .{});
+    }
+
+    /// Wheel steps at `xy` (positive scrolls toward the end).
+    pub fn wheel(self: *Editor, xy: [2]f32, steps: i32) void {
+        self.gestures.warp(xy[0], xy[1]);
+        self.gestures.axisDiscrete(.vertical, steps);
+        self.gestures.frame(.{});
+        self.drainPointer();
+    }
+
+    /// Where a click lands on byte `off` in the focused pane: just right of
+    /// its caret stop, mid-line. Null when it is scrolled off screen.
+    pub fn pointAt(self: *Editor, off: usize) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        return pointOn(v.frame_layout, off);
+    }
+
+    /// Like `pointAt`, in any pane of the last frame.
+    pub fn pointAtIn(self: *Editor, pane: u32, off: usize) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            if (m.pane == pane) return pointOn(m.lines, off);
+        }
+        return null;
+    }
+
+    fn pointOn(layout: anytype, off: usize) ?[2]f32 {
+        const caret = layout.pointAtOffset(off) orelse return null;
+        return .{ caret.x + 1, caret.y_top + caret.height / 2 };
+    }
+
+    /// The centre of a scene node's hit region in the last frame.
+    pub fn pointAtNode(self: *Editor, node: semantic_model.scene.NodeId) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.hits) |hit| if (hit.node == node)
+                return .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
+        }
+        return null;
+    }
+
+    /// The centre of the tab showing `entry` in the last frame — its body or
+    /// its close glyph. What a person aims a click at.
+    pub fn pointAtTab(self: *Editor, entry: u32, part: enum { body, close }) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .tab or c.entry != entry) continue;
+                if (@intFromEnum(c.part) != @intFromEnum(part)) continue;
+                return .{ c.rect.x + c.rect.w / 2, c.rect.y + c.rect.h / 2 };
+            }
+        }
+        return null;
+    }
+
+    /// The centre of the status segment with command `command`, in any pane.
+    pub fn pointAtStatusCommand(self: *Editor, cmd: []const u8) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .status or !std.mem.eql(u8, c.command, cmd)) continue;
+                return .{ c.rect.x + c.rect.w / 2, c.rect.y + c.rect.h / 2 };
+            }
+        }
+        return null;
+    }
+
+    /// The tab strip of the last frame, as the entries it lists, in order.
+    pub fn tabEntries(self: *Editor, out: []u32) []const u32 {
+        const v = self.ensureView() catch return out[0..0];
+        var n: usize = 0;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .tab or c.part != .body or n >= out.len) continue;
+                out[n] = c.entry orelse continue;
+                n += 1;
+            }
+        }
+        return out[0..n];
     }
 
     /// The current transient echo line (what a plugin last reported to the user).
@@ -1254,6 +1392,8 @@ const guest = struct {
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
+    const offerwatch = @embedFile("guest_offerwatch_wasm");
+    const diagfeed = @embedFile("guest_diagfeed_wasm");
     /// Test fixture only — `src/plugin_fixtures/fs_limit.zig`: declares fs_read +
     /// fs_write and exposes each path-taking door as a command reading its
     /// path from the args, so a test controls exactly which path to try
@@ -1290,6 +1430,13 @@ pub fn loadHelix(ed: *Editor) !void {
     try setResting(ed); // helix init set "helix-normal"
 }
 
+/// vim alone, over the set another grammar already loaded (`loadHelix`), for
+/// a test that crosses grammars: the head rests in `normal` afterwards.
+pub fn loadVimAlongside(ed: *Editor) !void {
+    try ed.load("vim", guest.vim);
+    try setResting(ed);
+}
+
 /// A standard vim editing set (synchronous plugins only — no subprocess).
 pub fn loadVim(ed: *Editor) !void {
     try ed.load("edit", guest.edit);
@@ -1310,6 +1457,19 @@ pub fn loadVim(ed: *Editor) !void {
 /// head to prove the guest ABI itself is head-addressed.
 pub fn loadHeadtest(ed: *Editor) !void {
     try ed.load("headtest", guest.headtest);
+}
+
+/// The action-system fixture (`src/plugin_fixtures/offerwatch.zig`): a
+/// toolbar's reads and its offers-changed listener, as commands a test reads.
+pub fn loadOfferwatch(ed: *Editor) !void {
+    try ed.load("offerwatch", guest.offerwatch);
+}
+
+/// A diagnostics source without a language server
+/// (`src/plugin_fixtures/diagfeed.zig`): rows a test sets, announced by the
+/// `diagnostics` signal.
+pub fn loadDiagfeed(ed: *Editor) !void {
+    try ed.load("diagfeed", guest.diagfeed);
 }
 
 /// Load ONE grammar from the embedded bundle by name — the load a config's
@@ -2002,6 +2162,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "motions", @embedFile("guest_motions_wasm") },
     .{ "textobjects", @embedFile("guest_textobjects_wasm") },
     .{ "operators", @embedFile("guest_operators_wasm") },
+    .{ "surround", @embedFile("guest_surround_wasm") },
     .{ "vim", @embedFile("guest_vim_wasm") },
     .{ "comment", @embedFile("guest_comment_wasm") },
     .{ "indent", @embedFile("guest_indent_wasm") },
@@ -2030,8 +2191,18 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "files", @embedFile("guest_files_wasm") },
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
+    .{ "ide", @embedFile("guest_ide_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
     .{ "marginalia", @embedFile("guest_marginalia_wasm") },
+    .{ "linenumbers", @embedFile("guest_linenumbers_wasm") },
+    .{ "snipe", @embedFile("guest_snipe_wasm") },
+    .{ "find", @embedFile("guest_find_wasm") },
+    .{ "toolbar", @embedFile("guest_toolbar_wasm") },
+    .{ "contextmenu", @embedFile("guest_contextmenu_wasm") },
+    .{ "panel", @embedFile("guest_panel_wasm") },
+    .{ "problems", @embedFile("guest_problems_wasm") },
+    .{ "terminal", @embedFile("guest_terminal_wasm") },
+    .{ "breadcrumbs", @embedFile("guest_breadcrumbs_wasm") },
     // The synthetic third-party grammar of the Files conformance gate
     // (src/plugin_fixtures/gramtest.zig) — resolvable by name so the gate's config
     // loads it the way a config loads any grammar.
@@ -2045,11 +2216,9 @@ pub const ConfigLoader = struct {
     ed: *Editor,
     missing: std.ArrayList([]const u8) = .empty, // names not in the bundle
     failed: std.ArrayList([]const u8) = .empty, // resolved but loadPlugin errored
-    /// EVERY name `weft.plugin(name)` requested, in request order — the
-    /// M3/M4 parity harness's "plugin load-list set-equality" evidence
-    /// (config_test.zig): recorded regardless of resolve/load outcome (a
-    /// `.js` name included), so two configs with the same plugin list
-    /// produce the same set here.
+    /// EVERY name `weft.plugin(name)` requested, in request order —
+    /// recorded regardless of resolve/load outcome (a `.js` name included),
+    /// so a test can assert a config asked for a plugin at all.
     requested: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *ConfigLoader) void {
@@ -2104,95 +2273,6 @@ pub const ConfigLoader = struct {
     }
 };
 
-/// A stable, sorted text snapshot of `requested` — comparable between two
-/// `ConfigLoader`s with `expectEqualStrings` (M3/M4 parity: "plugin
-/// load-list set-equality").
-pub fn requestedPluginsSnapshot(gpa: Allocator, loader_state: *const ConfigLoader) ![]u8 {
-    const list = try gpa.dupe([]const u8, loader_state.requested.items);
-    defer gpa.free(list);
-    std.mem.sort([]const u8, list, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (list) |name| {
-        try out.appendSlice(gpa, name);
-        try out.append(gpa, '\n');
-    }
-    return out.toOwnedSlice(gpa);
-}
-
-/// A stable, sorted text snapshot of an entire `kv.Store` — namespace, key,
-/// and the raw framed value blob — for a "full config-store diff" (M3/M4
-/// parity: catches ANY value divergence, not just a hand-picked key).
-pub fn kvSnapshot(gpa: Allocator, store: *core.kv.Store) ![]u8 {
-    var lines: std.ArrayList([]u8) = .empty;
-    defer {
-        for (lines.items) |l| gpa.free(l);
-        lines.deinit(gpa);
-    }
-    var nsit = store.ns.iterator();
-    while (nsit.next()) |nse| {
-        var kit = nse.value_ptr.iterator();
-        while (kit.next()) |ke| {
-            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ nse.key_ptr.*, ke.key_ptr.*, ke.value_ptr.* });
-            try lines.append(gpa, line);
-        }
-    }
-    std.mem.sort([]u8, lines.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (lines.items) |l| try out.appendSlice(gpa, l);
-    return out.toOwnedSlice(gpa);
-}
-
-/// A stable, sorted text snapshot of the keymap's MODE STRUCTURE — which
-/// modes are declared menus/sticky-menus/locked/resting, and which modes
-/// declare that they commit text (`commitCommand`) — the which-key GROUP
-/// structure a bind-only snapshot can't see (M3/M4 parity item 4).
-pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
-    var names: std.StringArrayHashMapUnmanaged(void) = .empty;
-    defer names.deinit(gpa);
-    for (km.modes.keys()) |k| try names.put(gpa, k, {});
-    // Tag keys are `mode\x00tag`; a mode that exists only as a menu declaration
-    // (no bindings of its own yet) still belongs in the structure snapshot.
-    for (km.mode_tags.keys()) |k| {
-        const sep = std.mem.indexOfScalar(u8, k, 0) orelse continue;
-        if (std.mem.eql(u8, k[sep + 1 ..], core.Keymap.tag_menu)) try names.put(gpa, k[0..sep], {});
-    }
-    for (km.commit_commands.keys()) |k| try names.put(gpa, k, {});
-
-    const list = try gpa.dupe([]const u8, names.keys());
-    defer gpa.free(list);
-    std.mem.sort([]const u8, list, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
-
-    // `commitCommand` is a pure function of (tables, mode) — W2a-1's split
-    // (Head owns the CURRENT-mode cursor; Keymap only holds tables) means
-    // probing every mode name needs no save/restore dance against a live
-    // head anymore; it never touches one.
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (list) |mode| {
-        const txt = km.commitCommand(mode) orelse "<none>";
-        const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|resting={}|text={s}\n", .{
-            mode, km.modeHasTag(mode, "menu"), km.modeHasTag(mode, "sticky"), km.modeHasTag(mode, "resting"), txt,
-        });
-        defer gpa.free(line);
-        try out.appendSlice(gpa, line);
-    }
-    return out.toOwnedSlice(gpa);
-}
-
 /// Boot the editor from the real `config/config.js` (read from `config_dir`,
 /// which also resolves its `weft.use("defaults")`). Fills `loader_state` with
 /// any plugins the config asked for that couldn't load.
@@ -2201,9 +2281,8 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
 }
 
 /// Like `bootConfig`, but the config FILE within `config_dir` is named
-/// explicitly — the M3/M4 parity harness's door (doc/configuration.md §7): boot
-/// `config.js` and `config.northstar.js` from the SAME directory (so both
-/// resolve `weft.use("defaults")` identically) into two separate `Editor`s.
+/// explicitly — config.js, helix.js and ide.js share one directory, so each
+/// resolves `weft.use("defaults")` identically.
 pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {
     const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/{s}", .{ config_dir, filename });
     defer ed.gpa.free(cfg_path);
@@ -2247,22 +2326,6 @@ pub fn keymapSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (lines.items) |l| try out.appendSlice(gpa, l);
-    return out.toOwnedSlice(gpa);
-}
-
-/// A text snapshot of how `actions` resolve across the cross product of
-/// `modes` × `langs` (deterministic iteration order — the lists are small,
-/// fixed, and given in the same order by both callers, so no sort needed).
-/// The action-provider-set analogue of `keymapSnapshot`.
-pub fn actionSnapshot(gpa: Allocator, ctx: *command.Context, actions: []const []const u8, modes: []const []const u8, langs: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (actions) |a| for (modes) |m| for (langs) |l| {
-        const cmd = ctx.actions.resolve(a, .{ .mode = m, .lang = l }) orelse "<none>";
-        const line = try std.fmt.allocPrint(gpa, "{s}|{s}|{s}->{s}\n", .{ a, m, l, cmd });
-        defer gpa.free(line);
-        try out.appendSlice(gpa, line);
-    };
     return out.toOwnedSlice(gpa);
 }
 

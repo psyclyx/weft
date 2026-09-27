@@ -80,6 +80,9 @@ pub fn addPickTarget(offset: usize) bool {
 // message, for gutter markers and `]d`/`[d` navigation. One set per session,
 // belonging to the document that session has open.
 pub const MAX_DIAG = 256;
+/// The signal raised whenever a session's diagnostics change (`weft.signalEmit`);
+/// a listener re-reads them with the `diagnostics-list` command.
+pub const diagnostics_signal = "diagnostics";
 pub const DiagnosticProvenance = enum { versioned, legacy_unversioned };
 
 pub const Diags = struct {
@@ -87,6 +90,11 @@ pub const Diags = struct {
     sev: [MAX_DIAG]u8 = undefined,
     moff: [MAX_DIAG]usize = undefined,
     mlen: [MAX_DIAG]usize = undefined,
+    /// Where the server said each one is (0-based), kept beside the anchor:
+    /// an anchor resolves only in the entry it was captured in, and a list of
+    /// problems names them while another entry is in front.
+    line: [MAX_DIAG]u32 = undefined,
+    col: [MAX_DIAG]u32 = undefined,
     msgs: [1 << 13]u8 = undefined,
     n: usize = 0,
     snapshot: ?u32 = null,
@@ -353,6 +361,8 @@ pub fn initializeParams(s: *const Session) ?[]u8 {
 }
 
 pub fn releaseDiagnostics(s: *Session) void {
+    // Whoever lists them (a problems panel) hears that the set moved.
+    if (s.diag.n > 0) weft.signalEmit(diagnostics_signal);
     for (s.diag.targets[0..s.diag.n]) |target| releaseTarget(target);
     s.diag.n = 0;
     if (s.diag.snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
@@ -524,7 +534,7 @@ pub fn buildUri() ?[]u8 {
 // ── Request identity: what a session has in flight ────────────────────
 
 // ── Request identities ───────────────────────────────────────────────
-pub const Kind = enum { hover, definition, references, symbols, format, rename, signature, inlay, codeaction, completion };
+pub const Kind = enum { hover, definition, type_definition, implementation, references, symbols, format, rename, signature, inlay, codeaction, completion };
 pub const kind_count = std.meta.fields(Kind).len;
 
 /// One ask. `id` 0 means ARMED: built, but not yet on the wire (the handshake

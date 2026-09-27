@@ -15,6 +15,24 @@ const View = view.View;
 const Run = view.Run;
 const Rect = view.Rect;
 const Hud = view.Hud;
+const ChromeHit = @import("hud.zig").ChromeHit;
+
+/// Where `buildHud` files the status segments' hit regions: the pane's
+/// chrome list, in the view's frame arena.
+pub const ChromeSink = struct {
+    list: *std.ArrayList(ChromeHit),
+    gpa: Allocator,
+
+    fn segment(self: ChromeSink, v: *const View, y: f32, index: usize, from: usize, to: usize, command: []const u8) !void {
+        if (to <= from) return;
+        try self.list.append(self.gpa, .{
+            .rect = v.cellsRect(y, from, to - from),
+            .kind = .status,
+            .index = index,
+            .command = command,
+        });
+    }
+};
 
 /// Baseline for local row `i` within a region whose top is `rect_y`.
 fn baseIn(v: *const View, rect_y: f32, i: usize) f32 {
@@ -30,6 +48,7 @@ pub fn buildHud(
     status_rect: region.Rect,
     panel_rect: region.Rect,
     cols_visible: usize,
+    chrome: ChromeSink,
 ) !void {
     // The status line owns `status_rect`; the panel (pick or which-key)
     // owns `panel_rect` directly above it. Both rects were cut from the
@@ -55,10 +74,13 @@ pub fn buildHud(
     // as plain segments. The diagnostics count rides the SAME mesh call but
     // is `align_right`, so it joins the right-anchored cluster below instead
     // of this loop.
-    for (hud.statusline_segs) |seg| {
+    const row_y = base_y - v.ascent;
+    for (hud.statusline_segs, 0..) |seg, index| {
         if (seg.align_right) continue;
         const color = seg.fg_override orelse v.theme.roleColor(seg.role);
+        const from = col;
         col = try segRun(v, scratch, runs, rects, seg.text, col, base_y, cols_visible, color, seg.bg_override);
+        try chrome.segment(v, row_y, index, from, col, seg.command);
         col += seg.gap_after; // spacing is the PREDECESSOR's data — see Seg.gap_after's doc
     }
     if (hud.dirty) col = try segRun(v, scratch, runs, rects, " ●", col, base_y, cols_visible, v.theme.diag_warn, null);
@@ -88,22 +110,27 @@ pub fn buildHud(
 
     // Right-anchored cluster: peers, then the mesh's right-anchored segments
     // (today: the diagnostics count), measured backward.
-    var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32 }) = .empty;
+    // `index` is a segment's place in the mesh output; null for the chips the
+    // mesh does not compose, which are not clickable.
+    var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32, index: ?usize = null, command: []const u8 = "" }) = .empty;
     if (hud.plugin_status) |st|
         try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "{s}  ", .{st}), .color = v.theme.accent });
     if (hud.peers > 0)
         try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "✦{d} ", .{hud.peers}), .color = v.theme.accent });
-    for (hud.statusline_segs) |seg| {
+    for (hud.statusline_segs, 0..) |seg, index| {
         if (!seg.align_right) continue;
-        try right_segs.append(scratch, .{ .text = seg.text, .color = seg.fg_override orelse v.theme.roleColor(seg.role) });
+        try right_segs.append(scratch, .{ .text = seg.text, .color = seg.fg_override orelse v.theme.roleColor(seg.role), .index = index, .command = seg.command });
     }
     var right_w: usize = 0;
     for (right_segs.items) |seg| right_w += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
     if (right_w > 0 and right_w < cols_visible) {
         var rcol = cols_visible - right_w;
         if (rcol > col) { // only if it doesn't collide with the left cluster
-            for (right_segs.items) |seg|
+            for (right_segs.items) |seg| {
+                const from = rcol;
                 rcol = try segRun(v, scratch, runs, rects, seg.text, rcol, base_y, cols_visible, seg.color, null);
+                if (seg.index) |index| try chrome.segment(v, row_y, index, from, rcol, seg.command);
+            }
         }
     }
 

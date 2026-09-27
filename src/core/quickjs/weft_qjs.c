@@ -142,6 +142,22 @@ __attribute__((import_module("weft"), import_name("qjs_path")))
 extern int host_path(char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_jump")))
 extern void host_jump(int offset);
+// The pointer facts of the dispatch in flight — wasm_host/pointer.zig's body,
+// the one `wl_pointer` runs: eight u32 words, 0 when there is no gesture.
+__attribute__((import_module("weft"), import_name("qjs_pointer")))
+extern int host_pointer(unsigned *out_words);
+// The system clipboard (grant: clipboard, config-only) — wasm_host/clipboard.zig's
+// bodies. `get` answers the FULL length, so a caller whose buffer was short
+// can ask again; both answer WEFT_DENIED without the grant.
+__attribute__((import_module("weft"), import_name("qjs_clipboard_set")))
+extern int host_clipboard_set(const char *text, int len);
+__attribute__((import_module("weft"), import_name("qjs_clipboard_get")))
+extern int host_clipboard_get(char *out, int cap);
+// The head's history — wasm_host/history.zig's bodies.
+__attribute__((import_module("weft"), import_name("qjs_jump_push")))
+extern void host_jump_push(void);
+__attribute__((import_module("weft"), import_name("qjs_macro_recording")))
+extern int host_macro_recording(void);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -165,14 +181,15 @@ __attribute__((import_module("weft"), import_name("qjs_semantic_action")))
 extern void host_semantic_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
 extern void host_provide(const char *action, int action_len,
-                         const char *mode, int mode_len,
-                         const char *lang, int lang_len,
-                         const char *cmd, int cmd_len, int prio);
+                         const char *when_json, int when_len,
+                         const char *cmd, int cmd_len,
+                         const char *opts_json, int opts_len);
 // weft.statusSegment(text, role, priority): stage a static ui/statusline-seg
 // segment onto the manifest (north-star-plan §6 W3, task #19 item 3).
 __attribute__((import_module("weft"), import_name("qjs_status_segment")))
 extern void host_status_segment(const char *text, int text_len,
-                                const char *role, int role_len, int priority);
+                                const char *role, int role_len, int priority,
+                                const char *command, int command_len);
 // weft.grant(plugin, capability, opts): stage a GrantDecl onto the manifest
 // (north-star-plan §6 W4 slice 4). `root` is opts.root ("" = unrestricted,
 // Limit.none; non-empty narrows to Limit.fs_root) — the only limit kind a
@@ -193,11 +210,16 @@ extern void host_viewport(const char *name, int name_len,
 // weft.present(viewport, opts): stage "show this subject in that viewport".
 __attribute__((import_module("weft"), import_name("qjs_present")))
 extern void host_present(const char *viewport, int viewport_len,
-                         const char *subject, int subject_len);
+                         const char *subject, int subject_len,
+                         const char *command, int command_len);
 
 #define WEFT_VP_CYCLES (1 << 0)
 #define WEFT_VP_PERSISTENT (1 << 1)
 #define WEFT_VP_FOCUS_SOURCE (1 << 2)
+#define WEFT_VP_TAKES_FOCUS (1 << 3)
+#define WEFT_VP_STATUS_LINE (1 << 4)
+#define WEFT_VP_EXTENT_ROWS (1 << 5)
+#define WEFT_VP_HIDDEN (1 << 6)
 
 // The result an i32-returning effect import answers when this plugin holds no
 // grant for the capability it needs (core/membrane/qjs_contract.zig's
@@ -479,38 +501,44 @@ static JSValue js_semantic_action(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.provide(action, when, cmd[, prio]) — register a provider for `action`.
-// `when` is an object {mode?, lang?}; an absent field is "don't care". The
-// highest-priority provider whose `when` holds in the current context wins when
-// the action fires (ties break toward the more specific `when`).
+// JSON text of `v`, or NULL (with *len 0) when `v` is absent or has no JSON
+// form. The caller frees a non-NULL result with JS_FreeCString.
+static const char *json_of(JSContext *ctx, JSValueConst v, size_t *len) {
+    *len = 0;
+    if (JS_IsUndefined(v) || JS_IsNull(v)) return NULL;
+    JSValue s = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+    if (JS_IsException(s) || !JS_IsString(s)) {
+        JS_FreeValue(ctx, s);
+        return NULL;
+    }
+    const char *out = JS_ToCStringLen(ctx, len, s);
+    JS_FreeValue(ctx, s);
+    return out;
+}
+
+// weft.provide(action, when, cmd[, prio | opts]) — register a provider for
+// `action`. `when` is an object over the context facts — {mode?, lang?, tool?,
+// role?, locality?}; an absent field is "don't care". The fourth argument is
+// the priority, or an object {priority?, label?, group?, order?} whose other
+// fields say how the provider's offer is PRESENTED where it wins. Both cross
+// as JSON and are parsed host-side into the same Predicate the wasm door
+// builds, so the two planes cannot disagree about what a fact means.
 static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 3) return JS_ThrowTypeError(ctx, "provide(action, when, cmd[, prio])");
-    size_t al, cl;
+    if (argc < 3) return JS_ThrowTypeError(ctx, "provide(action, when, cmd[, prio | opts])");
+    size_t al, cl, wl, ol;
     const char *a = JS_ToCStringLen(ctx, &al, argv[0]);
     const char *c = JS_ToCStringLen(ctx, &cl, argv[2]);
-    const char *mode = NULL;
-    size_t ml = 0;
-    const char *lang = NULL;
-    size_t ll = 0;
-    JSValue jmode = JS_UNDEFINED, jlang = JS_UNDEFINED;
-    if (JS_IsObject(argv[1])) {
-        jmode = JS_GetPropertyStr(ctx, argv[1], "mode");
-        if (!JS_IsUndefined(jmode) && !JS_IsNull(jmode)) mode = JS_ToCStringLen(ctx, &ml, jmode);
-        jlang = JS_GetPropertyStr(ctx, argv[1], "lang");
-        if (!JS_IsUndefined(jlang) && !JS_IsNull(jlang)) lang = JS_ToCStringLen(ctx, &ll, jlang);
-    }
-    int32_t prio = 0;
-    if (argc >= 4) JS_ToInt32(ctx, &prio, argv[3]);
+    const char *when = json_of(ctx, argv[1], &wl);
+    const char *opts = argc >= 4 ? json_of(ctx, argv[3], &ol) : NULL;
+    if (!opts) ol = 0;
     if (a && c)
-        host_provide(a, (int)al, mode ? mode : "", (int)ml,
-                     lang ? lang : "", (int)ll, c, (int)cl, prio);
+        host_provide(a, (int)al, when ? when : "", (int)wl, c, (int)cl,
+                     opts ? opts : "", (int)ol);
     JS_FreeCString(ctx, a);
     JS_FreeCString(ctx, c);
-    if (mode) JS_FreeCString(ctx, mode);
-    if (lang) JS_FreeCString(ctx, lang);
-    JS_FreeValue(ctx, jmode);
-    JS_FreeValue(ctx, jlang);
+    if (when) JS_FreeCString(ctx, when);
+    if (opts) JS_FreeCString(ctx, opts);
     return JS_UNDEFINED;
 }
 
@@ -518,18 +546,22 @@ static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
 // segment (north-star-plan §6 W3, task #19). `role` names a
 // core.surface.Role ("normal","muted","accent",…); unknown/empty falls back
 // to "normal" host-side. `priority` defaults to 0 — the composition sort key
-// within `ui/statusline-seg` (an ordered_union slot).
+// within `ui/statusline-seg` (an ordered_union slot). `command`, when given,
+// is what a click on the segment runs.
 static JSValue js_status_segment(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "statusSegment(text, role[, priority])");
-    size_t tl, rl;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "statusSegment(text, role[, priority[, command]])");
+    size_t tl, rl, cl = 0;
     const char *txt = JS_ToCStringLen(ctx, &tl, argv[0]);
     const char *role = JS_ToCStringLen(ctx, &rl, argv[1]);
     int32_t prio = 0;
     if (argc >= 3) JS_ToInt32(ctx, &prio, argv[2]);
-    if (txt && role) host_status_segment(txt, (int)tl, role, (int)rl, prio);
+    const char *cmd = NULL;
+    if (argc >= 4 && JS_IsString(argv[3])) cmd = JS_ToCStringLen(ctx, &cl, argv[3]);
+    if (txt && role) host_status_segment(txt, (int)tl, role, (int)rl, prio, cmd ? cmd : "", (int)cl);
     JS_FreeCString(ctx, txt);
     JS_FreeCString(ctx, role);
+    if (cmd) JS_FreeCString(ctx, cmd);
     return JS_UNDEFINED;
 }
 
@@ -608,7 +640,8 @@ static int opt_bool(JSContext *ctx, JSValueConst opts, const char *key, int dflt
 // weft.viewport(name, opts) — declare a viewport by its ATTRIBUTES
 // (doc/cwa-config-decisions.md D1). `opts.edge` docks it ("left"/"right"/
 // "top"/"bottom"; omitted means tiled), `opts.extent` is its share of the
-// frame, and cycles/persistent/followFocus are the remaining attributes.
+// frame (a number) or `{rows: n}` text rows, and cycles/persistent/
+// followFocus/takesFocus/statusLine are the remaining attributes.
 // "sidebar" is a fragment that sets these — never a kind this shim knows.
 static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
@@ -620,18 +653,35 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     const char *edge = NULL;
     size_t el = 0;
     double extent = 0.25;
+    int flags = 0;
+    int extent_arg = 0;
     JSValue jedge = JS_UNDEFINED, jextent = JS_UNDEFINED;
     if (JS_IsObject(opts)) {
         jedge = JS_GetPropertyStr(ctx, opts, "edge");
         if (JS_IsString(jedge)) edge = JS_ToCStringLen(ctx, &el, jedge);
         jextent = JS_GetPropertyStr(ctx, opts, "extent");
-        if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) JS_ToFloat64(ctx, &extent, jextent);
+        if (JS_IsObject(jextent)) {
+            // `{rows: n}`: whole text rows, resolved to pixels by the layout
+            // from the view's row height — never a share of the frame.
+            JSValue jrows = JS_GetPropertyStr(ctx, jextent, "rows");
+            int32_t rows = 1;
+            if (!JS_IsUndefined(jrows) && !JS_IsNull(jrows)) JS_ToInt32(ctx, &rows, jrows);
+            JS_FreeValue(ctx, jrows);
+            flags |= WEFT_VP_EXTENT_ROWS;
+            extent_arg = rows < 1 ? 1 : rows;
+        } else if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) {
+            JS_ToFloat64(ctx, &extent, jextent);
+        }
     }
-    int flags = 0;
+    if (!(flags & WEFT_VP_EXTENT_ROWS)) extent_arg = (int)(extent * 1000);
     if (opt_bool(ctx, opts, "cycles", 1)) flags |= WEFT_VP_CYCLES;
     if (opt_bool(ctx, opts, "persistent", 0)) flags |= WEFT_VP_PERSISTENT;
     if (opt_bool(ctx, opts, "followFocus", 1)) flags |= WEFT_VP_FOCUS_SOURCE;
-    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, (int)(extent * 1000));
+    if (opt_bool(ctx, opts, "takesFocus", 1)) flags |= WEFT_VP_TAKES_FOCUS;
+    if (opt_bool(ctx, opts, "statusLine", 1)) flags |= WEFT_VP_STATUS_LINE;
+    // `shown: false` starts it hidden: a panel opened on demand.
+    if (!opt_bool(ctx, opts, "shown", 1)) flags |= WEFT_VP_HIDDEN;
+    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, extent_arg);
     JS_FreeCString(ctx, name);
     if (edge) JS_FreeCString(ctx, edge);
     JS_FreeValue(ctx, jedge);
@@ -642,28 +692,36 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
 // weft.present(viewport, opts) — "present resource R in viewport V" (§7) as
 // a declaration. Separate from `viewport` because presenting is an ordinary
 // operation on a live viewport, not part of what the viewport is.
+// `opts.subject` is opened with `open`; `opts.command` names another command
+// that presents (with `subject` as its argument when there is one) — how a
+// plugin's own entry, which has no path to open, reaches a viewport.
 static JSValue js_present(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject})");
-    size_t vl, sl = 0;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject | command})");
+    size_t vl, sl = 0, cl = 0;
     const char *vp = JS_ToCStringLen(ctx, &vl, argv[0]);
     if (!vp) return JS_EXCEPTION;
-    const char *subject = NULL;
-    JSValue jsubject = JS_UNDEFINED;
+    const char *subject = NULL, *command = NULL;
+    JSValue jsubject = JS_UNDEFINED, jcommand = JS_UNDEFINED;
     if (JS_IsObject(argv[1])) {
         jsubject = JS_GetPropertyStr(ctx, argv[1], "subject");
         if (JS_IsString(jsubject)) subject = JS_ToCStringLen(ctx, &sl, jsubject);
+        jcommand = JS_GetPropertyStr(ctx, argv[1], "command");
+        if (JS_IsString(jcommand)) command = JS_ToCStringLen(ctx, &cl, jcommand);
     }
-    if (!subject) {
-        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject}): subject must be a string naming what to show");
+    if (!subject && !command) {
+        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject | command}): name what to show, or the command that shows it");
         JS_FreeCString(ctx, vp);
         JS_FreeValue(ctx, jsubject);
+        JS_FreeValue(ctx, jcommand);
         return exc;
     }
-    host_present(vp, (int)vl, subject, (int)sl);
+    host_present(vp, (int)vl, subject ? subject : "", (int)sl, command ? command : "", (int)cl);
     JS_FreeCString(ctx, vp);
-    JS_FreeCString(ctx, subject);
+    if (subject) JS_FreeCString(ctx, subject);
+    if (command) JS_FreeCString(ctx, command);
     JS_FreeValue(ctx, jsubject);
+    JS_FreeValue(ctx, jcommand);
     return JS_UNDEFINED;
 }
 
@@ -1001,6 +1059,80 @@ static JSValue js_path(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
 }
 
+// weft.pointer() -> {kind, button, clicks, ctrl, alt, shift, offset, node,
+// focused} | null: where the pointer gesture this command is bound to
+// happened. `offset`/`node` are null when the pointer is over no text / no
+// scene node. Kinds: "press", "release", "drag", "wheel", "hover".
+static JSValue js_pointer(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    static const char *const kinds[] = {"none", "press", "release", "drag", "wheel", "hover"};
+    unsigned w[8] = {0};
+    if (!host_pointer(w)) return JS_NULL;
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, w[0] < 6 ? kinds[w[0]] : "none"));
+    JS_SetPropertyStr(ctx, o, "button", JS_NewInt32(ctx, (int32_t)w[1]));
+    JS_SetPropertyStr(ctx, o, "clicks", JS_NewInt32(ctx, (int32_t)w[2]));
+    JS_SetPropertyStr(ctx, o, "ctrl", JS_NewBool(ctx, (w[3] & 1) != 0));
+    JS_SetPropertyStr(ctx, o, "alt", JS_NewBool(ctx, (w[3] & 2) != 0));
+    JS_SetPropertyStr(ctx, o, "shift", JS_NewBool(ctx, (w[3] & 4) != 0));
+    JS_SetPropertyStr(ctx, o, "offset", w[4] == 0xffffffffu ? JS_NULL : JS_NewFloat64(ctx, (double)w[4]));
+    JS_SetPropertyStr(ctx, o, "node", (w[7] & 4) ? JS_NewFloat64(ctx, (double)w[6] * 4294967296.0 + (double)w[5]) : JS_NULL);
+    JS_SetPropertyStr(ctx, o, "focused", JS_NewBool(ctx, (w[7] & 2) != 0));
+    return o;
+}
+
+// weft.clipboardSet(text) -> bool: take the system clipboard. Throws without
+// the `clipboard` grant.
+static JSValue js_clipboard_set(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (!s) return JS_EXCEPTION;
+    int r = host_clipboard_set(s, (int)l);
+    JS_FreeCString(ctx, s);
+    if (r == WEFT_DENIED) return weft_throw_denied(ctx, "clipboardSet");
+    return JS_NewBool(ctx, r == 0);
+}
+
+// weft.clipboardGet() -> string | null: the system clipboard's text. Throws
+// without the `clipboard` grant; null when it cannot be read.
+static JSValue js_clipboard_get(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int n = host_clipboard_get(g_read_buf, (int)sizeof g_read_buf);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "clipboardGet");
+    if (n < 0) return JS_NULL;
+    if ((size_t)n <= sizeof g_read_buf) return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+    char *big = js_malloc(ctx, (size_t)n);
+    if (!big) return JS_EXCEPTION;
+    int m = host_clipboard_get(big, n);
+    JSValue v = m < 0 ? JS_NULL : JS_NewStringLen(ctx, big, (size_t)(m < n ? m : n));
+    js_free(ctx, big);
+    return v;
+}
+
+// weft.jumpPush(): remember the caret as a jump in the head's jumplist.
+static JSValue js_jump_push(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    host_jump_push();
+    return JS_UNDEFINED;
+}
+
+// weft.macroRecording() -> string | null: the register a macro is recording
+// into, for a status chip.
+static JSValue js_macro_recording(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int r = host_macro_recording();
+    if (r <= 0) return JS_NULL;
+    char c = (char)r;
+    return JS_NewStringLen(ctx, &c, 1);
+}
+
 // weft.jump(offset): move the caret, clamped by the host.
 static JSValue js_jump(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
@@ -1144,6 +1276,11 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "selection", JS_NewCFunction(g_ctx, js_selection, "selection", 0));
     JS_SetPropertyStr(g_ctx, weft, "path", JS_NewCFunction(g_ctx, js_path, "path", 0));
     JS_SetPropertyStr(g_ctx, weft, "jump", JS_NewCFunction(g_ctx, js_jump, "jump", 1));
+    JS_SetPropertyStr(g_ctx, weft, "pointer", JS_NewCFunction(g_ctx, js_pointer, "pointer", 0));
+    JS_SetPropertyStr(g_ctx, weft, "clipboardSet", JS_NewCFunction(g_ctx, js_clipboard_set, "clipboardSet", 1));
+    JS_SetPropertyStr(g_ctx, weft, "clipboardGet", JS_NewCFunction(g_ctx, js_clipboard_get, "clipboardGet", 0));
+    JS_SetPropertyStr(g_ctx, weft, "jumpPush", JS_NewCFunction(g_ctx, js_jump_push, "jumpPush", 0));
+    JS_SetPropertyStr(g_ctx, weft, "macroRecording", JS_NewCFunction(g_ctx, js_macro_recording, "macroRecording", 0));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));

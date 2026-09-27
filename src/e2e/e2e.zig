@@ -30,4 +30,12 @@ test {
     _ = @import("grammar_test.zig");
     _ = @import("demolition_test.zig");
     _ = @import("notes_test.zig");
+    _ = @import("ide_test.zig");
+    _ = @import("visual_aids_test.zig");
+    _ = @import("pointer_test.zig");
+    _ = @import("find_test.zig");
+    _ = @import("helix_test.zig");
+    _ = @import("history_test.zig");
+    _ = @import("chrome_test.zig");
+    _ = @import("panels_test.zig");
 }

@@ -396,6 +396,9 @@ pub const Caps = struct {
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
     next_session: u64 = 1,
     layers: layers_mod.Layers = .empty,
+    /// The flash set (`flash.zig`): anchored on the documents in `layers`,
+    /// so it lives beside them.
+    flash: @import("flash.zig").Flash = .{},
     /// Monotonic clock, injectable for tests.
     now: *const fn () u64,
     /// The Container this module adapts onto (F5, W1) — see the file doc.

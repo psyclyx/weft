@@ -841,6 +841,71 @@ pub const Services = struct {
         return error.ActionUnavailable;
     }
 
+    /// Activate the focused node when it is an `action` node: invoke the
+    /// action its content names, with the node itself as the subject. Null
+    /// when the focus is not an action node, or the action is disabled.
+    ///
+    /// An action node IS its action reference; nothing needs to advertise it
+    /// in a `node.actions` list for it to be invocable. A click on it and a
+    /// key that activates it both land here, so they cannot disagree.
+    pub fn invokeFocusedActionNode(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+    ) InvokeActionError!?ActionEffect {
+        const path = head.semantic_focus.path() orelse return null;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return null;
+        };
+        const leaf = path.leaf() orelse return null;
+        const node = instance.node(leaf) orelse return null;
+        const action = switch (node.content) {
+            .action => |value| value,
+            else => return null,
+        };
+        if (!action.enabled) return null;
+        const effect = try self.invokeActionInRegister(stack, gpa, .{
+            .action = action.action,
+            .view = path.view,
+            .subject = leaf,
+        }, 0);
+        try self.applyActionFocus(head, gpa, path, effect);
+        return effect;
+    }
+
+    /// Activate an `action` node by REFERENCE, leaving this head's focus
+    /// where it is: the click on a pane that takes no focus (a strip of
+    /// buttons). The same action and subject `invokeFocusedActionNode` would
+    /// use; only the focus stays put, so what the strip acts on — the editor
+    /// with the keys — does not move under the click. An effect that asks
+    /// for focus (a target opened) still gets it: that is the action's
+    /// meaning, not the click's.
+    pub fn invokeActionNode(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        ref: semantic.view.Ref,
+        id: semantic.scene.NodeId,
+    ) InvokeActionError!?ActionEffect {
+        const instance = self.views.get(ref) orelse return null;
+        const node = instance.node(id) orelse return null;
+        const action = switch (node.content) {
+            .action => |value| value,
+            else => return null,
+        };
+        if (!action.enabled) return null;
+        const effect = try self.invokeActionInRegister(stack, gpa, .{
+            .action = action.action,
+            .view = ref,
+            .subject = id,
+        }, 0);
+        try self.applyActionFocus(head, gpa, head.semantic_focus.path(), effect);
+        return effect;
+    }
+
     /// Visual operations on a semantic field are text selections, even when
     /// the field is backed by a structured provider such as the files view.
     /// Keep this in the shared action layer so Vim does not learn how a field

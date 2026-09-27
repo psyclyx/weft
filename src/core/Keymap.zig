@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const BindingFacet = @import("weft_input").BindingFacet;
 
 const Keymap = @This();
 
@@ -96,6 +97,12 @@ mode_tags: std.StringArrayHashMapUnmanaged(void) = .empty,
 /// presentation metadata, but it follows the same tier/owner rules as a bind
 /// so imported defaults cannot overwrite a config author's label.
 group_names: std.StringArrayHashMapUnmanaged(GroupEntry) = .empty,
+/// `mode\x00facet` → the mode a key is looked up in while the head is in
+/// `mode` and the entry has that facet (`BindingFacet`). A grammar's
+/// declaration, like `parents`: vim says its `normal` binds through
+/// `normal-source` in a document, helix says `helix-normal` binds through
+/// `helix-source`. Core pairs the facet with the mode and names neither.
+variants: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -128,6 +135,11 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v.owner);
     }
     self.group_names.deinit(gpa);
+    for (self.variants.keys(), self.variants.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    self.variants.deinit(gpa);
     self.* = .{};
 }
 
@@ -374,6 +386,29 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
         gop.key_ptr.* = try gpa.dupe(u8, mode);
     }
     gop.value_ptr.* = try gpa.dupe(u8, parent);
+}
+
+/// DECLARE that while the head is in `mode`, an entry with `facet` looks its
+/// keys up in `variant`. The variant is an ordinary mode: what it falls back
+/// to is the declarer's own `setFallback`. Re-declaring replaces.
+pub fn declareVariant(self: *Keymap, gpa: Allocator, mode: []const u8, facet: BindingFacet, variant: []const u8) Allocator.Error!void {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, @tagName(facet)) orelse return;
+    const gop = try self.variants.getOrPut(gpa, key);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = try gpa.dupe(u8, key);
+    }
+    gop.value_ptr.* = try gpa.dupe(u8, variant);
+}
+
+/// The mode `mode` binds through for `facet`, or null where nobody declared
+/// one — the caller then binds `mode` itself.
+pub fn variantFor(self: *const Keymap, mode: []const u8, facet: BindingFacet) ?[]const u8 {
+    var buf: [256]u8 = undefined;
+    const key = tagKey(&buf, mode, @tagName(facet)) orelse return null;
+    return self.variants.get(key);
 }
 
 /// The RESTING mode a buffer in `mode` should be remembered as: the root of the
@@ -803,8 +838,14 @@ pub fn displayKey(self: *const Keymap, buf: []u8, key: []const u8) []const u8 {
 }
 
 /// Canonicalize a human keyspec (or space-joined sequence) into `buf`. Per
-/// token: leading `C-`/`M-`/`S-` modifier prefixes pass through unchanged, then
-/// the base maps via `baseName`. Falls back to the raw input if it doesn't fit.
+/// token: leading `C-`/`M-`/`S-` modifier prefixes are re-emitted in the
+/// `C-M-S-` order `keyspec` composes at event time (so `S-C-x` and `C-S-x`
+/// bind the same key), then the base maps via `baseName`. Falls back to the
+/// raw input if it doesn't fit.
+///
+/// Pointer gestures (`mouse-1`, `S-double-mouse-1`, `C-wheel-up`, …; the
+/// grammar is `pointer.zig`'s) are ordinary bases here: they carry no
+/// punctuation or alias, so they pass through with their modifiers ordered.
 pub fn normalizeKey(buf: []u8, key: []const u8) []const u8 {
     var w: usize = 0;
     var it = std.mem.splitScalar(u8, key, ' ');
@@ -818,13 +859,17 @@ pub fn normalizeKey(buf: []u8, key: []const u8) []const u8 {
         }
         first = false;
         var base = tok;
+        var mods: [3]bool = .{ false, false, false };
         while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
-            if (w + 2 > buf.len) return key;
-            buf[w] = base[0];
-            buf[w + 1] = '-';
-            w += 2;
+            mods[std.mem.indexOfScalar(u8, "CMS", base[0]).?] = true;
             base = base[2..];
         }
+        for (mods, "CMS") |on, m| if (on) {
+            if (w + 2 > buf.len) return key;
+            buf[w] = m;
+            buf[w + 1] = '-';
+            w += 2;
+        };
         const name = baseName(base);
         if (w + name.len > buf.len) return key;
         @memcpy(buf[w..][0..name.len], name);
@@ -1041,6 +1086,34 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try t.expectEqualStrings(":", km.displayKey(&buf, "colon")); // a lone segment
     try t.expectEqualStrings("f", km.displayKey(&buf, "f"));
     try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
+}
+
+test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass through" {
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("C-S-x", normalizeKey(&buf, "S-C-x"));
+    try t.expectEqualStrings("C-M-S-Tab", normalizeKey(&buf, "S-M-C-TAB"));
+    try t.expectEqualStrings("C-minus", normalizeKey(&buf, "C--"));
+
+    // The pointer grammar (`pointer.zig`): gestures are plain bases.
+    try t.expectEqualStrings("mouse-1", normalizeKey(&buf, "mouse-1"));
+    try t.expectEqualStrings("S-mouse-1", normalizeKey(&buf, "S-mouse-1"));
+    try t.expectEqualStrings("C-S-double-mouse-1", normalizeKey(&buf, "S-C-double-mouse-1"));
+    try t.expectEqualStrings("triple-mouse-3", normalizeKey(&buf, "triple-mouse-3"));
+    try t.expectEqualStrings("drag-mouse-1", normalizeKey(&buf, "drag-mouse-1"));
+    try t.expectEqualStrings("C-wheel-up", normalizeKey(&buf, "C-wheel-up"));
+
+    // And they compose exactly as the shell spells them at event time, so a
+    // config's `S-C-mouse-1` answers a ctrl+shift click.
+    var ev: [32]u8 = undefined;
+    const spec = keyspec(&ev, true, false, true, "mouse-1");
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.bind(gpa, global_mode, "S-C-mouse-1", "pointer-extend-selection", prio_config, "cfg");
+    try t.expectEqualStrings("pointer-extend-selection", km.lookup("normal", spec).?);
+    // A pointer chord is a sequence like any other.
+    try km.bind(gpa, "normal", "SPC mouse-3", "menu-at-point", prio_config, "cfg");
+    try t.expectEqualStrings("menu-at-point", km.resolveExact("normal", "space mouse-3").?);
 }
 
 test "keymap: committing text is DECLARED per mode — bindings inherit, the declaration never does" {

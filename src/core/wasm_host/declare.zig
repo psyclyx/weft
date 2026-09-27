@@ -121,5 +121,10 @@ pub fn hRequestPerm(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (p.phase != .describing) return;
     const idx: usize = @intCast(args[0]);
-    if (idx < wasm_abi.perm_count) p.perms[idx] = true;
+    if (idx >= wasm_abi.perm_count) return;
+    // A config-only capability cannot be asked into existence: `describe()`
+    // does not set it at all (`Perm.configOnly`).
+    const perm: shared.Perm = @enumFromInt(idx);
+    if (perm.configOnly()) return;
+    p.perms[idx] = true;
 }

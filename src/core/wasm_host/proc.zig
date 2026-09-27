@@ -131,7 +131,7 @@ pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i3
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(r.name, why);
+            shared.noteSpawnRefusal(ctx, r.name, why);
             results[0] = -1;
             return;
         },
@@ -386,7 +386,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
             return;
         },
     };
@@ -443,7 +443,7 @@ fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     var resolved: [1]usize = undefined;
     doc.resolveAnchors(gpa, &.{job.target}, &resolved) catch return;
     const at = resolved[0];
-    command.renderInto(gpa, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
+    command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
 }
 
 fn shellFree(ctx: ?*anyopaque) void {
@@ -581,7 +581,7 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
             return;
         },
     };
@@ -684,12 +684,12 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         if (end > 0) {
             const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
             defer gpa.free(sep);
-            command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
+            command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
         } else {
-            command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
+            command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
         }
     } else {
-        command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+        command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
 
     // The text has landed: tell the issuing plugin WHICH fill it was, so it can
@@ -809,7 +809,7 @@ pub fn hExec(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
             return;
         },
     };
@@ -1099,7 +1099,7 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         .inherit => null,
         .at => |dir| dir,
         .refused => |why| {
-            shared.noteSpawnRefusal(p.name, why);
+            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
             return;
         },
     };
@@ -1165,7 +1165,7 @@ fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     doc.resolveAnchors(gpa, &.{ job.start, job.end }, &resolved) catch return;
     const rs = resolved[0];
     const re = resolved[1];
-    command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
+    command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
 }
 
 fn filterFree(ctx: ?*anyopaque) void {

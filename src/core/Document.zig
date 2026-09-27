@@ -673,6 +673,36 @@ pub fn removeAnchor(self: *Document, h: AnchorHandle) void {
     self.anchors.remove(h);
 }
 
+/// A live range's two anchors (`addRangeAnchors`, read by `rangeOffsets`).
+pub const RangeAnchors = struct { start: AnchorHandle, end: AnchorHandle };
+
+/// Anchor `r` as a live range. A non-empty range anchors INWARD (start
+/// `.right`, end `.left`): text inserted at either edge stays outside it. An
+/// EMPTY range anchors both ends `.left`, as one point: inward biases would
+/// split it across text inserted there (start after, end before) and it would
+/// resolve to swallow that text. Left, so of two empty ranges at one point
+/// the one filled first ends up after the other (document order survives a
+/// reverse-order pass).
+pub fn addRangeAnchors(self: *Document, gpa: Allocator, r: Range) Error!RangeAnchors {
+    std.debug.assert(r.start <= r.end);
+    const empty = r.isEmpty();
+    const a = try self.addAnchor(gpa, r.start, if (empty) .left else .right);
+    errdefer self.removeAnchor(a);
+    return .{ .start = a, .end = try self.addAnchor(gpa, r.end, .left) };
+}
+
+/// A live range's current offsets, in order. The ends cross when a non-empty
+/// range's own text is REPLACED (both collapse onto the deletion point, then
+/// the inward biases part them around the new text): read in order, that is
+/// the range over the replacement, which is what an operator's range should
+/// become. An empty range cannot cross — `addRangeAnchors` gives its ends
+/// one bias — so it never swells over text merely inserted at its point.
+pub fn rangeOffsets(self: *const Document, start: AnchorHandle, end: AnchorHandle) Range {
+    const a = self.anchorOffset(start);
+    const b = self.anchorOffset(end);
+    return .{ .start = @min(a, b), .end = @max(a, b) };
+}
+
 pub const ExportAnchorError = ObjectDoc.AnchorError || error{InvalidOffset};
 
 /// A portable identity anchor for `offset` at the current head: names

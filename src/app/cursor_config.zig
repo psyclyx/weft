@@ -8,7 +8,7 @@ const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
 
 pub const CursorConfig = struct {
-    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, blink: bool = false };
+    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, place: view_mod.CaretPlace = .head, blink: bool = false };
     gpa: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
@@ -33,6 +33,10 @@ pub const CursorConfig = struct {
     pub fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
         return .block;
+    }
+    pub fn placeFor(self: *const CursorConfig, mode: []const u8) view_mod.CaretPlace {
+        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.place;
+        return .head;
     }
     pub fn blinkFor(self: *const CursorConfig, mode: []const u8) bool {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.blink;
@@ -78,6 +82,17 @@ pub fn setCursorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
     const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
     const style = parseCursorStyle(args[1].string) orelse return error.InvalidArgument;
     (try cfg.entry(args[0].string)).style = style;
+    return .nil;
+}
+
+/// `cursor-place <mode> head|inside` — where the caret draws relative to the
+/// selection in `mode` (`view_mod.CaretPlace`). A grammar declares it, as it
+/// declares the caret's shape; core picks no answer for anyone.
+pub fn cursorPlaceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = ctx;
+    const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
+    const place = std.meta.stringToEnum(view_mod.CaretPlace, args[1].string) orelse return error.InvalidArgument;
+    (try cfg.entry(args[0].string)).place = place;
     return .nil;
 }
 

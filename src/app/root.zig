@@ -17,6 +17,9 @@ pub const application = @import("application.zig");
 /// Keypress → command. The general dispatch door every platform goes through.
 pub const dispatch = @import("dispatch.zig");
 
+/// Pointer event → hit facts + a pointer keyspec, through that same door.
+pub const pointer = @import("pointer.zig");
+
 /// The app-level session: the one system the desktop binary runs, plus the
 /// per-head UI state that is not core's.
 pub const session = @import("session.zig");
