@@ -912,3 +912,102 @@ test "e2e/ide: a clipboard holding the register's line plus its line break paste
     ed.press("C-v", "");
     try expectText(ed, "beta\none two\nbeta");
 }
+
+// ── The selection's mapping, declared (doc/model.md §2.6) ────────────
+
+test "e2e/ide: a command that declares no mapping refuses several selections — the key, which-key and the echo agree" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "u.txt", "foo foo\n");
+    // `mark-region` marks THE line: it says nothing about several
+    // selections, so it is bound here to see how a key reaches it.
+    try ed.keymap.bind(gpa, "ide", "F6", "mark-region", core.Keymap.prio_config, "test");
+
+    // One selection is the degenerate case: it runs.
+    try t.expect(explainKey(ed, "F6") == .none);
+
+    // Two: which-key says it is blocked and why, and pressing it refuses,
+    // out loud, instead of marking the primary's line alone.
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    try expectBlocked(ed, "F6", "mark-region", "one-selection");
+    ed.press("F6", "");
+    try t.expectEqualStrings("mark-region: acts on one selection; several are selected", ed.echoText());
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    try expectText(ed, "foo foo\n");
+}
+
+/// The name field of the files listing's row for `name`.
+fn filesNameNode(ed: *Editor, name: []const u8) !h.semantic_model.scene.NodeId {
+    const view_ref = ed.toolView() orelse return error.NoFilesView;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
+    for (instance.scene.content.container.children) |row| {
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (std.mem.eql(u8, snap.value.bytes, name)) return node.id;
+        }
+    }
+    return error.FilesNameNotFound;
+}
+
+/// How many rows of the focused listing are flagged for removal.
+fn rowsFlaggedDeleted(ed: *Editor) usize {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return 0) orelse return 0;
+    var n: usize = 0;
+    for (instance.scene.content.container.children) |row| for (row.facts) |fact| {
+        if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete")) n += 1;
+    };
+    return n;
+}
+
+test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one, and a one-row action is disabled with the reason" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try openFile(ed, "a.txt", "x\n");
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expectEqualStrings("ide-structural", ed.mode());
+
+    // A click on a.txt, then C-click on c.txt: two rows, two extents.
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+    // The view washes both as selected.
+    const rows = core.selection.read(ed.ctx, gpa) catch return error.OutOfMemory;
+    defer gpa.free(rows.extents);
+    try t.expectEqual(@as(usize, 2), rows.extents.len);
+    try t.expectEqual(core.selection.Kind.rows, rows.extents[0].kind);
+
+    // An action a row offers for ITSELF says nothing about two rows: the
+    // toolbar and the context menu read it disabled, with the reason.
+    const plane = ed.ctx.intent.?;
+    const snap = plane.snapshotFor(ed.ctx).?;
+    var disabled_one: bool = false;
+    for (snap.candidates) |c| switch (c.availability) {
+        .disabled => |d| disabled_one = disabled_one or std.mem.eql(u8, d.reason, "one-selection"),
+        else => {},
+    };
+    try t.expect(disabled_one);
+
+    // Delete maps over the rows: both are flagged, b.txt between them is not.
+    ed.press("Delete", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+
+    // A plain click is THE selection again.
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "b.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
+}
