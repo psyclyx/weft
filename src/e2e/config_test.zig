@@ -454,7 +454,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expectEqualStrings(binding.intention, arms[0]);
     }
     // The standard semantic actions ARE commands, each under its own dotted
-    // name and nothing else (no `target-open-focused` beside `target.open`):
+    // name and nothing else (no dashed twin beside `target.open`):
     // the keys above reach them through intentions, and a palette or `:`
     // line reaches them by that one name.
     try t.expect(ed.commands.resolve(semantic.action.standard.open) != null);

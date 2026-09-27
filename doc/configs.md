@@ -190,12 +190,12 @@ predicate leaf. The guest half is the `gutter` plugin library.
 **Built.** `linenumbers` has two styles: `absolute`, and `relative`, which shows the
 caret line's own number the way vim's `number relativenumber` does (`hybrid` is
 accepted as a synonym). config.js sets `relative`. The vim flashes are in place, `=` has
-no operator to flash yet. Snipe's operator-pending commands are `snipe-op-*`: the range
+no operator to flash yet. Snipe's operator-pending commands are `snipe.operate-*`: the range
 goes to the command named by `weft.set("snipe", "operator", …)`, which config.js sets to
 vim's `vim.operate` (apply the pending operator over a range argument). A motion
 that reads keys before it knows its target cannot be a synchronous range command like
 `motions`', so it hands the range back instead. The count comes the same way, from the
-command `weft.set("snipe", "count", …)` names (vim's `vim-count-take`), so snipe names no
+command `weft.set("snipe", "count", …)` names (vim's `vim.count-take`), so snipe names no
 grammar. config.js takes Doom Emacs's evil-snipe settings (modules/editor/evil
 config.el): smart case, `scope` line, `repeat-scope` visible; Doom's `char-fold` has no
 weft equivalent. It binds `s S` in normal and visual, `z Z x X f F t T ; ,` under an

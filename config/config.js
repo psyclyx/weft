@@ -315,20 +315,24 @@ weft.bind("normal", "/", "consult.line");
 //   f F t T   — one-character snipes: vim's find, but highlighted and
 //               repeatable by pressing the key again
 //   ; ,       — repeat the last snipe, same way / reversed
-// Vim's own `find-*` commands stay registered, just unbound here.
-for (const key of ["s", "S", "f", "F", "t", "T"]) {
-  weft.bind("normal", key, `snipe-${key}`);
+// Vim's own `vim.find-*-char` commands stay registered, just unbound here.
+for (const [key, snipe] of [["s", "pair-next"], ["S", "pair-prev"],
+                            ["f", "char-next"], ["F", "char-prev"],
+                            ["t", "till-char-next"], ["T", "till-char-prev"]]) {
+  weft.bind("normal", key, `snipe.${snipe}`);
 }
-weft.bind("visual", "s", "snipe-s");
-weft.bind("visual", "S", "snipe-S");
-for (const [key, dir] of [["z", "s"], ["Z", "S"], ["x", "x"], ["X", "X"],
-                          ["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
-  weft.bind("op-pending", key, `snipe-op-${dir}`);
+weft.bind("visual", "s", "snipe.pair-next");
+weft.bind("visual", "S", "snipe.pair-prev");
+for (const [key, snipe] of [["z", "pair-next"], ["Z", "pair-prev"],
+                            ["x", "till-pair-next"], ["X", "till-pair-prev"],
+                            ["f", "char-next"], ["F", "char-prev"],
+                            ["t", "till-char-next"], ["T", "till-char-prev"]]) {
+  weft.bind("op-pending", key, `snipe.operate-${snipe}`);
 }
-weft.bind("normal", ";", "snipe-repeat");
-weft.bind("normal", ",", "snipe-repeat-rev");
-weft.bind("op-pending", ";", "snipe-op-repeat");
-weft.bind("op-pending", ",", "snipe-op-repeat-rev");
+weft.bind("normal", ";", "snipe.repeat");
+weft.bind("normal", ",", "snipe.repeat-reversed");
+weft.bind("op-pending", ";", "snipe.operate-repeat");
+weft.bind("op-pending", ",", "snipe.operate-repeat-reversed");
 
 // `C-o` / `C-i` — vim's jumplist. The intention first: a focused view that
 // knows its own history answers it; otherwise the head's jumplist does, which

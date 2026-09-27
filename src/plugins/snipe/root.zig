@@ -28,10 +28,10 @@
 //!     starts on a blank matches the LAST blank of a run, so `f SPC ;` walks
 //!     from gap to gap rather than through indentation.
 //!
-//! **Operators.** The `snipe-op-*` commands hand their range to the command
-//! named by `weft.set("snipe", "operator", …)` — vim's `vim-operate` — and the
+//! **Operators.** The `snipe.operate-*` commands hand their range to the command
+//! named by `weft.set("snipe", "operator", …)` — vim's `vim.operate` — and the
 //! typed count comes from `weft.set("snipe", "count", …)` (vim's
-//! `vim-count-take`). Snipe names no grammar; without those values an
+//! `vim.count-take`). Snipe names no grammar; without those values an
 //! operator-pending snipe just moves and a count is 1.
 //!
 //! **Several selections.** A snipe is a motion, so it maps like one: every
@@ -153,7 +153,7 @@ var prompt: struct {
 var origin_buf: [64]u8 = undefined;
 var origin_len: usize = 0;
 
-/// The snipe `snipe-go` performs, once per extent.
+/// The snipe `snipe.go` performs, once per extent.
 var request: Request = undefined;
 
 /// The last snipe made (not a repeat of one): what `;`/`,` repeat.
@@ -183,31 +183,31 @@ fn entry(comptime name: []const u8, comptime kind: Kind, comptime forward: bool,
 }
 
 const cmds = [_]weft.CommandEntry{
-    entry("snipe-s", .s, true, .move, "snipe forward to two characters"),
-    entry("snipe-S", .s, false, .move, "snipe backward to two characters"),
-    entry("snipe-x", .x, true, .move, "snipe forward to just before two characters"),
-    entry("snipe-X", .x, false, .move, "snipe backward to just after two characters"),
-    entry("snipe-f", .f, true, .move, "snipe forward to a character"),
-    entry("snipe-F", .f, false, .move, "snipe backward to a character"),
-    entry("snipe-t", .t, true, .move, "snipe forward to just before a character"),
-    entry("snipe-T", .t, false, .move, "snipe backward to just after a character"),
-    entry("snipe-op-s", .s, true, .operate, "operate through two characters"),
-    entry("snipe-op-S", .s, false, .operate, "operate back to two characters"),
-    entry("snipe-op-x", .x, true, .operate, "operate up to two characters"),
-    entry("snipe-op-X", .x, false, .operate, "operate back to just after two characters"),
-    entry("snipe-op-f", .f, true, .operate, "operate through a character"),
-    entry("snipe-op-F", .f, false, .operate, "operate back to a character"),
-    entry("snipe-op-t", .t, true, .operate, "operate up to a character"),
-    entry("snipe-op-T", .t, false, .operate, "operate back to just after a character"),
-    .{ .name = "snipe-read-char", .arity = whole, .call = weft.thunk(readChar) },
-    .{ .name = "snipe-backspace", .arity = whole, .call = backspace },
-    .{ .name = "snipe-return", .arity = whole, .call = returnKey },
-    .{ .name = "snipe-cancel", .arity = whole, .call = cancel },
-    .{ .name = "snipe-go", .arity = each, .call = go },
-    .{ .name = "snipe-repeat", .arity = each, .call = repeat(false, .move), .summary = "repeat the last snipe" },
-    .{ .name = "snipe-repeat-rev", .arity = each, .call = repeat(true, .move), .summary = "repeat the last snipe in the other direction" },
-    .{ .name = "snipe-op-repeat", .arity = each, .call = repeat(false, .operate), .summary = "operate over the last snipe, repeated" },
-    .{ .name = "snipe-op-repeat-rev", .arity = each, .call = repeat(true, .operate), .summary = "operate over the last snipe, reversed" },
+    entry("snipe.pair-next", .s, true, .move, "snipe forward to two characters"),
+    entry("snipe.pair-prev", .s, false, .move, "snipe backward to two characters"),
+    entry("snipe.till-pair-next", .x, true, .move, "snipe forward to just before two characters"),
+    entry("snipe.till-pair-prev", .x, false, .move, "snipe backward to just after two characters"),
+    entry("snipe.char-next", .f, true, .move, "snipe forward to a character"),
+    entry("snipe.char-prev", .f, false, .move, "snipe backward to a character"),
+    entry("snipe.till-char-next", .t, true, .move, "snipe forward to just before a character"),
+    entry("snipe.till-char-prev", .t, false, .move, "snipe backward to just after a character"),
+    entry("snipe.operate-pair-next", .s, true, .operate, "operate through two characters"),
+    entry("snipe.operate-pair-prev", .s, false, .operate, "operate back to two characters"),
+    entry("snipe.operate-till-pair-next", .x, true, .operate, "operate up to two characters"),
+    entry("snipe.operate-till-pair-prev", .x, false, .operate, "operate back to just after two characters"),
+    entry("snipe.operate-char-next", .f, true, .operate, "operate through a character"),
+    entry("snipe.operate-char-prev", .f, false, .operate, "operate back to a character"),
+    entry("snipe.operate-till-char-next", .t, true, .operate, "operate up to a character"),
+    entry("snipe.operate-till-char-prev", .t, false, .operate, "operate back to just after a character"),
+    .{ .name = "snipe.read-char", .arity = whole, .call = weft.thunk(readChar) },
+    .{ .name = "snipe.backspace", .arity = whole, .call = backspace },
+    .{ .name = "snipe.return", .arity = whole, .call = returnKey },
+    .{ .name = "snipe.cancel", .arity = whole, .call = cancel },
+    .{ .name = "snipe.go", .arity = each, .call = go },
+    .{ .name = "snipe.repeat", .arity = each, .call = repeat(false, .move), .summary = "repeat the last snipe" },
+    .{ .name = "snipe.repeat-reversed", .arity = each, .call = repeat(true, .move), .summary = "repeat the last snipe in the other direction" },
+    .{ .name = "snipe.operate-repeat", .arity = each, .call = repeat(false, .operate), .summary = "operate over the last snipe, repeated" },
+    .{ .name = "snipe.operate-repeat-reversed", .arity = each, .call = repeat(true, .operate), .summary = "operate over the last snipe, reversed" },
 };
 
 comptime {
@@ -215,11 +215,11 @@ comptime {
 }
 
 fn init() void {
-    weft.textInput(char_mode, "snipe-read-char");
-    weft.bindKey(char_mode, "Escape", "snipe-cancel");
-    weft.bindKey(char_mode, "BackSpace", "snipe-backspace");
-    weft.bindKey(char_mode, "Return", "snipe-return");
-    weft.bindKey(char_mode, "KP_Enter", "snipe-return");
+    weft.textInput(char_mode, "snipe.read-char");
+    weft.bindKey(char_mode, "Escape", "snipe.cancel");
+    weft.bindKey(char_mode, "BackSpace", "snipe.backspace");
+    weft.bindKey(char_mode, "Return", "snipe.return");
+    weft.bindKey(char_mode, "KP_Enter", "snipe.return");
 }
 
 /// Open the prompt — unless this key is the one right after a snipe of the
@@ -229,7 +229,7 @@ fn start(comptime kind: Kind, comptime forward: bool, comptime use: Use) fn () v
         fn h() void {
             if (use == .move and armed() and flag("repeat-keys", true)) {
                 if (last) |l| {
-                    if (l.kind == kind) return weft.run(if (forward) "snipe-repeat" else "snipe-repeat-rev");
+                    if (l.kind == kind) return weft.run(if (forward) "snipe.repeat" else "snipe.repeat-reversed");
                 }
             }
             prompt = .{ .kind = kind, .forward = forward, .use = use, .count = takeCount() };
@@ -271,7 +271,7 @@ fn returnKey() void {
     leavePrompt();
     count_serial = weft.keySerial();
     count_cached = prompt.count;
-    weft.run(if (prompt.use == .move) "snipe-repeat" else "snipe-op-repeat");
+    weft.run(if (prompt.use == .move) "snipe.repeat" else "snipe.operate-repeat");
 }
 
 fn cancel() void {
@@ -294,7 +294,7 @@ fn launch() void {
         .repeating = false,
     };
     last = .{ .keys = request.keys, .kind = request.kind, .count = request.count };
-    weft.run("snipe-go");
+    weft.run("snipe.go");
 }
 
 /// Out of the prompt. A move goes back where it came from; an operator's
