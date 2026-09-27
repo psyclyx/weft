@@ -186,6 +186,15 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             // the host's gate would refuse cannot ship (doc/chrome.md §1.1).
             if (weft.command_id.check(c.name)) |why|
                 @compileError("command id '" ++ c.name ++ "' " ++ why.describe());
+            // And what a person reads about it (doc/chrome.md §1.2): a
+            // one-sentence summary on every command, a label on every one a
+            // person runs, never a label spelling its own prompt mark.
+            if (!summaryStyled(c.summary))
+                @compileError("command '" ++ c.name ++ "': summary must be one sentence, capitalised, ending in a full stop");
+            if (!c.internal and c.label.len == 0)
+                @compileError("command '" ++ c.name ++ "': a command a person runs needs a label (or `.internal = true`)");
+            if (std.mem.endsWith(u8, c.label, "…") or std.mem.endsWith(u8, c.label, "..."))
+                @compileError("command '" ++ c.name ++ "': label spells its own prompt mark; set `.prompts = true`");
             for (seen) |prior| {
                 if (std.mem.eql(u8, prior, c.name))
                     @compileError("duplicate command name: " ++ c.name);
@@ -292,6 +301,15 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             return ids[index];
         }
     };
+}
+
+/// One sentence: a capital (or a digit) first, a full stop last, no line
+/// breaks or tabs. The shape the e2e identity gate holds every command to.
+fn summaryStyled(comptime s: []const u8) bool {
+    if (s.len < 2) return false;
+    if (!(std.ascii.isUpper(s[0]) or std.ascii.isDigit(s[0]))) return false;
+    if (s[s.len - 1] != '.') return false;
+    return std.mem.indexOfAny(u8, s, "\t\n") == null;
 }
 
 /// Erase a typed handler into the `fn () void` a table entry holds, reading its

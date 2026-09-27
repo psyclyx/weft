@@ -854,7 +854,9 @@ pub const Manifest = struct {
         // `wasm_host/plugin.zig`'s `mintGrantHandles` must find this row
         // ALREADY live when a plugin's `describe()` handshake runs.
         try reconcileGrants(gpa, null, self, actx);
-        try self.loadPlugins(actx);
+        var loaded: std.StringHashMapUnmanaged(void) = .empty;
+        defer loaded.deinit(gpa);
+        try self.loadPluginsOnce(actx, &loaded);
         try self.runCommands(actx);
     }
 
@@ -1045,17 +1047,6 @@ pub const Manifest = struct {
         }
     }
 
-    fn loadPlugins(self: *const Manifest, actx: *ApplyCtx) !void {
-        for (self.imports.items) |imp| try imp.loadPlugins(actx);
-        for (self.plugins.items) |d| {
-            switch (pluginTrust(d.name)) {
-                .bundled => {},
-                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
-            }
-            if (actx.loader) |ld| ld.load(ld.ctx, d.name);
-        }
-    }
-
     fn runCommands(self: *const Manifest, actx: *ApplyCtx) !void {
         for (self.imports.items) |imp| try imp.runCommands(actx);
         for (self.runs.items) |d| runOne(actx, d);
@@ -1133,7 +1124,7 @@ pub const Manifest = struct {
                 if (!found) std.log.warn("config: reload — plugin '{s}' removed from config but unload isn't supported yet; restart to fully remove it", .{n});
             }
         }
-        try new.loadPluginsDiffed(actx, &old_plugins);
+        try new.loadPluginsOnce(actx, &old_plugins);
 
         var old_runs: std.StringHashMapUnmanaged(void) = .empty;
         defer old_runs.deinit(gpa);
@@ -1147,10 +1138,17 @@ pub const Manifest = struct {
         try new.runCommandsDiffed(actx, &old_runs);
     }
 
-    fn loadPluginsDiffed(self: *const Manifest, actx: *ApplyCtx, old_plugins: *const std.StringHashMapUnmanaged(void)) !void {
-        for (self.imports.items) |imp| try imp.loadPluginsDiffed(actx, old_plugins);
+    /// Load every plugin the manifest and its imports name, ONCE each:
+    /// `loaded` holds the names already loaded (by a previous apply, on a
+    /// reload — reload isn't wired — or earlier in this walk) and gains each
+    /// one loaded here. A fragment and the config that imports it both
+    /// naming `offers` used to load it twice: two instances, every command
+    /// registered twice, each shadowing the other.
+    fn loadPluginsOnce(self: *const Manifest, actx: *ApplyCtx, loaded: *std.StringHashMapUnmanaged(void)) !void {
+        for (self.imports.items) |imp| try imp.loadPluginsOnce(actx, loaded);
         for (self.plugins.items) |d| {
-            if (old_plugins.contains(d.name)) continue; // already loaded — reload isn't wired
+            if (loaded.contains(d.name)) continue;
+            try loaded.put(actx.ctx.gpa, d.name, {});
             switch (pluginTrust(d.name)) {
                 .bundled => {},
                 .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),

@@ -28,6 +28,15 @@ function bindActionGroup(mode, prefix, bindings) {
   }
 }
 
+// An open action name is declared HERE, not by a plugin, so what a person
+// reads for it is said here too: `weft.command(id, {…})` describes any
+// command at the config tier (doc/chrome.md §1.2). The standard names
+// (`view.refresh`, `selection.delete`, …) are core's and describe themselves.
+weft.command("workspace.set-working-target", { label: "Use as Working Target", summary: "Make the focused target this head's working location." });
+weft.command("fs.edit-permissions", { label: "Edit Permissions", summary: "Edit the focused entry's permissions." });
+weft.command("fs.create-file", { label: "New File", icon: "file-plus", summary: "Create a file beside the focused entry." });
+weft.command("fs.create-directory", { label: "New Folder", icon: "folder-plus", summary: "Create a directory beside the focused entry." });
+
 // Where a standard intention already covers the operation, the key binds the
 // INTENTION: the focused view's own vocabulary publishes the offer, so no
 // trampoline command has to exist for the name at all.

@@ -146,19 +146,19 @@ fn provideProbe() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ow.fired", .arity = .one, .call = firedCount },
-    .{ .name = "ow.keys", .arity = .one, .call = lastKeys },
-    .{ .name = "ow.context-set", .arity = .one, .call = contextSet },
-    .{ .name = "ow.context-get", .arity = .one, .call = contextGet },
-    .{ .name = "ow.context-set-at", .arity = .one, .call = contextSetAt },
-    .{ .name = "ow.designation", .arity = .one, .call = designation },
-    .{ .name = "ow.designate", .arity = .one, .call = designate },
-    .{ .name = "ow.create", .arity = .one, .call = create },
-    .{ .name = "ow.claim", .arity = .one, .call = claim },
-    .{ .name = "ow.list", .arity = .one, .call = list },
-    .{ .name = "ow.invoke", .arity = .one, .call = invoke },
-    .{ .name = "ow.probe", .arity = .one, .call = probe },
-    .{ .name = "ow.provide", .arity = .one, .call = provideProbe },
+    .{ .name = "ow.fired", .arity = .one, .call = firedCount, .summary = "Exercise the ow.fired fixture command.", .internal = true },
+    .{ .name = "ow.keys", .arity = .one, .call = lastKeys, .summary = "Exercise the ow.keys fixture command.", .internal = true },
+    .{ .name = "ow.context-set", .arity = .one, .call = contextSet, .summary = "Exercise the ow.context-set fixture command.", .internal = true },
+    .{ .name = "ow.context-get", .arity = .one, .call = contextGet, .summary = "Exercise the ow.context-get fixture command.", .internal = true },
+    .{ .name = "ow.context-set-at", .arity = .one, .call = contextSetAt, .summary = "Exercise the ow.context-set-at fixture command.", .internal = true },
+    .{ .name = "ow.designation", .arity = .one, .call = designation, .summary = "Exercise the ow.designation fixture command.", .internal = true },
+    .{ .name = "ow.designate", .arity = .one, .call = designate, .summary = "Exercise the ow.designate fixture command.", .internal = true },
+    .{ .name = "ow.create", .arity = .one, .call = create, .summary = "Exercise the ow.create fixture command.", .internal = true },
+    .{ .name = "ow.claim", .arity = .one, .call = claim, .summary = "Exercise the ow.claim fixture command.", .internal = true },
+    .{ .name = "ow.list", .arity = .one, .call = list, .summary = "Exercise the ow.list fixture command.", .internal = true },
+    .{ .name = "ow.invoke", .arity = .one, .call = invoke, .summary = "Exercise the ow.invoke fixture command.", .internal = true },
+    .{ .name = "ow.probe", .arity = .one, .call = probe, .summary = "Exercise the ow.probe fixture command.", .internal = true },
+    .{ .name = "ow.provide", .arity = .one, .call = provideProbe, .summary = "Exercise the ow.provide fixture command.", .internal = true },
 };
 
 comptime {

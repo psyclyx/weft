@@ -21,12 +21,12 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "proj.build", .arity = .one, .call = build },
-    .{ .name = "proj.rebuild", .arity = .one, .call = rebuild },
-    .{ .name = "proj.fold-b", .arity = .one, .call = foldB },
-    .{ .name = "proj.report", .arity = .one, .call = report },
-    .{ .name = "proj.plan", .arity = .one, .call = plan },
-    .{ .name = "proj.plan-report", .arity = .one, .call = planReport },
+    .{ .name = "proj.build", .arity = .one, .call = build, .summary = "Exercise the proj.build fixture command.", .internal = true },
+    .{ .name = "proj.rebuild", .arity = .one, .call = rebuild, .summary = "Exercise the proj.rebuild fixture command.", .internal = true },
+    .{ .name = "proj.fold-b", .arity = .one, .call = foldB, .summary = "Exercise the proj.fold-b fixture command.", .internal = true },
+    .{ .name = "proj.report", .arity = .one, .call = report, .summary = "Exercise the proj.report fixture command.", .internal = true },
+    .{ .name = "proj.plan", .arity = .one, .call = plan, .summary = "Exercise the proj.plan fixture command.", .internal = true },
+    .{ .name = "proj.plan-report", .arity = .one, .call = planReport, .summary = "Exercise the proj.plan-report fixture command.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

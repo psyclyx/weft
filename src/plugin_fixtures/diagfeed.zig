@@ -27,8 +27,8 @@ fn list() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "diagfeed.set", .arity = .one, .call = set, .params = "rows" },
-    .{ .name = "diagfeed.list", .arity = .one, .call = list },
+    .{ .name = "diagfeed.set", .arity = .one, .call = set, .params = "rows", .summary = "Exercise the diagfeed.set fixture command.", .internal = true },
+    .{ .name = "diagfeed.list", .arity = .one, .call = list, .summary = "Exercise the diagfeed.list fixture command.", .internal = true },
 };
 
 comptime {
