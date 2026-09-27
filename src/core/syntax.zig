@@ -879,24 +879,33 @@ pub const Syntax = struct {
     /// resumes and folds in everything that queued up meanwhile as one
     /// incremental reparse — same shape as an ordinary edit.
     pub fn sync(self: *Syntax, gpa: Allocator, doc: *const Document) !bool {
-        var changed = false;
-        if (self.pending_initial) |job| {
-            const st = job.state.load(.acquire);
-            if (st == 0) return false; // still parsing
-            // `sync`/`destroy` are never both reachable for a live
-            // `Syntax` (the latter frees it) — the only claimant `sync`
-            // can ever observe here is the worker's own.
-            assert(st == InitialParseJob.claimed_by_worker);
-            self.tree = job.result;
-            self.pending_initial = null;
-            job.gpa.destroy(job);
-            changed = true;
-        }
+        const changed = self.adoptInitial();
+        if (self.pending_initial != null) return false; // still parsing
         const drained = try self.mirror.drain(gpa, doc, self, editCb);
         if (drained == 0) return changed;
         const new_tree = self.parse(doc.text(), self.tree);
         if (self.tree) |old| c.ts_tree_delete(old);
         self.tree = new_tree;
+        return true;
+    }
+
+    /// Adopt `createAsync`'s tree if its worker has finished; true when this
+    /// call adopted it. Cheap (one atomic load) and never parses, so the frame
+    /// loop can ask it every wake: the pool's completion wakes the loop, and a
+    /// tree that landed is the reason to draw again — the buffer has been
+    /// showing unhighlighted text until now. Without that ask nothing damaged
+    /// the frame, so a freshly opened file stayed uncolored until the next key.
+    pub fn adoptInitial(self: *Syntax) bool {
+        const job = self.pending_initial orelse return false;
+        const st = job.state.load(.acquire);
+        if (st == 0) return false; // still parsing
+        // `adoptInitial`/`destroy` are never both reachable for a live
+        // `Syntax` (the latter frees it) — the only claimant this can ever
+        // observe is the worker's own.
+        assert(st == InitialParseJob.claimed_by_worker);
+        self.tree = job.result;
+        self.pending_initial = null;
+        job.gpa.destroy(job);
         return true;
     }
 
