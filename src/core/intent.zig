@@ -177,6 +177,9 @@ const CoreOffer = struct {
         /// Not disabled: a git listing has nothing durable, which is
         /// nonapplicable (§9.3), so a key's next arm must get its turn.
         persists,
+        /// ABSENT unless the row's command — an action's name — has an
+        /// eligible provider here (`Shape.provided`), which the row runs.
+        provided,
     };
 };
 
@@ -189,7 +192,20 @@ const core_offers = [_]CoreOffer{
     .{ .intention = "std.persistence.save", .command = "file.save", .needs_text = false, .gate = .persists },
     .{ .intention = "std.editing.insert-line-break", .command = "edit.insert-newline" },
     .{ .intention = "std.input.break-out", .command = "mode.break-out", .needs_text = false },
+    // Transfer over TEXT is the grammar's to mean — a caret copies its line in
+    // one, a register takes it in another — so core offers the standard words
+    // only where a grammar provides the matching action here, and runs it: a
+    // context menu over text then leads with Cut, Copy, Paste, and a key bound
+    // to the word runs what the grammar's own arm would. A grammar that
+    // provides none leaves its keys' text arms exactly as they were.
+    .{ .intention = "std.transfer.delete-to-register", .command = "selection.cut", .gate = .provided },
+    .{ .intention = "std.transfer.yank", .command = "selection.copy", .gate = .provided },
+    .{ .intention = "std.transfer.paste", .command = "selection.paste-after", .gate = .provided },
 };
+
+comptime {
+    if (core_offers.len > 8) @compileError("Shape.provided holds one bit per core row");
+}
 
 /// The facts about the focused ENTRY core's table is computed from. A value,
 /// so "did it change" is one comparison and an unchanged entry republishes
@@ -202,6 +218,9 @@ pub const Shape = struct {
     /// providers' own predicates (core's `file.write` excludes tool
     /// projections by locality) — never by naming a tool.
     persists: bool = true,
+    /// Which `.provided` rows, by index in `core_offers`, have an eligible
+    /// provider of their action here. None where no action plane is attached.
+    provided: u8 = 0,
 };
 
 /// A text-needing core offer on an editor-less entry gets `disabled` rather
@@ -221,13 +240,14 @@ const nothing_to_redo: catalog_mod.Availability = .{ .disabled = .{
 } };
 
 /// A core row's availability for `shape`, or null when the row is absent.
-fn coreAvailability(offer: CoreOffer, shape: Shape) ?catalog_mod.Availability {
+fn coreAvailability(offer: CoreOffer, row: usize, shape: Shape) ?catalog_mod.Availability {
     if (offer.gate == .persists and !shape.persists) return null;
+    if (offer.gate == .provided and shape.provided & (@as(u8, 1) << @intCast(row)) == 0) return null;
     if (offer.needs_text and !shape.has_text) return no_text;
     return switch (offer.gate) {
         .undo => if (shape.can_undo) .enabled else nothing_to_undo,
         .redo => if (shape.can_redo) .enabled else nothing_to_redo,
-        .none, .persists => .enabled,
+        .none, .persists, .provided => .enabled,
     };
 }
 
@@ -366,15 +386,20 @@ pub const Plane = struct {
             self.derived.actions.resolveFacts("file.save", factsIn(scope)) != null
         else
             true;
+        var provided: u8 = 0;
+        if (self.derived_attached) for (core_offers, 0..) |offer, row| {
+            if (offer.gate == .provided and self.derived.actions.resolveFacts(offer.command, factsIn(scope)) != null)
+                provided |= @as(u8, 1) << @intCast(row);
+        };
         const ed = scope.entry.textEditor() orelse
-            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists };
-        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists };
+            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided };
+        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided };
     }
 
     fn publishCore(self: *Plane) Allocator.Error!void {
         var n: usize = 0;
         for (core_offers, 0..) |offer, i| {
-            const availability = coreAvailability(offer, self.shape) orelse continue;
+            const availability = coreAvailability(offer, i, self.shape) orelse continue;
             self.rows[n] = .{
                 // Interned at `init`, so a lookup: this path cannot fail on a name.
                 .intention = self.catalog.findIntention(offer.intention).?,

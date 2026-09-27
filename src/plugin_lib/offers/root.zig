@@ -69,6 +69,10 @@ pub const Options = struct {
     /// Name prefixes to leave out (checked after pinning).
     hide: []const []const u8 = &.{},
     disabled: Disabled = .keep,
+    /// What happens to a PINNED offer that cannot run here, when it differs:
+    /// a menu keeps its pinned words greyed in their place — the skeleton a
+    /// hand finds by position, which the rows around it do not reshuffle.
+    pinned_disabled: ?Disabled = null,
 };
 
 fn isIntention(name: []const u8) bool {
@@ -141,7 +145,7 @@ pub fn collect(a: std.mem.Allocator, opts: Options) ![]Item {
                 item.group = "";
                 item.pinned = true;
                 if (label.len > 0) item.label = label;
-                if (opts.disabled == .omit and !item.enabled()) continue;
+                if ((opts.pinned_disabled orelse opts.disabled) == .omit and !item.enabled()) continue;
                 try out.append(a, item);
             } else if (opts.disabled == .keep) {
                 // Pinned but offered nowhere here: shown, and says so.

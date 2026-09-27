@@ -350,10 +350,12 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     // ── A text buffer: the editing floor and the grammar's text arms. ──
     // Return has nothing to activate, so the line break core offers wins.
     try expectReady(ed, "Return", "std.editing.insert-line-break", "core.editing");
-    // No row to transfer: the copy/cut/paste words fall to the text commands.
-    try expectCommand(ed, "C-c", "ide.copy");
-    try expectCommand(ed, "C-x", "ide.cut");
-    try expectCommand(ed, "C-v", "ide.paste");
+    // No row to transfer: the copy/cut/paste words are core's over text,
+    // offered because the grammar provides what they mean here — so they
+    // run ide's own text arms, and a context menu can list them.
+    try expectReady(ed, "C-c", "std.transfer.yank", "core.editing");
+    try expectReady(ed, "C-x", "std.transfer.delete-to-register", "core.editing");
+    try expectReady(ed, "C-v", "std.transfer.paste", "core.editing");
     try expectCommand(ed, "Down", "ide.down");
     // REAL availability: a buffer nothing has changed has nothing to undo, so
     // the offer is there but DISABLED, with the reason which-key shows — and

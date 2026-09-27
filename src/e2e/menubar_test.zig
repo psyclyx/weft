@@ -570,7 +570,8 @@ test "e2e/menubar: the context menu is the menu widget — keys, icons, rules, t
     ed.applyWindow();
     const ctx_menu = try menu(ed);
     try t.expect(std.mem.eql(u8, "menu", h.view.menu.leaf(ctx_menu.role)));
-    try expectPanel(ctx_menu, "Build Test Debug | Format Rename Undo Save");
+    try expectPanel(ctx_menu, "Cut Copy Paste | Build Test Debug | Format Rename Undo Save");
+    try expectKeys(ctx_menu, "Cut", "C-x");
     try expectKeys(ctx_menu, "Undo", "C-z");
     try expectKeys(ctx_menu, "Save", "C-s");
     try expectKeys(ctx_menu, "Rename", "F2");
@@ -589,7 +590,7 @@ test "e2e/menubar: the context menu is the menu widget — keys, icons, rules, t
     // runs its row — `u`, Undo, takes the space back.
     ed.press("S-F10", "");
     ed.applyWindow();
-    try t.expectEqualStrings("Build", litLabel(try menu(ed)).?);
+    try t.expectEqualStrings("Cut", litLabel(try menu(ed)).?);
     try t.expect(fact(row(try menu(ed), "Undo").?, "mnemonic") != null);
     ed.press("u", "");
     try t.expect(ed.head.interactions.active() == null);

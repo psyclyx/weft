@@ -752,6 +752,13 @@ fn initExtra() void {
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
+    // Over text, THESE are what the transfer words mean: core offers
+    // std.transfer.* where a grammar provides the matching action, so the
+    // context menu over text has Cut, Copy and Paste, and the keys above
+    // reach the same arms through the words.
+    weft.provide("selection.cut", .{ .posture = "text" }, "ide.cut", 0);
+    weft.provide("selection.copy", .{ .posture = "text" }, "ide.copy", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "ide.paste", 0);
     // Escape cancels what is pending where something offers that — a row's
     // name being edited, put back as it was — and is ide's own way out
     // everywhere else.

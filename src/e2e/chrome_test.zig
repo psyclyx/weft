@@ -426,12 +426,13 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     ed.typeText(" ");
     ed.applyWindow();
 
-    // Over the text: the editor's offers, and the source actions ide.js
-    // provides for Zig. Undo can run, Redo cannot, so only Undo is listed;
-    // the lone words join the group before them instead of each sitting
-    // between two rules.
+    // Over the text: Cut, Copy, Paste first, as in every editor — the
+    // grammar means them over text and core offers the words — then the
+    // editor's offers and the source actions ide.js provides for Zig. Undo
+    // can run, Redo cannot, so only Undo is listed; the lone words join the
+    // group before them instead of each sitting between two rules.
     rightClick(ed, ed.pointAt(3).?);
-    try expectMenu(ed, "Build Test Debug | Format Rename Undo Save");
+    try expectMenu(ed, "Cut Copy Paste | Build Test Debug | Format Rename Undo Save");
     app.proj.shot(ed, "chrome-contextmenu-text");
     // Escape closes it, and the key goes no further.
     ed.press("Escape", "");
@@ -443,6 +444,20 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try selectInMenu(ed, "Undo");
     ed.press("Return", "");
     try t.expect(ed.head.interactions.active() == null);
+    try ide.expectText(ed, "const y = 2;\n");
+
+    // Cut and Paste from the menu do what C-x and C-v do: the grammar's own
+    // transfer, the selection out and back.
+    ed.press("C-a", "");
+    ed.press("S-F10", "");
+    ed.applyWindow();
+    try selectInMenu(ed, "Cut");
+    ed.press("Return", "");
+    try ide.expectText(ed, "");
+    ed.press("S-F10", "");
+    ed.applyWindow();
+    try selectInMenu(ed, "Paste");
+    ed.press("Return", "");
     try ide.expectText(ed, "const y = 2;\n");
 
     // Over a sidebar row: the listing's offers for THAT row, node actions
@@ -461,7 +476,7 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
     // No greyed words (a menu lists what can run here), and no rule around
     // a lone item.
-    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Edit name Save | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
+    try expectMenu(ed, "Cut Copy Paste | Up to Parent Open Rename | Insert Before Insert After Edit name Save | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
     app.proj.shot(ed, "chrome-contextmenu-row");
 
     // Click Copy — drawn over the editor pane, past the sidebar's edge: the
@@ -498,7 +513,7 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
     ed.applyWindow();
     ed.press("S-F10", "");
     ed.applyWindow();
-    try expectMenu(ed, "Run line Format Rename Save");
+    try expectMenu(ed, "Cut Copy Paste | Run line Format Rename Save");
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);
     try t.expectEqualStrings("ide", ed.mode());

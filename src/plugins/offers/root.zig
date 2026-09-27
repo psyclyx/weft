@@ -56,6 +56,26 @@ const act_press = "offers.press";
 /// keys' business (moving, a line break, breaking out of a capture).
 const default_hide = [_][]const u8{ "std.navigation.", "std.input.", "std.gesture.", "std.editing.insert-line-break" };
 
+/// What a context menu leads with, as every conventional one does: Cut,
+/// Copy, Paste — wherever the context offers them (text whose grammar means
+/// them, a listing's rows), greyed in place when they cannot run, absent
+/// where nothing offers them. `weft.set("offers", "menu-pinned", [...])`
+/// replaces the list.
+const default_menu_pinned: weft.ConfigIter = .{
+    .cur = framed(&.{ "std.transfer.delete-to-register", "std.transfer.yank", "std.transfer.paste" }),
+    .remaining = 3,
+};
+
+/// Names as a config list's records (a length byte, then the name).
+fn framed(comptime names: []const []const u8) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (names) |n| {
+        if (n.len >= 0x80) @compileError("a one-byte length: " ++ n);
+        out = out ++ [_]u8{@intCast(n.len)} ++ n;
+    }
+    return out;
+}
+
 const Layout = enum { strip, list, menu };
 
 /// Which context a designation's ref names.
@@ -276,7 +296,14 @@ fn openMenu(ref: Ref, keyboard: bool) void {
     var hide_buf: [32][]const u8 = undefined;
     const hide = menuHide(&hide_buf);
     defer if (hide.ptr != &default_hide) for (hide) |h| weft.allocator.free(h);
-    m.items = offers.collect(a, .{ .where = ref.where(), .grammar_words = true, .hide = hide, .disabled = .omit }) catch return closeMenu();
+    m.items = offers.collect(a, .{
+        .where = ref.where(),
+        .pinned = weft.configList("menu-pinned") orelse default_menu_pinned,
+        .grammar_words = true,
+        .hide = hide,
+        .disabled = .omit,
+        .pinned_disabled = .keep,
+    }) catch return closeMenu();
     if (m.items.len == 0) {
         closeMenu();
         weft.echo("nothing to offer here");
@@ -293,6 +320,8 @@ fn openMenu(ref: Ref, keyboard: bool) void {
         // menu opened over.
         .keys = a.dupe(u8, weft.firstKey(weft.keysFor(item.name))) catch "",
         .rule = rule,
+        // A pinned word that cannot run here stays, greyed, saying why.
+        .reason = item.reason,
         .tag = @intCast(i),
     };
     m.cascade = .open(entries, keyboard);
@@ -308,7 +337,8 @@ fn openMenu(ref: Ref, keyboard: bool) void {
     if (menu != null and menu.?.interaction == null) closeMenu();
 }
 
-/// A rule opens a group of two or more, and only once what is above it since
+/// The pinned words are ruled off from the rest. Otherwise a rule opens a
+/// group of two or more, and only once what is above it since
 /// the last rule is two or more as well; a lone item joins its neighbours,
 /// so a menu of mostly single words is not a ladder of rules.
 fn placeRules(list: []const offers.Item, rules: []bool) void {
@@ -319,7 +349,9 @@ fn placeRules(list: []const offers.Item, rules: []bool) void {
         while (end < list.len and std.mem.eql(u8, list[end].group, list[start].group)) end += 1;
         const size = end - start;
         for (rules[start..end]) |*r| r.* = false;
-        rules[start] = start > 0 and size >= 2 and section >= 2;
+        // The pinned words are a block of their own, always ruled off.
+        const after_pinned = start > 0 and list[start - 1].pinned and !list[start].pinned;
+        rules[start] = start > 0 and ((size >= 2 and section >= 2) or after_pinned);
         section = if (rules[start]) size else section + size;
         start = end;
     }
