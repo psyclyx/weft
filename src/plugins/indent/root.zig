@@ -80,5 +80,5 @@ fn opDedent() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
 }

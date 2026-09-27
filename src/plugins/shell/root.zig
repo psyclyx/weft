@@ -21,7 +21,7 @@ const cmds = [_]weft.CommandEntry{
     },
 };
 comptime {
-    weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();
+    weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer }, .arity = .whole }).exportAll();
 }
 
 /// The command's argument arrives as a parameter, owned for this call — where

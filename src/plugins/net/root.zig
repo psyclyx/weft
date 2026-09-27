@@ -72,5 +72,5 @@ fn close() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .arity = .whole }).exportAll();
 }

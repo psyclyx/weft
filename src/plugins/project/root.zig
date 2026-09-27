@@ -42,7 +42,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "project-root", .call = projectRoot, .summary = "say where this project's root is" },
 };
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = .whole }).exportAll();
 }
 
 /// Every buffer focus records the file. The root no longer needs recording:

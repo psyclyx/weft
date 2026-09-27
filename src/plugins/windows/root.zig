@@ -32,5 +32,5 @@ fn center() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = .whole }).exportAll();
 }

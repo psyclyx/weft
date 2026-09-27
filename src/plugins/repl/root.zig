@@ -65,11 +65,11 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "repl-start", .call = start, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
-    .{ .name = "repl-send", .call = send, .params = "text", .summary = "send a line to this buffer's REPL" },
+    .{ .name = "repl-start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
+    .{ .name = "repl-send", .call = send, .arity = .whole, .params = "text", .summary = "send a line to this buffer's REPL" },
     .{ .name = "repl-send-line", .call = sendLine, .summary = "send the current line to this buffer's REPL" },
-    .{ .name = "repl-quit", .call = quit, .summary = "stop this buffer's REPL; others stay live" },
-    .{ .name = "repl-reattach", .call = reattach, .params = "designation", .summary = "show the live REPL a `weft://here/proc/repl…` designation names" },
+    .{ .name = "repl-quit", .call = quit, .arity = .whole, .summary = "stop this buffer's REPL; others stay live" },
+    .{ .name = "repl-reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "show the live REPL a `weft://here/proc/repl…` designation names" },
 };
 
 fn describeExtra() void {

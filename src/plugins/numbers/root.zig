@@ -89,5 +89,5 @@ fn format(v: i64) []const u8 {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
 }

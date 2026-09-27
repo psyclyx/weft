@@ -62,5 +62,5 @@ fn reopen() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .arity = .whole }).exportAll();
 }

@@ -94,7 +94,7 @@ fn runSubst(template: []const u8, path: []const u8) void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .arity = .whole }).exportAll();
 }
 
 comptime {

@@ -119,6 +119,6 @@ const cmds = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init }).exportAll();
+    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
     weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

@@ -231,7 +231,7 @@ const cmds = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init }).exportAll();
+    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
     weft.exportCallback("on_signal", &onSignal);
 }

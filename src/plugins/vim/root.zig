@@ -376,12 +376,12 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase") },
     .{ .name = "vim-visual-indent", .call = visualOp("op.indent") },
     .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent") },
-    .{ .name = "enter-op-upcase", .call = enterOpUpcase },
-    .{ .name = "enter-op-lowercase", .call = enterOpLowercase },
-    .{ .name = "enter-op-indent", .call = enterOpIndent },
-    .{ .name = "enter-op-dedent", .call = enterOpDedent },
+    .{ .name = "enter-op-upcase", .call = enterOpUpcase, .arity = .whole },
+    .{ .name = "enter-op-lowercase", .call = enterOpLowercase, .arity = .whole },
+    .{ .name = "enter-op-indent", .call = enterOpIndent, .arity = .whole },
+    .{ .name = "enter-op-dedent", .call = enterOpDedent, .arity = .whole },
     .{ .name = "vim-visual-line", .call = visualLine },
-    .{ .name = "vim-normal", .call = normal },
+    .{ .name = "vim-normal", .call = normal, .arity = .whole },
     .{ .name = "vim-append-line", .call = appendLine },
     .{ .name = "vim-insert-line", .call = insertLine },
     .{ .name = "vim-delete-eol", .call = deleteEol },
@@ -390,55 +390,55 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "yank-line", .call = yankLine },
     .{ .name = "paste", .call = paste },
     .{ .name = "paste-before", .call = pasteBefore },
-    .{ .name = "vim-open-focused", .call = openFocused },
-    .{ .name = "vim-open-container", .call = openContainer },
+    .{ .name = "vim-open-focused", .call = openFocused, .arity = .whole },
+    .{ .name = "vim-open-container", .call = openContainer, .arity = .whole },
     .{ .name = "join-lines", .call = joinLines },
-    .{ .name = "enter-op-delete", .call = enterOpDelete },
-    .{ .name = "enter-op-change", .call = enterOpChange },
-    .{ .name = "enter-op-yank", .call = enterOpYank },
-    .{ .name = "enter-op-comment", .call = enterOpComment },
-    .{ .name = "op-cancel", .call = opCancel },
+    .{ .name = "enter-op-delete", .call = enterOpDelete, .arity = .whole },
+    .{ .name = "enter-op-change", .call = enterOpChange, .arity = .whole },
+    .{ .name = "enter-op-yank", .call = enterOpYank, .arity = .whole },
+    .{ .name = "enter-op-comment", .call = enterOpComment, .arity = .whole },
+    .{ .name = "op-cancel", .call = opCancel, .arity = .whole },
     .{ .name = "vim-operate", .call = operate },
     .{ .name = "op-line", .call = opLine },
-    .{ .name = "enter-op-inner", .call = enterOpInner },
-    .{ .name = "enter-op-around", .call = enterOpAround },
-    .{ .name = "enter-register", .call = enterRegister },
-    .{ .name = "vim-register-plus", .call = chooseClipboard },
-    .{ .name = "vim-register-star", .call = chooseClipboard },
-    .{ .name = "vim-macro-q", .call = macroQ },
-    .{ .name = "vim-macro-at", .call = macroAt },
-    .{ .name = "vim-macro-play-last", .call = macroPlay(0) },
+    .{ .name = "enter-op-inner", .call = enterOpInner, .arity = .whole },
+    .{ .name = "enter-op-around", .call = enterOpAround, .arity = .whole },
+    .{ .name = "enter-register", .call = enterRegister, .arity = .whole },
+    .{ .name = "vim-register-plus", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim-register-star", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim-macro-q", .call = macroQ, .arity = .whole },
+    .{ .name = "vim-macro-at", .call = macroAt, .arity = .whole },
+    .{ .name = "vim-macro-play-last", .call = macroPlay(0), .arity = .whole },
     // `"/`: the search register, the last pattern any grammar searched for.
-    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search) },
-    .{ .name = "find-file", .call = findFile },
+    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search), .arity = .whole },
+    .{ .name = "find-file", .call = findFile, .arity = .whole },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
     // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
-    .{ .name = "leader-cancel", .call = leaderCancel },
-    .{ .name = "vim-find-file", .call = vimFindFile },
-    .{ .name = "vim-share", .call = vimShare },
-    .{ .name = "vim-palette", .call = vimPalette },
-    .{ .name = "vim-split", .call = vimSplit },
-    .{ .name = "vim-vsplit", .call = vimVsplit },
-    .{ .name = "vim-focus-other", .call = vimFocusOther },
-    .{ .name = "vim-unsplit", .call = vimUnsplit },
-    .{ .name = "vim-win-left", .call = vimWinLeft },
-    .{ .name = "vim-win-right", .call = vimWinRight },
-    .{ .name = "vim-win-up", .call = vimWinUp },
-    .{ .name = "vim-win-down", .call = vimWinDown },
-    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft },
-    .{ .name = "vim-win-move-right", .call = vimWinMoveRight },
-    .{ .name = "vim-win-move-up", .call = vimWinMoveUp },
-    .{ .name = "vim-win-move-down", .call = vimWinMoveDown },
+    .{ .name = "leader-cancel", .call = leaderCancel, .arity = .whole },
+    .{ .name = "vim-find-file", .call = vimFindFile, .arity = .whole },
+    .{ .name = "vim-share", .call = vimShare, .arity = .whole },
+    .{ .name = "vim-palette", .call = vimPalette, .arity = .whole },
+    .{ .name = "vim-split", .call = vimSplit, .arity = .whole },
+    .{ .name = "vim-vsplit", .call = vimVsplit, .arity = .whole },
+    .{ .name = "vim-focus-other", .call = vimFocusOther, .arity = .whole },
+    .{ .name = "vim-unsplit", .call = vimUnsplit, .arity = .whole },
+    .{ .name = "vim-win-left", .call = vimWinLeft, .arity = .whole },
+    .{ .name = "vim-win-right", .call = vimWinRight, .arity = .whole },
+    .{ .name = "vim-win-up", .call = vimWinUp, .arity = .whole },
+    .{ .name = "vim-win-down", .call = vimWinDown, .arity = .whole },
+    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft, .arity = .whole },
+    .{ .name = "vim-win-move-right", .call = vimWinMoveRight, .arity = .whole },
+    .{ .name = "vim-win-move-up", .call = vimWinMoveUp, .arity = .whole },
+    .{ .name = "vim-win-move-down", .call = vimWinMoveDown, .arity = .whole },
     .{ .name = "vim-goto-top", .call = vimGotoTop },
-    .{ .name = "vim-center", .call = vimCenter },
-    .{ .name = "find-f", .call = enterFindF },
-    .{ .name = "find-F", .call = enterFindBigF },
-    .{ .name = "find-t", .call = enterFindT },
-    .{ .name = "find-T", .call = enterFindBigT },
+    .{ .name = "vim-center", .call = vimCenter, .arity = .whole },
+    .{ .name = "find-f", .call = enterFindF, .arity = .whole },
+    .{ .name = "find-F", .call = enterFindBigF, .arity = .whole },
+    .{ .name = "find-t", .call = enterFindT, .arity = .whole },
+    .{ .name = "find-T", .call = enterFindBigT, .arity = .whole },
     .{ .name = "vim-repeat-find", .call = repeatFind },
     .{ .name = "vim-repeat-find-rev", .call = repeatFindRev },
-    .{ .name = "vim-replace-char", .call = enterReplaceChar },
+    .{ .name = "vim-replace-char", .call = enterReplaceChar, .arity = .whole },
     .{ .name = "do-replace-char", .call = doReplaceChar },
     .{ .name = "vim-tilde", .call = tildeCase },
     .{ .name = "do-find-f", .call = doFindF },
@@ -450,7 +450,7 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-delete-char", .call = deleteCharFwd },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
-    .{ .name = "vim-ex", .call = ex.enter },
+    .{ .name = "vim-ex", .call = ex.enter, .arity = .whole },
 };
 
 /// The `:` line's own editing commands, from the shared `prompt` library —
@@ -458,7 +458,7 @@ const static_cmds = [_]weft.CommandEntry{
 /// vim's `Cmd` so `on_command`'s id indexing stays one flat table.
 const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
     var arr: [ex.commands.len]weft.CommandEntry = undefined;
-    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
     break :blk arr;
 };
 
@@ -494,6 +494,7 @@ const register_cmds: [26]weft.CommandEntry = blk: {
     for (0..26) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
         .call = chooseRegister(@intCast(i + 1)),
+        .arity = .whole,
     };
     break :blk arr;
 };
@@ -503,6 +504,7 @@ const count_cmds: [9]weft.CommandEntry = blk: {
     for (0..9) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-count-{d}", .{i + 1}),
         .call = countDigit(@intCast(i + 1)),
+        .arity = .whole,
     };
     break :blk arr;
 };
@@ -511,8 +513,8 @@ const macro_cmds: [52]weft.CommandEntry = blk: {
     var arr: [52]weft.CommandEntry = undefined;
     for (0..26) |i| {
         const c: u8 = 'a' + @as(u8, @intCast(i));
-        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c) };
-        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c) };
+        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c), .arity = .whole };
+        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c), .arity = .whole };
     }
     break :blk arr;
 };
@@ -549,7 +551,10 @@ const preserve_register = blk: {
 comptime {
     // `.clipboard` is declared for the approval surface to show; it confers
     // nothing — only the config's `weft.grant("vim", "clipboard")` does.
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
+    // A vim verb is a one-cursor program: dispatch runs it once per
+    // selection. What only enters a mode, picks a register or opens a window
+    // says `.whole`.
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard}, .arity = weft.Arity.each_extent }).exportAll();
 }
 
 /// The dispatch epilogue: a stray count or a named slot must not leak into an

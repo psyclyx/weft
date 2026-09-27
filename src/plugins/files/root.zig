@@ -33,6 +33,7 @@ comptime {
     weft.plugin(&cmds, .{
         .perms = &.{ .fs_read, .fs_write },
         .init = start,
+        .arity = .whole,
     }).exportAll();
 }
 

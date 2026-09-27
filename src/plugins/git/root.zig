@@ -332,6 +332,7 @@ comptime {
         .perms = &.{ .proc, .timer },
         .init = initExtra,
         .before = dispatch,
+        .arity = .whole,
     }).exportAll();
 }
 

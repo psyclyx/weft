@@ -367,7 +367,7 @@ fn onPickAccept(pick_id: u32) void {
     }
 }
 
-const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept });
+const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .arity = .whole });
 comptime {
     manifest.exportAll();
 }

@@ -78,20 +78,20 @@ const base_cmds = [_]weft.CommandEntry{
     .{ .name = "goto-type-definition", .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
     .{ .name = "goto-implementation", .call = cmdImplementation, .summary = "jump to the implementation" },
     .{ .name = "references", .call = cmdReferences, .summary = "list references to the symbol" },
-    .{ .name = "symbols", .call = cmdSymbols, .summary = "pick a symbol in this file" },
-    .{ .name = "next-diagnostic", .call = cmdNextDiag, .summary = "go to the next diagnostic" },
-    .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .summary = "go to the previous diagnostic" },
-    .{ .name = "diagnostics", .call = cmdDiagnostics, .summary = "pick a diagnostic in this file" },
-    .{ .name = "diagnostics-list", .call = cmdDiagnosticsList, .summary = "every stored diagnostic, one `path\tline\tcol\tseverity\tmessage` row each (a string result)" },
-    .{ .name = "lsp-format", .call = cmdFormat, .summary = "format the buffer through the language server" },
+    .{ .name = "symbols", .call = cmdSymbols, .arity = .whole, .summary = "pick a symbol in this file" },
+    .{ .name = "next-diagnostic", .call = cmdNextDiag, .arity = .whole, .summary = "go to the next diagnostic" },
+    .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .arity = .whole, .summary = "go to the previous diagnostic" },
+    .{ .name = "diagnostics", .call = cmdDiagnostics, .arity = .whole, .summary = "pick a diagnostic in this file" },
+    .{ .name = "diagnostics-list", .call = cmdDiagnosticsList, .arity = .whole, .summary = "every stored diagnostic, one `path\tline\tcol\tseverity\tmessage` row each (a string result)" },
+    .{ .name = "lsp-format", .call = cmdFormat, .arity = .whole, .summary = "format the buffer through the language server" },
     .{ .name = "rename", .call = cmdRename, .summary = "rename the symbol everywhere" },
     .{ .name = "signature-help", .call = cmdSignature, .summary = "show the call signature here" },
-    .{ .name = "inlay-hints", .call = cmdInlay, .summary = "toggle inlay hints" },
+    .{ .name = "inlay-hints", .call = cmdInlay, .arity = .whole, .summary = "toggle inlay hints" },
     .{ .name = "code-actions", .call = cmdCodeActions, .summary = "offer the code actions available here" },
     // Internal: the deferred half of `on_poll`'s message dispatch (task #19
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.
-    .{ .name = "lsp-deliver-internal", .call = lspDeliverInternal },
+    .{ .name = "lsp-deliver-internal", .call = lspDeliverInternal, .arity = .whole },
 };
 
 /// The rename prompt's five editing commands (`rename_prompt`, below),

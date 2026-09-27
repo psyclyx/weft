@@ -28,7 +28,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "llm-ask", .call = ask, .params = "prompt", .summary = "ask the configured LLM CLI; the reply lands in its own buffer" },
+    .{ .name = "llm-ask", .call = ask, .arity = .whole, .params = "prompt", .summary = "ask the configured LLM CLI; the reply lands in its own buffer" },
     .{ .name = "llm-ask-line", .call = askLine, .summary = "ask using the current line as the prompt" },
 };
 

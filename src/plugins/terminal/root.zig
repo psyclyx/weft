@@ -227,5 +227,5 @@ const cmds = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = init }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = init, .arity = .whole }).exportAll();
 }

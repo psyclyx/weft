@@ -99,7 +99,7 @@ fn on_fill_token(token: u32) callconv(.c) void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .arity = .whole }).exportAll();
 }
 
 comptime {

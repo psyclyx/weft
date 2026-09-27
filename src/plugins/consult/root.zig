@@ -190,5 +190,5 @@ fn consultImenu() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept, .arity = .whole }).exportAll();
 }

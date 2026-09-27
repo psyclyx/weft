@@ -14,11 +14,15 @@ const token = "// ";
 
 /// The command table. `describe`, `init`, and `on_command` are generated from
 /// it (`plugin_sdk/plugin.zig`), including the id→command mapping this file
-/// used to assume was registration order.
+/// used to assume was registration order. The toggles map over each
+/// selection's LINES (`comment.lines`), overlapping blocks merged, so two
+/// carets on one line toggle it once.
+const over_lines: weft.Arity = .{ .each = .{ .over = "comment.lines", .merge = true } };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "comment-line", .call = commentLine, .summary = "toggle this line's comment" },
-    .{ .name = "comment-selection", .call = commentSelection, .summary = "toggle the selection's comments" },
-    .{ .name = "op.comment", .call = opComment, .summary = "comment the operator's range" },
+    .{ .name = "comment-line", .call = commentLine, .arity = over_lines, .summary = "toggle this line's comment" },
+    .{ .name = "comment-selection", .call = commentSelection, .arity = over_lines, .summary = "toggle the selection's comments" },
+    .{ .name = "op.comment", .call = opComment, .arity = weft.Arity.each_extent, .summary = "comment the operator's range" },
+    .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "the selection's lines, or the caret's" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -77,9 +81,28 @@ fn applyLine(ls: usize, action: Action, skip_blank: bool) void {
     }
 }
 
-/// Toggle a leading `// ` on the line under the cursor.
+/// The lines this run was handed (`comment.lines`), or the caret's.
+fn target() weft.Range {
+    if (weft.argRange(0)) |h| if (weft.rangeEnds(h)) |r| return r;
+    const l = weft.lineAt(weft.cursor());
+    return .{ .start = l.start, .end = l.end };
+}
+
+/// `comment.lines`: the selection's span, or the caret's line — the target
+/// the toggles map over.
+fn lines() void {
+    const r = weft.selection() orelse blk: {
+        const l = weft.lineAt(weft.cursor());
+        break :blk weft.Range{ .start = l.start, .end = l.end };
+    };
+    const first = weft.lineAt(r.start).start;
+    const last = weft.lineAt(if (r.end > r.start) r.end - 1 else r.end).end;
+    if (weft.anchorRange(.{ .start = first, .end = last })) |h| weft.setResultRange(h);
+}
+
+/// Toggle a leading `// ` on the line.
 fn commentLine() void {
-    applyLine(weft.lineAt(weft.cursor()).start, .toggle, false);
+    applyLine(target().start, .toggle, false);
 }
 
 // ── Selection (every overlapping line, one uniform decision) ──────────
@@ -121,14 +144,12 @@ fn commentSpan(start: usize, end: usize) void {
     }
 }
 
-/// Toggle every line overlapping the selection. With no selection this falls
-/// back to the current line.
+/// Toggle every line overlapping the selection — with no selection, the
+/// current line.
 fn commentSelection() void {
-    const sel = weft.selection() orelse {
-        commentLine();
-        return;
-    };
-    commentSpan(sel.start, sel.end);
+    const r = target();
+    if (r.start == r.end or weft.lineAt(r.start).end >= r.end) return commentLine();
+    commentSpan(r.start, r.end);
 }
 
 /// The `gc` operator: toggle comments over the awaited range's lines. Composes

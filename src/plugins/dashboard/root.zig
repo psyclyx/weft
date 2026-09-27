@@ -48,7 +48,7 @@ const commands = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&commands, .{ .init = init, .pick = onPick }).exportAll();
+    weft.plugin(&commands, .{ .init = init, .pick = onPick, .arity = .whole }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
 }
 

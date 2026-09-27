@@ -40,7 +40,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "which-key-page-up", .call = pageUp },
 };
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = .whole }).exportAll();
 }
 
 /// Page down; `render` clamps to the last page.

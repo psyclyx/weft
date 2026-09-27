@@ -21,7 +21,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "upcase-line", .call = upcaseLine, .summary = "upper-case this line" },
 };
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
 }
 
 /// Copy the current line and insert the copy right below it.

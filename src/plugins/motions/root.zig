@@ -192,5 +192,5 @@ fn matchPair() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
 }

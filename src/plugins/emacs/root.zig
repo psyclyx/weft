@@ -98,7 +98,7 @@ fn openChosen(choice: []const u8) void {
 
 // ── Command table (registration order == on_command id) ──
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "find-file", .call = findFile },
+    .{ .name = "find-file", .call = findFile, .arity = .whole },
     .{ .name = "beginning-of-line", .call = beginningOfLine },
     .{ .name = "end-of-line", .call = endOfLine },
     .{ .name = "beginning-of-buffer", .call = beginningOfBuffer },
@@ -194,5 +194,7 @@ fn initExtra() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
+    // Every emacs verb is a one-point program (the point, the region); each
+    // runs once per selection. `find-file` alone never reads one.
+    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .arity = weft.Arity.each_extent }).exportAll();
 }

@@ -190,7 +190,7 @@ weft.command("debug-start", () => {
     supportsRunInTerminalRequest: false,
   });
   weft.echo("debug: started " + s.buf);
-}, "start a debug session");
+}, "start a debug session", undefined, "whole");
 
 function stepCmd(name, command, summary) {
   weft.command(name, () => {
@@ -200,7 +200,7 @@ function stepCmd(name, command, summary) {
       return;
     }
     send(s, command, { threadId: s.thread });
-  }, summary);
+  }, summary, undefined, "whole");
 }
 stepCmd("debug-continue", "continue", "let the program run on");
 stepCmd("debug-step-over", "next", "step over this line");
@@ -220,4 +220,4 @@ weft.command("debug-stop", () => {
   send(s, "disconnect", { terminateDebuggee: true });
   weft.status("○ " + s.buf + " · stopping");
   weft.echo("debug: stopping " + s.buf);
-}, "stop the focused debug session");
+}, "stop the focused debug session", undefined, "whole");
