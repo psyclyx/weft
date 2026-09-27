@@ -18,6 +18,11 @@ pub const Error = target_runtime.target.Error || router_mod.Error;
 pub const Definition = struct {
     display_name: []const u8,
     directory: fs.target.Directory,
+    /// The durable `weft://<authority>/dir/<path>` this directory is, when the
+    /// publisher knows it (`Router.designate`). A child published below it
+    /// inherits a name derived from this one and the provider's own leaf, so
+    /// a listing's rows designate their files without anyone joining paths.
+    designation: []const u8 = "",
     /// Additional descriptive facts are copied into the target registry. A
     /// second filesystem-directory fact is rejected by the registry just like
     /// any other duplicate vocabulary name.
@@ -36,6 +41,8 @@ pub const ChildDefinition = struct {
 pub const EntryDefinition = struct {
     display_name: []const u8,
     entry: fs.target.Entry,
+    /// As `Definition.designation`, for a file.
+    designation: []const u8 = "",
     facts: []const semantic.target.Fact = &.{},
 };
 
@@ -127,6 +134,8 @@ pub fn publish(
 
     const descriptor = targets.get(ref) orelse return error.StaleTarget;
     try router.bindTarget(owner, ref, descriptor.revision, definition.directory);
+    errdefer _ = router.unbindTargetOwned(owner, ref, descriptor.revision);
+    if (definition.designation.len != 0) try router.designate(ref, descriptor.revision, definition.designation);
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
@@ -157,6 +166,8 @@ pub fn publishEntry(
     errdefer _ = targets.close(gpa, owner, ref);
     const descriptor = targets.get(ref) orelse return error.StaleTarget;
     try router.bindEntry(owner, ref, descriptor.revision, definition.entry);
+    errdefer _ = router.unbindTargetOwned(owner, ref, descriptor.revision);
+    if (definition.designation.len != 0) try router.designate(ref, descriptor.revision, definition.designation);
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
@@ -189,8 +200,11 @@ pub fn publishChildFile(
         if (!std.mem.eql(u8, entry.observation.revision.token, definition.entry_revision.token))
             return error.Stale;
         if (entry.observation.kind != .regular) return error.Unsupported;
+        const designation = try childDesignation(gpa, router, definition.parent, .file, entry.name.bytes);
+        defer gpa.free(designation);
         return publishEntry(gpa, targets, router, owner, .{
             .display_name = entry.name.bytes,
+            .designation = designation,
             .entry = .{ .root = parent.root, .ref = definition.entry, .revision = entry.observation.revision },
         });
     }
@@ -243,8 +257,11 @@ pub fn publishChildDirectory(
     const derived_root = try router.deriveRoot(child_source);
     errdefer router.releaseRoot(derived_root) catch {};
 
+    const designation = try childDesignation(gpa, router, definition.parent, .directory, direct.name.bytes);
+    defer gpa.free(designation);
     const registration = try publish(gpa, targets, router, owner, .{
         .display_name = direct.name.bytes,
+        .designation = designation,
         .directory = .{ .root = derived_root },
     });
     return .{
@@ -252,6 +269,35 @@ pub fn publishChildDirectory(
         .derived_root = derived_root,
         .router = router,
     };
+}
+
+/// The designation of `parent`'s child `name`, of `kind`: the parent's own
+/// designation with the provider's leaf appended, or empty when the parent
+/// has none or the leaf cannot be spelled in one (a `/`, a `?`, `.`/`..`).
+///
+/// This is the whole of how a listing's rows come to name their files. The
+/// parent's name came from whoever bound it, and the leaf from the provider's
+/// own listing, so nothing a guest said is in it — which is what lets the
+/// shell open a row by its designation rather than by walking back up a
+/// chain of containers to a directory it remembers the path of.
+fn childDesignation(
+    gpa: std.mem.Allocator,
+    router: *const router_mod.Router,
+    parent: semantic.target.Located,
+    kind: semantic.durable.Kind,
+    name: []const u8,
+) error{OutOfMemory}![]u8 {
+    const durable = semantic.durable;
+    const parent_text = router.designationOf(parent.target, parent.revision) orelse return gpa.alloc(u8, 0);
+    const directory = durable.parse(parent_text) orelse return gpa.alloc(u8, 0);
+    if (directory.kind != .directory) return gpa.alloc(u8, 0);
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or
+        std.mem.indexOfAny(u8, name, "/?\n") != null) return gpa.alloc(u8, 0);
+    const base = std.mem.trimEnd(u8, directory.ref, "/");
+    const ref = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, name });
+    defer gpa.free(ref);
+    const child: durable.Designation = .{ .authority = directory.authority, .kind = kind, .ref = ref };
+    return child.renderAlloc(gpa);
 }
 
 /// Provider-neutral child lookup. The caller supplies only an opaque raw leaf
@@ -609,6 +655,51 @@ test "child publication proves direct identity, owns derived root, and preserves
     try std.testing.expectEqual(@as(usize, 2), provider.release_calls);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(revoked.registration.ref, revoked.registration.revision));
     try std.testing.expect(!revoked.close(gpa, &targets));
+}
+
+test "a child's designation is its parent's plus the provider's leaf, and only a spellable leaf has one" {
+    const gpa = std.testing.allocator;
+    const fs_authority: semantic.handle.Authority = @enumFromInt(43);
+    const owner: semantic.owner.Id = @enumFromInt(12);
+    const child_ref: fs.contract.EntryRef = .{ .authority = fs_authority, .slot = 8, .generation = 1 };
+    var provider = TestProvider{
+        .authority = fs_authority,
+        .list_enabled = true,
+        .listed_name = "src",
+        .listed_ref = child_ref,
+        .list_parent_only = true,
+    };
+    var router = router_mod.Router.init(gpa);
+    defer router.deinit();
+    try router.register(fs_authority, provider.provider());
+    var targets = target_runtime.target.Registry.init(@enumFromInt(75));
+    defer targets.deinit(gpa);
+
+    var parent = try publish(gpa, &targets, &router, owner, .{
+        .display_name = "proj",
+        .directory = .{ .root = testRoot(fs_authority) },
+        .designation = "weft://here/dir/srv/proj",
+    });
+    defer _ = parent.close(gpa, &targets, &router);
+    try std.testing.expectEqualStrings("weft://here/dir/srv/proj", router.designationOf(parent.ref, parent.revision).?);
+    var child = try publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    });
+    try std.testing.expectEqualStrings("weft://here/dir/srv/proj/src", router.designationOf(child.registration.ref, child.registration.revision).?);
+    _ = child.close(gpa, &targets);
+
+    // A leaf the grammar cannot hold names nothing rather than something
+    // else.
+    provider.listed_name = "a?b";
+    var odd = try publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    });
+    try std.testing.expect(router.designationOf(odd.registration.ref, odd.registration.revision) == null);
+    _ = odd.close(gpa, &targets);
 }
 
 test "stale registration closes only its exact authority revision" {
