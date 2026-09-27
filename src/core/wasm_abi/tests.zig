@@ -4167,3 +4167,49 @@ test "wasm plugin: multiple selections — a per-selection yank distributes acro
     _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
     try expectDoc(gpa, ed, "one\ntwooneone two|two");
 }
+
+test "context: a wasm plugin publishes at a scope, a predicate reads it, and unloading retracts it" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
+    var loaded = true;
+    defer if (loaded) plugin.deinit();
+    const intent_mod = @import("../intent.zig");
+    const facts = @import("weft_facts");
+
+    const S = struct {
+        fn set(e: *Env, key: []const u8, value: []const u8, scope: []const u8) ![]const u8 {
+            const v = try command.run(&e.commands, &e.ctx, "ow-context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
+            return v.string;
+        }
+    };
+    const gated: facts.Predicate = .{ .context = .{ .key = "demo.session", .value = "*" } };
+    try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
+
+    // Published at the place of the entry the command ran in: this entry and
+    // anything else in the same place now satisfy a predicate on the key.
+    try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "weft://here/proc/7", "place"));
+    try t.expect(gated.matches(intent_mod.factsFor(&env.ctx)));
+    var scratch: [facts.Facts.scratch_len]u8 = undefined;
+    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("demo.session", &scratch).?);
+    // An entry-scoped value is more specific than the place's.
+    try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "mine", "entry"));
+    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("demo.session", &scratch).?);
+
+    // A builtin, or a key with no namespace, is refused at the door.
+    try t.expectEqualStrings("refused", try S.set(&env, "mode", "normal", "global"));
+    try t.expectEqualStrings("refused", try S.set(&env, "session", "x", "global"));
+    // Another owner's key is not this plugin's to overwrite.
+    _ = try env.context.store.set("someone-else", .global, "demo.other", "x");
+    try t.expectEqualStrings("held", try S.set(&env, "demo.other", "y", "global"));
+
+    // Unloading the plugin retracts everything it published — and nothing else.
+    plugin.deinit();
+    loaded = false;
+    try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
+    try t.expectEqualStrings("x", env.context.store.get(.{}, "demo.other").?);
+}

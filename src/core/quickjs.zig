@@ -43,6 +43,7 @@ const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
 const pointer_doors = @import("wasm_host/pointer.zig");
 const clipboard_doors = @import("wasm_host/clipboard.zig");
+const context_doors = @import("wasm_host/context.zig");
 const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
@@ -260,6 +261,8 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_clipboard_get", .handler = cClipboardGet },
     .{ .name = "qjs_jump_push", .handler = cJumpPush },
     .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
+    .{ .name = "qjs_context_set", .handler = cContextSet },
+    .{ .name = "qjs_context_get", .handler = cContextGet },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -689,6 +692,9 @@ pub const JsPlugin = struct {
 
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
+        // What it published leaves with it, exactly as for a `.wasm` plugin —
+        // and before `name`, which the owner key borrows, is freed.
+        if (self.activeCtx().context) |context| _ = context.store.retractOwner(self.resources.name);
         gpa.free(self.name);
         self.resources.deinit(); // kill + join every live child
         self.exits_reported.deinit(gpa);
@@ -773,6 +779,10 @@ pub const cPointer = jsDoor(pointer_doors.pointerBody, null);
 /// config-only grant (a denial answers `denied`, thrown in JS).
 pub const cClipboardSet = jsDoor(clipboard_doors.setBody, .clipboard);
 pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
+/// Context — `wl_context_set`'s and `wl_context_get`'s bodies: publish a key
+/// at a scope as this plugin, read the primary context.
+pub const cContextSet = jsDoor(context_doors.setBody, null);
+pub const cContextGet = jsDoor(context_doors.getBody, null);
 /// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
 pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
 pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);

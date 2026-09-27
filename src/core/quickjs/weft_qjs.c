@@ -153,6 +153,13 @@ __attribute__((import_module("weft"), import_name("qjs_clipboard_set")))
 extern int host_clipboard_set(const char *text, int len);
 __attribute__((import_module("weft"), import_name("qjs_clipboard_get")))
 extern int host_clipboard_get(char *out, int cap);
+// Context — wasm_host/context.zig's bodies. `set` answers 0, -1 (a key that
+// is not namespaced, an oversized value, a bad scope) or -2 (another plugin
+// holds the key there); `get` answers the FULL length, or -1 for no value.
+__attribute__((import_module("weft"), import_name("qjs_context_set")))
+extern int host_context_set(const char *key, int key_len, const char *value, int value_len, int scope);
+__attribute__((import_module("weft"), import_name("qjs_context_get")))
+extern int host_context_get(const char *key, int key_len, char *out, int cap);
 // The head's history — wasm_host/history.zig's bodies.
 __attribute__((import_module("weft"), import_name("qjs_jump_push")))
 extern void host_jump_push(void);
@@ -1114,6 +1121,63 @@ static JSValue js_clipboard_get(JSContext *ctx, JSValueConst this_val,
     return v;
 }
 
+// weft.contextSet(key, value, scope) -> bool: publish `value` for the
+// namespaced `key` ("repl.session") at `scope` — "entry", "place" or
+// "global" — of the entry this call is about. An empty value retracts; so
+// does unloading the plugin. False when refused (a bad key or scope, or
+// another plugin holds the key there).
+static JSValue js_context_set(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_FALSE;
+    const char *scope = JS_ToCString(ctx, argv[2]);
+    if (!scope) return JS_EXCEPTION;
+    int kind = strcmp(scope, "entry") == 0 ? 0 : strcmp(scope, "place") == 0 ? 1 : strcmp(scope, "global") == 0 ? 2 : -1;
+    JS_FreeCString(ctx, scope);
+    if (kind < 0) return JS_FALSE;
+    size_t kl, vl;
+    const char *k = JS_ToCStringLen(ctx, &kl, argv[0]);
+    if (!k) return JS_EXCEPTION;
+    const char *v = JS_ToCStringLen(ctx, &vl, argv[1]);
+    if (!v) {
+        JS_FreeCString(ctx, k);
+        return JS_EXCEPTION;
+    }
+    int r = host_context_set(k, (int)kl, v, (int)vl, kind);
+    JS_FreeCString(ctx, k);
+    JS_FreeCString(ctx, v);
+    return JS_NewBool(ctx, r == 0);
+}
+
+// weft.contextGet(key) -> string | null: the PRIMARY context's value for any
+// key, builtin ("mode", "entry") or published ("repl.session").
+static JSValue js_context_get(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    size_t kl;
+    const char *k = JS_ToCStringLen(ctx, &kl, argv[0]);
+    if (!k) return JS_EXCEPTION;
+    int n = host_context_get(k, (int)kl, g_read_buf, (int)sizeof g_read_buf);
+    JSValue v;
+    if (n < 0) {
+        v = JS_NULL;
+    } else if ((size_t)n <= sizeof g_read_buf) {
+        v = JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+    } else {
+        char *big = js_malloc(ctx, (size_t)n);
+        if (!big) {
+            JS_FreeCString(ctx, k);
+            return JS_EXCEPTION;
+        }
+        int m = host_context_get(k, (int)kl, big, n);
+        v = m < 0 ? JS_NULL : JS_NewStringLen(ctx, big, (size_t)(m < n ? m : n));
+        js_free(ctx, big);
+    }
+    JS_FreeCString(ctx, k);
+    return v;
+}
+
 // weft.jumpPush(): remember the caret as a jump in the head's jumplist.
 static JSValue js_jump_push(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
@@ -1279,6 +1343,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "pointer", JS_NewCFunction(g_ctx, js_pointer, "pointer", 0));
     JS_SetPropertyStr(g_ctx, weft, "clipboardSet", JS_NewCFunction(g_ctx, js_clipboard_set, "clipboardSet", 1));
     JS_SetPropertyStr(g_ctx, weft, "clipboardGet", JS_NewCFunction(g_ctx, js_clipboard_get, "clipboardGet", 0));
+    JS_SetPropertyStr(g_ctx, weft, "contextSet", JS_NewCFunction(g_ctx, js_context_set, "contextSet", 3));
+    JS_SetPropertyStr(g_ctx, weft, "contextGet", JS_NewCFunction(g_ctx, js_context_get, "contextGet", 1));
     JS_SetPropertyStr(g_ctx, weft, "jumpPush", JS_NewCFunction(g_ctx, js_jump_push, "jumpPush", 0));
     JS_SetPropertyStr(g_ctx, weft, "macroRecording", JS_NewCFunction(g_ctx, js_macro_recording, "macroRecording", 0));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));

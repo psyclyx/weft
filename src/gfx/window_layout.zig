@@ -82,7 +82,7 @@ pub const Dir = enum { left, right, up, down };
 /// `dock` by the `.dock` node this pane hangs under, and the pair of them by
 /// `splitFocused`/`swapNeighbor`/`closeFocused` refusing to restructure a
 /// companion. `persistent` and `focus_source` are enforced one layer up
-/// (`app/window_cmds.zig`), where the active entry and the focus feed live.
+/// (`app/window_cmds.zig`), where the active entry and primary focus live.
 pub const Pane = struct {
     id: PaneId,
     buffer_id: core.Buffers.Id,

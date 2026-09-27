@@ -56,6 +56,7 @@ const proj = @import("../wasm_host/projection.zig");
 const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
 const clipboard = @import("../wasm_host/clipboard.zig");
+const context_doors = @import("../wasm_host/context.zig");
 const history = @import("../wasm_host/history.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
@@ -294,6 +295,10 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── clipboard.zig — the head's system clipboard (config-only grant) ──
     .{ .name = "wl_clipboard_set", .handler = clipboard.hClipboardSet },
     .{ .name = "wl_clipboard_get", .handler = clipboard.hClipboardGet },
+    // ── context.zig — publish a key, read the primary context ───────────
+    .{ .name = "wl_context_set", .handler = context_doors.hContextSet },
+    .{ .name = "wl_context_get", .handler = context_doors.hContextGet },
+    .{ .name = "wl_context_changed", .handler = context_doors.hContextChanged },
 
     // ── history.zig — the head's jumplist and macro recorder ──────────
     .{ .name = "wl_jump_push", .handler = history.hJumpPush },
@@ -473,6 +478,9 @@ pub const render_safe = [_][]const u8{
     "wl_menu_binding_is_group",    "wl_menu_binding_intent_status", "wl_menu_binding_intent",
     "wl_menu_binding_intent_note", "wl_annotate_len",               "wl_annotate_read",
     "wl_payload_read",             "wl_payload_push",
+    // Context reads: a gutter may ask which REPL is live; it may not publish.
+                  "wl_context_get",
+    "wl_context_changed",
 };
 
 /// Whether `name` is callable while answering a provider round.

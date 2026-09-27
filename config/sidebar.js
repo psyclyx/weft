@@ -19,7 +19,7 @@ weft.viewport("sidebar", {
   // root.
   persistent: true,
   // Focus landing here is not a primary-focus change, so companions that
-  // follow the focus feed ignore it (and cannot chase themselves).
+  // follow the primary context never hear it (and cannot chase themselves).
   followFocus: false,
 });
 

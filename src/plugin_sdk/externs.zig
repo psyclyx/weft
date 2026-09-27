@@ -216,6 +216,11 @@ pub extern "weft:abi/1" fn wl_clipboard_set(ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_clipboard_get(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_jump_push() void;
 pub extern "weft:abi/1" fn wl_macro_recording() u32;
+// Context (doc/model.md §2.5): publish a key at a scope (0 entry, 1 place,
+// 2 global), read the primary context, list the keys a delivery moved.
+pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scope: u32) i32;
+pub extern "weft:abi/1" fn wl_context_get(k: u32, kl: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_context_changed(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;

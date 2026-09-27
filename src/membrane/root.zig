@@ -89,6 +89,10 @@ pub const Group = enum {
     /// `wasm_host/history.zig` — the dispatching head's jumplist and macro
     /// recorder: push a jump, ask whether a macro is recording.
     history,
+    /// `wasm_host/context.zig` — context as an open keyed map (doc/model.md
+    /// §2.5): publish a namespaced key at a scope, read the primary context,
+    /// and list the keys an `on_context_changed` delivery reports as moved.
+    context,
     semantic,
     proc,
     sessions,
@@ -383,6 +387,9 @@ pub const imports = [_]Entry{
     // ── history.zig — the dispatching head's jumplist and macro recorder ──
     .{ .name = "wl_jump_push", .params = &.{}, .results = &.{}, .group = .history, .doc = "remember the caret as a jump in the head's jumplist (a grammar decides what a jump is)" },
     .{ .name = "wl_macro_recording", .params = &.{}, .results = &.{.u32}, .group = .history, .doc = "the register a macro is recording into (its byte), or 0 when none is" },
+    .{ .name = "wl_context_set", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "publish (key, value) at a scope (0 entry, 1 place, 2 global) of the entry this call is about; an empty value retracts; 0 done, -1 refused (key not namespaced, value too long, bad scope), -2 another plugin holds the key there" },
+    .{ .name = "wl_context_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the primary context's value for any key (builtin or published) into guest memory (clamped); returns the full length, -1 when unset" },
+    .{ .name = "wl_context_changed", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the keys the on_context_changed being delivered reports as moved, one per line (clamped); returns the full length" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
@@ -556,7 +563,7 @@ pub const exports = [_]Export{
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
-    .{ .name = "on_offers_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "what the head's primary context offers moved (focus, mode, entry, provider set, availability); at most once per frame, at the frame boundary, never inside a dispatch" },
+    .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
@@ -596,9 +603,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 256;
+const max_import_count: usize = 259;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 276;
+const max_semantic_operation_count: usize = 279;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -753,7 +760,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 256), census.imports);
+    try t.expectEqual(@as(usize, 259), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 276), census.semantic_operations);
+    try t.expectEqual(@as(usize, 279), census.semantic_operations);
 }

@@ -18,7 +18,6 @@ const wasm = @import("../wasm.zig");
 const catalog = @import("../catalog.zig");
 const intent_mod = @import("../intent.zig");
 const plugin_offers = @import("../plugin_offers.zig");
-const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -216,7 +215,7 @@ fn putU32(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) std.mem.Alloc
 /// HEAD-GATED, unlike `wl_intent_invoke`: running in the primary context
 /// moves which entry the head is on for the call (`Plane.invokeNamedAt`),
 /// and moving the head is a dispatching entry's business — never a
-/// background callback's, such as the `on_offers_changed` that told a
+/// background callback's, such as the `on_context_changed` that tells a
 /// toolbar to redraw.
 pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -242,28 +241,6 @@ pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         .unknown => -1,
         .refused => |why| @intCast(caller.writeMemory(@intCast(args[3]), @intCast(args[4]), why) catch 0),
     };
-}
-
-/// Fire the offers-changed event (`on_offers_changed`) at one plugin: what
-/// the head's primary context offers just moved. The caller (the app's frame
-/// phase, `app/application.zig`'s `notifyOffersChanged`) decides WHEN — once
-/// per frame at most, at the frame boundary, never from inside a dispatch —
-/// and this only delivers.
-/// A plugin that does not export the callback is remembered as deaf after the
-/// first try, so it costs nothing on later changes. Returns whether it ran.
-pub fn notifyOffersChanged(p: *WasmPlugin) bool {
-    if (p.offers_listener == .deaf) return false;
-    contract.callOptionalExport("on_offers_changed", &p.instance, .{}) catch |err| {
-        if (err == error.MissingExport) p.offers_listener = .deaf;
-        return false;
-    };
-    p.offers_listener = .listening;
-    return true;
-}
-
-/// Could this plugin be listening? Unknown counts as yes — it is asked once.
-pub fn hearsOffers(p: *const WasmPlugin) bool {
-    return p.offers_listener != .deaf;
 }
 
 /// `order` value meaning "no ordering hint" on `wl_provide_affordance`.

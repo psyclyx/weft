@@ -38,9 +38,6 @@ pub const Application = struct {
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
     last_activate_len: usize = 0,
     last_active: core.Buffers.Id,
-    /// What the primary context offered when listeners were last told
-    /// (`notifyOffersChanged`); null before the first delivery.
-    offers_seen: ?u64 = null,
     which_key_delay_ns: u64,
     lifecycle: lifecycle_mod.Lifecycle,
 
@@ -107,7 +104,6 @@ pub const Application = struct {
                 .head = &args.session.head,
                 .semantic = &args.session.system.semantic,
                 .placement = &args.session.system.placement,
-                .focus_feed = &args.session.system.focus,
                 .viewports = &args.session.system.viewports,
                 .cursor_cfg = &args.session.cursor_cfg,
                 .plugins = args.plugins,
@@ -221,7 +217,7 @@ pub const Application = struct {
 
     pub fn applyWindowIntents(self: *Application) bool {
         var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
-        if (self.notifyOffersChanged()) damaged = true;
+        if (self.notifyContextChanged()) damaged = true;
         // Named signals plugins raised this wake (`wl_signal_emit`), heard at
         // the same boundary and for the same reason: never inside the
         // dispatch or poll that raised them.
@@ -229,31 +225,36 @@ pub const Application = struct {
         return damaged;
     }
 
-    /// The offers-changed event (doc/configs.md §3.5.3): tell listening
-    /// plugins that what the head's PRIMARY context offers moved, so chrome (a
-    /// toolbar) redraws without polling.
+    /// The context-changed event (doc/model.md §2.5): tell every listener —
+    /// Zig consumers and plugins exporting `on_context_changed` — which keys
+    /// of the head's PRIMARY context moved, so chrome redraws and companions
+    /// retarget without polling.
     ///
     /// Here, after the layout phase, because that is where primary focus is
     /// recorded — so a focus move, a mode change, an entry switch, a provider
-    /// registration and an availability flip made anywhere in this wake are
-    /// all visible, and are delivered as ONE event. It runs at the frame
-    /// boundary, never inside a dispatch, so a listener re-entering the offer
-    /// doors cannot recurse into the dispatch that caused the change. The
-    /// comparison is over the offers' content (`Plane.signatureAt`), so a
-    /// frame where nothing a toolbar shows moved fires nothing.
-    fn notifyOffersChanged(self: *Application) bool {
-        const plugins = self.driver.ctx.plugins.items;
-        for (plugins) |pl| {
-            if (core.wasm_host.hearsOffers(pl)) break;
-        } else return false;
+    /// registration, an availability flip and a `contextSet` made anywhere in
+    /// this wake are all visible, and are delivered as ONE event. It runs at
+    /// the frame boundary, never inside a dispatch, so a listener re-entering
+    /// the doors cannot recurse into the dispatch that caused the change, and
+    /// a change a listener makes is the NEXT frame's event. The comparison is
+    /// per key, over content (`context.Context.observe`), so a frame where
+    /// nothing moved fires nothing and a caret move in text fires nothing.
+    fn notifyContextChanged(self: *Application) bool {
         const ctx = &self.session.cmd_ctx;
-        const plane = ctx.intent orelse return false;
-        const signature = plane.signatureAt(ctx, .primary);
-        if (self.offers_seen) |seen| if (seen == signature) return false;
-        self.offers_seen = signature;
-        var ran = false;
+        const context = ctx.context orelse return false;
+        const plugins = self.driver.ctx.plugins.items;
+        const hears = context.listeners.items.len > 0 or for (plugins) |pl| {
+            if (core.wasm_host.hearsContext(pl)) break true;
+        } else false;
+        if (!hears) return false;
+        const moved = context.observe(ctx) catch |err| {
+            std.log.warn("context: observing the primary context failed: {t}", .{err});
+            return false;
+        };
+        if (!moved) return false;
+        var ran = context.notify();
         for (plugins) |pl| {
-            if (core.wasm_host.notifyOffersChanged(pl)) ran = true;
+            if (core.wasm_host.notifyContextChanged(pl)) ran = true;
         }
         return ran;
     }

@@ -239,8 +239,9 @@ const StatuslineRound = struct {
 /// for any other pane, never the focused pane's mode stamped on every pane.
 pub fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, pane: u32) core.facts.Facts {
     const head = fx.head;
-    if (buffer == fx.buffers.active()) return core.intent.entryFacts(buffer, head.currentMode(), &head.semantic_focus, pane);
-    return core.intent.entryFacts(buffer, core.intent.restingModeOf(fx.buffers, buffer), &buffer.semantic_focus, pane);
+    const open = core.context.openAt(fx.cmd_ctx.context, buffer);
+    if (buffer == fx.buffers.active()) return core.intent.entryFacts(buffer, head.currentMode(), &head.semantic_focus, pane, open);
+    return core.intent.entryFacts(buffer, core.intent.restingModeOf(fx.buffers, buffer), &buffer.semantic_focus, pane, open);
 }
 
 /// Resolve one pane's gutter for this frame: the eligible providers (one

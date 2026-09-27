@@ -386,10 +386,10 @@ surface: surface_mod.Surface = .{},
 /// address it captures is the address it keeps.
 offers: plugin_offers.Publisher = undefined,
 offers_ready: bool = false,
-/// Whether this plugin exports `on_offers_changed` — learned on the first
-/// delivery (`wasm_host/intent.zig`'s `notifyOffersChanged`), so a plugin
+/// Whether this plugin exports `on_context_changed` — learned on the first
+/// delivery (`wasm_host/context.zig`'s `notifyContextChanged`), so a plugin
 /// without it is asked once, not every change.
-offers_listener: enum { unknown, listening, deaf } = .unknown,
+context_listener: enum { unknown, listening, deaf } = .unknown,
 
 // ── Sandboxed semantic field providers ──
 /// Stable heap proxies + host-owned snapshots for fields registered by this
@@ -843,6 +843,9 @@ pub fn deinit(self: *WasmPlugin) void {
     // by its name. The declared actions themselves persist (cheap names; another
     // plugin/config may still provide for them).
     self.ctx.actions.unregisterByOwnerPrefix(self.name);
+    // So does every context value it published (`wl_context_set`): a claim
+    // about the plugin's work must not outlive the code that knew it true.
+    if (self.ctx.context) |context| _ = context.store.retractOwner(self.resources.name);
     // D2 slot providers (wl_slot_bind) die with it too — same shape. Slots
     // THEMSELVES (wl_slot_declare) persist, exactly like declared actions —
     // Container has no slot-removal API (matches every other domain's

@@ -155,6 +155,11 @@ pub const Context = struct {
     /// embeddings that expose only the concrete command surface; dispatch
     /// then treats an intention binding as unresolvable and says so.
     intent: ?*@import("intent.zig").Plane = null,
+    /// The system's context (`context.zig`): the keys plugins published, and
+    /// the primary context's last delivered fingerprints. `null` in bare
+    /// embeddings; every open key then reads as unset and `contextSet` is
+    /// refused rather than stored nowhere.
+    context: ?*@import("context.zig").Context = null,
     /// Authority-routed filesystem services. Providers are installed by the
     /// embedding app (Linux today, Darwin/remote/synthetic independently);
     /// commands and plugins see only this platform-neutral router.

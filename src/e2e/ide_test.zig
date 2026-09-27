@@ -455,6 +455,8 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     ed.applyWindow();
     ed.applyWindow();
     try t.expectEqual(first + 1, runInt(ed, "ow-fired", &.{}));
+    // …and it names exactly what moved: the offers, not the entry or mode.
+    try t.expectEqualStrings("offers", runStr(ed, &buf, "ow-keys", &.{}));
 
     // Focus the docked sidebar. The PRIMARY context is still the editor, so
     // what a toolbar describes did not move: no event.
@@ -510,10 +512,61 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     ed.applyWindow();
     try t.expectEqual(editor_entry, ed.buffers.active_id);
     try t.expectEqual(first + 3, runInt(ed, "ow-fired", &.{}));
-    // …and a different entry in the primary pane is one.
+    // …and a different entry in the primary pane is one, naming the entry.
     try openFile(ed, "b.txt", "two\n");
     ed.applyWindow();
     try t.expectEqual(first + 4, runInt(ed, "ow-fired", &.{}));
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "entry") != null);
+}
+
+test "e2e/ide: a live REPL is a key of the context — the event names it, a predicate reads it, explain agrees with the keypress" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try h.loadOfferwatch(ed);
+    try openFile(ed, "a.txt", "sent line\n");
+    const source = ed.buffers.active_id;
+    ed.applyWindow();
+    var buf: [1 << 12]u8 = undefined;
+    const arms = [_][]const u8{"plugin.ide.send-to-repl"};
+
+    // Nothing publishes `repl.session`: the gated provider is not offered,
+    // and explain says so exactly as a keypress would find it.
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    try t.expect(!offered(ed, "plugin.ide.send-to-repl"));
+    try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
+
+    // Starting one publishes it on this place, and the ONE event of that
+    // frame lists it.
+    ed.runStr("repl-start", "cat");
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
+    ed.runStr("open", "a.txt");
+    try t.expectEqual(source, ed.buffers.active_id);
+    ed.applyWindow();
+    try t.expectEqualStrings("*repl*", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    // Back on the source, the entry moved — the REPL key did not.
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") == null);
+
+    // Explain and the keypress read the same freshly synced table: both say
+    // the config's provider runs it, and running it sends the line.
+    const why = core.intent.explain(ed.ctx, &arms);
+    try t.expect(why == .ready);
+    try t.expectEqualStrings("config", why.ready.provider);
+    try t.expect(offered(ed, "plugin.ide.send-to-repl"));
+    var refusal: [256]u8 = undefined;
+    try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.ide.send-to-repl", &refusal) == .invoked);
+    try t.expect(h.drainToolContains(ed, "*repl*", "sent line"));
+
+    // Quitting retracts it: one event naming the key, and nothing offered.
+    const before = runInt(ed, "ow-fired", &.{});
+    ed.run("repl-quit");
+    ed.applyWindow();
+    try t.expect(runInt(ed, "ow-fired", &.{}) > before);
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
 }
 
 test "e2e/ide: C-d adds the next occurrence, C-S-l takes them all, and typing edits every one as one undo unit" {

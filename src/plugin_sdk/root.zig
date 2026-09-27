@@ -1147,6 +1147,72 @@ pub fn offersIn(where: OfferContext) Offers {
     return .{ .bytes = bytes, .count = std.mem.readInt(u32, bytes[0..4], .little) };
 }
 
+// ── Context (doc/model.md §2.5) ──────────────────────────────────────
+/// Which level of the context stack a published value lives at: the entry a
+/// call is about, the place that entry is in, or the whole workspace.
+pub const ContextScope = enum(u32) { entry = 0, place = 1, global = 2 };
+
+pub const ContextSetError = error{
+    /// Not a namespaced key (`repl.session`), a value too long, or no
+    /// context to publish into.
+    Refused,
+    /// Another plugin publishes this key at this scope.
+    Held,
+};
+
+/// Say `value` is true of `key` at `scope`, as this plugin — so a provider
+/// gated on `{ .context = .{ .key = key, .value = "*" } }` is offered there.
+/// An empty value retracts; unloading the plugin retracts everything it
+/// published. Keys are namespaced by convention (`<plugin>.<what>`), and a
+/// builtin (`mode`, `entry`, …) cannot be published at all.
+pub fn contextSet(key: []const u8, value: []const u8, scope: ContextScope) ContextSetError!void {
+    return switch (e.wl_context_set(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len), @intFromEnum(scope))) {
+        0 => {},
+        -2 => error.Held,
+        else => error.Refused,
+    };
+}
+
+var context_scratch: [2048]u8 = undefined;
+
+/// The PRIMARY context's value for `key` — any key, builtin (`mode`,
+/// `entry`, `offers`) or published (`repl.session`) — or null when unset.
+/// Borrowed until the next `contextGet`.
+pub fn contextGet(key: []const u8) ?[]const u8 {
+    const n = e.wl_context_get(p(key.ptr), @intCast(key.len), p(&context_scratch), context_scratch.len);
+    if (n < 0) return null;
+    return context_scratch[0..@min(@as(usize, @intCast(n)), context_scratch.len)];
+}
+
+var changed_scratch: [4096]u8 = undefined;
+
+/// The keys the `on_context_changed` being delivered reports as moved.
+/// Borrowed until the next call.
+pub fn contextChanged() ContextKeys {
+    const n = e.wl_context_changed(p(&changed_scratch), changed_scratch.len);
+    const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), changed_scratch.len);
+    return .{ .it = std.mem.splitScalar(u8, changed_scratch[0..len], '\n'), .empty = len == 0 };
+}
+
+pub const ContextKeys = struct {
+    it: std.mem.SplitIterator(u8, .scalar),
+    empty: bool,
+
+    pub fn next(self: *ContextKeys) ?[]const u8 {
+        if (self.empty) return null;
+        return self.it.next();
+    }
+
+    /// Did any of `keys` move? The one question most listeners ask.
+    pub fn any(self: ContextKeys, keys: []const []const u8) bool {
+        var copy = self;
+        while (copy.next()) |moved| {
+            for (keys) |k| if (std.mem.eql(u8, k, moved)) return true;
+        }
+        return false;
+    }
+};
+
 /// `invokeIntention` in a chosen context: resolved and run THERE, so a
 /// toolbar's Undo undoes the editor it describes. Only from a dispatch (a
 /// command or a click), like any other change to where the head is.

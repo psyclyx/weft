@@ -1053,7 +1053,6 @@ pub const SecondHead = struct {
             ed.keymap,
             ed.application.last_frame_rect,
             &ed.session.system.placement,
-            &ed.session.system.focus,
         );
     }
 

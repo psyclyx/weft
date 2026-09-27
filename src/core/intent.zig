@@ -20,6 +20,7 @@ const action_here = @import("action_here.zig");
 const action_offers = @import("action_offers.zig");
 const Head = @import("Head.zig");
 const Buffers = @import("Buffers.zig");
+const context_mod = @import("context.zig");
 
 pub const Catalog = catalog_mod.Catalog;
 pub const IntentionId = catalog_mod.IntentionId;
@@ -412,18 +413,17 @@ pub const Plane = struct {
         };
     }
 
-    /// A value that moves exactly when what `where` offers moves — the rows
-    /// (intention, owner, availability, presentation) or the context they
-    /// describe (entry, mode). The offers-changed event fires on it, so it is
-    /// content, not the catalog epoch: describing the primary from a sidebar
-    /// flips core's tables back and forth without changing a single row, and
-    /// that must not read as a change.
-    pub fn signatureAt(self: *Plane, ctx: *command.Context, where: Where) u64 {
-        const scope = scopeOf(ctx, where);
+    /// A value that moves exactly when what `where` offers moves — the rows:
+    /// intention, owner, availability, presentation. It is the primary
+    /// context's `offers` key (`context.zig`), so it is CONTENT, not the
+    /// catalog epoch: describing the primary from a sidebar flips core's
+    /// tables back and forth without changing a single row, and that must not
+    /// read as a change. The entry and mode the rows describe are keys of
+    /// their own; folding them in here would report every focus move as an
+    /// offers move too.
+    pub fn offersFingerprint(self: *Plane, ctx: *command.Context, where: Where) u64 {
         const snap = self.snapshotAt(ctx, where) orelse return 0;
         var h = std.hash.Wyhash.init(0);
-        h.update(std.mem.asBytes(&scope.entry_id));
-        h.update(scope.mode);
         for (snap.candidates, 0..) |c, i| {
             if (i != 0 and snap.candidates[i - 1].intention == c.intention) continue;
             h.update(self.catalog.intentionName(c.intention));
@@ -554,13 +554,15 @@ pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
 /// The facts of a chosen scope — `factsFor` is this for the active one, so
 /// the primary context is described by the same builder, never a copy.
 pub fn factsIn(scope: Scope) catalog_mod.Facts {
-    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane);
+    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane, scope.open);
 }
 
 /// The facts of `entry` in `mode`, as pane `pane` shows it — `factsIn` for
 /// a scope, and what the frame asks a pane's chrome (status line, gutter)
-/// with, so every pane is described by this one builder too.
-pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32) catalog_mod.Facts {
+/// with, so every pane is described by this one builder too. `open` is the
+/// published context at the entry (`context.openAt`): the keys no typed
+/// field names.
+pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32, open: @import("weft_facts").context.Open) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
         .name = entry.name,
@@ -571,6 +573,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
         .locality = localityOf(entry),
         .posture = @tagName(entry.posture(focus.field != null)),
         .pane = pane,
+        .context = open,
     };
 }
 
@@ -609,6 +612,8 @@ pub const Scope = struct {
     pane: u32,
     focus: *const Head.SemanticFocus,
     clock: *Head.CatalogClock,
+    /// The published context at this entry — its open keys.
+    open: @import("weft_facts").context.Open,
 };
 
 pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
@@ -621,12 +626,23 @@ pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
         .pane = head.focused_pane,
         .focus = &head.semantic_focus,
         .clock = &head.catalog_clock,
+        .open = context_mod.openAt(ctx.context, ctx.buffers.active()),
     };
     if (where == .active) return active;
-    // No primary recorded yet, or it IS where the head is: one context.
-    const primary = head.primary_focus orelse return active;
-    if (primary.entry == ctx.buffers.active_id) return active;
-    const entry = ctx.buffers.get(primary.entry) orelse return active;
+    return primaryScopeOf(ctx) orelse active;
+}
+
+/// The head's PRIMARY context, or null when there is none: no focus-source
+/// pane focused yet, or the entry it showed is gone. Offer readers fall back
+/// to the active context (`scopeOf`); the primary context (`context.zig`)
+/// does not, because the active pane may be a companion, and a companion that
+/// could observe its own focus as "primary" could follow itself.
+pub fn primaryScopeOf(ctx: *command.Context) ?Scope {
+    const head = ctx.head;
+    const primary = head.primary_focus orelse return null;
+    // It IS where the head is: the live context, with the head's own mode.
+    if (primary.entry == ctx.buffers.active_id) return scopeOf(ctx, .active);
+    const entry = ctx.buffers.get(primary.entry) orelse return null;
     return .{
         .entry = entry,
         .entry_id = primary.entry,
@@ -635,6 +651,7 @@ pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
         .pane = primary.pane,
         .focus = &entry.semantic_focus,
         .clock = &head.primary_clock,
+        .open = context_mod.openAt(ctx.context, entry),
     };
 }
 
@@ -695,6 +712,10 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
     // sitting on the line it applies to.
     h.update(&[_]u8{@intFromEnum(locality)});
     h.update(&[_]u8{@intFromBool(path != null)});
+    // …and the open keys, through the store's revision and coordinates: a
+    // plugin publishing `repl.session` changes which providers are eligible.
+    const open = facts.context.digest();
+    h.update(std.mem.asBytes(&open));
     if (scope.focus.view) |view| {
         h.update(std.mem.asBytes(&view.slot));
         h.update(std.mem.asBytes(&view.generation));

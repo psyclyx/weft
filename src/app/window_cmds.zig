@@ -120,7 +120,8 @@ pub fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
 /// This is also where the workspace enforces the two viewport attributes the
 /// pane tree cannot (`core/viewport.zig`): `persistent` decides which way the
 /// focused-pane/active-entry mirror runs, and `focus_source` decides whether
-/// a focus change is published on `focus`.
+/// a focus change moves the head's primary focus — the one input the primary
+/// context (`core/context.zig`) reads focus from.
 pub fn applyIntents(
     win_ctx: *WindowCtx,
     win_layout: *window_layout.Layout,
@@ -131,7 +132,6 @@ pub fn applyIntents(
     keymap: *const core.Keymap,
     last_frame_rect: region.Rect,
     policy: *const core.placement.Policy,
-    focus: *core.focus_feed.Feed,
 ) bool {
     var dirty = false;
     if (win_ctx.split) |axis| {
@@ -211,7 +211,7 @@ pub fn applyIntents(
             }
         }.visit);
     }
-    publishFocus(win_layout, head, focus);
+    recordPrimaryFocus(win_layout, head);
     return dirty;
 }
 
@@ -375,10 +375,9 @@ fn takeInto(
 /// hands the resulting entry to `pane`, and puts the acting head back on the
 /// entry it was already looking at.
 ///
-/// This is the retarget half of the follow-focus pair
-/// (`core/focus_feed.zig`'s `Companion` is the other): a companion that
-/// follows the focus feed calls exactly this, which is why following needs no
-/// binding language.
+/// This is the retarget half of following: a companion that hears the
+/// primary context's `entry` move (`core/context.zig`) calls exactly this,
+/// which is why following needs no binding language.
 pub fn presentIn(
     ctx: *core.command.Context,
     win_layout: *window_layout.Layout,
@@ -435,17 +434,13 @@ fn presentRoundTrip(
     buffers.prev_id = prev;
 }
 
-/// Publish this head's focused viewport on the primary-focus feed (§7). The
-/// feed is idempotent, so calling it every layout phase costs one comparison
-/// on a quiet frame; every event carries the source viewport's attributes, so
-/// a companion consumer can tell primary focus from companion focus without
-/// the workspace deciding for it.
-fn publishFocus(win_layout: *window_layout.Layout, head: *core.Head, focus: *core.focus_feed.Feed) void {
+/// Record this head's PRIMARY focus (§7): the focused pane, when its viewport
+/// is a `focus_source`. Cheap enough for every layout phase. This record is
+/// the only thing the primary context reads focus from, so "what a toolbar
+/// describes" and "what an outline follows" cannot disagree about which pane
+/// is primary — and a companion taking focus moves neither.
+fn recordPrimaryFocus(win_layout: *window_layout.Layout, head: *core.Head) void {
     const pane = window_layout.headFocus(win_layout, head).pane();
-    focus.publish(.{ .viewport = pane.id, .entry = pane.buffer_id, .attrs = pane.attrs });
-    // The head's own record of its primary focus, by the SAME attribute the
-    // feed's companions filter on — so "what a toolbar describes" and "what
-    // an outline follows" cannot disagree about which pane is primary.
     if (pane.attrs.focus_source) {
         head.primary_focus = .{ .pane = pane.id, .entry = pane.buffer_id };
     } else if (head.primary_focus) |*p| {

@@ -133,6 +133,13 @@ function provideInSource(action, when, cmd, opts) {
 weft.action("plugin.ide.build");
 provideInSource("plugin.ide.build", {}, "run-line", { label: "Run line", group: "run", order: 1 });
 provideInSource("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Build", group: "build", order: 1 });
+// Send to REPL: offered only where a REPL is live. The repl plugin publishes
+// `repl.session` on the place its interpreter runs in, so this is a fact of
+// the context like the language is — the toolbar grows the button while a
+// REPL runs and drops it when the REPL quits, and neither the toolbar nor
+// this file knows how a REPL is tracked.
+weft.action("plugin.ide.send-to-repl");
+provideInSource("plugin.ide.send-to-repl", { context: { "repl.session": "*" } }, "repl-send-line", { label: "Send to REPL", group: "run", order: 2 });
 provideInSource("plugin.ide.build", { lang: "py" }, "lang-run", { label: "Run", group: "run", order: 1 });
 weft.action("plugin.ide.test");
 provideInSource("plugin.ide.test", { lang: "zig" }, "make-test", { label: "Test", group: "build", order: 2 });

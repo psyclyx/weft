@@ -19,12 +19,18 @@
 //! The `terminal` mode commits typed text into the input line and falls back
 //! to `default`, so every workspace key the config binds globally still
 //! reaches it. Return sends, BackSpace edits, C-u clears.
+//!
+//! While a shell runs, context key `terminal.session` holds the terminal's
+//! buffer name on the place it runs in (doc/model.md §2.5) — the `repl`
+//! plugin's `repl.session`, for the same reason: a config can offer an action
+//! only where there is a live shell to take it.
 
 const std = @import("std");
 const weft = @import("weft");
 
 const buffer_name = "*terminal*";
 const mode = "terminal";
+const session_key = "terminal.session";
 
 /// The shell's session handle, while it runs.
 var session: ?u32 = null;
@@ -92,6 +98,7 @@ fn shell() ?u32 {
         // Reap it and free its slot; the handle stays dead.
         weft.replQuit(h);
         session = null;
+        publish("");
     }
     input_len = 0;
     weft.toolBacking("terminal");
@@ -99,7 +106,16 @@ fn shell() ?u32 {
         weft.echo("terminal: could not start the shell");
         return null;
     };
+    publish(buffer_name);
     return session;
+}
+
+/// Say whether a shell is live here (`value`), or that none is (empty).
+fn publish(value: []const u8) void {
+    weft.contextSet(session_key, value, .place) catch |err| {
+        var buf: [96]u8 = undefined;
+        weft.echo(std.fmt.bufPrint(&buf, "terminal: could not publish {s}: {t}", .{ session_key, err }) catch session_key);
+    };
 }
 
 /// `terminal`: the shell in the panel, focused; started on first use, and
@@ -169,6 +185,7 @@ fn quit() void {
     weft.replQuit(handle);
     session = null;
     input_len = 0;
+    publish("");
 }
 
 const cmds = [_]weft.CommandEntry{

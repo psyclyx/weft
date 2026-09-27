@@ -58,9 +58,18 @@ pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
 pub const deliverSignals = activation.deliverSignals;
 
-const intent_doors = @import("wasm_host/intent.zig");
-pub const notifyOffersChanged = intent_doors.notifyOffersChanged;
-pub const hearsOffers = intent_doors.hearsOffers;
+/// The context doors, whose set and get bodies both membranes run.
+/// Re-exported for the same function-pointer proof as `edit_doors`, and for
+/// the app's frame boundary, which delivers `on_context_changed`.
+const context = @import("wasm_host/context.zig");
+pub const notifyContextChanged = context.notifyContextChanged;
+pub const hearsContext = context.hearsContext;
+pub const context_doors = struct {
+    pub const setBody = context.setBody;
+    pub const getBody = context.getBody;
+    pub const hContextSet = context.hContextSet;
+    pub const hContextGet = context.hContextGet;
+};
 
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
 /// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only

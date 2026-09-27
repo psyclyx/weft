@@ -68,6 +68,9 @@ pub const Publisher = struct {
         lang: u64,
         posture: u64,
         locality: facts_mod.Locality,
+        /// The open keys (`Open.digest`): a plugin publishing
+        /// `repl.session` makes a provider gated on it eligible.
+        context: u64,
     };
 
     fn hash(s: []const u8) u64 {
@@ -83,6 +86,7 @@ pub const Publisher = struct {
             .lang = hash(f.lang),
             .posture = hash(f.posture),
             .locality = f.locality,
+            .context = f.context.digest(),
         };
     }
 

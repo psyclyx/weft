@@ -92,7 +92,7 @@ const grants_mod = @import("grants.zig");
 const semantic_mod = @import("semantic.zig");
 const intent_mod = @import("intent.zig");
 const placement_mod = @import("placement.zig");
-const focus_feed = @import("focus_feed.zig");
+const context_mod = @import("context.zig");
 const viewport_mod = @import("viewport.zig");
 const fs_runtime = @import("weft_fs_runtime");
 
@@ -222,10 +222,12 @@ intent: intent_mod.Plane = undefined,
 /// by every head attached here, so the rule deciding which pane an open
 /// reaches must be one rule, not one per head.
 placement: placement_mod.Policy = .empty,
-/// Primary-viewport focus changes (§7). Consumed by companion viewports,
-/// statuslines, titles, and presence alike; published by the workspace's
-/// layout phase, which is the only place focus actually moves.
-focus: focus_feed.Feed = .empty,
+/// What is true here (doc/model.md §2.5): the keys plugins publish at a
+/// scope, and the primary context whose changes companion viewports,
+/// toolbars, statuslines and titles all consume as one event. System-scoped
+/// like the offer catalog it sits beside; plugins retract into it as they
+/// unload, so it outlives them.
+context: context_mod.Context,
 /// The viewports this system's manifest declares (`weft.viewport` /
 /// `weft.present`). Declarations, plus the layout phase's note of which are
 /// realized — the workspace materializes them; nothing here draws.
@@ -252,7 +254,9 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .filesystems = .init(gpa),
         .environments = .init(gpa),
         .place_ids = try place_mod.Ids.init(gpa),
+        .context = .init(gpa),
     };
+    errdefer self.context.deinit();
     errdefer self.buffers.deinit(gpa);
     errdefer self.semantic.deinit(gpa);
     errdefer self.filesystems.deinit();
@@ -316,7 +320,7 @@ pub fn destroy(self: *System) void {
     self.container.deinit();
     self.intent.deinit(gpa);
     self.placement.deinit(gpa);
-    self.focus.deinit(gpa);
+    self.context.deinit();
     self.viewports.deinit(gpa);
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
@@ -348,6 +352,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .semantic = &self.semantic,
         .filesystems = &self.filesystems,
         .intent = &self.intent,
+        .context = &self.context,
         .viewports = &self.viewports,
         .environments = &self.environments,
         .place_ids = &self.place_ids,
@@ -618,6 +623,7 @@ pub const Host = struct {
         c.semantic = &to.semantic;
         c.filesystems = &to.filesystems;
         c.intent = &to.intent;
+        c.context = &to.context;
         try to.attachHead(gpa, head);
     }
 };

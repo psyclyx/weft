@@ -38,6 +38,7 @@ const capability = @import("capability.zig");
 const action = @import("action.zig");
 const slot_mod = @import("slot.zig");
 const grants_mod = @import("grants.zig");
+const context_mod = @import("context.zig");
 
 const TestHost = @This();
 
@@ -57,6 +58,9 @@ slot_host: slot_mod.SlotHost,
 /// test can grant without rebuilding the world; an empty table grants
 /// nothing, which is what every other fixture already assumed.
 grants: grants_mod.HandleTable,
+/// The published context store, so a plugin under test can `contextSet` and
+/// a predicate can read what it said.
+context: context_mod.Context,
 quit: bool,
 ctx: command.Context,
 
@@ -68,6 +72,7 @@ pub fn init(gpa: Allocator, self: *TestHost) !void {
     self.head = .empty;
     self.container = container_mod.Container.init(gpa);
     self.grants = grants_mod.HandleTable.init(gpa);
+    self.context = .init(gpa);
     self.quit = false;
     // AFTER the fields above: these three borrow `&self.container`, which
     // must already hold its final value at its final address. See the module
@@ -86,6 +91,7 @@ pub fn init(gpa: Allocator, self: *TestHost) !void {
         .head = &self.head,
         .slot_host = &self.slot_host,
         .grant_table = &self.grants,
+        .context = &self.context,
     };
 }
 
@@ -107,6 +113,7 @@ pub fn deinit(self: *TestHost, gpa: Allocator) void {
     self.actions.deinit();
     self.caps.deinit();
     self.grants.deinit();
+    self.context.deinit();
     self.container.deinit();
     self.head.deinit(gpa);
     self.keymap.deinit(gpa);

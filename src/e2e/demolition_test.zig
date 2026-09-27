@@ -605,3 +605,30 @@ test "demolition: the clipboard and history doors are ONE body reached two ways"
         try t.expectEqual(@as(?HostFn, c[2]), qjs_handler);
     }
 }
+
+// The context doors: publishing a key and reading the primary context run one
+// body each on both planes, ungated on both. A JS plugin that could publish
+// what a wasm one cannot (or read more) would be a second definition of
+// context, and the pointers stop matching here.
+test "demolition: the context doors are ONE body reached two ways" {
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const ctx = h.core.wasm_host.context_doors;
+    const HostFn = @TypeOf(ctx.hContextSet);
+    const cases = .{
+        .{ "context_set", ctx.hContextSet, quickjs.jsDoor(ctx.setBody, null) },
+        .{ "context_get", ctx.hContextGet, quickjs.jsDoor(ctx.getBody, null) },
+    };
+    inline for (cases) |c| {
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ c[0])) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[1]), wl_handler);
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ c[0])) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[2]), qjs_handler);
+    }
+}

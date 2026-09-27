@@ -15,10 +15,10 @@
 //! - `persistent`: a sidebar keeps its own entry when the active buffer
 //!   changes; an ordinary pane follows it.
 //! - `dock`: an edge-anchored extent instead of a share of a split.
-//! - `focus_source`: whether focus landing here is a PRIMARY-focus change on
-//!   `focus_feed`. False for companions, which is what structurally kills the
-//!   outline-retargets-to-itself bug (D2): a companion cannot observe its own
-//!   focus, so it cannot chase it.
+//! - `focus_source`: whether focus landing here moves the PRIMARY context
+//!   (`context.zig`). False for companions, which is what structurally kills
+//!   the outline-retargets-to-itself bug (D2): a companion cannot observe its
+//!   own focus, so it cannot chase it.
 //! - `takes_focus`: whether the pane can hold a head's keyboard focus at
 //!   all. False for a strip of buttons: a click acts through it and the
 //!   editor keeps the keys, so what the strip describes never moves under it.

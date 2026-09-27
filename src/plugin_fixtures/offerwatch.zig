@@ -3,10 +3,14 @@
 //! with no toolbar in it — just the three things a toolbar does, each a
 //! command a test can drive and read:
 //!
-//!   - `on_offers_changed`: counts deliveries. A toolbar would re-read its
-//!     offers and redraw here; the count is what proves the event fires once
-//!     per relevant change and never on a quiet frame.
+//!   - `on_context_changed`: counts deliveries and keeps the moved keys. A
+//!     toolbar would re-read its offers and redraw here; the count is what
+//!     proves the event fires once per change and never on a quiet frame.
 //!   - `ow-fired`: that count, as the command's integer result.
+//!   - `ow-keys`: the last delivery's moved keys, comma-joined.
+//!   - `ow-context-set <key> <value> <scope>` / `ow-context-get <key>`:
+//!     `wl_context_set` ("ok", "held", "refused") and `wl_context_get` (the
+//!     value, or "<unset>").
 //!   - `ow-list <where>`: `wl_offers_list` for context `where` (0 active, 1
 //!     primary), one `intention|provider|availability|reason|label|group|order`
 //!     line per offer, as the command's string result.
@@ -23,13 +27,53 @@ const weft = @import("weft");
 
 var fired: i32 = 0;
 var out: [1 << 15]u8 = undefined;
+var keys_buf: [1024]u8 = undefined;
+var keys_len: usize = 0;
 
-fn onOffersChanged() callconv(.c) void {
+fn onContextChanged() callconv(.c) void {
     fired += 1;
+    var w: std.Io.Writer = .fixed(&keys_buf);
+    var keys = weft.contextChanged();
+    var first = true;
+    while (keys.next()) |k| {
+        if (!first) w.writeAll(",") catch break;
+        w.writeAll(k) catch break;
+        first = false;
+    }
+    keys_len = w.buffered().len;
 }
 
 fn firedCount() void {
     weft.setResultInt(fired);
+}
+
+fn lastKeys() void {
+    weft.setResultStr(keys_buf[0..keys_len]);
+}
+
+var arg_bufs: [3][256]u8 = undefined;
+
+/// Copy argument `i` out of the SDK's scratch, which the next read reuses.
+fn arg(i: usize) []const u8 {
+    const raw = weft.argStr(i) orelse "";
+    const n = @min(raw.len, arg_bufs[i].len);
+    @memcpy(arg_bufs[i][0..n], raw[0..n]);
+    return arg_bufs[i][0..n];
+}
+
+fn contextSet() void {
+    const key = arg(0);
+    const value = arg(1);
+    const scope = std.meta.stringToEnum(weft.ContextScope, arg(2)) orelse return weft.setResultStr("refused");
+    weft.contextSet(key, value, scope) catch |err| return weft.setResultStr(switch (err) {
+        error.Held => "held",
+        error.Refused => "refused",
+    });
+    weft.setResultStr("ok");
+}
+
+fn contextGet() void {
+    weft.setResultStr(weft.contextGet(arg(0)) orelse "<unset>");
 }
 
 fn whereArg(i: usize) weft.OfferContext {
@@ -74,6 +118,9 @@ fn provideProbe() void {
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "ow-fired", .call = firedCount },
+    .{ .name = "ow-keys", .call = lastKeys },
+    .{ .name = "ow-context-set", .call = contextSet },
+    .{ .name = "ow-context-get", .call = contextGet },
     .{ .name = "ow-list", .call = list },
     .{ .name = "ow-invoke", .call = invoke },
     .{ .name = "ow-probe", .call = probe },
@@ -82,5 +129,5 @@ const cmds = [_]weft.CommandEntry{
 
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
-    weft.exportCallback("on_offers_changed", &onOffersChanged);
+    weft.exportCallback("on_context_changed", &onContextChanged);
 }

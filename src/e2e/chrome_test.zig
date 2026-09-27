@@ -341,6 +341,40 @@ test "e2e/chrome: the toolbar redraws when the offers move, and only then" {
     try t.expectEqual(settled + 1, (try toolbarView(ed)).descriptor.revision);
 }
 
+test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, with no toolbar code involved" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "hello repl\n");
+    const source = ed.buffers.active_id;
+    ed.applyWindow();
+    // ide.js gates the provider on `{context: {"repl.session": "*"}}`, and
+    // nothing has published that key: not offered, so not shown.
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
+
+    // The repl plugin publishes `repl.session` on the place its interpreter
+    // runs in. Its own buffer takes the pane; come back to the source.
+    ed.runStr("repl-start", "cat");
+    ed.runStr("open", "a.txt");
+    try t.expectEqual(source, ed.buffers.active_id);
+    ed.applyWindow();
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line Send to REPL | Format Rename");
+    try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Send to REPL").?, "provider").?);
+
+    // The button acts on the editor it describes: the source's line goes to
+    // the live interpreter, which echoes it into its own buffer.
+    try clickButton(ed, "Send to REPL");
+    try t.expect(h.drainToolContains(ed, "*repl*", "hello repl"));
+    try t.expectEqual(source, ed.buffers.active_id);
+
+    // Quitting the last REPL retracts the key, and the strip drops the button.
+    ed.run("repl-quit");
+    ed.applyWindow();
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
+}
+
 // ── The context menu ─────────────────────────────────────────────────
 
 test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar row — and runs the choice" {

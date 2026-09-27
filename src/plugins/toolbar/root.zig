@@ -19,9 +19,9 @@
 //!
 //! The strip lives in its own entry, shown in whatever viewport a config
 //! presents it in (`config/toolbar.js` docks one text row at the top, taking
-//! no focus). It redraws on `on_offers_changed` — the host's word that the
-//! primary context's offers moved — and never otherwise: no polling, and a
-//! caret move redraws nothing.
+//! no focus). It redraws on `on_context_changed` when the primary context's
+//! `offers` or `mode` moved — and never otherwise: no polling, and a caret
+//! move redraws nothing.
 //!
 //! A click runs the offer IN the primary context (`invokeIntentionIn`), so
 //! Undo undoes the editor it describes; a refusal (Undo with nothing to
@@ -70,7 +70,7 @@ const cmds = [_]weft.CommandEntry{
 comptime {
     weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
-    weft.exportCallback("on_offers_changed", &onOffersChanged);
+    weft.exportCallback("on_context_changed", &onContextChanged);
 }
 
 fn init() void {
@@ -88,9 +88,10 @@ fn open() void {
     if (view_ref) |ref| _ = weft.semanticViewFocus(ref, null);
 }
 
-fn onOffersChanged() callconv(.c) void {
+fn onContextChanged() callconv(.c) void {
     // Before the strip is presented there is nothing to redraw into.
     if (view_ref == null) return;
+    if (!weft.contextChanged().any(&.{ "offers", "mode" })) return;
     redraw();
 }
 
