@@ -592,10 +592,11 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
 pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, bind: *SaveBinding) !void {
     _ = try commands.bind(gpa, "transcript.save", .{
         .name = "transcript.save",
-        .summary = "Reconcile an edited transcript projection's rows back into the graph doc by NodeRef identity.",
+        .summary = "Save the edits made in a transcript back into the conversation it shows.",
         .args = &.{},
         .handler = cTranscriptSave,
         .data = bind,
+        .meta = .{ .internal = true },
     });
     try actions.provide(.{
         .action = "file.save",

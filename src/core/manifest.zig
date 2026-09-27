@@ -1026,6 +1026,7 @@ pub const Manifest = struct {
                 registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
             for (self.presents.items) |d| registry.present(gpa, d.viewport, d.presentation()) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
+            if (actx.ctx.context) |context| registry.publishShown(context);
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
             std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});
         }

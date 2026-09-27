@@ -36,6 +36,9 @@ pub const Item = struct {
     label: []const u8,
     /// The presentation group; pinned entries have their own (empty) one.
     group: []const u8 = "",
+    /// An icon name from the theme's set, or "" — a strip and a menu draw it
+    /// beside the label in the styles that show icons.
+    icon: []const u8 = "",
     /// Who wins the offer here — what a tooltip or a palette row names.
     provider: []const u8 = "",
     /// The stable reason code when it cannot run; empty when it can.
@@ -87,6 +90,7 @@ fn fromOffer(a: std.mem.Allocator, o: weft.Offer) !Item {
         .name = try a.dupe(u8, o.intention),
         .label = try a.dupe(u8, o.label),
         .group = try a.dupe(u8, o.group),
+        .icon = try a.dupe(u8, o.icon),
         .provider = try a.dupe(u8, o.provider),
         .reason = switch (o.availability) {
             .enabled => "",
@@ -112,7 +116,20 @@ pub fn collect(a: std.mem.Allocator, opts: Options) ![]Item {
             if (name.len == 0) continue;
             const label = parts.next() orelse "";
             if (!isIntention(name)) {
-                try out.append(a, .{ .kind = .command, .name = name, .label = if (label.len > 0) label else name, .pinned = true });
+                // A pinned COMMAND is presented as it presents itself
+                // (doc/chrome.md §1.2): its label, with the prompt mark
+                // when it asks for more, and its icon — the config's
+                // `name\tLabel` still wins over the label.
+                const meta = weft.commandMeta(name) orelse weft.Presentation{};
+                var shown_buf: [128]u8 = undefined;
+                const own_label = try a.dupe(u8, meta.shown(&shown_buf, name));
+                try out.append(a, .{
+                    .kind = .command,
+                    .name = name,
+                    .label = if (label.len > 0) label else own_label,
+                    .icon = try a.dupe(u8, meta.icon),
+                    .pinned = true,
+                });
                 continue;
             }
             const hit = for (found.items) |*f| {

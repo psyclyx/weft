@@ -19,10 +19,10 @@ pub const Control = struct {
 
     pub fn register(self: *Control, gpa: std.mem.Allocator, commands: *core.command.Commands) !void {
         const entries = [_]core.command.Command{
-            .{ .name = "font-size-set", .summary = "Set the text size in pixels (8–72).", .args = &.{.{ .name = "size", .type = .string }}, .handler = set, .data = self },
-            .{ .name = "font.increase", .summary = "Increase the text size by one pixel.", .args = &.{}, .handler = increase, .data = self },
-            .{ .name = "font.decrease", .summary = "Decrease the text size by one pixel.", .args = &.{}, .handler = decrease, .data = self },
-            .{ .name = "font.reset", .summary = "Restore the configured text size.", .args = &.{}, .handler = reset, .data = self },
+            .{ .name = "font.set-size", .summary = "Set the text size in pixels, from 8 to 72.", .args = &.{.{ .name = "size", .type = .string }}, .handler = set, .data = self, .meta = .{ .label = "Set Text Size", .menu = "View/Appearance", .group = "zoom", .order = 40, .icon = "type", .prompts = true } },
+            .{ .name = "font.increase", .summary = "Make the text one pixel larger.", .args = &.{}, .handler = increase, .data = self, .meta = .{ .label = "Zoom In", .menu = "View/Appearance", .group = "zoom", .order = 10, .icon = "zoom-in" } },
+            .{ .name = "font.decrease", .summary = "Make the text one pixel smaller.", .args = &.{}, .handler = decrease, .data = self, .meta = .{ .label = "Zoom Out", .menu = "View/Appearance", .group = "zoom", .order = 20, .icon = "zoom-out" } },
+            .{ .name = "font.reset", .summary = "Restore the configured text size.", .args = &.{}, .handler = reset, .data = self, .meta = .{ .label = "Reset Zoom", .menu = "View/Appearance", .group = "zoom", .order = 30 } },
         };
         for (entries) |entry| _ = try commands.bind(gpa, entry.name, entry);
     }

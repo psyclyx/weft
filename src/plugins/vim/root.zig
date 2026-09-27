@@ -374,86 +374,86 @@ fn chooseRegister(comptime index: u8) fn () void {
 /// A vim verb is a one-cursor program: dispatch runs it once per selection.
 const each = weft.Arity.each_extent;
 const static_cmds = [_]weft.CommandEntry{
-    .{ .name = "vim.insert", .call = insert, .arity = each },
-    .{ .name = "vim.append", .call = append, .arity = each },
-    .{ .name = "vim.open-below", .call = openBelow, .arity = each },
-    .{ .name = "vim.open-above", .call = openAbove, .arity = each },
-    .{ .name = "vim.visual", .call = visual, .arity = each },
-    .{ .name = "vim.visual-delete", .call = visualDelete, .arity = .whole },
-    .{ .name = "vim.visual-delete-text", .call = visualDeleteText, .arity = each },
-    .{ .name = "vim.visual-yank", .call = visualYank, .arity = .whole },
-    .{ .name = "vim.visual-yank-text", .call = visualYankText, .arity = each },
-    .{ .name = "vim.visual-paste", .call = visualPaste(true), .arity = .whole },
-    .{ .name = "vim.visual-paste-before", .call = visualPaste(false), .arity = .whole },
-    .{ .name = "vim.visual-change", .call = visualChange, .arity = each },
-    .{ .name = "vim.visual-comment", .call = visualOp("comment.toggle"), .arity = each },
-    .{ .name = "vim.visual-upcase", .call = visualOp("operators.upcase"), .arity = each },
-    .{ .name = "vim.visual-lowercase", .call = visualOp("operators.lowercase"), .arity = each },
-    .{ .name = "vim.visual-indent", .call = visualOp("indent.increase"), .arity = each },
-    .{ .name = "vim.visual-dedent", .call = visualOp("indent.decrease"), .arity = each },
-    .{ .name = "vim.upcase", .call = enterOpUpcase, .arity = .whole },
-    .{ .name = "vim.lowercase", .call = enterOpLowercase, .arity = .whole },
-    .{ .name = "vim.indent", .call = enterOpIndent, .arity = .whole },
-    .{ .name = "vim.dedent", .call = enterOpDedent, .arity = .whole },
-    .{ .name = "vim.visual-line", .call = visualLine, .arity = each },
-    .{ .name = "vim.normal", .call = normal, .arity = .whole },
-    .{ .name = "vim.append-line-end", .call = appendLine, .arity = each },
-    .{ .name = "vim.insert-line-start", .call = insertLine, .arity = each },
-    .{ .name = "vim.delete-line-end", .call = deleteEol, .arity = each },
-    .{ .name = "vim.change-line-end", .call = changeEol, .arity = each },
-    .{ .name = "vim.change-line", .call = changeLine, .arity = each },
-    .{ .name = "vim.yank-line", .call = yankLine, .arity = .whole },
-    .{ .name = "vim.yank-line-text", .call = yankLineText, .arity = each },
-    .{ .name = "vim.paste", .call = paste, .arity = .whole },
-    .{ .name = "vim.paste-text", .call = pasteText(true), .arity = each },
-    .{ .name = "vim.paste-before", .call = pasteBefore, .arity = .whole },
-    .{ .name = "vim.paste-before-text", .call = pasteText(false), .arity = each },
-    .{ .name = "vim.next-line", .call = openFocused, .arity = .whole },
-    .{ .name = "vim.prev-line", .call = openContainer, .arity = .whole },
-    .{ .name = "vim.join-lines", .call = joinLines, .arity = each },
-    .{ .name = "vim.delete", .call = enterOpDelete, .arity = .whole },
-    .{ .name = "vim.change", .call = enterOpChange, .arity = .whole },
-    .{ .name = "vim.yank", .call = enterOpYank, .arity = .whole },
-    .{ .name = "vim.comment", .call = enterOpComment, .arity = .whole },
-    .{ .name = "vim.cancel-operator", .call = opCancel, .arity = .whole },
-    .{ .name = "vim.operate", .call = operate, .arity = each },
-    .{ .name = "vim.operate-line", .call = opLine, .arity = .whole },
-    .{ .name = "vim.operate-line-text", .call = opLineText, .arity = each },
-    .{ .name = "vim.object-inner", .call = enterOpInner, .arity = .whole },
-    .{ .name = "vim.object-around", .call = enterOpAround, .arity = .whole },
-    .{ .name = "vim.select-register", .call = enterRegister, .arity = .whole },
-    .{ .name = "vim.register-plus", .call = chooseClipboard, .arity = .whole },
-    .{ .name = "vim.register-star", .call = chooseClipboard, .arity = .whole },
-    .{ .name = "vim.macro-record", .call = macroQ, .arity = .whole },
-    .{ .name = "vim.macro-play", .call = macroAt, .arity = .whole },
-    .{ .name = "vim.macro-play-last", .call = macroPlay(0), .arity = .whole },
+    .{ .name = "vim.insert", .call = insert, .arity = each, .summary = "Enter insert mode before the cursor.", .label = "Insert" },
+    .{ .name = "vim.append", .call = append, .arity = each, .summary = "Enter insert mode after the cursor.", .label = "Append" },
+    .{ .name = "vim.open-below", .call = openBelow, .arity = each, .summary = "Open a new line below the cursor's line and start inserting on it.", .label = "Open Line Below" },
+    .{ .name = "vim.open-above", .call = openAbove, .arity = each, .summary = "Open a new line above the cursor's line and start inserting on it.", .label = "Open Line Above" },
+    .{ .name = "vim.visual", .call = visual, .arity = each, .summary = "Start a characterwise visual selection at the cursor.", .label = "Visual Mode" },
+    .{ .name = "vim.visual-delete", .call = visualDelete, .arity = .whole, .summary = "Delete the visual selection into the register.", .label = "Delete Selection" },
+    .{ .name = "vim.visual-delete-text", .call = visualDeleteText, .arity = each, .summary = "Delete the visual selection's text into the register, one caret at a time.", .internal = true },
+    .{ .name = "vim.visual-yank", .call = visualYank, .arity = .whole, .summary = "Copy the visual selection into the register.", .label = "Yank Selection", .icon = "copy" },
+    .{ .name = "vim.visual-yank-text", .call = visualYankText, .arity = each, .summary = "Copy the visual selection's text into the register, one caret at a time.", .internal = true },
+    .{ .name = "vim.visual-paste", .call = visualPaste(true), .arity = .whole, .summary = "Paste the register after the visual selection.", .label = "Paste After Selection", .icon = "clipboard-paste" },
+    .{ .name = "vim.visual-paste-before", .call = visualPaste(false), .arity = .whole, .summary = "Paste the register before the visual selection.", .label = "Paste Before Selection", .icon = "clipboard-paste" },
+    .{ .name = "vim.visual-change", .call = visualChange, .arity = each, .summary = "Delete the visual selection into the register and start inserting in its place.", .label = "Change Selection" },
+    .{ .name = "vim.visual-comment", .call = visualOp("comment.toggle"), .arity = each, .summary = "Toggle comments over the visual selection.", .label = "Comment Selection" },
+    .{ .name = "vim.visual-upcase", .call = visualOp("operators.upcase"), .arity = each, .summary = "Uppercase the visual selection.", .label = "Uppercase Selection", .icon = "case-upper" },
+    .{ .name = "vim.visual-lowercase", .call = visualOp("operators.lowercase"), .arity = each, .summary = "Lowercase the visual selection.", .label = "Lowercase Selection", .icon = "case-lower" },
+    .{ .name = "vim.visual-indent", .call = visualOp("indent.increase"), .arity = each, .summary = "Indent the lines of the visual selection one level.", .label = "Indent Selection", .icon = "indent-increase" },
+    .{ .name = "vim.visual-dedent", .call = visualOp("indent.decrease"), .arity = each, .summary = "Dedent the lines of the visual selection one level.", .label = "Dedent Selection", .icon = "indent-decrease" },
+    .{ .name = "vim.upcase", .call = enterOpUpcase, .arity = .whole, .summary = "Uppercase the text the next motion or text object covers.", .label = "Uppercase", .icon = "case-upper" },
+    .{ .name = "vim.lowercase", .call = enterOpLowercase, .arity = .whole, .summary = "Lowercase the text the next motion or text object covers.", .label = "Lowercase", .icon = "case-lower" },
+    .{ .name = "vim.indent", .call = enterOpIndent, .arity = .whole, .summary = "Indent the lines the next motion or text object covers.", .label = "Indent", .icon = "indent-increase" },
+    .{ .name = "vim.dedent", .call = enterOpDedent, .arity = .whole, .summary = "Dedent the lines the next motion or text object covers.", .label = "Dedent", .icon = "indent-decrease" },
+    .{ .name = "vim.visual-line", .call = visualLine, .arity = each, .summary = "Start a linewise visual selection at the cursor's line.", .label = "Visual Line Mode" },
+    .{ .name = "vim.normal", .call = normal, .arity = .whole, .summary = "Return to normal mode, clearing the selection and sealing the undo step.", .label = "Normal Mode" },
+    .{ .name = "vim.append-line-end", .call = appendLine, .arity = each, .summary = "Start inserting at the end of the cursor's line.", .label = "Append at Line End" },
+    .{ .name = "vim.insert-line-start", .call = insertLine, .arity = each, .summary = "Start inserting at the start of the cursor's line.", .label = "Insert at Line Start" },
+    .{ .name = "vim.delete-line-end", .call = deleteEol, .arity = each, .summary = "Delete from the cursor to the end of the line into the register.", .label = "Delete to Line End" },
+    .{ .name = "vim.change-line-end", .call = changeEol, .arity = each, .summary = "Delete from the cursor to the end of the line and start inserting.", .label = "Change to Line End" },
+    .{ .name = "vim.change-line", .call = changeLine, .arity = each, .summary = "Clear the cursor's line into the register and start inserting on it.", .label = "Change Line" },
+    .{ .name = "vim.yank-line", .call = yankLine, .arity = .whole, .summary = "Copy the cursor's line, or the selected rows, into the register.", .label = "Yank Line", .icon = "copy" },
+    .{ .name = "vim.yank-line-text", .call = yankLineText, .arity = each, .summary = "Copy the cursor's line of text into the register, one caret at a time.", .internal = true },
+    .{ .name = "vim.paste", .call = paste, .arity = .whole, .summary = "Paste the register after the cursor.", .label = "Paste", .icon = "clipboard-paste" },
+    .{ .name = "vim.paste-text", .call = pasteText(true), .arity = each, .summary = "Paste the register's text after each caret.", .internal = true },
+    .{ .name = "vim.paste-before", .call = pasteBefore, .arity = .whole, .summary = "Paste the register before the cursor.", .label = "Paste Before", .icon = "clipboard-paste" },
+    .{ .name = "vim.paste-before-text", .call = pasteText(false), .arity = each, .summary = "Paste the register's text before each caret.", .internal = true },
+    .{ .name = "vim.next-line", .call = openFocused, .arity = .whole, .summary = "Move to the first non-blank character of the next line.", .label = "Next Line" },
+    .{ .name = "vim.prev-line", .call = openContainer, .arity = .whole, .summary = "Move to the first non-blank character of the previous line.", .label = "Previous Line" },
+    .{ .name = "vim.join-lines", .call = joinLines, .arity = each, .summary = "Join the next line onto the cursor's line with a single space.", .label = "Join Lines" },
+    .{ .name = "vim.delete", .call = enterOpDelete, .arity = .whole, .summary = "Delete the text the next motion or text object covers into the register.", .label = "Delete" },
+    .{ .name = "vim.change", .call = enterOpChange, .arity = .whole, .summary = "Delete the text the next motion or text object covers and start inserting.", .label = "Change" },
+    .{ .name = "vim.yank", .call = enterOpYank, .arity = .whole, .summary = "Copy the text the next motion or text object covers into the register.", .label = "Yank", .icon = "copy" },
+    .{ .name = "vim.comment", .call = enterOpComment, .arity = .whole, .summary = "Toggle comments over the lines the next motion or text object covers.", .label = "Comment" },
+    .{ .name = "vim.cancel-operator", .call = opCancel, .arity = .whole, .summary = "Cancel the pending operator and return to the resting mode.", .internal = true },
+    .{ .name = "vim.operate", .call = operate, .arity = each, .summary = "Apply the pending operator over a range another plugin computed.", .internal = true },
+    .{ .name = "vim.operate-line", .call = opLine, .arity = .whole, .summary = "Apply the pending operator to the whole line, or to the selected rows.", .internal = true },
+    .{ .name = "vim.operate-line-text", .call = opLineText, .arity = each, .summary = "Apply the pending operator to the cursor's line of text, one caret at a time.", .internal = true },
+    .{ .name = "vim.object-inner", .call = enterOpInner, .arity = .whole, .summary = "Choose the inner variant of the next text object.", .internal = true },
+    .{ .name = "vim.object-around", .call = enterOpAround, .arity = .whole, .summary = "Choose the around variant of the next text object.", .internal = true },
+    .{ .name = "vim.select-register", .call = enterRegister, .arity = .whole, .summary = "Name the register the next yank, delete or paste uses.", .label = "Select Register", .prompts = true },
+    .{ .name = "vim.register-plus", .call = chooseClipboard, .arity = .whole, .summary = "Use the system clipboard for the next yank or paste.", .internal = true },
+    .{ .name = "vim.register-star", .call = chooseClipboard, .arity = .whole, .summary = "Use the system clipboard for the next yank or paste.", .internal = true },
+    .{ .name = "vim.macro-record", .call = macroQ, .arity = .whole, .summary = "Start recording a macro into a register, or stop the recording in progress.", .label = "Record Macro", .prompts = true },
+    .{ .name = "vim.macro-play", .call = macroAt, .arity = .whole, .summary = "Play the macro in a register, a count's times.", .label = "Play Macro", .prompts = true, .icon = "play" },
+    .{ .name = "vim.macro-play-last", .call = macroPlay(0), .arity = .whole, .summary = "Replay the macro played last, a count's times.", .internal = true },
     // `"/`: the search register, the last pattern any grammar searched for.
-    .{ .name = "vim.register-search", .call = chooseRegister(weft.register_search), .arity = .whole },
+    .{ .name = "vim.register-search", .call = chooseRegister(weft.register_search), .arity = .whole, .summary = "Use the search register, holding the last searched pattern, for the next paste.", .internal = true },
     // `vim.cancel-pending` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
     // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
-    .{ .name = "vim.cancel-pending", .call = leaderCancel, .arity = .whole },
-    .{ .name = "vim.goto-top", .call = vimGotoTop, .arity = each },
-    .{ .name = "vim.find-next-char", .call = enterFindF, .arity = .whole },
-    .{ .name = "vim.find-prev-char", .call = enterFindBigF, .arity = .whole },
-    .{ .name = "vim.till-next-char", .call = enterFindT, .arity = .whole },
-    .{ .name = "vim.till-prev-char", .call = enterFindBigT, .arity = .whole },
-    .{ .name = "vim.repeat-find", .call = repeatFind, .arity = each },
-    .{ .name = "vim.repeat-find-reversed", .call = repeatFindRev, .arity = each },
-    .{ .name = "vim.replace-char", .call = enterReplaceChar, .arity = .whole },
-    .{ .name = "vim.do-replace-char", .call = doReplaceChar, .arity = each },
-    .{ .name = "vim.toggle-case", .call = tildeCase, .arity = each },
-    .{ .name = "vim.do-find-next-char", .call = doFindF, .arity = each },
-    .{ .name = "vim.do-find-prev-char", .call = doFindBigF, .arity = each },
-    .{ .name = "vim.do-till-next-char", .call = doFindT, .arity = each },
-    .{ .name = "vim.do-till-prev-char", .call = doFindBigT, .arity = each },
+    .{ .name = "vim.cancel-pending", .call = leaderCancel, .arity = .whole, .summary = "Cancel the pending character read and return to the resting mode.", .internal = true },
+    .{ .name = "vim.goto-top", .call = vimGotoTop, .arity = each, .summary = "Jump to the start of the buffer, remembering where the cursor was.", .label = "Go to Top" },
+    .{ .name = "vim.find-next-char", .call = enterFindF, .arity = .whole, .summary = "Move onto the next occurrence of a typed character on the line.", .label = "Find Next Char", .prompts = true },
+    .{ .name = "vim.find-prev-char", .call = enterFindBigF, .arity = .whole, .summary = "Move onto the previous occurrence of a typed character on the line.", .label = "Find Previous Char", .prompts = true },
+    .{ .name = "vim.till-next-char", .call = enterFindT, .arity = .whole, .summary = "Move up to just before the next occurrence of a typed character on the line.", .label = "Till Next Char", .prompts = true },
+    .{ .name = "vim.till-prev-char", .call = enterFindBigT, .arity = .whole, .summary = "Move back to just after the previous occurrence of a typed character on the line.", .label = "Till Previous Char", .prompts = true },
+    .{ .name = "vim.repeat-find", .call = repeatFind, .arity = each, .summary = "Repeat the last character find in its original direction.", .label = "Repeat Find" },
+    .{ .name = "vim.repeat-find-reversed", .call = repeatFindRev, .arity = each, .summary = "Repeat the last character find in the opposite direction.", .label = "Repeat Find Reversed" },
+    .{ .name = "vim.replace-char", .call = enterReplaceChar, .arity = .whole, .summary = "Replace the character under the cursor with a typed one.", .label = "Replace Char", .prompts = true },
+    .{ .name = "vim.do-replace-char", .call = doReplaceChar, .arity = each, .summary = "Replace the character under the cursor with the character just typed.", .internal = true },
+    .{ .name = "vim.toggle-case", .call = tildeCase, .arity = each, .summary = "Toggle the case of the character under the cursor and move past it, a count's times.", .label = "Toggle Case" },
+    .{ .name = "vim.do-find-next-char", .call = doFindF, .arity = each, .summary = "Move onto the next occurrence of the character just typed.", .internal = true },
+    .{ .name = "vim.do-find-prev-char", .call = doFindBigF, .arity = each, .summary = "Move onto the previous occurrence of the character just typed.", .internal = true },
+    .{ .name = "vim.do-till-next-char", .call = doFindT, .arity = each, .summary = "Move up to just before the next occurrence of the character just typed.", .internal = true },
+    .{ .name = "vim.do-till-prev-char", .call = doFindBigT, .arity = each, .summary = "Move back to just after the previous occurrence of the character just typed.", .internal = true },
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
-    .{ .name = "vim.zero", .call = zeroKey, .arity = each },
-    .{ .name = "vim.delete-char", .call = deleteCharFwd, .arity = each },
-    .{ .name = "vim.count-take", .call = countTake, .arity = .whole },
+    .{ .name = "vim.zero", .call = zeroKey, .arity = each, .summary = "Add a zero to the count being typed, or else move to the start of the line.", .internal = true },
+    .{ .name = "vim.delete-char", .call = deleteCharFwd, .arity = each, .summary = "Delete the character under the cursor, a count's times.", .label = "Delete Char" },
+    .{ .name = "vim.count-take", .call = countTake, .arity = .whole, .summary = "Hand the typed count to another plugin's motion and clear it.", .internal = true },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
-    .{ .name = "vim.ex", .call = ex.enter, .arity = .whole },
+    .{ .name = "vim.ex", .call = ex.enter, .arity = .whole, .summary = "Open the command line to run an ex command.", .label = "Command Line", .prompts = true },
 };
 
 /// The `:` line's own editing commands, from the shared `prompt` library —
@@ -477,48 +477,134 @@ const n_gen = blk: {
     break :blk n;
 };
 const gen_cmds: [n_gen]weft.CommandEntry = blk: {
+    @setEvalBranchQuota(20000); // matching each motion and object to its prose
     var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim.move-" ++ motionWord(m.motion), .call = moveByMotion(m.motion, m.jump), .arity = each };
+        arr[i] = .{
+            .name = "vim.move-" ++ motionWord(m.motion),
+            .call = moveByMotion(m.motion, m.jump),
+            .arity = each,
+            .summary = "Move the cursor " ++ motionProse(motionWord(m.motion)) ++ ", once per count.",
+            .internal = true,
+        };
         i += 1;
         if (m.in_op) {
-            arr[i] = .{ .name = "vim.operate-to-" ++ motionWord(m.motion), .call = opByMotion(m.motion), .arity = each };
+            arr[i] = .{
+                .name = "vim.operate-to-" ++ motionWord(m.motion),
+                .call = opByMotion(m.motion),
+                .arity = each,
+                .summary = "Apply the pending operator from the cursor " ++ motionProse(motionWord(m.motion)) ++ ".",
+                .internal = true,
+            };
             i += 1;
         }
     }
     for (to_objs) |obj| {
-        arr[i] = .{ .name = "vim.operate-on-" ++ obj, .call = objWrap(obj), .arity = each };
+        arr[i] = .{
+            .name = "vim.operate-on-" ++ obj,
+            .call = objWrap(obj),
+            .arity = each,
+            .summary = "Apply the pending operator over the " ++ objectProse(obj) ++ " around the cursor, inner or around as chosen.",
+            .internal = true,
+        };
         i += 1;
     }
     break :blk arr;
 };
-const register_cmds: [26]weft.CommandEntry = blk: {
-    var arr: [26]weft.CommandEntry = undefined;
-    for (0..26) |i| arr[i] = .{
-        .name = std.fmt.comptimePrint("vim.register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
-        .call = chooseRegister(@intCast(i + 1)),
-        .arity = .whole,
+
+/// `big-word-next` → `to the start of the next WORD`: a generated motion
+/// command's target, as the phrase its summary reads.
+fn motionProse(comptime word: []const u8) []const u8 {
+    const pairs = .{
+        .{ "left", "one character left" },
+        .{ "right", "one character right" },
+        .{ "down", "one line down" },
+        .{ "up", "one line up" },
+        .{ "word-next", "to the start of the next word" },
+        .{ "word-prev", "to the start of the previous word" },
+        .{ "word-end", "to the end of the word" },
+        .{ "big-word-next", "to the start of the next WORD" },
+        .{ "big-word-prev", "to the start of the previous WORD" },
+        .{ "big-word-end", "to the end of the WORD" },
+        .{ "line-start", "to the start of the line" },
+        .{ "line-end", "to the end of the line" },
+        .{ "first-non-blank", "to the line's first non-blank character" },
+        .{ "doc-end", "to the end of the buffer" },
+        .{ "match-pair", "to the matching bracket" },
     };
+    inline for (pairs) |p| {
+        if (std.mem.eql(u8, p[0], word)) return p[1];
+    }
+    return "to where " ++ word ++ " lands";
+}
+
+/// `quote-double` → `double-quoted string`: a text object, as its summary reads.
+fn objectProse(comptime obj: []const u8) []const u8 {
+    const pairs = .{
+        .{ "big-word", "WORD" },
+        .{ "quote-double", "double-quoted string" },
+        .{ "quote-single", "single-quoted string" },
+        .{ "quote-back", "backtick-quoted string" },
+        .{ "paren", "parenthesised block" },
+        .{ "bracket", "bracketed block" },
+        .{ "brace", "braced block" },
+        .{ "call", "function call" },
+    };
+    inline for (pairs) |p| {
+        if (std.mem.eql(u8, p[0], obj)) return p[1];
+    }
+    return obj; // word, paragraph, function, class
+}
+
+const register_cmds: [26]weft.CommandEntry = blk: {
+    @setEvalBranchQuota(20000); // two comptimePrints per register
+    var arr: [26]weft.CommandEntry = undefined;
+    for (0..26) |i| {
+        const c: u8 = 'a' + @as(u8, @intCast(i));
+        arr[i] = .{
+            .name = std.fmt.comptimePrint("vim.register-{c}", .{c}),
+            .call = chooseRegister(@intCast(i + 1)),
+            .arity = .whole,
+            .summary = std.fmt.comptimePrint("Use register {c} for the next yank, delete or paste.", .{c}),
+            .internal = true,
+        };
+    }
     break :blk arr;
 };
 /// One command per count digit 1–9 (`vim.count-N`), bound to the digit keys.
 const count_cmds: [9]weft.CommandEntry = blk: {
+    @setEvalBranchQuota(10000); // two comptimePrints per digit
     var arr: [9]weft.CommandEntry = undefined;
     for (0..9) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim.count-{d}", .{i + 1}),
         .call = countDigit(@intCast(i + 1)),
         .arity = .whole,
+        .summary = std.fmt.comptimePrint("Add the digit {d} to the count being typed.", .{i + 1}),
+        .internal = true,
     };
     break :blk arr;
 };
 /// `q<a-z>` records into, and `@<a-z>` plays, one macro register each.
 const macro_cmds: [52]weft.CommandEntry = blk: {
+    @setEvalBranchQuota(40000); // four comptimePrints per register
     var arr: [52]weft.CommandEntry = undefined;
     for (0..26) |i| {
         const c: u8 = 'a' + @as(u8, @intCast(i));
-        arr[i] = .{ .name = std.fmt.comptimePrint("vim.macro-record-{c}", .{c}), .call = macroRecordInto(c), .arity = .whole };
-        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim.macro-play-{c}", .{c}), .call = macroPlay(c), .arity = .whole };
+        arr[i] = .{
+            .name = std.fmt.comptimePrint("vim.macro-record-{c}", .{c}),
+            .call = macroRecordInto(c),
+            .arity = .whole,
+            .summary = std.fmt.comptimePrint("Start recording a macro into register {c}.", .{c}),
+            .internal = true,
+        };
+        arr[26 + i] = .{
+            .name = std.fmt.comptimePrint("vim.macro-play-{c}", .{c}),
+            .call = macroPlay(c),
+            .arity = .whole,
+            .summary = std.fmt.comptimePrint("Play the macro in register {c}, a count's times.", .{c}),
+            .internal = true,
+        };
     }
     break :blk arr;
 };

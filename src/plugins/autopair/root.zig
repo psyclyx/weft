@@ -13,15 +13,21 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const Pair = struct { name: []const u8, open: []const u8, close: []const u8 };
+const Pair = struct {
+    name: []const u8,
+    open: []const u8,
+    close: []const u8,
+    /// A config pair says only its name and bytes; it reads this.
+    summary: []const u8 = "Insert a delimiter pair and leave the cursor between the two.",
+};
 
 /// Shipped defaults, used when config sets no `pairs`.
 const defaults = [_]Pair{
-    .{ .name = "autopair.open-paren", .open = "(", .close = ")" },
-    .{ .name = "autopair.open-brace", .open = "{", .close = "}" },
-    .{ .name = "autopair.open-bracket", .open = "[", .close = "]" },
-    .{ .name = "autopair.quote-double", .open = "\"", .close = "\"" },
-    .{ .name = "autopair.quote-single", .open = "'", .close = "'" },
+    .{ .name = "autopair.open-paren", .open = "(", .close = ")", .summary = "Insert a pair of parentheses and leave the cursor between them." },
+    .{ .name = "autopair.open-brace", .open = "{", .close = "}", .summary = "Insert a pair of braces and leave the cursor between them." },
+    .{ .name = "autopair.open-bracket", .open = "[", .close = "]", .summary = "Insert a pair of brackets and leave the cursor between them." },
+    .{ .name = "autopair.quote-double", .open = "\"", .close = "\"", .summary = "Insert a pair of double quotes, or step over the closing one." },
+    .{ .name = "autopair.quote-single", .open = "'", .close = "'", .summary = "Insert a pair of single quotes, or step over the closing one." },
 };
 
 /// Extensions where `'` (a quote pair — open==close) is a QUOTE, not an
@@ -102,11 +108,11 @@ fn loadPairs() void {
 /// exact char is already under the cursor (the pair auto-inserted it) SKIPS over
 /// it instead of inserting a duplicate. Without this, typing balanced code
 /// `f(x)` produces `f(x))` — every opener orphans its auto-closer.
-const Closer = struct { name: []const u8, ch: u8 };
+const Closer = struct { name: []const u8, ch: u8, summary: []const u8 };
 const closers = [_]Closer{
-    .{ .name = "autopair.close-paren", .ch = ')' },
-    .{ .name = "autopair.close-brace", .ch = '}' },
-    .{ .name = "autopair.close-bracket", .ch = ']' },
+    .{ .name = "autopair.close-paren", .ch = ')', .summary = "Type a closing parenthesis, or step over the one already there." },
+    .{ .name = "autopair.close-brace", .ch = '}', .summary = "Type a closing brace, or step over the one already there." },
+    .{ .name = "autopair.close-bracket", .ch = ']', .summary = "Type a closing bracket, or step over the one already there." },
 };
 
 // This is the ONE plugin in the tree whose command table is not known at
@@ -122,14 +128,17 @@ fn describe() callconv(.c) void {
     loadPairs();
     loadQuoteLangs();
     // A pair (or a type-over) goes in at every caret: dispatch runs each
-    // command once per selection.
+    // command once per selection. Each is a key typed in insert mode, never
+    // a verb run by name: internal.
     for (pairs[0..pairs_len]) |pr| {
-        weft.declareCommand(pr.name);
+        weft.describeCommand(pr.name, "", pr.summary);
         weft.declareArity(pr.name, weft.Arity.each_extent);
+        weft.declareCommandMeta(pr.name, .{ .internal = true });
     }
     for (closers) |c| {
-        weft.declareCommand(c.name);
+        weft.describeCommand(c.name, "", c.summary);
         weft.declareArity(c.name, weft.Arity.each_extent);
+        weft.declareCommandMeta(c.name, .{ .internal = true });
     }
 }
 fn init() callconv(.c) void {

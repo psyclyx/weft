@@ -17,6 +17,13 @@ pub fn Registry(comptime T: type) type {
         /// stable and never removed, so a `Name` (an index) stays valid
         /// for the registry's lifetime; only the *binding* changes.
         map: std.StringArrayHashMapUnmanaged(?T) = .empty,
+        /// How many binds found the name ALREADY bound — a second registration
+        /// shadowing the first — and the first name that happened to. Late
+        /// binding allows it (a plugin may shadow a built-in); a shipped
+        /// configuration registering one id twice is the duplicate-command
+        /// class, and the e2e id gate refuses it by reading this.
+        rebinds: usize = 0,
+        first_rebound: ?Name = null,
 
         pub const Name = enum(u32) { _ };
 
@@ -53,6 +60,10 @@ pub fn Registry(comptime T: type) type {
         /// through every held handle.
         pub fn bind(self: *Self, gpa: Allocator, name: []const u8, value: T) Allocator.Error!Name {
             const n = try self.intern(gpa, name);
+            if (self.map.values()[@intFromEnum(n)] != null) {
+                self.rebinds += 1;
+                if (self.first_rebound == null) self.first_rebound = n;
+            }
             self.map.values()[@intFromEnum(n)] = value;
             return n;
         }

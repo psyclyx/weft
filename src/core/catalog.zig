@@ -208,6 +208,10 @@ pub const Affordance = struct {
     group: []const u8 = "",
     /// Ordering hint within the group; lower sorts first.
     order: ?i32 = null,
+    /// An icon name from the theme's set (`save`, `build`). Filled from the
+    /// command the offer runs (`intent.presentation`); a provider's own
+    /// affordance leaves it to that.
+    icon: []const u8 = "",
 };
 
 /// One row of a pushed table: "for this intention, in contexts matching this

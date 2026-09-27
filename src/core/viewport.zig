@@ -311,6 +311,19 @@ pub const Registry = struct {
         try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .shown = !opts.hidden });
     }
 
+    /// Publish every declared viewport's shown state into `context` as the
+    /// global key `viewport.<name>.shown` — `on` while shown, absent while
+    /// hidden — so what is on screen is a FACT like any other: a toggle
+    /// command's check mark reads it (doc/chrome.md §1.2 `toggle`), and a
+    /// predicate may name it. Called wherever the state is decided.
+    pub fn publishShown(self: *const Registry, context: *@import("context.zig").Context) void {
+        for (self.list.items) |d| {
+            var buf: [96]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "viewport.{s}.shown", .{d.name}) catch continue;
+            _ = context.store.set("viewport", .global, key, if (d.shown) "on" else "") catch {};
+        }
+    }
+
     /// Flip whether `name` is held on screen; returns the new state. Only the
     /// intent is recorded here — the layout phase realizes it, exactly as it
     /// realizes a declaration.

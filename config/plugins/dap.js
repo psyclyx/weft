@@ -190,9 +190,18 @@ weft.command("debug.start", () => {
     supportsRunInTerminalRequest: false,
   });
   weft.echo("debug: started " + s.buf);
-}, "start a debug session", undefined, "whole");
+}, {
+  summary: "Start a debug session.",
+  arity: "whole",
+  label: "Start Debugging",
+  menu: "Run/Debug",
+  group: "session",
+  order: 1,
+  icon: "bug",
+});
 
-function stepCmd(name, command, summary) {
+// `options` is the command's presentation; the arity is always "whole".
+function stepCmd(name, command, options) {
   weft.command(name, () => {
     const s = current();
     if (!s) {
@@ -200,12 +209,12 @@ function stepCmd(name, command, summary) {
       return;
     }
     send(s, command, { threadId: s.thread });
-  }, summary, undefined, "whole");
+  }, { ...options, arity: "whole", menu: "Run/Debug", group: "step" });
 }
-stepCmd("debug.continue", "continue", "let the program run on");
-stepCmd("debug.step-over", "next", "step over this line");
-stepCmd("debug.step-into", "stepIn", "step into the call");
-stepCmd("debug.step-out", "stepOut", "run to the end of this frame");
+stepCmd("debug.continue", "continue", { summary: "Let the program run on.", label: "Continue", order: 1, icon: "play" });
+stepCmd("debug.step-over", "next", { summary: "Step over this line.", label: "Step Over", order: 2, icon: "step-forward" });
+stepCmd("debug.step-into", "stepIn", { summary: "Step into the call.", label: "Step Into", order: 3, icon: "arrow-down-to-line" });
+stepCmd("debug.step-out", "stepOut", { summary: "Run to the end of this frame.", label: "Step Out", order: 4, icon: "arrow-up-from-line" });
 
 // Stop the FOCUSED session only — a second debugger keeps running.
 weft.command("debug.stop", () => {
@@ -220,4 +229,12 @@ weft.command("debug.stop", () => {
   send(s, "disconnect", { terminateDebuggee: true });
   weft.status("○ " + s.buf + " · stopping");
   weft.echo("debug: stopping " + s.buf);
-}, "stop the focused debug session", undefined, "whole");
+}, {
+  summary: "Stop the focused debug session.",
+  arity: "whole",
+  label: "Stop Debugging",
+  menu: "Run/Debug",
+  group: "session",
+  order: 2,
+  icon: "stop",
+});

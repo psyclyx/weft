@@ -451,10 +451,10 @@ fn pickCleanup(data: ?*anyopaque, gpa: Allocator) void {
 const count_arg: []const command.ArgSpec = &.{.{ .name = "count", .type = .nil, .optional = true }};
 
 const table = [_]command.Command{
-    .{ .name = "jump.back", .summary = "Go back along the jumplist (C-o).", .args = count_arg, .handler = travelCmd(.back) },
-    .{ .name = "jump.forward", .summary = "Go forward along the jumplist (C-i).", .args = count_arg, .handler = travelCmd(.forward) },
-    .{ .name = "jump.push", .summary = "Remember the caret as a jump.", .args = &.{}, .handler = cJumpPush },
-    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist.", .args = &.{}, .handler = cJumplistPick },
+    .{ .name = "jump.back", .summary = "Go back to where you were before the last jump.", .args = count_arg, .handler = travelCmd(.back), .meta = .{ .label = "Back", .menu = "Go", .group = "history", .order = 10, .icon = "arrow-left" } },
+    .{ .name = "jump.forward", .summary = "Go forward again along the jumps you went back through.", .args = count_arg, .handler = travelCmd(.forward), .meta = .{ .label = "Forward", .menu = "Go", .group = "history", .order = 20, .icon = "arrow-right" } },
+    .{ .name = "jump.push", .summary = "Remember the caret's position as a jump.", .args = &.{}, .handler = cJumpPush, .meta = .{ .label = "Remember Position" } },
+    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist and go there.", .args = &.{}, .handler = cJumplistPick, .meta = .{ .label = "Jump to Position", .menu = "Go", .group = "history", .order = 30, .icon = "history", .prompts = true } },
 };
 
 pub fn install(gpa: Allocator, commands: *command.Commands) !void {

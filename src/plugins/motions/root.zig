@@ -14,22 +14,22 @@ const regex = @import("weft_regex");
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "motions.left", .arity = weft.Arity.each_extent, .call = left },
-    .{ .name = "motions.right", .arity = weft.Arity.each_extent, .call = right },
-    .{ .name = "motions.up", .arity = weft.Arity.each_extent, .call = up },
-    .{ .name = "motions.down", .arity = weft.Arity.each_extent, .call = down },
-    .{ .name = "motions.word-next", .arity = weft.Arity.each_extent, .call = wordFwd },
-    .{ .name = "motions.word-prev", .arity = weft.Arity.each_extent, .call = wordBack },
-    .{ .name = "motions.word-end", .arity = weft.Arity.each_extent, .call = wordEnd },
-    .{ .name = "motions.big-word-next", .arity = weft.Arity.each_extent, .call = wordFwdBig },
-    .{ .name = "motions.big-word-prev", .arity = weft.Arity.each_extent, .call = wordBackBig },
-    .{ .name = "motions.big-word-end", .arity = weft.Arity.each_extent, .call = wordEndBig },
-    .{ .name = "motions.line-start", .arity = weft.Arity.each_extent, .call = lineStart },
-    .{ .name = "motions.line-end", .arity = weft.Arity.each_extent, .call = lineEnd },
-    .{ .name = "motions.first-non-blank", .arity = weft.Arity.each_extent, .call = firstNonBlank },
-    .{ .name = "motions.doc-start", .arity = weft.Arity.each_extent, .call = docStart },
-    .{ .name = "motions.doc-end", .arity = weft.Arity.each_extent, .call = docEnd },
-    .{ .name = "motions.match-pair", .arity = weft.Arity.each_extent, .call = matchPair },
+    .{ .name = "motions.left", .arity = weft.Arity.each_extent, .call = left, .summary = "Return the range one character to the left.", .internal = true },
+    .{ .name = "motions.right", .arity = weft.Arity.each_extent, .call = right, .summary = "Return the range one character to the right.", .internal = true },
+    .{ .name = "motions.up", .arity = weft.Arity.each_extent, .call = up, .summary = "Return the range one line up.", .internal = true },
+    .{ .name = "motions.down", .arity = weft.Arity.each_extent, .call = down, .summary = "Return the range one line down.", .internal = true },
+    .{ .name = "motions.word-next", .arity = weft.Arity.each_extent, .call = wordFwd, .summary = "Return the range to the start of the next word.", .internal = true },
+    .{ .name = "motions.word-prev", .arity = weft.Arity.each_extent, .call = wordBack, .summary = "Return the range back to the start of the previous word.", .internal = true },
+    .{ .name = "motions.word-end", .arity = weft.Arity.each_extent, .call = wordEnd, .summary = "Return the range to the end of the word.", .internal = true },
+    .{ .name = "motions.big-word-next", .arity = weft.Arity.each_extent, .call = wordFwdBig, .summary = "Return the range to the start of the next whitespace-delimited word.", .internal = true },
+    .{ .name = "motions.big-word-prev", .arity = weft.Arity.each_extent, .call = wordBackBig, .summary = "Return the range back to the start of the previous whitespace-delimited word.", .internal = true },
+    .{ .name = "motions.big-word-end", .arity = weft.Arity.each_extent, .call = wordEndBig, .summary = "Return the range to the end of the whitespace-delimited word.", .internal = true },
+    .{ .name = "motions.line-start", .arity = weft.Arity.each_extent, .call = lineStart, .summary = "Return the range back to the start of the line.", .internal = true },
+    .{ .name = "motions.line-end", .arity = weft.Arity.each_extent, .call = lineEnd, .summary = "Return the range to the end of the line.", .internal = true },
+    .{ .name = "motions.first-non-blank", .arity = weft.Arity.each_extent, .call = firstNonBlank, .summary = "Return the range to the line's first non-blank character.", .internal = true },
+    .{ .name = "motions.doc-start", .arity = weft.Arity.each_extent, .call = docStart, .summary = "Return the range back to the start of the buffer.", .internal = true },
+    .{ .name = "motions.doc-end", .arity = weft.Arity.each_extent, .call = docEnd, .summary = "Return the range to the end of the buffer.", .internal = true },
+    .{ .name = "motions.match-pair", .arity = weft.Arity.each_extent, .call = matchPair, .summary = "Return the range to the bracket matching the one at the cursor.", .internal = true },
 };
 
 /// Return the range `[cursor, target]` as this motion's result. The cursor is

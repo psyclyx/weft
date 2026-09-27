@@ -147,8 +147,6 @@ pub extern "weft:abi/1" fn wl_buffer_count() u32;
 pub extern "weft:abi/1" fn wl_buffer_id(i: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_active(i: u32) u32;
-pub extern "weft:abi/1" fn wl_mode_names(out_ptr: u32, out_cap: u32) i32;
-pub extern "weft:abi/1" fn wl_binding_table(mode_ptr: u32, mode_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_readonly(i: u32) u32;
 pub extern "weft:abi/1" fn wl_buffer_path(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_dirty(i: u32) i32;

@@ -54,8 +54,6 @@ const goto_word = @import("goto_word.zig");
 /// SAME fall-through to the weft registry (`:name arg…`).
 const ex = ex_mod.Ex("helix-normal", "helix-ex", "helix.ex");
 
-const file_pick = 0;
-
 // ── Motions ─────────────────────────────────────────────────────────────
 
 fn left(h: usize) ?usize {
@@ -97,24 +95,25 @@ fn word(comptime f: fn (weft.Selection, bool) ?weft.Selection, comptime big: boo
 
 /// One motion, named once; every key that runs it lists it by name. A `jump`
 /// leaves the old place on the jumplist first, so `C-o` comes back.
-const MotionDef = struct { name: []const u8, motion: sel.Motion, jump: bool = false };
+/// `what` finishes the sentence "Move each selection …" for its summary.
+const MotionDef = struct { name: []const u8, what: []const u8, motion: sel.Motion, jump: bool = false };
 const motion_defs = [_]MotionDef{
-    .{ .name = "left", .motion = sel.point(left) },
-    .{ .name = "right", .motion = sel.point(right) },
-    .{ .name = "down", .motion = sel.point(down) },
-    .{ .name = "up", .motion = sel.point(up) },
-    .{ .name = "word-next", .motion = word(text.nextWordStart, false) },
-    .{ .name = "word-prev", .motion = word(text.prevWordStart, false) },
-    .{ .name = "word-end", .motion = word(text.nextWordEnd, false) },
-    .{ .name = "big-word-next", .motion = word(text.nextWordStart, true) },
-    .{ .name = "big-word-prev", .motion = word(text.prevWordStart, true) },
-    .{ .name = "big-word-end", .motion = word(text.nextWordEnd, true) },
-    .{ .name = "line-start", .motion = sel.point(lineStart) },
-    .{ .name = "line-end", .motion = sel.point(lineEnd) },
-    .{ .name = "first-non-blank", .motion = sel.point(firstNonBlank) },
-    .{ .name = "last-line", .motion = sel.point(lastLine), .jump = true },
-    .{ .name = "paragraph-next", .motion = text.nextParagraph },
-    .{ .name = "paragraph-prev", .motion = text.prevParagraph },
+    .{ .name = "left", .what = "one character left", .motion = sel.point(left) },
+    .{ .name = "right", .what = "one character right", .motion = sel.point(right) },
+    .{ .name = "down", .what = "one line down", .motion = sel.point(down) },
+    .{ .name = "up", .what = "one line up", .motion = sel.point(up) },
+    .{ .name = "word-next", .what = "to the start of the next word", .motion = word(text.nextWordStart, false) },
+    .{ .name = "word-prev", .what = "to the start of the previous word", .motion = word(text.prevWordStart, false) },
+    .{ .name = "word-end", .what = "to the end of the next word", .motion = word(text.nextWordEnd, false) },
+    .{ .name = "big-word-next", .what = "to the start of the next whitespace-delimited word", .motion = word(text.nextWordStart, true) },
+    .{ .name = "big-word-prev", .what = "to the start of the previous whitespace-delimited word", .motion = word(text.prevWordStart, true) },
+    .{ .name = "big-word-end", .what = "to the end of the next whitespace-delimited word", .motion = word(text.nextWordEnd, true) },
+    .{ .name = "line-start", .what = "to the start of its line", .motion = sel.point(lineStart) },
+    .{ .name = "line-end", .what = "to the end of its line", .motion = sel.point(lineEnd) },
+    .{ .name = "first-non-blank", .what = "to the first non-blank character of its line", .motion = sel.point(firstNonBlank) },
+    .{ .name = "last-line", .what = "to the last line", .motion = sel.point(lastLine), .jump = true },
+    .{ .name = "paragraph-next", .what = "to the next paragraph", .motion = text.nextParagraph },
+    .{ .name = "paragraph-prev", .what = "to the previous paragraph", .motion = text.prevParagraph },
 };
 
 /// Motion keys. Each binds the standard navigation intention where one names
@@ -161,8 +160,8 @@ fn motionCmd(comptime m: sel.Motion, comptime mode: sel.Mode, comptime jump: boo
 const motion_cmds = blk: {
     var arr: [motion_defs.len * 2]weft.CommandEntry = undefined;
     for (motion_defs, 0..) |d, i| {
-        arr[2 * i] = .{ .name = "helix.move-" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each };
-        arr[2 * i + 1] = .{ .name = "helix.extend-" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each };
+        arr[2 * i] = .{ .name = "helix.move-" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each, .summary = "Move each selection " ++ d.what ++ ".", .internal = true };
+        arr[2 * i + 1] = .{ .name = "helix.extend-" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each, .summary = "Extend each selection " ++ d.what ++ ".", .internal = true };
     }
     break :blk arr;
 };
@@ -235,42 +234,44 @@ fn findChar() void {
 }
 
 const find_cmds = [_]weft.CommandEntry{
-    .{ .name = "helix.move-find-next-char", .call = findEnter(.to, .move), .arity = .whole },
-    .{ .name = "helix.move-till-next-char", .call = findEnter(.till, .move), .arity = .whole },
-    .{ .name = "helix.move-find-prev-char", .call = findEnter(.back_to, .move), .arity = .whole },
-    .{ .name = "helix.move-till-prev-char", .call = findEnter(.back_till, .move), .arity = .whole },
-    .{ .name = "helix.extend-find-next-char", .call = findEnter(.to, .extend), .arity = .whole },
-    .{ .name = "helix.extend-till-next-char", .call = findEnter(.till, .extend), .arity = .whole },
-    .{ .name = "helix.extend-find-prev-char", .call = findEnter(.back_to, .extend), .arity = .whole },
-    .{ .name = "helix.extend-till-prev-char", .call = findEnter(.back_till, .extend), .arity = .whole },
-    .{ .name = "helix.find-char", .call = findChar, .arity = each },
-    .{ .name = "helix.move-goto-line", .call = gotoLine(.move), .arity = each },
-    .{ .name = "helix.extend-goto-line", .call = gotoLine(.extend), .arity = each },
-    .{ .name = "helix.move-match", .call = matchPair(.move), .arity = each },
-    .{ .name = "helix.extend-match", .call = matchPair(.extend), .arity = each },
+    .{ .name = "helix.move-find-next-char", .call = findEnter(.to, .move), .arity = .whole, .summary = "Select up to and including the next occurrence of the next key typed.", .label = "Find Next Char", .prompts = true },
+    .{ .name = "helix.move-till-next-char", .call = findEnter(.till, .move), .arity = .whole, .summary = "Select up to the next occurrence of the next key typed.", .label = "Till Next Char", .prompts = true },
+    .{ .name = "helix.move-find-prev-char", .call = findEnter(.back_to, .move), .arity = .whole, .summary = "Select back to and including the previous occurrence of the next key typed.", .label = "Find Previous Char", .prompts = true },
+    .{ .name = "helix.move-till-prev-char", .call = findEnter(.back_till, .move), .arity = .whole, .summary = "Select back to just after the previous occurrence of the next key typed.", .label = "Till Previous Char", .prompts = true },
+    .{ .name = "helix.extend-find-next-char", .call = findEnter(.to, .extend), .arity = .whole, .summary = "Extend each selection through the next occurrence of the next key typed.", .internal = true },
+    .{ .name = "helix.extend-till-next-char", .call = findEnter(.till, .extend), .arity = .whole, .summary = "Extend each selection up to the next occurrence of the next key typed.", .internal = true },
+    .{ .name = "helix.extend-find-prev-char", .call = findEnter(.back_to, .extend), .arity = .whole, .summary = "Extend each selection back through the previous occurrence of the next key typed.", .internal = true },
+    .{ .name = "helix.extend-till-prev-char", .call = findEnter(.back_till, .extend), .arity = .whole, .summary = "Extend each selection back to just after the previous occurrence of the next key typed.", .internal = true },
+    .{ .name = "helix.find-char", .call = findChar, .arity = each, .summary = "Find the typed character for the pending find.", .internal = true },
+    .{ .name = "helix.move-goto-line", .call = gotoLine(.move), .arity = each, .summary = "Go to the first line, or to the line the count names.", .label = "Goto Line" },
+    .{ .name = "helix.extend-goto-line", .call = gotoLine(.extend), .arity = each, .summary = "Extend each selection to the first line, or to the line the count names.", .internal = true },
+    .{ .name = "helix.move-match", .call = matchPair(.move), .arity = each, .summary = "Move each selection to its matching bracket.", .label = "Goto Matching Bracket" },
+    .{ .name = "helix.extend-match", .call = matchPair(.extend), .arity = each, .summary = "Extend each selection to its matching bracket.", .internal = true },
 };
 
 // ── `mi` / `ma`: text objects, per selection ────────────────────────────
 
 /// Helix's object keys → the `textobjects` plugin's object names.
-const Obj = struct { keys: []const []const u8, obj: []const u8 };
+/// `label` is what which-key shows under "Select inside/around"; `noun` names
+/// the object in the summary.
+const Obj = struct { keys: []const []const u8, obj: []const u8, label: []const u8, noun: []const u8 };
 const objects = [_]Obj{
-    .{ .keys = &.{"w"}, .obj = "word" },
-    .{ .keys = &.{"W"}, .obj = "big-word" },
-    .{ .keys = &.{"p"}, .obj = "paragraph" },
-    .{ .keys = &.{ "parenleft", "parenright" }, .obj = "paren" },
-    .{ .keys = &.{ "bracketleft", "bracketright" }, .obj = "bracket" },
-    .{ .keys = &.{ "braceleft", "braceright" }, .obj = "brace" },
-    .{ .keys = &.{"quotedbl"}, .obj = "quote-double" },
-    .{ .keys = &.{"apostrophe"}, .obj = "quote-single" },
-    .{ .keys = &.{"grave"}, .obj = "quote-back" },
-    .{ .keys = &.{ "less", "greater" }, .obj = "angle" },
-    .{ .keys = &.{"f"}, .obj = "function" },
-    .{ .keys = &.{"t"}, .obj = "class" },
-    .{ .keys = &.{"a"}, .obj = "argument" },
-    .{ .keys = &.{"c"}, .obj = "comment" },
-    .{ .keys = &.{"T"}, .obj = "test" },
-    .{ .keys = &.{"m"}, .obj = "pair" },
+    .{ .keys = &.{"w"}, .obj = "word", .label = "Word", .noun = "word" },
+    .{ .keys = &.{"W"}, .obj = "big-word", .label = "Big Word", .noun = "whitespace-delimited word" },
+    .{ .keys = &.{"p"}, .obj = "paragraph", .label = "Paragraph", .noun = "paragraph" },
+    .{ .keys = &.{ "parenleft", "parenright" }, .obj = "paren", .label = "Paren", .noun = "parentheses" },
+    .{ .keys = &.{ "bracketleft", "bracketright" }, .obj = "bracket", .label = "Bracket", .noun = "square brackets" },
+    .{ .keys = &.{ "braceleft", "braceright" }, .obj = "brace", .label = "Brace", .noun = "braces" },
+    .{ .keys = &.{"quotedbl"}, .obj = "quote-double", .label = "Double Quote", .noun = "double quotes" },
+    .{ .keys = &.{"apostrophe"}, .obj = "quote-single", .label = "Single Quote", .noun = "single quotes" },
+    .{ .keys = &.{"grave"}, .obj = "quote-back", .label = "Backtick", .noun = "backticks" },
+    .{ .keys = &.{ "less", "greater" }, .obj = "angle", .label = "Angle Bracket", .noun = "angle brackets" },
+    .{ .keys = &.{"f"}, .obj = "function", .label = "Function", .noun = "function" },
+    .{ .keys = &.{"t"}, .obj = "class", .label = "Type", .noun = "type or class" },
+    .{ .keys = &.{"a"}, .obj = "argument", .label = "Argument", .noun = "argument" },
+    .{ .keys = &.{"c"}, .obj = "comment", .label = "Comment", .noun = "comment" },
+    .{ .keys = &.{"T"}, .obj = "test", .label = "Test", .noun = "test" },
+    .{ .keys = &.{"m"}, .obj = "pair", .label = "Closest Pair", .noun = "closest surrounding pair" },
 };
 
 fn rangeCmd(comptime cmd: []const u8) fn () void {
@@ -284,8 +285,8 @@ fn rangeCmd(comptime cmd: []const u8) fn () void {
 const object_cmds = blk: {
     var arr: [objects.len * 2]weft.CommandEntry = undefined;
     for (objects, 0..) |o, i| {
-        arr[2 * i] = .{ .name = "helix.select-inner-" ++ o.obj, .call = rangeCmd("textobjects.inner-" ++ o.obj), .arity = each };
-        arr[2 * i + 1] = .{ .name = "helix.select-around-" ++ o.obj, .call = rangeCmd("textobjects.around-" ++ o.obj), .arity = each };
+        arr[2 * i] = .{ .name = "helix.select-inner-" ++ o.obj, .call = rangeCmd("textobjects.inner-" ++ o.obj), .arity = each, .summary = "Select inside the " ++ o.noun ++ " around each selection.", .label = o.label };
+        arr[2 * i + 1] = .{ .name = "helix.select-around-" ++ o.obj, .call = rangeCmd("textobjects.around-" ++ o.obj), .arity = each, .summary = "Select the whole " ++ o.noun ++ " around each selection, delimiters included.", .label = o.label };
     }
     break :blk arr;
 };
@@ -393,24 +394,24 @@ fn gotoWord(comptime mode: sel.Mode) fn () void {
 }
 
 const pattern_cmds = [_]weft.CommandEntry{
-    .{ .name = "helix.select-regex", .call = regexOp(.select, .move), .arity = .whole },
-    .{ .name = "helix.split-regex", .call = regexOp(.split, .move), .arity = .whole },
-    .{ .name = "helix.keep-regex", .call = regexOp(.keep, .move), .arity = .whole },
-    .{ .name = "helix.remove-regex", .call = regexOp(.remove, .move), .arity = .whole },
-    .{ .name = "helix.move-search", .call = regexOp(.search_forward, .move), .arity = .whole },
-    .{ .name = "helix.extend-search", .call = regexOp(.search_forward, .extend), .arity = .whole },
-    .{ .name = "helix.move-search-reverse", .call = regexOp(.search_backward, .move), .arity = .whole },
-    .{ .name = "helix.extend-search-reverse", .call = regexOp(.search_backward, .extend), .arity = .whole },
-    .{ .name = "helix.move-search-next", .call = searchAgain(true, .move), .arity = .whole },
-    .{ .name = "helix.extend-search-next", .call = searchAgain(true, .extend), .arity = .whole },
-    .{ .name = "helix.move-search-prev", .call = searchAgain(false, .move), .arity = .whole },
-    .{ .name = "helix.extend-search-prev", .call = searchAgain(false, .extend), .arity = .whole },
-    .{ .name = "helix.search-selection", .call = searchSelection(true), .arity = .whole },
-    .{ .name = "helix.search-selection-raw", .call = searchSelection(false), .arity = .whole },
-    .{ .name = "helix.move-goto-word", .call = gotoWord(.move), .arity = .whole },
-    .{ .name = "helix.extend-goto-word", .call = gotoWord(.extend), .arity = .whole },
-    .{ .name = "helix.goto-word-key", .call = goto_word.key, .arity = .whole },
-    .{ .name = "helix.goto-word-cancel", .call = goto_word.cancel, .arity = .whole },
+    .{ .name = "helix.select-regex", .call = regexOp(.select, .move), .arity = .whole, .summary = "Select every match of a regex inside the selections.", .label = "Select Regex Matches", .prompts = true },
+    .{ .name = "helix.split-regex", .call = regexOp(.split, .move), .arity = .whole, .summary = "Split the selections on every match of a regex.", .label = "Split Selection", .prompts = true },
+    .{ .name = "helix.keep-regex", .call = regexOp(.keep, .move), .arity = .whole, .summary = "Keep only the selections that match a regex.", .label = "Keep Selections", .prompts = true },
+    .{ .name = "helix.remove-regex", .call = regexOp(.remove, .move), .arity = .whole, .summary = "Remove the selections that match a regex.", .label = "Remove Selections", .prompts = true },
+    .{ .name = "helix.move-search", .call = regexOp(.search_forward, .move), .arity = .whole, .summary = "Search forward for a regex and select the match.", .label = "Search", .icon = "search", .prompts = true },
+    .{ .name = "helix.extend-search", .call = regexOp(.search_forward, .extend), .arity = .whole, .summary = "Search forward for a regex and add the match as a new selection.", .internal = true },
+    .{ .name = "helix.move-search-reverse", .call = regexOp(.search_backward, .move), .arity = .whole, .summary = "Search backward for a regex and select the match.", .label = "Reverse Search", .prompts = true },
+    .{ .name = "helix.extend-search-reverse", .call = regexOp(.search_backward, .extend), .arity = .whole, .summary = "Search backward for a regex and add the match as a new selection.", .internal = true },
+    .{ .name = "helix.move-search-next", .call = searchAgain(true, .move), .arity = .whole, .summary = "Select the next match of the last search.", .label = "Search Next" },
+    .{ .name = "helix.extend-search-next", .call = searchAgain(true, .extend), .arity = .whole, .summary = "Add the next match of the last search as a new selection.", .internal = true },
+    .{ .name = "helix.move-search-prev", .call = searchAgain(false, .move), .arity = .whole, .summary = "Select the previous match of the last search.", .label = "Search Previous" },
+    .{ .name = "helix.extend-search-prev", .call = searchAgain(false, .extend), .arity = .whole, .summary = "Add the previous match of the last search as a new selection.", .internal = true },
+    .{ .name = "helix.search-selection", .call = searchSelection(true), .arity = .whole, .summary = "Use the selections' text, bounded at word edges, as the search pattern.", .label = "Search Selection" },
+    .{ .name = "helix.search-selection-raw", .call = searchSelection(false), .arity = .whole, .summary = "Use the selections' text as the search pattern, without word bounds.", .label = "Search Selection Without Bounds" },
+    .{ .name = "helix.move-goto-word", .call = gotoWord(.move), .arity = .whole, .summary = "Label the words in view and jump to the one whose label is typed.", .label = "Goto Word", .prompts = true },
+    .{ .name = "helix.extend-goto-word", .call = gotoWord(.extend), .arity = .whole, .summary = "Label the words in view and extend the selection to the one whose label is typed.", .internal = true },
+    .{ .name = "helix.goto-word-key", .call = goto_word.key, .arity = .whole, .summary = "Narrow or pick a word label with the typed key.", .internal = true },
+    .{ .name = "helix.goto-word-cancel", .call = goto_word.cancel, .arity = .whole, .summary = "Cancel goto word and clear its labels.", .internal = true },
 };
 
 /// The regex prompt's five editing commands, from the shared `prompt`
@@ -448,10 +449,10 @@ fn macroPlay() void {
 }
 
 const history_cmds = [_]weft.CommandEntry{
-    .{ .name = "helix.jump-back", .call = jumpWalk("jump.back"), .arity = .whole },
-    .{ .name = "helix.jump-forward", .call = jumpWalk("jump.forward"), .arity = .whole },
-    .{ .name = "helix.macro-record", .call = macroRecord, .arity = .whole },
-    .{ .name = "helix.macro-play", .call = macroPlay, .arity = .whole },
+    .{ .name = "helix.jump-back", .call = jumpWalk("jump.back"), .arity = .whole, .summary = "Jump back through the jumplist, as many jumps as the count.", .label = "Jump Backward" },
+    .{ .name = "helix.jump-forward", .call = jumpWalk("jump.forward"), .arity = .whole, .summary = "Jump forward through the jumplist, as many jumps as the count.", .label = "Jump Forward" },
+    .{ .name = "helix.macro-record", .call = macroRecord, .arity = .whole, .summary = "Start or stop recording a macro into the chosen register.", .label = "Record Macro" },
+    .{ .name = "helix.macro-play", .call = macroPlay, .arity = .whole, .summary = "Replay the macro in the chosen register, count times.", .label = "Replay Macro" },
 };
 
 // ── Counts ──────────────────────────────────────────────────────────────
@@ -466,7 +467,13 @@ fn countDigit(comptime d: u32) fn () void {
 
 const count_cmds = blk: {
     var arr: [10]weft.CommandEntry = undefined;
-    for (0..10) |d| arr[d] = .{ .name = std.fmt.comptimePrint("helix.count-{d}", .{d}), .call = countDigit(d), .arity = .whole };
+    for (0..10) |d| arr[d] = .{
+        .name = std.fmt.comptimePrint("helix.count-{d}", .{d}),
+        .call = countDigit(d),
+        .arity = .whole,
+        .summary = std.fmt.comptimePrint("Add the digit {d} to the pending count.", .{d}),
+        .internal = true,
+    };
     break :blk arr;
 };
 
@@ -506,93 +513,90 @@ fn eachOver(comptime over: []const u8) weft.Arity {
 // reshapes the set, or never reads it), or refused on several (`.one`: a
 // goto from the primary's word, which has no per-selection reading).
 const base_cmds = [_]weft.CommandEntry{
-    .{ .name = "helix.enter", .call = enterHelix, .arity = .whole },
-    .{ .name = "helix.normal", .call = hxNormal, .arity = .whole },
-    .{ .name = "helix.insert-exit", .call = hxInsertExit, .arity = .whole },
-    .{ .name = "helix.select", .call = enter("helix-select"), .arity = .whole },
-    .{ .name = "helix.insert", .call = thunk(edit.insertAt, .before), .arity = each },
-    .{ .name = "helix.append", .call = thunk(edit.insertAt, .after), .arity = each },
-    .{ .name = "helix.insert-line-start", .call = thunk(edit.insertAt, .line_start), .arity = each },
-    .{ .name = "helix.append-line-end", .call = thunk(edit.insertAt, .line_end), .arity = each },
-    .{ .name = "helix.open-below", .call = thunk(edit.openLine, true), .arity = each },
-    .{ .name = "helix.open-above", .call = thunk(edit.openLine, false), .arity = each },
+    .{ .name = "helix.enter", .call = enterHelix, .arity = .whole, .summary = "Switch the buffer to Helix's normal mode.", .label = "Helix Mode" },
+    .{ .name = "helix.normal", .call = hxNormal, .arity = .whole, .summary = "Return to normal mode, sealing the current undo step.", .label = "Normal Mode" },
+    .{ .name = "helix.insert-exit", .call = hxInsertExit, .arity = .whole, .summary = "Leave insert mode, remembering where the typing ended.", .label = "Exit Insert Mode" },
+    .{ .name = "helix.select", .call = enter("helix-select"), .arity = .whole, .summary = "Enter select mode, where motions extend the selections.", .label = "Select Mode" },
+    .{ .name = "helix.insert", .call = thunk(edit.insertAt, .before), .arity = each, .summary = "Start typing before each selection.", .label = "Insert Mode" },
+    .{ .name = "helix.append", .call = thunk(edit.insertAt, .after), .arity = each, .summary = "Start typing after each selection.", .label = "Append Mode" },
+    .{ .name = "helix.insert-line-start", .call = thunk(edit.insertAt, .line_start), .arity = each, .summary = "Start typing at the start of each selection's line.", .label = "Insert at Line Start" },
+    .{ .name = "helix.append-line-end", .call = thunk(edit.insertAt, .line_end), .arity = each, .summary = "Start typing at the end of each selection's line.", .label = "Insert at Line End" },
+    .{ .name = "helix.open-below", .call = thunk(edit.openLine, true), .arity = each, .summary = "Open a new line below each selection and start typing there.", .label = "Open Below" },
+    .{ .name = "helix.open-above", .call = thunk(edit.openLine, false), .arity = each, .summary = "Open a new line above each selection and start typing there.", .label = "Open Above" },
     // Reshaping the selections.
-    .{ .name = "helix.select-line", .call = selectLines, .arity = each },
-    .{ .name = "helix.line-bounds", .call = sel.toLineBounds, .arity = each },
-    .{ .name = "helix.select-all", .call = sel.selectAll, .arity = .whole },
-    .{ .name = "helix.collapse", .call = sel.collapse, .arity = each },
-    .{ .name = "helix.flip", .call = sel.flip, .arity = each },
-    .{ .name = "helix.head-at-end", .call = sel.ensureForward, .arity = each },
-    .{ .name = "helix.keep-primary", .call = sel.keepPrimary, .arity = .whole },
-    .{ .name = "helix.remove-primary", .call = sel.removePrimary, .arity = .whole },
-    .{ .name = "helix.rotate-next", .call = thunk(sel.rotate, true), .arity = .whole },
-    .{ .name = "helix.rotate-prev", .call = thunk(sel.rotate, false), .arity = .whole },
-    .{ .name = "helix.copy-next-line", .call = withCount(sel.copyToLine, true), .arity = .whole },
-    .{ .name = "helix.copy-prev-line", .call = withCount(sel.copyToLine, false), .arity = .whole },
-    .{ .name = "helix.trim", .call = sel.trim, .arity = each },
-    .{ .name = "helix.split-lines", .call = sel.splitLines, .arity = each },
-    .{ .name = "helix.expand", .call = sel.expand, .arity = .whole },
-    .{ .name = "helix.shrink", .call = sel.shrink, .arity = .whole },
-    .{ .name = "helix.ts-expand", .call = sel.tsExpand, .arity = each },
-    .{ .name = "helix.ts-shrink", .call = sel.tsShrink, .arity = each },
-    .{ .name = "helix.sibling-next", .call = rangeCmd("ts.sibling-next"), .arity = each },
-    .{ .name = "helix.sibling-prev", .call = rangeCmd("ts.sibling-prev"), .arity = each },
-    .{ .name = "helix.function-next", .call = rangeCmd("ts.function-next"), .arity = each },
-    .{ .name = "helix.function-prev", .call = rangeCmd("ts.function-prev"), .arity = each },
+    .{ .name = "helix.select-line", .call = selectLines, .arity = each, .summary = "Select the lines of each selection, taking the next line too when they are already whole.", .label = "Select Line" },
+    .{ .name = "helix.line-bounds", .call = sel.toLineBounds, .arity = each, .summary = "Stretch each selection to the bounds of its lines.", .label = "Extend to Line Bounds" },
+    .{ .name = "helix.select-all", .call = sel.selectAll, .arity = .whole, .summary = "Select the whole buffer.", .label = "Select All" },
+    .{ .name = "helix.collapse", .call = sel.collapse, .arity = each, .summary = "Collapse each selection onto its cursor.", .label = "Collapse Selection" },
+    .{ .name = "helix.flip", .call = sel.flip, .arity = each, .summary = "Swap the anchor and cursor of each selection.", .label = "Flip Selection" },
+    .{ .name = "helix.head-at-end", .call = sel.ensureForward, .arity = each, .summary = "Turn each selection so its cursor is at the end.", .label = "Ensure Selection Forward" },
+    .{ .name = "helix.keep-primary", .call = sel.keepPrimary, .arity = .whole, .summary = "Drop every selection except the primary one.", .label = "Keep Primary Selection" },
+    .{ .name = "helix.remove-primary", .call = sel.removePrimary, .arity = .whole, .summary = "Drop the primary selection, keeping the others.", .label = "Remove Primary Selection" },
+    .{ .name = "helix.rotate-next", .call = thunk(sel.rotate, true), .arity = .whole, .summary = "Make the next selection the primary one.", .label = "Rotate Selections Forward" },
+    .{ .name = "helix.rotate-prev", .call = thunk(sel.rotate, false), .arity = .whole, .summary = "Make the previous selection the primary one.", .label = "Rotate Selections Backward" },
+    .{ .name = "helix.copy-next-line", .call = withCount(sel.copyToLine, true), .arity = .whole, .summary = "Copy the primary selection onto the next line it fits on.", .label = "Copy Selection on Next Line" },
+    .{ .name = "helix.copy-prev-line", .call = withCount(sel.copyToLine, false), .arity = .whole, .summary = "Copy the primary selection onto the previous line it fits on.", .label = "Copy Selection on Previous Line" },
+    .{ .name = "helix.trim", .call = sel.trim, .arity = each, .summary = "Trim the whitespace off both ends of each selection.", .label = "Trim Selections" },
+    .{ .name = "helix.split-lines", .call = sel.splitLines, .arity = each, .summary = "Split each selection into one selection per line.", .label = "Split Selection on Newlines" },
+    .{ .name = "helix.expand", .call = sel.expand, .arity = .whole, .summary = "Expand every selection to its enclosing syntax node.", .label = "Expand Selection" },
+    .{ .name = "helix.shrink", .call = sel.shrink, .arity = .whole, .summary = "Undo the last expansion, or shrink every selection to a child syntax node.", .label = "Shrink Selection" },
+    .{ .name = "helix.ts-expand", .call = sel.tsExpand, .arity = each, .summary = "Expand each selection one syntax node outward.", .label = "Expand to Parent Node" },
+    .{ .name = "helix.ts-shrink", .call = sel.tsShrink, .arity = each, .summary = "Shrink each selection one syntax node inward.", .label = "Shrink to Child Node" },
+    .{ .name = "helix.sibling-next", .call = rangeCmd("ts.sibling-next"), .arity = each, .summary = "Select the next sibling syntax node of each selection.", .label = "Select Next Sibling" },
+    .{ .name = "helix.sibling-prev", .call = rangeCmd("ts.sibling-prev"), .arity = each, .summary = "Select the previous sibling syntax node of each selection.", .label = "Select Previous Sibling" },
+    .{ .name = "helix.function-next", .call = rangeCmd("ts.function-next"), .arity = each, .summary = "Select the next function after each selection.", .label = "Goto Next Function" },
+    .{ .name = "helix.function-prev", .call = rangeCmd("ts.function-prev"), .arity = each, .summary = "Select the previous function before each selection.", .label = "Goto Previous Function" },
     // Editing the selections.
-    .{ .name = "helix.delete", .call = thunk(edit.delete, false), .arity = each },
-    .{ .name = "helix.delete-keep", .call = thunk(edit.delete, true), .arity = each },
-    .{ .name = "helix.change", .call = thunk(edit.change, false), .arity = each },
-    .{ .name = "helix.change-keep", .call = thunk(edit.change, true), .arity = each },
-    .{ .name = "helix.yank", .call = edit.yank, .arity = each },
-    .{ .name = "helix.paste", .call = thunk(edit.paste, true), .arity = each },
-    .{ .name = "helix.paste-before", .call = thunk(edit.paste, false), .arity = each },
-    .{ .name = "helix.paste-text", .call = weft.thunk(edit.pasteClipboardText), .arity = each, .params = "where text" },
-    .{ .name = "helix.replace-register", .call = edit.replaceWithRegister, .arity = each },
-    .{ .name = "helix.replace-text", .call = weft.thunk(edit.replaceText), .arity = each, .params = "text" },
-    .{ .name = "helix.replace", .call = enter("helix-replace"), .arity = .whole },
-    .{ .name = "helix.replace-with", .call = replaceChar, .arity = each },
-    .{ .name = "helix.case-toggle", .call = thunk(edit.setCase, .toggle), .arity = each },
-    .{ .name = "helix.case-lower", .call = thunk(edit.setCase, .lower), .arity = each },
-    .{ .name = "helix.case-upper", .call = thunk(edit.setCase, .upper), .arity = each },
-    .{ .name = "helix.join", .call = edit.join, .arity = eachOver("helix.join-target") },
-    .{ .name = "helix.indent", .call = thunk(edit.onLines, "indent.increase"), .arity = eachOver("helix.line-block") },
-    .{ .name = "helix.dedent", .call = thunk(edit.onLines, "indent.decrease"), .arity = eachOver("helix.line-block") },
-    .{ .name = "helix.comment", .call = thunk(edit.onLines, "comment.toggle"), .arity = eachOver("helix.line-block") },
-    .{ .name = "helix.add-line-below", .call = edit.addBlankLine, .arity = eachOver("helix.blank-below") },
-    .{ .name = "helix.add-line-above", .call = edit.addBlankLine, .arity = eachOver("helix.blank-above") },
-    .{ .name = "helix.goto-last-edit", .call = edit.gotoLastEdit, .arity = .whole },
-    .{ .name = "helix.goto-last-modified", .call = edit.gotoLastModified, .arity = .whole },
-    .{ .name = "helix.align", .call = edit.alignSelections, .arity = .whole },
-    .{ .name = "helix.yank-clipboard", .call = edit.yankToClipboard, .arity = .whole },
-    .{ .name = "helix.paste-clipboard", .call = thunk(edit.pasteClipboard, true), .arity = .whole },
-    .{ .name = "helix.paste-clipboard-before", .call = thunk(edit.pasteClipboard, false), .arity = .whole },
-    .{ .name = "helix.replace-clipboard", .call = edit.replaceWithClipboard, .arity = .whole },
-    .{ .name = "helix.goto-file", .arity = .one, .call = gotoFile },
-    .{ .name = "helix.view-sticky", .call = enter("helix-view"), .arity = .whole },
+    .{ .name = "helix.delete", .call = thunk(edit.delete, false), .arity = each, .summary = "Delete each selection, yanking it into the register.", .label = "Delete Selection" },
+    .{ .name = "helix.delete-keep", .call = thunk(edit.delete, true), .arity = each, .summary = "Delete each selection without yanking it.", .label = "Delete Selection Without Yank" },
+    .{ .name = "helix.change", .call = thunk(edit.change, false), .arity = each, .summary = "Delete each selection, yanking it, and start typing in its place.", .label = "Change Selection" },
+    .{ .name = "helix.change-keep", .call = thunk(edit.change, true), .arity = each, .summary = "Delete each selection without yanking it and start typing in its place.", .label = "Change Selection Without Yank" },
+    .{ .name = "helix.yank", .call = edit.yank, .arity = each, .summary = "Yank each selection into the register.", .label = "Yank" },
+    .{ .name = "helix.paste", .call = thunk(edit.paste, true), .arity = each, .summary = "Paste the register after each selection.", .label = "Paste After" },
+    .{ .name = "helix.paste-before", .call = thunk(edit.paste, false), .arity = each, .summary = "Paste the register before each selection.", .label = "Paste Before" },
+    .{ .name = "helix.paste-text", .call = weft.thunk(edit.pasteClipboardText), .arity = each, .params = "where text", .summary = "Paste the given text after or before each selection.", .internal = true },
+    .{ .name = "helix.replace-register", .call = edit.replaceWithRegister, .arity = each, .summary = "Replace each selection with the register's contents.", .label = "Replace with Yanked" },
+    .{ .name = "helix.replace-text", .call = weft.thunk(edit.replaceText), .arity = each, .params = "text", .summary = "Replace each selection with the given text.", .internal = true },
+    .{ .name = "helix.replace", .call = enter("helix-replace"), .arity = .whole, .summary = "Replace every character of each selection with the next key typed.", .label = "Replace", .prompts = true },
+    .{ .name = "helix.replace-with", .call = replaceChar, .arity = each, .summary = "Replace every character of each selection with the typed character.", .internal = true },
+    .{ .name = "helix.case-toggle", .call = thunk(edit.setCase, .toggle), .arity = each, .summary = "Toggle the case of each selection.", .label = "Switch Case" },
+    .{ .name = "helix.case-lower", .call = thunk(edit.setCase, .lower), .arity = each, .summary = "Lowercase each selection.", .label = "Switch to Lowercase" },
+    .{ .name = "helix.case-upper", .call = thunk(edit.setCase, .upper), .arity = each, .summary = "Uppercase each selection.", .label = "Switch to Uppercase" },
+    .{ .name = "helix.join", .call = edit.join, .arity = eachOver("helix.join-target"), .summary = "Join the lines of each selection into one, separated by spaces.", .label = "Join Selections" },
+    .{ .name = "helix.indent", .call = thunk(edit.onLines, "indent.increase"), .arity = eachOver("helix.line-block"), .summary = "Indent the lines of each selection.", .label = "Indent" },
+    .{ .name = "helix.dedent", .call = thunk(edit.onLines, "indent.decrease"), .arity = eachOver("helix.line-block"), .summary = "Unindent the lines of each selection.", .label = "Unindent" },
+    .{ .name = "helix.comment", .call = thunk(edit.onLines, "comment.toggle"), .arity = eachOver("helix.line-block"), .summary = "Toggle comments on the lines of each selection.", .label = "Toggle Comments" },
+    .{ .name = "helix.add-line-below", .call = edit.addBlankLine, .arity = eachOver("helix.blank-below"), .summary = "Add a blank line below each selection.", .label = "Add Newline Below" },
+    .{ .name = "helix.add-line-above", .call = edit.addBlankLine, .arity = eachOver("helix.blank-above"), .summary = "Add a blank line above each selection.", .label = "Add Newline Above" },
+    .{ .name = "helix.goto-last-edit", .call = edit.gotoLastEdit, .arity = .whole, .summary = "Go back to the last place edited.", .label = "Goto Last Modification" },
+    .{ .name = "helix.goto-last-modified", .call = edit.gotoLastModified, .arity = .whole, .summary = "Switch to the buffer edited most recently before this one.", .label = "Goto Last Modified File" },
+    .{ .name = "helix.align", .call = edit.alignSelections, .arity = .whole, .summary = "Pad the selections with spaces so they line up in columns.", .label = "Align Selections" },
+    .{ .name = "helix.yank-clipboard", .call = edit.yankToClipboard, .arity = .whole, .summary = "Yank the selections to the system clipboard.", .label = "Yank to Clipboard" },
+    .{ .name = "helix.paste-clipboard", .call = thunk(edit.pasteClipboard, true), .arity = .whole, .summary = "Paste the system clipboard after each selection.", .label = "Paste Clipboard After" },
+    .{ .name = "helix.paste-clipboard-before", .call = thunk(edit.pasteClipboard, false), .arity = .whole, .summary = "Paste the system clipboard before each selection.", .label = "Paste Clipboard Before" },
+    .{ .name = "helix.replace-clipboard", .call = edit.replaceWithClipboard, .arity = .whole, .summary = "Replace each selection with the system clipboard.", .label = "Replace with Clipboard" },
+    .{ .name = "helix.goto-file", .arity = .one, .call = gotoFile, .summary = "Open the file the primary selection names.", .label = "Goto File" },
+    .{ .name = "helix.view-sticky", .call = enter("helix-view"), .arity = .whole, .summary = "Enter the sticky view mode, which scrolls until Escape.", .label = "View Mode" },
     // Captures.
-    .{ .name = "helix.register", .call = enter("helix-register"), .arity = .whole },
-    .{ .name = "helix.register-char", .call = registerChar, .arity = .whole },
-    .{ .name = "helix.surround-add", .call = enter("helix-surround-add"), .arity = .whole },
-    .{ .name = "helix.surround-add-char", .call = surroundAdd, .arity = .whole },
-    .{ .name = "helix.surround-delete", .call = enter("helix-surround-delete"), .arity = .whole },
-    .{ .name = "helix.surround-delete-char", .call = surroundDelete, .arity = .whole },
-    .{ .name = "helix.surround-replace", .call = enter("helix-surround-from"), .arity = .whole },
-    .{ .name = "helix.surround-from-char", .call = surroundFrom, .arity = .whole },
-    .{ .name = "helix.surround-to-char", .call = surroundTo, .arity = .whole },
-    .{ .name = "helix.surround-wrap", .call = edit.surroundWrap, .arity = each },
+    .{ .name = "helix.register", .call = enter("helix-register"), .arity = .whole, .summary = "Choose the register the next command uses from the next key typed.", .label = "Select Register", .prompts = true },
+    .{ .name = "helix.register-char", .call = registerChar, .arity = .whole, .summary = "Use the typed character's register for the next command.", .internal = true },
+    .{ .name = "helix.surround-add", .call = enter("helix-surround-add"), .arity = .whole, .summary = "Surround each selection with the pair of the next key typed.", .label = "Surround Add", .prompts = true },
+    .{ .name = "helix.surround-add-char", .call = surroundAdd, .arity = .whole, .summary = "Surround each selection with the typed character's pair.", .internal = true },
+    .{ .name = "helix.surround-delete", .call = enter("helix-surround-delete"), .arity = .whole, .summary = "Delete the surrounding pair of the next key typed.", .label = "Surround Delete", .prompts = true },
+    .{ .name = "helix.surround-delete-char", .call = surroundDelete, .arity = .whole, .summary = "Delete the surrounding pair of the typed character.", .internal = true },
+    .{ .name = "helix.surround-replace", .call = enter("helix-surround-from"), .arity = .whole, .summary = "Replace one surrounding pair with another, both chosen by the next two keys.", .label = "Surround Replace", .prompts = true },
+    .{ .name = "helix.surround-from-char", .call = surroundFrom, .arity = .whole, .summary = "Choose the surrounding pair to replace from the typed character.", .internal = true },
+    .{ .name = "helix.surround-to-char", .call = surroundTo, .arity = .whole, .summary = "Replace the chosen surrounding pair with the typed character's pair.", .internal = true },
+    .{ .name = "helix.surround-wrap", .call = edit.surroundWrap, .arity = each, .summary = "Wrap the selection in the pair chosen for surround.", .internal = true },
     // The targets the line verbs map over (range commands, not for binding).
-    .{ .name = "helix.line-block", .call = edit.lineBlock, .arity = each },
-    .{ .name = "helix.join-target", .call = edit.joinTarget, .arity = each },
-    .{ .name = "helix.blank-below", .call = thunk(edit.blankPoint, true), .arity = each },
-    .{ .name = "helix.blank-above", .call = thunk(edit.blankPoint, false), .arity = each },
-    // The same file picker vim and emacs register under this name, so a
-    // config's `files.find` bind means the same thing under every grammar.
-    .{ .name = "files.find", .call = findFile, .arity = .whole },
+    .{ .name = "helix.line-block", .call = edit.lineBlock, .arity = each, .summary = "Return the whole lines of the selection for the line verbs to map over.", .internal = true },
+    .{ .name = "helix.join-target", .call = edit.joinTarget, .arity = each, .summary = "Return the lines a join takes from the selection.", .internal = true },
+    .{ .name = "helix.blank-below", .call = thunk(edit.blankPoint, true), .arity = each, .summary = "Return where a blank line below the selection goes.", .internal = true },
+    .{ .name = "helix.blank-above", .call = thunk(edit.blankPoint, false), .arity = each, .summary = "Return where a blank line above the selection goes.", .internal = true },
     // The `:` ex command line — the key that OPENS it (shared engine; helix
     // mode namespace). Its five editing commands come from the shared
     // prompt, spliced in as `ex_cmds` below.
-    .{ .name = "helix.ex", .call = ex.enter, .arity = .whole },
+    .{ .name = "helix.ex", .call = ex.enter, .arity = .whole, .summary = "Open the command line to run a command by name.", .label = "Command Line", .icon = "command", .prompts = true },
 };
 
 /// The `:` line's editing commands, from the shared `prompt` library, mapped
@@ -913,22 +917,6 @@ fn gotoFile() void {
     weft.openTyped(buf[0..name.len]);
 }
 
-fn findFile() void {
-    weft.pickCategory("file");
-    weft.openFilePick("open", file_pick);
-}
-fn onPickAccept(pick_id: u32) void {
-    if (pick_id != file_pick) return;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const chosen = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => return,
-    };
-    if (chosen.len > 0) weft.openTyped(chosen);
-}
-
 comptime {
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle }).exportAll();
 }

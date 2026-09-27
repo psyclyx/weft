@@ -13,8 +13,8 @@ const weft = @import("weft");
 const unit = "  ";
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "indent.increase", .arity = weft.Arity.each_extent, .call = opIndent },
-    .{ .name = "indent.decrease", .arity = weft.Arity.each_extent, .call = opDedent },
+    .{ .name = "indent.increase", .arity = weft.Arity.each_extent, .call = opIndent, .summary = "Indent the non-blank lines of the operator's range.", .internal = true },
+    .{ .name = "indent.decrease", .arity = weft.Arity.each_extent, .call = opDedent, .summary = "Dedent the lines of the operator's range.", .internal = true },
 };
 
 /// Whether the line has no non-whitespace content (indent skips blank lines, as

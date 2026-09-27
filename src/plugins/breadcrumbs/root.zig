@@ -104,7 +104,7 @@ fn jump() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "breadcrumbs.jump", .arity = .one, .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
+    .{ .name = "breadcrumbs.jump", .arity = .one, .call = jump, .params = "offset", .summary = "Move the cursor to a breadcrumb's symbol.", .internal = true },
 };
 
 comptime {

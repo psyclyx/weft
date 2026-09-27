@@ -26,13 +26,39 @@ const object_names = [_][]const u8{
     "angle",      "pair",     "argument",     "comment",
     "test",
 };
+/// An object's name as a summary reads it: `big-word` is "big word".
+fn spoken(comptime obj: []const u8) []const u8 {
+    comptime {
+        var out: [obj.len]u8 = obj[0..obj.len].*;
+        for (&out) |*c| {
+            if (c.* == '-') c.* = ' ';
+        }
+        const final = out;
+        return &final;
+    }
+}
+
+// Range providers: an operator or a selection verb asks for one, a person
+// never runs one by name — internal.
 const cmds = blk: {
     var arr: [object_names.len * 2]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (object_names) |obj| {
-        arr[i] = .{ .name = "textobjects.inner-" ++ obj, .call = objHandler(obj, false), .arity = weft.Arity.each_extent };
+        arr[i] = .{
+            .name = "textobjects.inner-" ++ obj,
+            .call = objHandler(obj, false),
+            .arity = weft.Arity.each_extent,
+            .summary = "Return the inside of the " ++ spoken(obj) ++ " object at the cursor.",
+            .internal = true,
+        };
         i += 1;
-        arr[i] = .{ .name = "textobjects.around-" ++ obj, .call = objHandler(obj, true), .arity = weft.Arity.each_extent };
+        arr[i] = .{
+            .name = "textobjects.around-" ++ obj,
+            .call = objHandler(obj, true),
+            .arity = weft.Arity.each_extent,
+            .summary = "Return the " ++ spoken(obj) ++ " object at the cursor, its delimiters or surrounding space included.",
+            .internal = true,
+        };
         i += 1;
     }
     break :blk arr;

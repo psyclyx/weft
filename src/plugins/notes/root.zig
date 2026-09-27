@@ -72,12 +72,12 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "notes.capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "append a line to the notes file" },
-    .{ .name = "notes.open", .call = open, .arity = .whole, .params = "[file]", .summary = "open the notes file itself" },
-    .{ .name = "notes.capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
-    .{ .name = "notes.show-embeds", .call = embedsRefresh, .arity = .whole, .summary = "render this note's embeds live beside their own bytes" },
-    .{ .name = "notes.hide-embeds", .call = embedsOff, .arity = .whole, .summary = "stop rendering this note's embeds" },
-    .{ .name = "notes.activate-embed", .arity = .one, .call = embedActivate, .summary = "open what the embed on this line designates" },
+    .{ .name = "notes.capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "Append a line to the notes file.", .label = "Capture Note", .menu = "File/Notes", .group = "notes", .order = 1, .icon = "notebook-pen", .prompts = true },
+    .{ .name = "notes.open", .call = open, .arity = .whole, .params = "[file]", .summary = "Open the notes file itself.", .label = "Open Notes", .menu = "File/Notes", .group = "notes", .order = 2, .icon = "notebook-pen" },
+    .{ .name = "notes.capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "Append an embed to the notes naming where you are now.", .label = "Capture Location", .menu = "File/Notes", .group = "notes", .order = 3 },
+    .{ .name = "notes.show-embeds", .call = embedsRefresh, .arity = .whole, .summary = "Render this note's embeds live beside their own bytes.", .label = "Show Note Embeds", .menu = "File/Notes", .group = "embeds", .order = 1 },
+    .{ .name = "notes.hide-embeds", .call = embedsOff, .arity = .whole, .summary = "Stop rendering this note's embeds.", .label = "Hide Note Embeds", .menu = "File/Notes", .group = "embeds", .order = 2 },
+    .{ .name = "notes.activate-embed", .arity = .one, .call = embedActivate, .summary = "Open what the embed on this line designates.", .internal = true },
 };
 
 fn describeExtra() void {

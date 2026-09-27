@@ -18,8 +18,10 @@
 //!   · `buffer`    → `bufferLang`/`bufferDirty`/`bufferByteLen`/`bufferTool`,
 //!     matched to the row by the KEY core supplies (the buffer's path or
 //!     name), never by parsing the display label.
-//!   · `command`   → the keymap tables (`modeNames`/`bindingTable`), reverse
-//!     -indexed to answer "which key runs this".
+//!   · `command`   → `keysFor`: the key that would run the row's command in
+//!     the context the palette was opened from (doc/chrome.md §1.3), intention
+//!     arms included — so `C-s` shows beside Save in a file and not where
+//!     nothing is saved.
 //!
 //! Anything else — consult's lines, lsp's references, the shared list — is
 //! declined: those rows mean something only inside their producer's own
@@ -48,13 +50,6 @@ var note_buf: [128]u8 = undefined;
 var notes_storage: [256][]const u8 = undefined;
 var note_bytes: [256 * 128]u8 = undefined;
 var note_used: usize = 0;
-
-/// The keymap reverse index, built lazily per `command` round: which key runs
-/// a command, in the mode the pick was opened from. Rebuilt each round rather
-/// than cached — bindings change when a plugin loads or a config reloads, and
-/// a stale "press SPC g s" is worse than none.
-var table_buf: [1 << 15]u8 = undefined;
-var mode_buf: [1 << 12]u8 = undefined;
 
 fn describe() callconv(.c) void {
     // No commands: this plugin has no verbs. It answers a question and
@@ -122,12 +117,8 @@ fn on_slot_fire(session: i32) callconv(.c) void {
         .buffer => for (keys, 0..) |key, i| {
             notes_storage[i] = store(bufferNote(key));
         },
-        // The command index is built ONCE per round, not once per row: it
-        // walks every mode's whole table, so per-row would be
-        // O(rows × bindings).
-        .command => {
-            const index = commandIndex() orelse "";
-            for (keys, 0..) |key, i| notes_storage[i] = store(commandNote(key, index));
+        .command => for (keys, 0..) |key, i| {
+            notes_storage[i] = store(commandNote(key));
         },
         .other => return,
     }
@@ -258,38 +249,18 @@ fn bufferIndexFor(key: []const u8) ?usize {
 
 // ── command ──────────────────────────────────────────────────────────
 
-/// Every mode's resolved bindings, concatenated into one `<key>\t<command>`
-/// listing. `commandNote` scans it; building it once per round is what keeps
-/// a palette over hundreds of commands from being quadratic in bindings.
+/// The shortest key that runs `command` where the person is, or "".
 ///
-/// Every mode, not just the current one, because a palette is opened FROM
-/// somewhere and the pick's own mode is "pick" by then — so "the mode you
-/// were in" is not readable here. Showing the key wherever it is bound is
-/// more useful than showing none, and a command bound in exactly one mode
-/// (the overwhelming case) is unambiguous either way.
-fn commandIndex() ?[]const u8 {
-    const modes = weft.modeNames(&mode_buf) orelse return null;
-    var used: usize = 0;
-    var it = std.mem.splitScalar(u8, modes, '\n');
-    while (it.next()) |mode| {
-        if (mode.len == 0) continue;
-        const listing = weft.bindingTable(mode, table_buf[used..]) orelse continue;
-        used += listing.len;
-        if (used >= table_buf.len) break;
-        table_buf[used] = '\n';
-        used += 1;
-    }
-    return table_buf[0..used];
-}
-
-/// The first key bound to `command`, or "".
-fn commandNote(command: []const u8, index: []const u8) []const u8 {
-    var rows = weft.bindingRows(index);
-    while (rows.next()) |row| {
-        if (!std.mem.eql(u8, row.command, command)) continue;
-        return std.fmt.bufPrint(&note_buf, "{s}", .{row.key}) catch "";
-    }
-    return "";
+/// It used to be this plugin's own answer: every mode's binding table,
+/// reverse-indexed, the first key found anywhere — context-blind by
+/// necessity, since the palette's own mode is "pick" by the time it asks.
+/// That showed `C-s` for a command `C-s` did not run where you were, and
+/// nothing for a command only an intention arm reached. The host answers
+/// "which key runs this, here" now (`keysFor`), in the mode the picker was
+/// opened from, the way dispatch would walk each key's arms.
+fn commandNote(command: []const u8) []const u8 {
+    const first = weft.firstKey(weft.keysFor(command));
+    return std.fmt.bufPrint(&note_buf, "{s}", .{first}) catch "";
 }
 
 comptime {

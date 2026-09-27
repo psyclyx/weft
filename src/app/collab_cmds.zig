@@ -669,108 +669,123 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, sc: *ShareCtx, known: *core.known_peers.KnownPeers) !void {
     _ = try commands.bind(gpa, "collab.connect", .{
         .name = "collab.connect",
-        .summary = "Connect to a host at runtime; its document opens as a buffer.",
+        .summary = "Join another person's session by its address; what they share opens as a buffer.",
         .args = &.{.{ .name = "hostport", .type = .string }},
         .handler = connectHandler,
         .data = sc,
+        .meta = .{ .label = "Join Session", .menu = "File/Share", .group = "session", .order = 10, .icon = "link", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.disconnect", .{
         .name = "collab.disconnect",
-        .summary = "Drop the connection; shared buffers stay as local copies.",
+        .summary = "Leave the shared session, keeping local copies of the buffers you had open.",
         .args = &.{},
         .handler = disconnectHandler,
         .data = sc,
+        .meta = .{ .label = "Leave Session", .menu = "File/Share", .group = "session", .order = 30, .icon = "unplug" },
     });
     _ = try commands.bind(gpa, "collab.realize-all", .{
         .name = "collab.realize-all",
-        .summary = "Fetch the whole partial checkout.",
+        .summary = "Download everything the other person shares, not just what you have opened.",
         .args = &.{},
         .handler = realizeAllHandler,
         .data = sc,
+        .meta = .{ .label = "Download All Shared Files", .menu = "File/Share", .group = "files", .order = 30, .icon = "download" },
     });
     _ = try commands.bind(gpa, "collab.peer-files", .{
         .name = "collab.peer-files",
-        .summary = "Open the connected peer's shared filesystem target.",
+        .summary = "Browse the files the other person shares with you.",
         .args = &.{},
         .handler = peerFilesHandler,
         .data = sc,
+        .meta = .{ .label = "Browse Shared Files", .menu = "File/Share", .group = "files", .order = 10, .icon = "folder-tree" },
     });
     _ = try commands.bind(gpa, "collab.share", .{
         .name = "collab.share",
-        .summary = "Share the active buffer over the connection; an optional preset (look_together|pair|review) compiles to a grant bundle.",
+        .summary = "Share the active buffer with the people you are connected to, optionally as a preset: look together, pair or review.",
         .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
         .handler = shareHandler,
         .data = sc,
+        .meta = .{ .label = "Share Buffer", .menu = "File/Share", .group = "share", .order = 10, .icon = "share-2" },
     });
     _ = try commands.bind(gpa, "collab.share-presence", .{
         .name = "collab.share-presence",
-        .summary = "Share your cursor with peers (on|off); off retracts it, separate from sharing a buffer.",
+        .summary = "Show or hide your cursor to the people you are connected to, separately from sharing a buffer.",
         .args = &.{.{ .name = "state", .type = .string }},
         .handler = sharePresenceHandler,
         .data = sc,
+        .meta = .{ .label = "Share Cursor", .menu = "File/Share", .group = "share", .order = 20, .icon = "eye", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.share-fs", .{
         .name = "collab.share-fs",
-        .summary = "Select which shared-root surfaces peers hold: hierarchy|bytes|write (comma-separated) or none|read|rw.",
+        .summary = "Choose what others may do with your shared files: see the tree, read contents, or write.",
         .args = &.{.{ .name = "surfaces", .type = .string }},
         .handler = shareFsHandler,
         .data = sc,
+        .meta = .{ .label = "Share Files", .menu = "File/Share", .group = "share", .order = 30, .icon = "folder-open", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.open-shared", .{
         .name = "collab.open-shared",
-        .summary = "Pick one of the peer's shared buffers and open it.",
+        .summary = "Pick one of the buffers the other person shares and open it.",
         .args = &.{},
         .handler = openSharedHandler,
         .data = sc,
+        .meta = .{ .label = "Open Shared Buffer", .menu = "File/Share", .group = "files", .order = 20, .icon = "file-text", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.listen", .{
         .name = "collab.listen",
-        .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
+        .summary = "Host a session on a port so others can join, viewing, editing or owning what you share.",
         .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
         .handler = listenHandler,
         .data = sc,
+        .meta = .{ .label = "Host Session", .menu = "File/Share", .group = "session", .order = 20, .icon = "users", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.stop-listening", .{
         .name = "collab.stop-listening",
-        .summary = "Stop accepting new peers (connected peers stay).",
+        .summary = "Stop letting new people join your session; those already connected stay.",
         .args = &.{},
         .handler = stopListeningHandler,
         .data = sc,
+        .meta = .{ .label = "Stop Hosting", .menu = "File/Share", .group = "session", .order = 25, .icon = "stop" },
     });
     _ = try commands.bind(gpa, "collab.verify-peer", .{
         .name = "collab.verify-peer",
-        .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
+        .summary = "Trust a person's fingerprint after you have compared their safety words with them directly.",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = verifyPeerHandler,
         .data = known,
+        .meta = .{ .label = "Verify Peer", .menu = "File/Share", .group = "peers", .order = 20, .icon = "shield-check", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.forget-peer", .{
         .name = "collab.forget-peer",
-        .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
+        .summary = "Stop trusting a person's fingerprint, removing it from your known peers.",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = forgetPeerHandler,
         .data = known,
+        .meta = .{ .label = "Forget Peer", .menu = "File/Share", .group = "peers", .order = 30, .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.peers", .{
         .name = "collab.peers",
-        .summary = "List connected peers with fingerprint, SAS words, and trust.",
+        .summary = "List the people connected to you, with their fingerprints, safety words and trust.",
         .args = &.{},
         .handler = peersHandler,
         .data = sc,
+        .meta = .{ .label = "Show Peers", .menu = "File/Share", .group = "peers", .order = 10, .icon = "users" },
     });
     _ = try commands.bind(gpa, "collab.cancel", .{
         .name = "collab.cancel",
-        .summary = "Abort a pending/in-flight connect and drop queued host intents.",
+        .summary = "Stop a connection attempt still in progress.",
         .args = &.{},
         .handler = cancelHandler,
         .data = sc,
+        .meta = .{ .label = "Cancel Connecting", .menu = "File/Share", .group = "session", .order = 15 },
     });
     _ = try commands.bind(gpa, "collab.grant", .{
         .name = "collab.grant",
-        .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
+        .summary = "Change what a connected person may do: view, edit or own.",
         .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
         .handler = grantHandler,
         .data = sc,
+        .meta = .{ .label = "Set Peer Access", .menu = "File/Share", .group = "peers", .order = 40, .prompts = true },
     });
 }
 

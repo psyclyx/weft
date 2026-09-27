@@ -113,11 +113,11 @@ const Menu = struct {
 var menu: ?Menu = null;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "offers.present", .arity = .whole, .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
-    .{ .name = "offers.menu", .arity = .whole, .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
-    .{ .name = "offers.menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
-    .{ .name = "offers.press", .arity = .whole, .call = press, .params = "button" },
-    .{ .name = "offers.menu-key", .arity = .whole, .call = menuKey, .params = "input" },
+    .{ .name = "offers.present", .arity = .whole, .call = present, .params = "designation", .summary = "Present an offers designation (weft://here/offers/<context>?as=strip|list|menu).", .internal = true },
+    .{ .name = "offers.menu", .arity = .whole, .call = menuAtPointer, .summary = "Open a menu of what the thing under the pointer offers.", .label = "Context Menu", .prompts = true, .icon = "more" },
+    .{ .name = "offers.menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "Open a menu of what the focused context offers, at the caret.", .label = "Context Menu at Caret", .prompts = true, .icon = "more" },
+    .{ .name = "offers.press", .arity = .whole, .call = press, .params = "button", .summary = "Run the offer a strip button stands for.", .internal = true },
+    .{ .name = "offers.menu-key", .arity = .whole, .call = menuKey, .params = "input", .summary = "Move through, choose from or close the open offers menu.", .internal = true },
 };
 
 comptime {
@@ -196,6 +196,9 @@ fn publishBoard(board: *Board) !void {
             try nodes.append(a, .{ .id = @enumFromInt(sep_base + i), .role = "separator", .facts = &.{.{ .name = "tone", .value = "muted" }}, .content = .{ .label = if (board.layout == .strip) "│" else "──" } });
         var facts: std.ArrayList(Fact) = .empty;
         try facts.append(a, .{ .name = "name", .value = item.name });
+        // What the offer's command presents itself with (doc/chrome.md §1.2):
+        // the styles that draw icons put it beside the label.
+        if (item.icon.len > 0) try facts.append(a, .{ .name = "icon", .value = item.icon });
         if (item.provider.len > 0) try facts.append(a, .{ .name = "provider", .value = item.provider });
         if (!item.enabled()) {
             // Greyed by the presenter's `muted` tone; still clickable, so the
@@ -340,7 +343,10 @@ fn publishMenu(m: *Menu) !void {
         cells[0] = .{
             .id = @enumFromInt(item_base + i),
             .role = "offers.item",
-            .facts = try a.dupe(Fact, &.{.{ .name = "name", .value = item.name }}),
+            .facts = if (item.icon.len > 0)
+                try a.dupe(Fact, &.{ .{ .name = "name", .value = item.name }, .{ .name = "icon", .value = item.icon } })
+            else
+                try a.dupe(Fact, &.{.{ .name = "name", .value = item.name }}),
             .layout = .{ .column = 0 },
             .focusable = i == m.selected,
             .content = .{ .action = .{ .action = act_choose, .label = item.label } },

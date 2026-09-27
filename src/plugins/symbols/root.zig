@@ -74,8 +74,8 @@ const Tree = struct {
 var trees: std.ArrayList(*Tree) = .empty;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "symbols.present", .arity = .whole, .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
-    .{ .name = "symbols.jump", .arity = .one, .call = jump, .params = "offset" },
+    .{ .name = "symbols.present", .arity = .whole, .call = present, .params = "designation", .summary = "Present an entry's symbols (weft://…?as=symbols).", .internal = true },
+    .{ .name = "symbols.jump", .arity = .one, .call = jump, .params = "offset", .summary = "Open the subject with the cursor at a symbol.", .internal = true },
 };
 
 comptime {

@@ -182,10 +182,11 @@ pub fn main(init: std.process.Init) !void {
     defer known_peers.deinit();
     _ = try session.system.commands.bind(gpa, "app.identity", .{
         .name = "app.identity",
-        .summary = "Show this machine's identity fingerprint.",
+        .summary = "Show this machine's identity fingerprint, which others use to recognise you.",
         .args = &.{},
         .handler = identityHandler,
         .data = &my_identity,
+        .meta = .{ .label = "Show My Identity", .menu = "Help", .group = "permissions", .order = 30 },
     });
 
     // ── Plugins: external .wasm, sandboxed under wasmtime (no in-process
@@ -292,10 +293,11 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
         if (config_session) |*cs| _ = try session.system.commands.bind(gpa, "app.reload-config", .{
             .name = "app.reload-config",
-            .summary = "Reload config.js, reconciled against the manifest last applied.",
+            .summary = "Reload your config and apply what changed since it last loaded.",
             .args = &.{},
             .handler = config_load.configReloadHandler,
             .data = cs,
+            .meta = .{ .label = "Reload Config", .menu = "File", .group = "preferences", .order = 10, .icon = "refresh" },
         });
     }
     // The config's editor plugin (vim/helix) has set the base editing mode by
@@ -323,10 +325,11 @@ pub fn main(init: std.process.Init) !void {
     for (session.host.systems.values()) |sys| {
         _ = try sys.commands.bind(gpa, "app.swap-system", .{
             .name = "app.swap-system",
-            .summary = "Re-bind this head to another hosted system (refuses on an open transient/menu or a live collab connection).",
+            .summary = "Switch this window over to another hosted system, refusing while a menu is open or a collaboration is live.",
             .args = &.{.{ .name = "name", .type = .string }},
             .handler = session_mod.Session.systemSwapHandler,
             .data = &swap_data,
+            .meta = .{ .internal = true },
         });
     }
 
@@ -475,10 +478,11 @@ pub fn main(init: std.process.Init) !void {
     // stays a plain lookup.
     _ = try session.system.commands.bind(gpa, "theme.set-color", .{
         .name = "theme.set-color",
-        .summary = "Set a theme color (name, #rrggbb).",
+        .summary = "Set one of the theme's named colours to a #rrggbb value.",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
         .handler = cursor_config.setColorHandler,
         .data = view,
+        .meta = .{ .label = "Set Theme Color", .icon = "palette", .prompts = true },
     });
     view.theme.resolve(&session.system.container, .{});
 

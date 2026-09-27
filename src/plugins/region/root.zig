@@ -11,7 +11,8 @@ const cmds = [_]weft.CommandEntry{
         .name = "region.mark",
         .call = weft.thunk(markRegion),
         .params = "[language]",
-        .summary = "mark this line as a region of another language (default text)",
+        .summary = "Mark this line as a region of another language, text by default.",
+        .label = "Mark Language Region",
         .arity = .one,
     },
 };

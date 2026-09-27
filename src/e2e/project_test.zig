@@ -683,7 +683,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // layout action, and autopair is an insert-mode editing provider. These
     // are ordinary config binds, not direct command/keymap calls.
     ed.press("F1", "");
-    try t.expect(h.surfaceHasText(&ed, "edit.repeat"));
+    try t.expect(h.surfaceHasText(&ed, "Repeat Last Change")); // by label, not id
     proj.capture(&ed, "spine-which-key");
     ed.press("Escape", "");
     ed.chord("SPC w v");
@@ -1831,8 +1831,9 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
     }
     // And the same answer a user SEES: which-key peeks the git mode and
     // paints the offer rows through that existing path — no new UI.
-    // The rendered row reads `s  plugin.git.stage -> plugin.git`.
-    try t.expect(whichKeyShows(&ed, "plugin.git.stage"));
+    // The rendered row reads `s  Stage -> plugin.git`: the intention by the
+    // label of the command that answers it here.
+    try t.expect(whichKeyShows(&ed, "Stage"));
     // The refused verb is not painted as a dimmed row with a sentence any
     // more; it is simply absent, which is what "no provider bound this row"
     // looks like. Asserted so the change is a decision, not a drift.

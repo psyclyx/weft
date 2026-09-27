@@ -6,7 +6,7 @@
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "structural.delete-node", .call = deleteNode, .arity = weft.Arity.each_extent, .summary = "delete the syntax node under the cursor" },
+    .{ .name = "structural.delete-node", .call = deleteNode, .arity = weft.Arity.each_extent, .summary = "Delete the syntax node under the cursor.", .label = "Delete Syntax Node" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

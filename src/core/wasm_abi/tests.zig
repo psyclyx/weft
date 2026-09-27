@@ -3905,9 +3905,8 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     //
     // The `command` category is the one that exercises the most in one pass:
     // slot bind over the membrane, `wl_payload_read`, a schema decode INSIDE
-    // the guest, `wl_mode_names`/`wl_binding_table` (which exist only because
-    // "which key runs this" was unanswerable), `wl_payload_push`, core's
-    // decode, and the render column.
+    // the guest, `wl_keys_for` ("which key runs this, here", doc/chrome.md
+    // §1.3), `wl_payload_push`, core's decode, and the render column.
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -3919,19 +3918,28 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     const plugin = try loadPlugin(&engine, &env.ctx, "marginalia", @embedFile("guest_marginalia_wasm"), .{});
     defer plugin.deinit();
 
-    // A keymap the annotator can reverse-index. `git-status` is bound behind
-    // a chord, which is exactly the case an indexed binding door could not
-    // have answered as one row.
+    // Two commands, and keys that run them: `git.status` behind a chord. The
+    // annotator asks the host which key runs a row's command HERE
+    // (`wl_keys_for`), and a key runs only what is registered — dispatch walks
+    // past an arm nothing answers, and so does the answer.
+    const Nop = struct {
+        fn run(_: *command.Context, _: struct {}) anyerror!command.Value {
+            return .nil;
+        }
+    };
+    _ = try env.commands.bind(gpa, "git.status", command.define("git.status", "Show the repository's status.", Nop.run));
+    _ = try env.commands.bind(gpa, "edit.delete-line", command.define("edit.delete-line", "Delete the line.", Nop.run));
     try env.keymap.bind(gpa, "normal", "space g s", "git.status", 0, "test");
-    try env.keymap.bind(gpa, "normal", "d", "delete-line", 0, "test");
+    try env.keymap.bind(gpa, "normal", "d", "edit.delete-line", 0, "test");
+    try env.head.setModeRaw(gpa, "normal");
 
     const Sink = struct {
         fn accept(_: *command.Context, _: ?*anyopaque, _: pick_mod.Outcome) anyerror!void {}
     };
     try env.head.pick.openWith(&env.ctx, "command", &.{
         .{ .text = "git.status", .doc = "Show the repo status." },
-        .{ .text = "delete-line", .doc = "" },
-        .{ .text = "unbound-command", .doc = "" },
+        .{ .text = "edit.delete-line", .doc = "" },
+        .{ .text = "unbound.command", .doc = "" },
     }, .{ .handler = Sink.accept }, .{ .category = "command" });
 
     // The round happens on the tick — the same one that will cover rows a

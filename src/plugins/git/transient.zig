@@ -24,6 +24,8 @@ const leave_keys: []const []const u8 = &.{ "Escape", "C-g", "q" };
 
 pub const push = weft.transient("git.push", .{
     .title = "Push",
+    .summary = "Push the current branch, choosing flags first.",
+    .icon = "upload",
     .switches = &.{
         .{ .key = "f", .flag = "--force-with-lease" },
         .{ .key = "u", .flag = "--set-upstream", .extra = &.{ "origin", "HEAD" } },
@@ -34,6 +36,8 @@ pub const push = weft.transient("git.push", .{
 
 pub const pull = weft.transient("git.pull", .{
     .title = "Pull",
+    .summary = "Pull into the current branch, choosing flags first.",
+    .icon = "download",
     .switches = &.{.{ .key = "r", .flag = "--rebase" }},
     .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "pull", .run = doPull, .arity = .whole }},
     .cancel_keys = leave_keys,
@@ -41,6 +45,8 @@ pub const pull = weft.transient("git.pull", .{
 
 pub const fetch = weft.transient("git.fetch", .{
     .title = "Fetch",
+    .summary = "Fetch from the remotes, choosing flags first.",
+    .icon = "download",
     .switches = &.{
         .{ .key = "a", .flag = "--all" },
         .{ .key = "p", .flag = "--prune" },
@@ -87,6 +93,8 @@ fn doFetch() void {
 
 pub const commit = weft.transient("git.commit-dispatch", .{
     .title = "Commit",
+    .summary = "Choose how to commit: new, amend, extend, reword, fixup or squash.",
+    .icon = "git-commit",
     .actions = &.{
         // An INTENTION, not a command: `c` means "commit here", and what that
         // resolves to is the intent plane's answer. A one-shot menu binds it
@@ -102,6 +110,7 @@ pub const commit = weft.transient("git.commit-dispatch", .{
 
 pub const reset = weft.transient("git.reset", .{
     .title = "Reset",
+    .summary = "Choose how to reset to the commit under the cursor.",
     .actions = &.{
         .{ .keys = &.{"s"}, .label = "soft", .command = "git.reset-soft" },
         .{ .keys = &.{"m"}, .label = "mixed", .command = "git.reset-mixed" },
@@ -111,6 +120,8 @@ pub const reset = weft.transient("git.reset", .{
 
 pub const branch = weft.transient("git.branch", .{
     .title = "Branch",
+    .summary = "Choose a branch verb: checkout, create, new, delete or rename.",
+    .icon = "git-branch",
     .actions = &.{
         .{ .keys = &.{"b"}, .label = "checkout", .command = "git.branch-checkout" },
         .{ .keys = &.{"c"}, .label = "create", .command = "git.branch-create" },
@@ -122,6 +133,7 @@ pub const branch = weft.transient("git.branch", .{
 
 pub const stash = weft.transient("git.stash", .{
     .title = "Stash",
+    .summary = "Choose a stash verb: save, pop, apply, list or drop.",
     .actions = &.{
         .{ .keys = &.{"z"}, .label = "save", .command = "git.stash-save" },
         .{ .keys = &.{"p"}, .label = "pop", .command = "git.stash-pop" },
@@ -136,6 +148,8 @@ pub const stash = weft.transient("git.stash", .{
 // transient's name is not free is where the plugin already used it.
 pub const log = weft.transient("git.log-choose", .{
     .title = "Log",
+    .summary = "Choose which log to show.",
+    .icon = "history",
     .actions = &.{
         .{ .keys = &.{"l"}, .label = "this branch", .command = "git.log" },
         .{ .keys = &.{"a"}, .label = "all branches", .command = "git.log-all" },

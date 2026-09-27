@@ -218,12 +218,12 @@ fn quit() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "terminal.open", .arity = .whole, .call = open, .summary = "open the shell in the panel (line-mode: no terminal emulation)" },
-    .{ .name = "terminal.type", .arity = .whole, .call = typeText, .params = "text", .summary = "add typed text to the terminal's input line" },
-    .{ .name = "terminal.send", .arity = .whole, .call = send, .summary = "send the terminal's input line to the shell" },
-    .{ .name = "terminal.backspace", .arity = .whole, .call = backspace, .summary = "delete the last character of the input line" },
-    .{ .name = "terminal.clear", .arity = .whole, .call = clearLine, .summary = "clear the input line" },
-    .{ .name = "terminal.quit", .arity = .whole, .call = quit, .summary = "stop the terminal's shell" },
+    .{ .name = "terminal.open", .arity = .whole, .call = open, .summary = "Open the shell in the panel, in line mode without terminal emulation.", .label = "New Terminal", .menu = "Terminal", .group = "new", .order = 1, .icon = "terminal" },
+    .{ .name = "terminal.type", .arity = .whole, .call = typeText, .params = "text", .summary = "Add typed text to the terminal's input line.", .internal = true },
+    .{ .name = "terminal.send", .arity = .whole, .call = send, .summary = "Send the terminal's input line to the shell.", .internal = true },
+    .{ .name = "terminal.backspace", .arity = .whole, .call = backspace, .summary = "Delete the last character of the terminal's input line.", .internal = true },
+    .{ .name = "terminal.clear", .arity = .whole, .call = clearLine, .summary = "Clear the terminal's input line.", .internal = true },
+    .{ .name = "terminal.quit", .arity = .whole, .call = quit, .summary = "Stop the terminal's shell.", .label = "Stop Terminal", .menu = "Terminal", .group = "terminal", .order = 1, .icon = "stop" },
 };
 
 comptime {

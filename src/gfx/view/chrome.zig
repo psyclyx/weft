@@ -478,8 +478,9 @@ pub fn paintTooltip(s: Sink, tip: Tip, at: [2]f32, bounds: region.Rect) !void {
 }
 
 /// The keys that run a command here — the tooltip's and a menu item's key
-/// hint. A later lane answers it with `keysFor` (doc/chrome.md §1.3); until
-/// then no one is wired and hints are simply absent.
+/// hint. The shell answers it with `keysFor` (doc/chrome.md §1.3), so the key
+/// shown is the one that would work in the focused pane; a frame built with
+/// no hook shows none.
 pub const KeyHints = struct {
     context: *anyopaque,
     keysFor: *const fn (context: *anyopaque, scratch: Allocator, command: []const u8) ?[]const u8,

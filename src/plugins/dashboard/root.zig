@@ -40,8 +40,8 @@ var revision: u32 = 0;
 var activations: std.ArrayList(Activation) = .empty;
 
 const commands = [_]weft.CommandEntry{
-    .{ .name = "dashboard.open", .arity = .whole, .call = openDashboard, .summary = "open the welcome dashboard" },
-    .{ .name = "dashboard.activate", .arity = .one, .call = activate, .summary = "activate the selected dashboard item" },
+    .{ .name = "dashboard.open", .arity = .whole, .call = openDashboard, .summary = "Open the welcome dashboard.", .label = "Welcome", .menu = "Help", .group = "welcome", .order = 1, .icon = "layout-dashboard" },
+    .{ .name = "dashboard.activate", .arity = .one, .call = activate, .summary = "Activate the selected dashboard item.", .internal = true },
 };
 
 comptime {

@@ -29,11 +29,11 @@ const weft = @import("weft");
 const each_pair: weft.Arity = .{ .each = .{ .over = "surround.find" } };
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "surround.choose-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "choose the delimiters the next surround operator uses" },
-    .{ .name = "surround.add", .call = opAdd, .arity = weft.Arity.each_extent, .summary = "wrap the operator's range in the chosen pair" },
-    .{ .name = "surround.delete", .call = opDelete, .arity = each_pair, .summary = "delete the chosen pair around each selection" },
-    .{ .name = "surround.replace", .call = opReplace, .arity = each_pair, .summary = "replace the chosen pair around each selection" },
-    .{ .name = "surround.find", .call = find, .arity = weft.Arity.each_extent, .summary = "the chosen pair around the selection, delimiters included" },
+    .{ .name = "surround.choose-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "Choose the delimiters the next surround operator uses.", .label = "Choose Surround Pair", .prompts = true },
+    .{ .name = "surround.add", .call = opAdd, .arity = weft.Arity.each_extent, .summary = "Wrap the operator's range in the chosen pair.", .internal = true },
+    .{ .name = "surround.delete", .call = opDelete, .arity = each_pair, .summary = "Delete the chosen pair around each selection.", .internal = true },
+    .{ .name = "surround.replace", .call = opReplace, .arity = each_pair, .summary = "Replace the chosen pair around each selection.", .internal = true },
+    .{ .name = "surround.find", .call = find, .arity = weft.Arity.each_extent, .summary = "Return the chosen pair around the selection, delimiters included.", .internal = true },
 };
 
 comptime {

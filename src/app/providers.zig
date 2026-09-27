@@ -22,7 +22,7 @@ const collab = @import("collab.zig");
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
         .name = "syntax.add-grammar",
-        .summary = "Register a tree-sitter grammar for one or more extensions.",
+        .summary = "Register a tree-sitter grammar for one or more file extensions.",
         .args = &.{
             .{ .name = "exts", .type = .string },
             .{ .name = "grammar", .type = .string },
@@ -32,6 +32,7 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
         },
         .handler = grammarAddHandler,
         .data = runtime,
+        .meta = .{ .internal = true },
     };
 }
 

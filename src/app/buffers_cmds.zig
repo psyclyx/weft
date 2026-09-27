@@ -386,12 +386,13 @@ fn retireThroughShell(raw: *anyopaque, ctx: *core.command.Context, entry: *core.
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, context: *Context) !void {
     _ = try commands.bind(gpa, "file.browse-remote", .{
         .name = "file.browse-remote",
-        .summary = "Browse a remote directory (host, path) over the host's shell.",
+        .summary = "Browse a directory on a remote host over its shell.",
         .args = &.{
             .{ .name = "host", .type = .string },
             .{ .name = "path", .type = .string },
         },
         .handler = browseRemoteHandler,
         .data = context,
+        .meta = .{ .label = "Browse Remote Files", .menu = "File", .group = "open", .order = 60, .icon = "globe", .prompts = true },
     });
 }

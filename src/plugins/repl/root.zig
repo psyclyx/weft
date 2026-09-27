@@ -65,11 +65,11 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "repl.start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
-    .{ .name = "repl.send", .call = send, .arity = .whole, .params = "text", .summary = "send a line to this buffer's REPL" },
-    .{ .name = "repl.send-line", .arity = .one, .call = sendLine, .summary = "send the current line to this buffer's REPL" },
-    .{ .name = "repl.quit", .call = quit, .arity = .whole, .summary = "stop this buffer's REPL; others stay live" },
-    .{ .name = "repl.reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "show the live REPL a `weft://here/proc/repl…` designation names" },
+    .{ .name = "repl.start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer, sh by default.", .label = "Start REPL", .menu = "Run", .group = "repl", .order = 1, .icon = "terminal" },
+    .{ .name = "repl.send", .call = send, .arity = .whole, .params = "text", .summary = "Send a line to this buffer's REPL.", .label = "Send to REPL", .prompts = true },
+    .{ .name = "repl.send-line", .arity = .one, .call = sendLine, .summary = "Send the current line to this buffer's REPL.", .label = "Send Line to REPL", .menu = "Run", .group = "repl", .order = 2 },
+    .{ .name = "repl.quit", .call = quit, .arity = .whole, .summary = "Stop this buffer's REPL, leaving the others live.", .label = "Stop REPL", .menu = "Run", .group = "repl", .order = 3, .icon = "stop" },
+    .{ .name = "repl.reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "Show the live REPL a `weft://here/proc/repl…` designation names.", .internal = true },
 };
 
 fn describeExtra() void {

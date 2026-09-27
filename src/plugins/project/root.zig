@@ -36,10 +36,10 @@ var list_buf: std.ArrayList(u8) = .empty;
 // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
 // second cost a grant over the whole filesystem.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "remember this project so it shows up in recents" },
-    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "open a project you were in recently" },
-    .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "list recently visited project roots" },
-    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "say where this project's root is" },
+    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "Remember this project so it shows up in recents.", .label = "Remember Project", .menu = "File", .group = "project", .order = 1 },
+    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the projects you were in recently.", .label = "Open Recent Project", .menu = "File", .group = "open", .order = 4, .icon = "history" },
+    .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "List recently visited project roots.", .internal = true },
+    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "Say where this project's root is.", .label = "Show Project Root", .menu = "File", .group = "project", .order = 2 },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

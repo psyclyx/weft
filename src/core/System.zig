@@ -669,10 +669,11 @@ pub fn systemSwapHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
 pub fn registerSwapCommand(gpa: Allocator, commands: *command.Commands, host: *Host) !void {
     _ = try commands.bind(gpa, "app.swap-system", .{
         .name = "app.swap-system",
-        .summary = "Re-bind this head to another hosted system.",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = systemSwapHandler,
         .data = host,
+        .meta = .{ .internal = true },
     });
 }
 
@@ -697,10 +698,11 @@ pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const com
 pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
     _ = try commands.bind(gpa, "grants.revoke", .{
         .name = "grants.revoke",
-        .summary = "Revoke a capability from a principal/plugin — its next matching use traps.",
+        .summary = "Take a permission away from a plugin, so its next use of it fails.",
         .args = &.{ .{ .name = "principal", .type = .string }, .{ .name = "capability", .type = .string } },
         .handler = revokeHandler,
         .data = system,
+        .meta = .{ .label = "Revoke Permission", .menu = "Help", .group = "permissions", .order = 20, .icon = "shield-check", .prompts = true },
     });
 }
 
@@ -761,10 +763,11 @@ pub fn grantsShowHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
 pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
     _ = try commands.bind(gpa, "grants.show", .{
         .name = "grants.show",
-        .summary = "List every row in the grant table: principal, capability, limit, state.",
+        .summary = "List every permission granted to each plugin, with its limit and state.",
         .args = &.{},
         .handler = grantsShowHandler,
         .data = system,
+        .meta = .{ .label = "Show Permissions", .menu = "Help", .group = "permissions", .order = 10, .icon = "shield-check" },
     });
 }
 

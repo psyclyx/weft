@@ -38,7 +38,7 @@ fn langFor(path: []const u8) ?Lang {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "modes.run", .arity = .whole, .call = langRun },
+    .{ .name = "modes.run", .arity = .whole, .call = langRun, .summary = "Run the current file with its language's runner.", .label = "Run File", .menu = "Run", .group = "run", .order = 1, .icon = "play" },
 };
 
 fn describeExtra() void {

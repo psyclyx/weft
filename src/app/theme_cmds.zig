@@ -58,14 +58,16 @@ pub fn cycleChromeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
 pub fn register(gpa: std.mem.Allocator, commands: *core.command.Commands) !void {
     _ = try commands.bind(gpa, "theme.set-chrome", .{
         .name = "theme.set-chrome",
-        .summary = "Switch how chrome looks, live: text, text-icons or widget.",
+        .summary = "Switch how the editor's chrome looks, live: text, text with icons, or widgets.",
         .args = &.{.{ .name = "style", .type = .string }},
         .handler = setChromeHandler,
+        .meta = .{ .label = "Set Chrome Style", .menu = "View/Appearance", .group = "chrome", .order = 20, .icon = "palette", .prompts = true },
     });
     _ = try commands.bind(gpa, "theme.cycle-chrome", .{
         .name = "theme.cycle-chrome",
-        .summary = "Switch chrome to the next style: text, text-icons, widget.",
+        .summary = "Switch the editor's chrome to the next style: text, text with icons, then widgets.",
         .args = &.{},
         .handler = cycleChromeHandler,
+        .meta = .{ .label = "Next Chrome Style", .menu = "View/Appearance", .group = "chrome", .order = 10, .icon = "palette" },
     });
 }

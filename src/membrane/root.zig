@@ -275,8 +275,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
     .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
-    .{ .name = "wl_mode_names", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "every mode with a binding table, newline-joined; cap=0 reports the length, short destinations return -2" },
-    .{ .name = "wl_binding_table", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .keymap, .doc = "mode `m`'s bindings resolved through its fallback chain, one `<key>\t<command>` per line" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, narrowed by an encoded facts.Predicate (same codec as wl_slot_bind) + priority" },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
@@ -617,9 +615,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 263;
+const max_import_count: usize = 261;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 285;
+const max_semantic_operation_count: usize = 283;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -779,7 +777,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 263), census.imports);
+    try t.expectEqual(@as(usize, 261), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 285), census.semantic_operations);
+    try t.expectEqual(@as(usize, 283), census.semantic_operations);
 }

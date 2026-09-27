@@ -1133,6 +1133,9 @@ pub const Offer = struct {
     label: []const u8,
     group: []const u8,
     order: ?i32,
+    /// An icon name from the theme's set, or "" — the command's own
+    /// (doc/chrome.md §1.2) unless its provider said otherwise.
+    icon: []const u8,
 };
 
 var offers_scratch: [1 << 16]u8 = undefined;
@@ -1150,7 +1153,7 @@ pub const Offers = struct {
         const availability = std.enums.fromInt(OfferAvailability, self.byte()) orelse return null;
         const has_order = self.byte() != 0;
         const order: i32 = @bitCast(self.word());
-        var parts: [5][]const u8 = undefined;
+        var parts: [6][]const u8 = undefined;
         for (&parts) |*part| {
             const n = self.word();
             if (self.at + n > self.bytes.len) return null;
@@ -1166,6 +1169,7 @@ pub const Offers = struct {
             .reason = parts[2],
             .label = parts[3],
             .group = parts[4],
+            .icon = parts[5],
         };
     }
 
@@ -1358,54 +1362,6 @@ pub fn offersCommit() void {
 /// nonapplicable — an empty table would still be a claim.
 pub fn offersRetract() void {
     e.wl_offers_retract();
-}
-
-// ── Reading the keymap tables ────────────────────────────────────────
-//
-// The head-scoped which-key reads are `menuBinding*`. These two read the
-// TABLES, with the mode named — which is the only way to answer "what key
-// runs this command" for a mode you are not standing in.
-//
-// Both write into `out` (caller-owned, so a listing survives the next read)
-// and answer null when it is too small, never a truncated listing.
-
-/// Every mode with a binding table, newline-joined.
-pub fn modeNames(out: []u8) ?[]const u8 {
-    const n = e.wl_mode_names(p(out.ptr), @intCast(out.len));
-    if (n < 0) return null;
-    return out[0..@intCast(n)];
-}
-
-/// Mode `mode`'s bindings resolved through its fallback chain, one
-/// `<key>\t<command>` per line. Walk it with `bindingRows`.
-pub fn bindingTable(mode: []const u8, out: []u8) ?[]const u8 {
-    const n = e.wl_binding_table(p(mode.ptr), @intCast(mode.len), p(out.ptr), @intCast(out.len));
-    if (n < 0) return null;
-    return out[0..@intCast(n)];
-}
-
-/// One row of `bindingTable`.
-pub const BindingRow = struct { key: []const u8, command: []const u8 };
-
-/// Split a `bindingTable` listing into rows. A line without a tab is skipped
-/// rather than guessed at.
-pub const BindingRows = struct {
-    rest: []const u8,
-
-    pub fn next(self: *BindingRows) ?BindingRow {
-        while (self.rest.len > 0) {
-            const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
-            const line = self.rest[0..nl];
-            self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
-            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-            return .{ .key = line[0..tab], .command = line[tab + 1 ..] };
-        }
-        return null;
-    }
-};
-
-pub fn bindingRows(listing: []const u8) BindingRows {
-    return .{ .rest = listing };
 }
 
 pub fn bufferCount() usize {

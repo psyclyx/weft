@@ -308,9 +308,9 @@ fn jumpTo(row: Row) void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "problems.open", .arity = .whole, .call = open, .summary = "list this place's diagnostics in the panel" },
-    .{ .name = "problems.present", .arity = .whole, .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
-    .{ .name = "problems.refresh", .arity = .whole, .call = refresh, .summary = "re-read the problems lists' source now" },
+    .{ .name = "problems.open", .arity = .whole, .call = open, .summary = "List this place's diagnostics in the panel.", .label = "Problems", .menu = "View", .group = "panels", .order = 3, .icon = "list-checks" },
+    .{ .name = "problems.present", .arity = .whole, .call = present, .params = "designation", .summary = "Present a place's diagnostics (weft://here/diagnostics/<place>).", .internal = true },
+    .{ .name = "problems.refresh", .arity = .whole, .call = refresh, .summary = "Re-read the problems list's source now.", .label = "Refresh Problems", .icon = "refresh" },
 };
 
 comptime {

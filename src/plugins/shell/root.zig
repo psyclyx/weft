@@ -18,7 +18,13 @@ const cmds = [_]weft.CommandEntry{
         .arity = .one,
         .call = weft.thunk(insertShell),
         .params = "command",
-        .summary = "run a shell command and insert its output at the cursor",
+        .summary = "Run a shell command and insert its output at the cursor.",
+        .label = "Insert Command Output",
+        .menu = "Edit",
+        .group = "insert",
+        .order = 2,
+        .icon = "terminal",
+        .prompts = true,
     },
 };
 comptime {

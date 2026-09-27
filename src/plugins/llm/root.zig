@@ -28,8 +28,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "llm.ask", .call = ask, .arity = .whole, .params = "prompt", .summary = "ask the configured LLM CLI; the reply lands in its own buffer" },
-    .{ .name = "llm.ask-line", .arity = .one, .call = askLine, .summary = "ask using the current line as the prompt" },
+    .{ .name = "llm.ask", .call = ask, .arity = .whole, .params = "prompt", .summary = "Ask the configured LLM command a question, with the reply in its own buffer.", .label = "Ask LLM", .menu = "Run", .group = "llm", .order = 1, .icon = "sparkles", .prompts = true },
+    .{ .name = "llm.ask-line", .arity = .one, .call = askLine, .summary = "Ask the configured LLM command, using the current line as the prompt.", .label = "Ask LLM with Line", .menu = "Run", .group = "llm", .order = 2, .icon = "sparkles" },
 };
 
 fn describeExtra() void {

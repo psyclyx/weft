@@ -405,10 +405,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     }
     ed.press("g", ""); // drill into the git group
     try t.expectEqualStrings("space g", ed.head.pending);
-    // The overlay now shows the git leaves BY THEIR COMMAND NAMES — what a user
-    // reads to discover the binding we added.
-    try t.expect(whichKeyShows(&ed, "git.init"));
-    try t.expect(whichKeyShows(&ed, "git.status"));
+    // The overlay now shows the git leaves BY THEIR LABELS (doc/chrome.md
+    // §1.2) — what a user reads to discover the binding we added.
+    try t.expect(whichKeyShows(&ed, "Initialize Repository"));
+    try t.expect(whichKeyShows(&ed, "Source Control"));
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.head.pending);
 
@@ -703,8 +703,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.press("SPC", "");
     ed.press("v", "");
     try t.expectEqualStrings("space v", ed.head.pending);
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.edit));
-    try t.expect(whichKeyShows(&ed, "transfer.yank"));
+    // By label: `field.edit` reads `Edit`, the yank intention the label of
+    // what answers it here.
+    try t.expect(whichKeyShows(&ed, "Edit"));
+    try t.expect(whichKeyShows(&ed, "Copy"));
     try t.expect(whichKeyShows(&ed, "fixture.plugin-action"));
     ed.press("Escape", "");
 
@@ -959,14 +961,18 @@ test "e2e/config: weft.grant is a resident .js plugin's only authority — adopt
 // ── The palette over live offers (architecture §9.3, §14.2) ───────────
 
 /// The palette row whose matchable text is `text`, or null.
-fn pickRow(ed: *Editor, text: []const u8) ?usize {
-    for (ed.pick.items.items, 0..) |item, i| {
-        if (std.mem.eql(u8, item, text)) return i;
+/// The palette row that runs `id`. A row READS by label; its id leads its
+/// secondary text (`window.split-right · Split the …`), which is what a
+/// test names it by.
+fn pickRow(ed: *Editor, id: []const u8) ?usize {
+    for (ed.pick.docs.items, 0..) |doc, i| {
+        if (!std.mem.startsWith(u8, doc, id)) continue;
+        if (doc.len == id.len or doc[id.len] == ' ') return i;
     }
     return null;
 }
 
-test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
+test "e2e/config: the palette lists what a person runs, by label, and no machinery" {
     const gpa = t.allocator;
     var proj: Project = undefined;
     try proj.init(gpa);
@@ -991,48 +997,36 @@ test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
         }
     }
 
-    // UNDOCUMENTED IS NOT. A keystroke (`vim.append`), a motion
-    // (`motions.doc-end`) and a trampoline one plugin runs on another's behalf
-    // (`git.commit-settle`) are not things anyone looks up by name, and a list that
-    // holds them is a list you scroll past. Silence is the DEFAULT, so a new
-    // internal command stays out without anyone remembering to hide it.
-    for ([_][]const u8{ "vim.append", "motions.doc-end", "git.commit-settle" }) |hidden| {
+    // MACHINERY IS NOT. A count digit (`vim.count-1`), a motion a grammar
+    // wraps (`motions.doc-end`), a trampoline one plugin runs on another's
+    // behalf (`git.commit-settle`) and a picker's own key (`pick.backspace`)
+    // each SAY they are internal (doc/chrome.md §1.2) — no pattern list in the
+    // palette decides it — and get no row.
+    for ([_][]const u8{ "vim.count-1", "motions.doc-end", "git.commit-settle", "pick.backspace" }) |hidden| {
         if (pickRow(&ed, hidden) != null) {
-            std.debug.print("\n[e2e/config] undocumented command listed: '{s}'\n", .{hidden});
-            return error.UndocumentedCommandListed;
+            std.debug.print("\n[e2e/config] internal command listed: '{s}'\n", .{hidden});
+            return error.InternalCommandListed;
         }
     }
 
     // A REFUSAL TO LIST IS NOT A REFUSAL TO RUN. The pick is free-text, so an
-    // undocumented command still runs when you type its name — which is what
-    // keeps this a matter of presentation rather than of authority.
-    try t.expect(ed.commands.resolve("vim.append") != null);
+    // internal command still runs when you type its id — which is what keeps
+    // this a matter of presentation rather than of authority.
+    try t.expect(ed.commands.resolve("motions.doc-end") != null);
 
-    // EVERY ROW SAYS WHOSE IT IS, and the rows arrive grouped by that owner —
-    // a fuzzy pick has no headings, so the order is the grouping.
-    var seen: std.ArrayList([]const u8) = .empty;
-    defer seen.deinit(gpa);
-    var last: []const u8 = "";
+    // A ROW READS BY LABEL — the prompt mark on one that asks for more — with
+    // its id and summary as the secondary text.
+    const split = pickRow(&ed, "window.split-right") orelse return error.SplitNotListed;
+    try t.expectEqualStrings("Split Editor Right", ed.pick.items.items[split]);
+    try t.expect(std.mem.indexOf(u8, ed.pick.docs.items[split], " · Split ") != null);
+    const find = pickRow(&ed, "files.find") orelse return error.FindNotListed;
+    try t.expectEqualStrings("Open File…", ed.pick.items.items[find]);
+    // Every row's secondary text leads with an id the registry answers.
     for (ed.pick.docs.items) |doc| {
-        if (std.mem.startsWith(u8, doc, "offer · ")) continue; // a live offer, not a command
-        const cut = std.mem.indexOf(u8, doc, " · ") orelse doc.len;
-        const owner = doc[0..cut];
-        try t.expect(owner.len > 0);
-        if (std.mem.eql(u8, owner, last)) continue;
-        // A new owner: it must not be one we already finished, or the list is
-        // interleaved and reads as no grouping at all.
-        for (seen.items) |prior| {
-            if (std.mem.eql(u8, prior, owner)) {
-                std.debug.print("\n[e2e/config] owner '{s}' appears in two runs\n", .{owner});
-                return error.PaletteNotGroupedByOwner;
-            }
-        }
-        try seen.append(gpa, owner);
-        last = owner;
+        const id = doc[0 .. std.mem.indexOfScalar(u8, doc, ' ') orelse doc.len];
+        if (core.catalog.isIntentionName(id)) continue; // a live offer
+        try t.expect(ed.commands.resolve(id) != null);
     }
-    // core leads: the editor.s own verbs are the ones with no prefix to type.
-    try t.expect(seen.items.len > 1);
-    try t.expectEqualStrings("core", seen.items[0]);
     ed.press("Escape", "");
     ed.settle(2);
 }
@@ -1075,13 +1069,15 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     ed.run("palette.open");
     ed.settle(2);
     const row = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
-    try t.expectEqualStrings("offer · core.editing", ed.pick.docs.items[row]);
+    try t.expectEqualStrings("Undo", ed.pick.items.items[row]);
+    try t.expectEqualStrings("std.history.undo · offered by core.editing", ed.pick.docs.items[row]);
     try t.expect(pickRow(&ed, "buffer.pick") != null); // commands still there
     ed.press("Escape", "");
     ed.settle(2);
 
-    // Accepting it undoes exactly like the bound key would.
-    paletteAccept(&ed, "std.history.undo");
+    // Accepting it undoes exactly like the bound key would. The offer is the
+    // first `Undo` row: offers lead.
+    paletteAccept(&ed, "Undo");
     {
         const undone = try ed.textAlloc();
         defer gpa.free(undone);
@@ -1095,12 +1091,12 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     ed.run("palette.open");
     ed.settle(2);
     const disabled = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
-    try t.expectEqualStrings("offer · core.editing · no-text", ed.pick.docs.items[disabled]);
+    try t.expectEqualStrings("std.history.undo · offered by core.editing · no-text", ed.pick.docs.items[disabled]);
     ed.press("Escape", "");
     ed.settle(2);
 
     // Accepting it surfaces the refusal instead of silently doing nothing.
-    paletteAccept(&ed, "std.history.undo");
+    paletteAccept(&ed, "Undo");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "no-text") != null);
 }
 
@@ -1138,8 +1134,7 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     ed.run("palette.open");
     ed.settle(2);
     const row = pickRow(&ed, "collab.listen") orelse return error.ListenNotListed;
-    try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "core · "));
-    try t.expect(std.mem.indexOf(u8, ed.pick.docs.items[row], "<port> <access>") != null);
+    try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "collab.listen <port> <access> · "));
 
     // Every row still NAMES something runnable. Rendering a row's shape reads
     // the registry three times (name, summary, parameters) and each read lands
@@ -1147,10 +1142,11 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     // `<slot>` over the front of `action.explain` and listed a row called
     // `slotain-binding`. A row you cannot run is not a cosmetic defect, so the
     // sweep is here rather than trusting one spot check.
-    for (ed.pick.items.items, ed.pick.docs.items) |item, doc| {
-        if (std.mem.startsWith(u8, doc, "offer · ")) continue; // a live offer, not a command
-        if (ed.commands.resolve(item) == null) {
-            std.debug.print("\n[e2e/config] palette row names no command: '{s}'\n", .{item});
+    for (ed.pick.docs.items) |doc| {
+        const id = doc[0 .. std.mem.indexOfScalar(u8, doc, ' ') orelse doc.len];
+        if (core.catalog.isIntentionName(id)) continue; // a live offer, not a command
+        if (ed.commands.resolve(id) == null) {
+            std.debug.print("\n[e2e/config] palette row names no command: '{s}'\n", .{doc});
             return error.PaletteRowNamesNoCommand;
         }
     }
@@ -1185,8 +1181,8 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     // 4. Backing out of the question runs nothing — a half-filled call is not
     //    a call. Escape is the same key that leaves every other prompt.
     ed.share_ctx.pending_listen = null;
-    paletteAccept(&ed, "connect");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "connect <hostport>") != null);
+    paletteAccept(&ed, "collab.connect");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.connect <hostport>") != null);
     ed.press("Escape", "");
     ed.settle(2);
     try t.expect(ed.share_ctx.pending_connect == null);
@@ -1194,7 +1190,7 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     // 5. A command whose only argument is OPTIONAL is not interrogated: it
     //    runs, and its refusal is now VISIBLE rather than a dropped return
     //    value. (`share` returns a bare string; that used to vanish.)
-    paletteAccept(&ed, "share");
+    paletteAccept(&ed, "collab.share");
     try t.expectEqualStrings("not connected", ed.echoText());
 }
 

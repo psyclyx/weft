@@ -19,10 +19,10 @@ const token = "// ";
 /// carets on one line toggle it once.
 const over_lines: weft.Arity = .{ .each = .{ .over = "comment.lines", .merge = true } };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "comment.toggle-line", .call = commentLine, .arity = over_lines, .summary = "toggle this line's comment" },
-    .{ .name = "comment.toggle-selection", .call = commentSelection, .arity = over_lines, .summary = "toggle the selection's comments" },
-    .{ .name = "comment.toggle", .call = opComment, .arity = weft.Arity.each_extent, .summary = "comment the operator's range" },
-    .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "the selection's lines, or the caret's" },
+    .{ .name = "comment.toggle-line", .call = commentLine, .arity = over_lines, .summary = "Comment or uncomment the current line.", .label = "Toggle Line Comment", .menu = "Edit", .group = "comment", .order = 1 },
+    .{ .name = "comment.toggle-selection", .call = commentSelection, .arity = over_lines, .summary = "Comment or uncomment the selected lines.", .label = "Toggle Selection Comment", .menu = "Edit", .group = "comment", .order = 2 },
+    .{ .name = "comment.toggle", .call = opComment, .arity = weft.Arity.each_extent, .summary = "Comment or uncomment the lines of the operator's range.", .internal = true },
+    .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "Return the selection's lines, or the cursor's line.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

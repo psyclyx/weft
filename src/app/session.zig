@@ -1189,10 +1189,11 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     var swap_data: Session.SwapCmdData = .{ .session = &sess };
     const swap_spec: core.command.Command = .{
         .name = "app.swap-system",
-        .summary = "test",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = Session.systemSwapHandler,
         .data = &swap_data,
+        .meta = .{ .internal = true },
     };
     _ = try editor_sys.commands.bind(gpa, "app.swap-system", swap_spec);
     _ = try agent_sys.commands.bind(gpa, "app.swap-system", swap_spec);
@@ -1256,10 +1257,11 @@ test "session: SwapCmdData.isBlocked refuses loudly BEFORE touching the Host —
     var swap_data: Session.SwapCmdData = .{ .session = &sess, .isBlocked = AlwaysBlocked.blocked };
     _ = try sess.system.commands.bind(gpa, "app.swap-system", .{
         .name = "app.swap-system",
-        .summary = "test",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = Session.systemSwapHandler,
         .data = &swap_data,
+        .meta = .{ .internal = true },
     });
 
     try t.expectError(error.SwapBlocked, core.command.run(&editor_sys.commands, &sess.cmd_ctx, "app.swap-system", &.{.{ .string = "agent-ux" }}));

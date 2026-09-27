@@ -201,7 +201,11 @@ function openNextPick() {
 // Internal: the deferred half of session/request_permission — not a
 // user-facing verb, invoked only via weft.run from the background
 // weft.onOutput handler.
-weft.command("agent.answer-permission", openNextPick, "answer the agent's pending permission request", undefined, "whole");
+weft.command("agent.answer-permission", openNextPick, {
+  summary: "Answer the agent's pending permission request.",
+  arity: "whole",
+  internal: true,
+});
 
 // The OTHER pick this plugin opens (`agent.focus`, below): its own
 // continuation identity, and the conversations it offered.
@@ -376,7 +380,11 @@ weft.command("agent.reap", () => {
   }
   dead_pick = false;
   weft.run("pick.cancel");
-}, "clean up finished agent sessions", undefined, "whole");
+}, {
+  summary: "Clean up finished agent sessions.",
+  arity: "whole",
+  internal: true,
+});
 
 weft.onExit((h) => {
   const c = convByProc(h);
@@ -436,7 +444,15 @@ weft.command("agent.start", () => {
   }
   const c = startAgent(cmd, weft.config("prompt") || "Hello");
   if (c) weft.echo("acp: started " + cmd + " as " + c.peer + " → " + c.buffer);
-}, "start a coding agent", undefined, "whole");
+}, {
+  summary: "Start a coding agent in a new conversation.",
+  arity: "whole",
+  label: "Start Agent",
+  menu: "Run/Agents",
+  group: "agents",
+  order: 1,
+  icon: "bot",
+});
 
 // agent-send: send the SELECTION — or, with none, the current line — as the
 // next prompt of the FOCUSED conversation (a multi-turn turn).
@@ -458,7 +474,14 @@ weft.command("agent.send", () => {
     return;
   }
   sendPrompt(focused, line);
-}, "send the selection to the agent");
+}, {
+  summary: "Send the selection, or the current line, to the focused agent.",
+  label: "Send to Agent",
+  menu: "Run/Agents",
+  group: "agents",
+  order: 2,
+  icon: "bot",
+});
 
 // agent-focus: choose which conversation `agent.send` addresses. It rides
 // the same continuation token the permission picks use — a second identity
@@ -477,4 +500,13 @@ weft.command("agent.focus", () => {
   pickOpen = true;
   focusChoices = [...convs.values()];
   weft.pick("agent conversation", focusChoices.map((c) => c.peer + " " + c.buffer).join("\n"), focus_token);
-}, "focus the agent's conversation", undefined, "whole");
+}, {
+  summary: "Choose which agent conversation sends go to.",
+  arity: "whole",
+  label: "Focus Agent Conversation",
+  menu: "Run/Agents",
+  group: "agents",
+  order: 3,
+  icon: "bot",
+  prompts: true,
+});

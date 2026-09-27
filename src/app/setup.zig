@@ -32,10 +32,10 @@ pub fn registerCapabilityConsumers(
 const reg_arg: core.command.ArgSpec = .{ .name = "register", .type = .string, .optional = true };
 const count_arg: core.command.ArgSpec = .{ .name = "count", .type = .nil, .optional = true };
 const macro_cmds = [_]core.command.Command{
-    .{ .name = "macro.record-start", .summary = "Record keystrokes into a macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler },
-    .{ .name = "macro.record-stop", .summary = "Stop recording; the macro is filed under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler },
-    .{ .name = "macro.record-toggle", .summary = "Start recording into a register (default @), or stop.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler },
-    .{ .name = "macro.play", .summary = "Replay a macro register [count] times (default: the last played).", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler },
+    .{ .name = "macro.record-start", .summary = "Start recording your keystrokes into a named macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler, .meta = .{ .label = "Record Macro", .menu = "Edit/Macros", .group = "record", .order = 10, .icon = "circle-dot", .prompts = true } },
+    .{ .name = "macro.record-stop", .summary = "Stop recording and file the macro under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler, .meta = .{ .label = "Stop Recording", .menu = "Edit/Macros", .group = "record", .order = 20, .icon = "stop" } },
+    .{ .name = "macro.record-toggle", .summary = "Start recording a macro, into register @ unless one is given, or stop recording.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler, .meta = .{ .label = "Toggle Macro Recording", .menu = "Edit/Macros", .group = "record", .order = 30 } },
+    .{ .name = "macro.play", .summary = "Replay a macro, the last one played unless a register is given, a count of times.", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler, .meta = .{ .label = "Play Macro", .menu = "Edit/Macros", .group = "play", .order = 10, .icon = "play" } },
 };
 
 /// Bind the caret/which-key/menu commands, registered before the config runs
@@ -51,20 +51,22 @@ pub fn registerCursorCommands(
 ) !void {
     _ = try commands.bind(gpa, "mode.leave-menu", .{
         .name = "mode.leave-menu",
-        .summary = "Leave a menu, back to its return mode.",
+        .summary = "Leave a menu and return to the mode it was opened from.",
         .args = &.{},
         .handler = dispatch.menuEscapeHandler,
         .data = null,
+        .meta = .{ .internal = true },
     });
     // Dot-repeat: replay the last change's keystrokes (vim `.`). The recorder
     // lives in dispatch (it records through the one keypress interface), so this
     // composes with every plugin out of the box.
     _ = try commands.bind(gpa, "edit.repeat", .{
         .name = "edit.repeat",
-        .summary = "Repeat the last change (vim `.`).",
+        .summary = "Repeat the last change.",
         .args = &.{},
         .handler = dispatch.repeatChangeHandler,
         .data = null,
+        .meta = .{ .label = "Repeat Last Change", .menu = "Edit", .group = "history", .order = 30, .icon = "history" },
     });
     // Macros: record the keystroke stream into a named register and replay
     // it, through the same dispatch (`dispatch.zig`'s macro section). Which
@@ -75,30 +77,34 @@ pub fn registerCursorCommands(
     // from anywhere.
     _ = try commands.bind(gpa, "which-key.show", .{
         .name = "which-key.show",
-        .summary = "Show the which-key popup now (open the leader menu if idle).",
+        .summary = "Show the key hints now, opening the leader menu when no menu is open.",
         .args = &.{},
         .handler = dispatch.whichKeyNowHandler,
         .data = which_key_now,
+        .meta = .{ .label = "Show Key Hints", .menu = "View", .group = "help", .order = 20, .icon = "keyboard" },
     });
     _ = try commands.bind(gpa, "cursor.set-style", .{
         .name = "cursor.set-style",
-        .summary = "Set the caret style (block|bar|underline) for a mode.",
+        .summary = "Set a mode's caret style: block, bar or underline.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
         .handler = cursor_config.setCursorHandler,
         .data = cursor_cfg,
+        .meta = .{ .internal = true },
     });
     _ = try commands.bind(gpa, "cursor.set-place", .{
         .name = "cursor.set-place",
-        .summary = "Draw the caret at the selection's head, or inside it on its last character (head|inside), for a mode.",
+        .summary = "Set whether a mode draws the caret at the selection's head or inside it on its last character.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "place", .type = .string } },
         .handler = cursor_config.cursorPlaceHandler,
         .data = cursor_cfg,
+        .meta = .{ .internal = true },
     });
     _ = try commands.bind(gpa, "cursor.set-blink", .{
         .name = "cursor.set-blink",
-        .summary = "Toggle caret blink (on|off) for a mode.",
+        .summary = "Turn caret blinking on or off for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
         .handler = cursor_config.cursorBlinkHandler,
         .data = cursor_cfg,
+        .meta = .{ .internal = true },
     });
 }

@@ -17,8 +17,8 @@ const weft = @import("weft");
 var buf: [1 << 16]u8 = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "edit.duplicate-line", .arity = weft.Arity.each_extent, .call = duplicateLine, .summary = "copy this line below itself" },
-    .{ .name = "edit.upcase-line", .arity = weft.Arity.each_extent, .call = upcaseLine, .summary = "upper-case this line" },
+    .{ .name = "edit.duplicate-line", .arity = weft.Arity.each_extent, .call = duplicateLine, .summary = "Copy the current line below itself.", .label = "Duplicate Line", .menu = "Edit/Lines", .group = "lines", .order = 1, .icon = "copy" },
+    .{ .name = "edit.upcase-line", .arity = weft.Arity.each_extent, .call = upcaseLine, .summary = "Upper-case the current line.", .label = "Uppercase Line", .menu = "Edit/Lines", .group = "case", .order = 1, .icon = "case-upper" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

@@ -883,17 +883,17 @@ fn cAcceptInput(ctx: *command.Context, args: struct {}) anyerror!Value {
 /// Register pick commands + the "pick" mode bindings.
 pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("../Keymap.zig")) !void {
     const defs = [_]command.Command{
-        command.define("pick.input", "Append text to the pick query.", cInput),
-        command.define("pick.backspace", "Delete the last query character.", cBackspace),
-        command.define("pick.next", "Select the next match.", cNext),
-        command.define("pick.prev", "Select the previous match.", cPrev),
-        command.define("pick.accept", "Accept the selected match (else the typed text, if free-text).", cAccept),
-        command.define("pick.accept-input", "Accept the typed text verbatim (free-text picks).", cAcceptInput),
-        command.define("pick.cancel", "Close the picker.", cCancel),
-        command.define("pick.complete", "Complete the query (common prefix, else selection).", cComplete),
-        command.define("pick.narrow", "Promote the query into a sticky narrowing filter.", cNarrow),
-        command.define("pick.widen", "Drop the narrowing filter.", cWiden),
-        command.define("pick.cycle-style", "Cycle the completion style (orderless/flex/substring/prefix).", cStyleCycle),
+        command.define("pick.input", "Append text to the picker's query.", cInput).present(.{ .internal = true }),
+        command.define("pick.backspace", "Delete the last character of the query.", cBackspace).present(.{ .internal = true }),
+        command.define("pick.next", "Select the next match.", cNext).present(.{ .internal = true }),
+        command.define("pick.prev", "Select the previous match.", cPrev).present(.{ .internal = true }),
+        command.define("pick.accept", "Accept the selected match, or the typed text when the picker takes free text.", cAccept).present(.{ .internal = true }),
+        command.define("pick.accept-input", "Accept the typed text exactly as written.", cAcceptInput).present(.{ .internal = true }),
+        command.define("pick.cancel", "Close the picker.", cCancel).present(.{ .internal = true }),
+        command.define("pick.complete", "Complete the query to the common prefix, or else to the selected match.", cComplete).present(.{ .internal = true }),
+        command.define("pick.narrow", "Keep the current query as a filter and start a new one within it.", cNarrow).present(.{ .internal = true }),
+        command.define("pick.widen", "Drop the narrowing filter.", cWiden).present(.{ .internal = true }),
+        command.define("pick.cycle-style", "Cycle how the query matches: orderless, flex, substring or prefix.", cStyleCycle).present(.{ .internal = true }),
     };
     for (defs) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 

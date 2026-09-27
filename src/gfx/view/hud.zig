@@ -174,8 +174,8 @@ pub const Hud = struct {
     /// the pane built last, so the tooltip is above every pane. A caller
     /// building one pane leaves it on.
     tooltips: bool = true,
-    /// Where a tooltip's key hint comes from; null until `keysFor`
-    /// (doc/chrome.md §1.3) is wired, and hints are absent.
+    /// Where a tooltip's key hint comes from — the shell's `keysFor`
+    /// (doc/chrome.md §1.3). Null in a frame built without one: no hints.
     key_hints: ?chrome.KeyHints = null,
 
     pub const max_pick_rows = 8;

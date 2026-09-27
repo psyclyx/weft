@@ -178,36 +178,47 @@ var paint_serial: ?u32 = null;
 const whole: weft.Arity = .whole;
 const each = weft.Arity.each_extent;
 
-fn entry(comptime name: []const u8, comptime kind: Kind, comptime forward: bool, comptime use: Use, comptime summary: []const u8) weft.CommandEntry {
-    return .{ .name = name, .arity = whole, .call = start(kind, forward, use), .summary = summary };
+/// A motion (`s`, `f`, …) reads its characters, then moves: a grammar key
+/// which-key names. Its `operate-*` twin is an operator-pending continuation
+/// a person never runs by name.
+fn entry(comptime name: []const u8, comptime kind: Kind, comptime forward: bool, comptime use: Use, comptime label: []const u8, comptime summary: []const u8) weft.CommandEntry {
+    return .{
+        .name = name,
+        .arity = whole,
+        .call = start(kind, forward, use),
+        .summary = summary,
+        .label = if (use == .operate) "" else label,
+        .prompts = use != .operate,
+        .internal = use == .operate,
+    };
 }
 
 const cmds = [_]weft.CommandEntry{
-    entry("snipe.pair-next", .s, true, .move, "snipe forward to two characters"),
-    entry("snipe.pair-prev", .s, false, .move, "snipe backward to two characters"),
-    entry("snipe.till-pair-next", .x, true, .move, "snipe forward to just before two characters"),
-    entry("snipe.till-pair-prev", .x, false, .move, "snipe backward to just after two characters"),
-    entry("snipe.char-next", .f, true, .move, "snipe forward to a character"),
-    entry("snipe.char-prev", .f, false, .move, "snipe backward to a character"),
-    entry("snipe.till-char-next", .t, true, .move, "snipe forward to just before a character"),
-    entry("snipe.till-char-prev", .t, false, .move, "snipe backward to just after a character"),
-    entry("snipe.operate-pair-next", .s, true, .operate, "operate through two characters"),
-    entry("snipe.operate-pair-prev", .s, false, .operate, "operate back to two characters"),
-    entry("snipe.operate-till-pair-next", .x, true, .operate, "operate up to two characters"),
-    entry("snipe.operate-till-pair-prev", .x, false, .operate, "operate back to just after two characters"),
-    entry("snipe.operate-char-next", .f, true, .operate, "operate through a character"),
-    entry("snipe.operate-char-prev", .f, false, .operate, "operate back to a character"),
-    entry("snipe.operate-till-char-next", .t, true, .operate, "operate up to a character"),
-    entry("snipe.operate-till-char-prev", .t, false, .operate, "operate back to just after a character"),
-    .{ .name = "snipe.read-char", .arity = whole, .call = weft.thunk(readChar) },
-    .{ .name = "snipe.backspace", .arity = whole, .call = backspace },
-    .{ .name = "snipe.return", .arity = whole, .call = returnKey },
-    .{ .name = "snipe.cancel", .arity = whole, .call = cancel },
-    .{ .name = "snipe.go", .arity = each, .call = go },
-    .{ .name = "snipe.repeat", .arity = each, .call = repeat(false, .move), .summary = "repeat the last snipe" },
-    .{ .name = "snipe.repeat-reversed", .arity = each, .call = repeat(true, .move), .summary = "repeat the last snipe in the other direction" },
-    .{ .name = "snipe.operate-repeat", .arity = each, .call = repeat(false, .operate), .summary = "operate over the last snipe, repeated" },
-    .{ .name = "snipe.operate-repeat-reversed", .arity = each, .call = repeat(true, .operate), .summary = "operate over the last snipe, reversed" },
+    entry("snipe.pair-next", .s, true, .move, "Snipe Forward", "Snipe forward to the next two characters you type."),
+    entry("snipe.pair-prev", .s, false, .move, "Snipe Backward", "Snipe backward to the previous two characters you type."),
+    entry("snipe.till-pair-next", .x, true, .move, "Snipe Forward Till", "Snipe forward to just before the next two characters you type."),
+    entry("snipe.till-pair-prev", .x, false, .move, "Snipe Backward Till", "Snipe backward to just after the previous two characters you type."),
+    entry("snipe.char-next", .f, true, .move, "Find Character Forward", "Snipe forward to the next character you type."),
+    entry("snipe.char-prev", .f, false, .move, "Find Character Backward", "Snipe backward to the previous character you type."),
+    entry("snipe.till-char-next", .t, true, .move, "Till Character Forward", "Snipe forward to just before the next character you type."),
+    entry("snipe.till-char-prev", .t, false, .move, "Till Character Backward", "Snipe backward to just after the previous character you type."),
+    entry("snipe.operate-pair-next", .s, true, .operate, "", "Operate through the next two characters you type."),
+    entry("snipe.operate-pair-prev", .s, false, .operate, "", "Operate back to the previous two characters you type."),
+    entry("snipe.operate-till-pair-next", .x, true, .operate, "", "Operate up to the next two characters you type."),
+    entry("snipe.operate-till-pair-prev", .x, false, .operate, "", "Operate back to just after the previous two characters you type."),
+    entry("snipe.operate-char-next", .f, true, .operate, "", "Operate through the next character you type."),
+    entry("snipe.operate-char-prev", .f, false, .operate, "", "Operate back to the previous character you type."),
+    entry("snipe.operate-till-char-next", .t, true, .operate, "", "Operate up to the next character you type."),
+    entry("snipe.operate-till-char-prev", .t, false, .operate, "", "Operate back to just after the previous character you type."),
+    .{ .name = "snipe.read-char", .arity = whole, .call = weft.thunk(readChar), .summary = "Add a typed character to the snipe prompt.", .internal = true },
+    .{ .name = "snipe.backspace", .arity = whole, .call = backspace, .summary = "Take the last character back from the snipe prompt.", .internal = true },
+    .{ .name = "snipe.return", .arity = whole, .call = returnKey, .summary = "Search for what the snipe prompt holds, or repeat the last snipe.", .internal = true },
+    .{ .name = "snipe.cancel", .arity = whole, .call = cancel, .summary = "Close the snipe prompt without moving.", .internal = true },
+    .{ .name = "snipe.go", .arity = each, .call = go, .summary = "Perform the requested snipe at each selection.", .internal = true },
+    .{ .name = "snipe.repeat", .arity = each, .call = repeat(false, .move), .summary = "Repeat the last snipe.", .label = "Repeat Snipe" },
+    .{ .name = "snipe.repeat-reversed", .arity = each, .call = repeat(true, .move), .summary = "Repeat the last snipe in the other direction.", .label = "Repeat Snipe Reversed" },
+    .{ .name = "snipe.operate-repeat", .arity = each, .call = repeat(false, .operate), .summary = "Operate over the last snipe, repeated.", .internal = true },
+    .{ .name = "snipe.operate-repeat-reversed", .arity = each, .call = repeat(true, .operate), .summary = "Operate over the last snipe, reversed.", .internal = true },
 };
 
 comptime {

@@ -16,18 +16,18 @@ pub const ScrollCtx = struct { view: *view_mod.View, fb: *[2]u32 };
 /// here beside the handlers; `view.top_row` is the focused pane's scroll.
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, scroll_ctx: *ScrollCtx) !void {
     inline for (.{
-        .{ "scroll.line-down", "Scroll down one line.", scrollLineDown },
-        .{ "scroll.line-up", "Scroll up one line.", scrollLineUp },
-        .{ "scroll.half-page-down", "Scroll down half a page (moves the cursor).", scrollHalfDown },
-        .{ "scroll.half-page-up", "Scroll up half a page (moves the cursor).", scrollHalfUp },
-        .{ "scroll.page-down", "Scroll down a page (moves the cursor).", scrollPageDown },
-        .{ "scroll.page-up", "Scroll up a page (moves the cursor).", scrollPageUp },
-        .{ "scroll.center-line", "Center the current line in the viewport.", centerLine },
-        .{ "scroll.line-to-top", "Scroll the current line to the top of the viewport.", scrollLineToTop },
-        .{ "scroll.line-to-bottom", "Scroll the current line to the bottom of the viewport.", scrollLineToBottom },
-        .{ "scroll.cursor-to-top", "Move the cursor to the viewport's first line.", scrollGotoViewTop },
-        .{ "scroll.cursor-to-middle", "Move the cursor to the viewport's middle line.", scrollGotoViewMiddle },
-        .{ "scroll.cursor-to-bottom", "Move the cursor to the viewport's last line.", scrollGotoViewBottom },
+        .{ "scroll.line-down", "Scroll down one line.", scrollLineDown, "Scroll Line Down" },
+        .{ "scroll.line-up", "Scroll up one line.", scrollLineUp, "Scroll Line Up" },
+        .{ "scroll.half-page-down", "Scroll down half a page, moving the cursor with it.", scrollHalfDown, "Scroll Half Page Down" },
+        .{ "scroll.half-page-up", "Scroll up half a page, moving the cursor with it.", scrollHalfUp, "Scroll Half Page Up" },
+        .{ "scroll.page-down", "Scroll down a page, moving the cursor with it.", scrollPageDown, "Page Down" },
+        .{ "scroll.page-up", "Scroll up a page, moving the cursor with it.", scrollPageUp, "Page Up" },
+        .{ "scroll.center-line", "Scroll so the current line sits in the middle of the window.", centerLine, "Center Line" },
+        .{ "scroll.line-to-top", "Scroll the current line to the top of the window.", scrollLineToTop, "Scroll Line to Top" },
+        .{ "scroll.line-to-bottom", "Scroll the current line to the bottom of the window.", scrollLineToBottom, "Scroll Line to Bottom" },
+        .{ "scroll.cursor-to-top", "Move the cursor to the window's first visible line.", scrollGotoViewTop, "Cursor to Top" },
+        .{ "scroll.cursor-to-middle", "Move the cursor to the window's middle visible line.", scrollGotoViewMiddle, "Cursor to Middle" },
+        .{ "scroll.cursor-to-bottom", "Move the cursor to the window's last visible line.", scrollGotoViewBottom, "Cursor to Bottom" },
     }) |spec| {
         _ = try commands.bind(gpa, spec[0], .{
             .name = spec[0],
@@ -35,6 +35,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
             .args = &.{},
             .handler = spec[2],
             .data = scroll_ctx,
+            .meta = .{ .label = spec[3] },
         });
     }
 }

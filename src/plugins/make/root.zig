@@ -13,11 +13,11 @@ const weft = @import("weft");
 const output = @import("weft_output");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "make.build", .arity = .whole, .call = makeBuild, .summary = "build this project" },
-    .{ .name = "make.test", .arity = .whole, .call = makeTest, .summary = "run this project's tests" },
-    .{ .name = "make.run", .arity = .whole, .call = makeRun, .summary = "run this project" },
-    .{ .name = "make.visit", .arity = .one, .call = output.visit, .summary = "open the location the focused build row names" },
-    .{ .name = "make.open", .arity = .whole, .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
+    .{ .name = "make.build", .arity = .whole, .call = makeBuild, .summary = "Build this project.", .label = "Build Project", .menu = "Run", .group = "make", .order = 1, .icon = "build" },
+    .{ .name = "make.test", .arity = .whole, .call = makeTest, .summary = "Run this project's tests.", .label = "Run Tests", .menu = "Run", .group = "make", .order = 2, .icon = "test" },
+    .{ .name = "make.run", .arity = .whole, .call = makeRun, .summary = "Run this project.", .label = "Run Project", .menu = "Run", .group = "make", .order = 3, .icon = "play" },
+    .{ .name = "make.visit", .arity = .one, .call = output.visit, .summary = "Open the location the focused build row names.", .internal = true },
+    .{ .name = "make.open", .arity = .whole, .call = reopen, .params = "designation", .summary = "Run the build a `weft://here/make/…` designation names.", .internal = true },
 };
 
 fn describeExtra() void {

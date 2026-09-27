@@ -536,17 +536,17 @@ fn cActivateFocusedAction(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 pub const table = [_]command.Command{
-    command.define("pointer.focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
-    command.define("pointer.focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
-    command.define("pointer.click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
-    command.define("pointer.add-selection", "Add a caret (in text) or the row (in a scene) under the pointer to the selection.", cPointerAddSelection),
-    command.define("pointer.drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
-    command.define("pointer.extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
-    command.define("pointer.activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),
-    command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab),
-    command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp),
-    command.define("scroll.wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown),
-    command.define("view.run-focused-action", "Run the action the focused action node names.", cActivateFocusedAction),
+    command.define("pointer.focus-pane", "Focus the pane under the pointer.", cPointerFocusPane).present(.{ .internal = true }),
+    command.define("pointer.focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint).present(.{ .internal = true }),
+    command.define("pointer.click", "Focus the pane under the pointer and act there, placing the caret, focusing a node or running an action.", cPointerClick).present(.{ .internal = true }),
+    command.define("pointer.add-selection", "Add a caret in text, or the row in a scene, under the pointer to the selection.", cPointerAddSelection).present(.{ .internal = true }),
+    command.define("pointer.drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect).present(.{ .internal = true }),
+    command.define("pointer.extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection).present(.{ .internal = true }),
+    command.define("pointer.activate", "Activate the node under the pointer, running its action or opening its target.", cPointerActivate).present(.{ .internal = true }),
+    command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab).present(.{ .internal = true }),
+    command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp).present(.{ .internal = true }),
+    command.define("scroll.wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown).present(.{ .internal = true }),
+    command.define("view.run-focused-action", "Run the action the focused action node names.", cActivateFocusedAction).present(.{ .internal = true }),
 };
 
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands) !void {

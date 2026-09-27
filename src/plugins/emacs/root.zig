@@ -86,16 +86,16 @@ fn yank() void {
 
 // ── Command table (registration order == on_command id) ──
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "emacs.line-start", .arity = weft.Arity.each_extent, .call = beginningOfLine },
-    .{ .name = "emacs.line-end", .arity = weft.Arity.each_extent, .call = endOfLine },
-    .{ .name = "emacs.doc-start", .arity = weft.Arity.each_extent, .call = beginningOfBuffer },
-    .{ .name = "emacs.doc-end", .arity = weft.Arity.each_extent, .call = endOfBuffer },
-    .{ .name = "emacs.word-next", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-next") },
-    .{ .name = "emacs.word-prev", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-prev") },
-    .{ .name = "emacs.kill-line", .arity = weft.Arity.each_extent, .call = killLine },
-    .{ .name = "emacs.kill-region", .arity = weft.Arity.each_extent, .call = killRegion },
-    .{ .name = "emacs.copy-region", .arity = weft.Arity.each_extent, .call = copyRegion },
-    .{ .name = "emacs.yank", .arity = weft.Arity.each_extent, .call = yank },
+    .{ .name = "emacs.line-start", .arity = weft.Arity.each_extent, .call = beginningOfLine, .summary = "Move to the beginning of the line.", .label = "Beginning of Line" },
+    .{ .name = "emacs.line-end", .arity = weft.Arity.each_extent, .call = endOfLine, .summary = "Move to the end of the line.", .label = "End of Line" },
+    .{ .name = "emacs.doc-start", .arity = weft.Arity.each_extent, .call = beginningOfBuffer, .summary = "Move to the beginning of the buffer.", .label = "Beginning of Buffer" },
+    .{ .name = "emacs.doc-end", .arity = weft.Arity.each_extent, .call = endOfBuffer, .summary = "Move to the end of the buffer.", .label = "End of Buffer" },
+    .{ .name = "emacs.word-next", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-next"), .summary = "Move forward a word.", .label = "Forward Word" },
+    .{ .name = "emacs.word-prev", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-prev"), .summary = "Move backward a word.", .label = "Backward Word" },
+    .{ .name = "emacs.kill-line", .arity = weft.Arity.each_extent, .call = killLine, .summary = "Kill from the cursor to the end of the line.", .label = "Kill Line" },
+    .{ .name = "emacs.kill-region", .arity = weft.Arity.each_extent, .call = killRegion, .summary = "Kill the region between the mark and the cursor.", .label = "Kill Region" },
+    .{ .name = "emacs.copy-region", .arity = weft.Arity.each_extent, .call = copyRegion, .summary = "Copy the region between the mark and the cursor without deleting it.", .label = "Copy Region" },
+    .{ .name = "emacs.yank", .arity = weft.Arity.each_extent, .call = yank, .summary = "Paste the most recently killed text at the cursor.", .label = "Yank" },
 };
 
 fn initExtra() void {

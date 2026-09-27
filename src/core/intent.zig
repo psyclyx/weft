@@ -683,15 +683,29 @@ pub fn primaryScopeOf(ctx: *command.Context) ?Scope {
     };
 }
 
-/// How to present `c`: what its provider declared, completed from the
-/// intention table (a std intention's label, its package as the group, its
-/// table position as the order) and, for anything else, from its name. A UI
-/// therefore always has a label and a group, and "missing placement metadata
-/// never hides an action" (§11.3) holds by construction.
-pub fn presentation(cat: *const Catalog, c: catalog_mod.Candidate) catalog_mod.Affordance {
+/// How to present `c`: what its provider declared; then what the COMMAND the
+/// offer runs says about itself (doc/chrome.md §1.2 — an offer's presentation
+/// defaults from its command's), read through its invoker when `ctx` is
+/// given; then the intention table (a std intention's label, its package as
+/// the group, its table position as the order) and, for anything else, its
+/// name. A UI therefore always has a label and a group, and "missing
+/// placement metadata never hides an action" (§11.3) holds by construction.
+pub fn presentation(plane: *const Plane, ctx: ?*command.Context, c: catalog_mod.Candidate) catalog_mod.Affordance {
+    const cat = &plane.catalog;
     const name = cat.intentionName(c.intention);
     const known = intentions.find(name);
     var out = c.affordance;
+    if (ctx) |live| if (plane.invokers.commandOf(live, c.endpoint)) |runs| {
+        // The label and the icon only: a command's `group`/`order` place it
+        // in a MENU, and a toolbar clusters offers by what they do here —
+        // the intention's package — not by where a menubar files them.
+        // A std intention keeps the vocabulary's word (`Paste`, not the
+        // provider's `Paste After`): the offer IS the intention.
+        if (@import("presentations.zig").of(live, runs)) |own| {
+            if (out.label.len == 0 and known == null) out.label = own.label;
+            if (out.icon.len == 0) out.icon = own.icon;
+        }
+    };
     if (out.label.len == 0) out.label = if (known) |k| k.intention.label else lastSegment(name);
     if (out.group.len == 0) out.group = packageOf(name);
     if (out.order == null) if (known) |k| {
@@ -975,7 +989,7 @@ test "intent: presentation completes what a provider left unsaid from the intent
     const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 1 });
 
     const undo = plane.catalog.findIntention("std.history.undo").?;
-    const shown = presentation(&plane.catalog, snap.offersFor(undo)[0]);
+    const shown = presentation(&plane, null, snap.offersFor(undo)[0]);
     try t.expectEqualStrings("Undo", shown.label);
     try t.expectEqualStrings("history", shown.group);
     try t.expect(shown.order != null);
@@ -984,14 +998,14 @@ test "intent: presentation completes what a provider left unsaid from the intent
     // from its name and grouped by its plugin.
     var c = snap.offersFor(undo)[0];
     c.affordance = .{ .label = "Take back", .order = 3 };
-    const over = presentation(&plane.catalog, c);
+    const over = presentation(&plane, null, c);
     try t.expectEqualStrings("Take back", over.label);
     try t.expectEqualStrings("history", over.group);
     try t.expectEqual(@as(?i32, 3), over.order);
 
     c.intention = try plane.catalog.intention("plugin.git.stage");
     c.affordance = .{};
-    const plugin_row = presentation(&plane.catalog, c);
+    const plugin_row = presentation(&plane, null, c);
     try t.expectEqualStrings("stage", plugin_row.label);
     try t.expectEqualStrings("git", plugin_row.group);
     try t.expectEqual(@as(?i32, null), plugin_row.order);
