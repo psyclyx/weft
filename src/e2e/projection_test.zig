@@ -234,6 +234,67 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
     app.proj.shot(ed, "projection-outline");
 }
 
+test "e2e/projection: two viewports on two entries' symbols each keep their own tree" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{app.proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, app.loader.loader(), &ed.config_kv, config_dir, "weft.use(\"outline\");");
+
+    try ide.openFile(ed, "shapes.zig", "const Point = struct {\n    fn norm(self: Point) u32 {\n        return 0;\n    }\n};\n");
+    try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
+    try ide.openFile(ed, "tools.zig", "fn hammer() void {}\nfn saw() void {}\n");
+    try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
+
+    // A second viewport pinned to shapes.zig's symbols, beside the outline
+    // that follows the editor (on tools.zig).
+    var buf: [4096]u8 = undefined;
+    const shapes = under(&app.proj, &buf, "file", "/shapes.zig");
+    const viewports = &ed.session.system.viewports;
+    try viewports.declare(gpa, "pinned-symbols", .{ .dock = .top, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 6 });
+    try viewports.present(gpa, "pinned-symbols", .{ .subject = .{ .text = shapes }, .as = "symbols" });
+    ed.applyWindow();
+    ed.applyWindow();
+
+    const outline = ed.win_layout.dockedPanel(.right) orelse return error.NoOutline;
+    const pinned = ed.win_layout.dockedPanel(.top) orelse return error.NoPinned;
+    const follows = try paneEntry(ed, outline);
+    const fixed = try paneEntry(ed, pinned);
+    try t.expect(follows.id != fixed.id);
+    try t.expect(std.mem.endsWith(u8, follows.designationText(), "/tools.zig"));
+    try t.expect(std.mem.endsWith(u8, fixed.designationText(), "/shapes.zig"));
+    {
+        const text = try ed.semanticText(fixed.scene_selection.view orelse return error.NoPinnedView);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "Point") != null);
+        try t.expect(std.mem.indexOf(u8, text, "hammer") == null);
+    }
+    {
+        const text = try ed.semanticText(follows.scene_selection.view orelse return error.NoOutlineView);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "hammer") != null);
+        try t.expect(std.mem.indexOf(u8, text, "Point") == null);
+    }
+    // Another frame presents neither again.
+    const ids = .{ follows.id, fixed.id };
+    ed.applyWindow();
+    try t.expectEqual(ids[0], outline.pane().buffer_id);
+    try t.expectEqual(ids[1], pinned.pane().buffer_id);
+
+    // A row of the pinned tree jumps to ITS subject, not the followed one.
+    const view = try ed.ensureView();
+    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
+        if (m.pane == pinned.pane().id and m.hits.len > 0) break m.hits[0];
+    } else return error.PinnedNotDrawn;
+    ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    ed.press("Return", "");
+    ed.applyWindow();
+    try t.expectEqualStrings(shapes, ed.buffers.get(ed.win_layout.primaryPane().?.pane().buffer_id).?.designationText());
+}
+
 /// How deep the outline row named `name` sits (its `depth` fact).
 fn symbolDepth(ed: *Editor, view: semantic_model.view.Ref, name: []const u8) ?[]const u8 {
     const instance = ed.session.system.semantic.views.get(view) orelse return null;
@@ -381,6 +442,18 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     const primary = b.win_layout.primaryPane() orelse return error.NoPrimaryPane;
     try t.expectEqual(primary, window_layout.headFocus(b.win_layout, b.head));
     proj.shot(&b, "projection-sidebar-peer");
+
+    // The peer's place has no local directory: its problems list is
+    // refused by name, never every diagnostic in the workspace standing in.
+    b.run("problems");
+    b.applyWindow();
+    {
+        var it = b.buffers.iterator();
+        while (it.next()) |entry| {
+            try t.expect(!std.mem.startsWith(u8, entry.designationText(), "weft://here/diagnostics/"));
+        }
+    }
+    try t.expectEqualStrings(file_designation, b.buffers.active().designationText());
 
     // The places projection lists every place worked in — both local
     // projects and the peer's tree — as rows that open it.

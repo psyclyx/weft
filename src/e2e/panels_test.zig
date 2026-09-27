@@ -147,6 +147,64 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     try t.expectEqualStrings("*problems*", panelEntry(ed).?.name);
 }
 
+test "e2e/panels: two viewports on two places' diagnostics each keep their own list, and neither re-runs the other" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "q.txt", "one\ntwo\n");
+    try h.loadDiagfeed(ed);
+    try ed.setConfig("problems", "source", "diagfeed-list");
+    const rows = try std.fmt.allocPrint(gpa, "{s}/p.zig\t1\t1\terror\tin the project\n{s}/other/x.zig\t1\t1\terror\tin other\n", .{ app.proj.root, app.proj.root });
+    defer gpa.free(rows);
+    ed.runStr("diagfeed-set", rows);
+
+    var a_buf: [4096]u8 = undefined;
+    var b_buf: [4096]u8 = undefined;
+    const a = try std.fmt.bufPrint(&a_buf, "weft://here/diagnostics/{s}", .{app.proj.root[1..]});
+    const b = try std.fmt.bufPrint(&b_buf, "weft://here/diagnostics/{s}/other", .{app.proj.root[1..]});
+    const viewports = &ed.session.system.viewports;
+    try viewports.declare(gpa, "diag-a", .{ .dock = .top, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 6 });
+    try viewports.declare(gpa, "diag-b", .{ .dock = .right, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 30 });
+    try viewports.present(gpa, "diag-a", .{ .subject = .{ .text = a } });
+    try viewports.present(gpa, "diag-b", .{ .subject = .{ .text = b } });
+    ed.runStr("open", "q.txt");
+    ed.applyWindow();
+    ed.applyWindow();
+
+    const pane_a = ed.win_layout.dockedPanel(.top) orelse return error.NoPaneA;
+    const pane_b = ed.win_layout.dockedPanel(.right) orelse return error.NoPaneB;
+    const entry_a = ed.buffers.get(pane_a.pane().buffer_id) orelse return error.NoEntryA;
+    const entry_b = ed.buffers.get(pane_b.pane().buffer_id) orelse return error.NoEntryB;
+    // One entry per place: each designated by what its viewport presents.
+    try t.expect(entry_a.id != entry_b.id);
+    try t.expectEqualStrings(a, entry_a.designationText());
+    try t.expectEqualStrings(b, entry_b.designationText());
+    {
+        const text = try ed.semanticText(entry_b.scene_selection.view orelse return error.NoViewB);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "in other") != null);
+        try t.expect(std.mem.indexOf(u8, text, "in the project") == null);
+    }
+    {
+        const text = try ed.semanticText(entry_a.scene_selection.view orelse return error.NoViewA);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "in the project") != null);
+    }
+
+    // The signal refreshes both, and another frame presents neither again.
+    const ids = .{ entry_a.id, entry_b.id };
+    ed.runStr("diagfeed-set", rows);
+    ed.applyWindow();
+    ed.applyWindow();
+    try t.expectEqual(ids[0], pane_a.pane().buffer_id);
+    try t.expectEqual(ids[1], pane_b.pane().buffer_id);
+    try t.expectEqualStrings(a, ed.buffers.get(ids[0]).?.designationText());
+    try t.expectEqualStrings(b, ed.buffers.get(ids[1]).?.designationText());
+}
+
 test "e2e/panels: C-` runs a line-mode shell in the panel, with its controls stripped, and C-j hides and shows it" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
