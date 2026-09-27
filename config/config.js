@@ -156,6 +156,11 @@ weft.use("defaults");
 // quarter of every frame, which is a workspace opinion the reference config
 // declines to hold for you.
 // weft.use("sidebar");
+// The same goes for a menubar (config/menubar.js): File, Edit, … with the
+// key that runs each row in vim beside it (`SPC f S` for Save As…). The
+// palette (SPC :) and which-key are this config's discovery surfaces; one
+// line adds the bar, and F10 or Alt with a title's letter opens it.
+// weft.use("menubar");
 
 // `panel` docks a bottom panel that starts hidden: the problems list and the
 // terminal each bring themselves into it (SPC o p, SPC o t), one at a time.
@@ -238,6 +243,9 @@ weft.bind("global", "F1", "which-key.show"); // force the hint now, mid-chord
 // in any mode, vim's included: the menu's own keys (Up/Down/Return/Escape)
 // are its interaction's, not a mode.
 weft.bind("global", "mouse-3", "offers.menu");
+// …and S-F10 or the Menu key the focused context's, at the caret.
+weft.bind("global", "S-F10", "offers.menu-at-caret");
+weft.bind("global", "Menu", "offers.menu-at-caret");
 
 // The keymap derives groups from longer chords. Give those prefixes names for
 // which-key; an unnamed prefix intentionally falls back to "+prefix".

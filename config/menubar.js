@@ -36,8 +36,8 @@ weft.present("menubar", { subject: "weft://here/menu/main", as: "menubar" });
 
 // The keys. `global`, so they reach every mode that has not claimed them.
 weft.bind("global", "F10", "menu.focus-bar");
-for (const letter of ["f", "e", "s", "v", "g", "r", "t", "h"])
-  weft.bind("global", "M-" + letter, "menu.open-" + letter);
+for (const title of ["file", "edit", "selection", "view", "go", "run", "terminal", "help"])
+  weft.bind("global", "M-" + title[0], "menu.open-" + title);
 
 // Rows that run a command WITH an argument (`Path\tLabel\tcommand arg\t
 // toggle\tgroup\torder`): showing and hiding the bar itself. A config that

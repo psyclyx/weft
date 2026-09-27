@@ -78,19 +78,29 @@ const default_groups = [_][2][]const u8{
 /// palette asks them.
 const asker = invoke.Invoker(.{ .name = "menu.arg" });
 
-/// `menu.open-<letter>`: Alt with a menubar title's letter, one command per
-/// letter so a config binds `M-f` to `menu.open-f` (a key names a command,
-/// not a call).
-const letters = "abcdefghijklmnopqrstuvwxyz";
-const open_cmds: [letters.len]weft.CommandEntry = blk: {
-    var arr: [letters.len]weft.CommandEntry = undefined;
-    for (letters, 0..) |ch, i| {
+/// `menu.open-file`, `menu.open-edit`, …: one command per conventional menu,
+/// what a config binds Alt with its letter to (`M-f`) — a key names a
+/// command, not a call, and a person can run "File Menu" from the palette
+/// too. A menu a config adds opens from the bar itself (F10, then its letter).
+const open_cmds: [default_menus.len]weft.CommandEntry = blk: {
+    var arr: [default_menus.len]weft.CommandEntry = undefined;
+    for (default_menus, 0..) |title_label, i| {
         const Opener = struct {
             fn call() void {
-                openByLetter(letters[i]);
+                openByTitle(default_menus[i]);
             }
         };
-        arr[i] = .{ .name = "menu.open-" ++ [_]u8{ch}, .call = Opener.call, .arity = .whole, .summary = "Open the menubar menu whose title has this letter underlined.", .internal = true };
+        var lower: [title_label.len]u8 = undefined;
+        for (title_label, 0..) |ch, k| lower[k] = std.ascii.toLower(ch);
+        const spelled = lower;
+        arr[i] = .{
+            .name = "menu.open-" ++ spelled,
+            .call = Opener.call,
+            .arity = .whole,
+            .summary = "Open the " ++ title_label ++ " menu, its first row lit for the keyboard.",
+            .label = title_label ++ " Menu",
+            .icon = "list",
+        };
     }
     break :blk arr;
 };
@@ -131,23 +141,39 @@ const Run = struct {
     index: ?usize,
 };
 
-const Title = struct { label: []const u8, entries: []const Entry };
+/// A menu of the bar: its rows, read the first time it opens — how each
+/// stands (enabled, its key, its check) is a question per row, so only the
+/// menu a person opens pays for it.
+const Title = struct { label: []const u8, entries: ?[]const Entry = null };
 
 const Model = struct {
     arena: std.heap.ArenaAllocator,
-    titles: []const Title = &.{},
+    titles: []Title = &.{},
+    rows: []const Pending = &.{},
     runs: std.ArrayList(Run) = .empty,
 };
 
 var model: ?Model = null;
 
-/// One row before it is placed: where it goes and how it sorts.
+/// One row before it is placed: where it goes, how it sorts, and the
+/// context key its check reads.
 const Pending = struct {
     path: []const u8,
     entry: Entry,
     group: []const u8,
     order: ?i32,
+    toggle: []const u8 = "",
 };
+
+/// Title `i`'s rows, read now if this is the first time it opens.
+fn entriesOf(i: usize) []const Entry {
+    const m = &(model orelse return &.{});
+    if (i >= m.titles.len) return &.{};
+    if (m.titles[i].entries) |e| return e;
+    const built = build(m.arena.allocator(), m.rows, m.titles[i].label) catch &.{};
+    m.titles[i].entries = built;
+    return built;
+}
 
 fn dropModel() void {
     if (model) |*m| m.arena.deinit();
@@ -190,7 +216,7 @@ fn buildModel(m: *Model) !void {
         const icon = try a.dupe(u8, meta.icon);
         const toggle = try a.dupe(u8, meta.toggle);
         try m.runs.append(a, .{ .invocation = name, .index = i });
-        try rows.append(a, .{ .path = path, .group = group, .order = meta.order, .entry = try row(a, label, name, icon, toggle, m.runs.items.len - 1) });
+        try rows.append(a, .{ .path = path, .group = group, .order = meta.order, .toggle = toggle, .entry = .{ .label = label, .name = name, .icon = icon, .tag = @intCast(m.runs.items.len - 1) } });
     }
     // Config's own rows.
     if (weft.configList("items")) |list| {
@@ -207,18 +233,22 @@ fn buildModel(m: *Model) !void {
             if (path.len == 0 or invocation.len == 0 or !hasTitle(titles.items, topOf(path))) continue;
             try m.runs.append(a, .{ .invocation = invocation, .index = null });
             const name = invocation[0 .. std.mem.indexOfScalar(u8, invocation, ' ') orelse invocation.len];
-            try rows.append(a, .{ .path = path, .group = group, .order = order, .entry = try row(a, label, name, "", toggle, m.runs.items.len - 1) });
+            try rows.append(a, .{ .path = path, .group = group, .order = order, .toggle = toggle, .entry = .{ .label = label, .name = name, .tag = @intCast(m.runs.items.len - 1) } });
         }
     }
 
     const out = try a.alloc(Title, titles.items.len);
-    for (titles.items, out) |title, *t| t.* = .{ .label = title, .entries = try build(a, rows.items, title) };
+    for (titles.items, out) |title, *t| t.* = .{ .label = title };
     m.titles = out;
+    m.rows = try rows.toOwnedSlice(a);
 }
 
-/// One leaf row, as it stands in the primary context now.
-fn row(a: std.mem.Allocator, label: []const u8, name: []const u8, icon: []const u8, toggle: []const u8, tag: usize) !Entry {
-    var entry: Entry = .{ .label = label, .name = name, .icon = icon, .tag = @intCast(tag) };
+/// A leaf row as it stands in the primary context now: whether it can run
+/// there, its key there, and its check.
+fn stand(a: std.mem.Allocator, p: Pending) !Entry {
+    var entry = p.entry;
+    const name = entry.name;
+    const toggle = p.toggle;
     if (weft.commandAt(.primary, name)) |s| {
         entry.reason = try a.dupe(u8, s.reason);
         entry.keys = try a.dupe(u8, s.firstKey());
@@ -253,7 +283,9 @@ fn build(a: std.mem.Allocator, rows: []const Pending, path: []const u8) ![]const
     var subs: std.ArrayList([]const u8) = .empty;
     for (rows) |r| {
         if (std.mem.eql(u8, r.path, path)) {
-            try here.append(a, r);
+            var stood = r;
+            stood.entry = try stand(a, r);
+            try here.append(a, stood);
             continue;
         }
         if (r.path.len <= path.len + 1 or !std.mem.startsWith(u8, r.path, path) or r.path[path.len] != '/') continue;
@@ -464,11 +496,15 @@ fn focusBar() void {
     startInteraction();
 }
 
-/// Alt with a letter: that title's menu, dropped down and lit from the keys.
-fn openByLetter(ch: u8) void {
+/// Alt with a title's letter: that menu, dropped down and lit from the keys
+/// (at the caret when no menubar is shown).
+fn openByTitle(label: []const u8) void {
     closeAll();
     readModel();
-    const i = titleByLetter(ch) orelse return;
+    const m = model orelse return;
+    const i = for (m.titles, 0..) |t, i| {
+        if (std.mem.eql(u8, t.label, label)) break i;
+    } else return weft.echo("menu: no such menu here");
     if (!barShown()) return openAtCaret(i);
     openTitle(i, true);
 }
@@ -490,7 +526,7 @@ fn openTitle(i: usize, keyboard: bool) void {
     if (!was_open) open = .{};
     const o = &open.?;
     o.bar = i;
-    o.cascade = .open(m.titles[i].entries, keyboard);
+    o.cascade = .open(entriesOf(i), keyboard);
     if (!was_open) return startInteraction();
     publishDrop() catch return closeAll();
     publishBar() catch {};
@@ -503,7 +539,7 @@ fn openAtCaret(sub: ?usize) void {
     closeInteraction();
     const a = model.?.arena.allocator();
     const roots = a.alloc(Entry, m.titles.len) catch return;
-    for (m.titles, roots) |t, *e| e.* = .{ .label = t.label, .children = t.entries };
+    for (m.titles, roots, 0..) |t, *e, i| e.* = .{ .label = t.label, .children = entriesOf(i) };
     open = .{ .cascade = .open(roots, true) };
     const o = &open.?;
     if (sub) |i| {

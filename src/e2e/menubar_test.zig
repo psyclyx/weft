@@ -240,6 +240,12 @@ test "e2e/menubar: a click drops File beneath its title — rows in order, rules
     // The same click again closes it.
     try clickTitle(ed, "File");
     try t.expect(ed.head.interactions.active() == null);
+
+    // The same menu in the text style: a clean cell box.
+    ed.runStr("theme.set-chrome", "text");
+    try clickTitle(ed, "File");
+    try expectKeys(try menu(ed), "Save", "C-s");
+    shot(&app, "menubar-file-ide-text");
 }
 
 /// config.js with the menubar fragment: the vim grammar's editor.
@@ -425,6 +431,30 @@ test "e2e/menubar: Alt+F opens File from the keys, Enter runs in the primary con
     try t.expectEqualStrings("one!\n", disk);
     try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
     try t.expect(ed.buffers.get(editor) != null);
+
+    // The same by the arrows: Down to Save, Return. An edit made in the
+    // editor since is written, still from the sidebar.
+    const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
+    ed.click(ed.pointAtIn(primary.pane().id, 1) orelse return error.EditorNotDrawn);
+    ed.applyWindow();
+    try t.expectEqual(editor, ed.buffers.active_id);
+    ed.press("End", "");
+    ed.typeText("?");
+    ed.click(centre(first_row));
+    ed.applyWindow();
+    try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
+    ed.press("M-f", "");
+    for (0..20) |_| {
+        if (std.mem.eql(u8, litLabel(try menu(ed)).?, "Save")) break;
+        ed.press("Down", "");
+    }
+    try t.expectEqualStrings("Save", litLabel(try menu(ed)).?);
+    ed.press("Return", "");
+    try t.expect(ed.head.interactions.active() == null);
+    const again = try core.file.readAlloc(gpa, "k.txt");
+    defer gpa.free(again);
+    try t.expectEqualStrings("one!?\n", again);
+    try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
 
     // Arrows: Down walks the rows, Right moves on to Edit, Left back.
     ed.press("M-f", "");

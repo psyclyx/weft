@@ -64,6 +64,7 @@ weft.plugin("acp.js");
 weft.use("defaults"); // picker and which-key navigation keys
 weft.use("semantic"); // SPC v, bound into helix-structural (and vim's layer)
 weft.use("panel");    // a hidden bottom panel the problems list and terminal take
+// weft.use("menubar"); // File, Edit, … with helix's keys beside each row (F10, Alt+letter)
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
