@@ -1,0 +1,348 @@
+//! The OPEN half of context (doc/model.md §2.5): keyed string values any
+//! plugin may publish at a scope, resolved most-specific-wins over the stack
+//! entry → place → global.
+//!
+//! Core computes a handful of keys it alone can answer (`entry`, `place`,
+//! `mode`, `posture`, `locality`, `lang`, `tool`, `role`, `offers`), and those
+//! stay typed fields of `Facts`. Everything else — "a REPL is connected
+//! here", "this project has a test runner" — used to have nowhere to live:
+//! `Facts` was a closed struct, so a plugin that knew something about a
+//! context could only act on it, never SAY it where a predicate could read
+//! it. This is where it says it.
+//!
+//! Two rules make the space safe to leave open:
+//!
+//!   - **A published key is namespaced** (`repl.session`): it contains a dot,
+//!     and every builtin key has none. A plugin therefore cannot shadow a
+//!     builtin — not by policy, but because no builtin name passes
+//!     `isPublishableKey`. Core names no plugin key, and no plugin can name a
+//!     core one.
+//!   - **A key at a scope has one owner.** The first plugin to publish
+//!     `(scope, key)` holds it until it retracts or unloads; a second
+//!     plugin's write is refused (`error.Held`), never silently merged or
+//!     raced. Resolution therefore cannot depend on load order.
+//!
+//! Values are strings, because the values worth publishing are names — and a
+//! durable name for content is a designation, which is a string
+//! (`weft://here/proc/7`).
+//!
+//! `std` is the only import, for the same reason as `root.zig`'s: `Facts`
+//! carries a reader into this store, and `Facts` must compile wherever any
+//! plane runs.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+/// The keys core computes. A predicate or a reader may name them like any
+/// other key (`Facts.get` answers them from the typed fields); a plugin can
+/// never publish one — none contains a dot.
+pub const builtin_keys = [_][]const u8{ "entry", "place", "mode", "posture", "locality", "lang", "tool", "role", "offers" };
+
+pub const max_key_len = 64;
+/// Long enough for any designation a value is expected to be.
+pub const max_value_len = 2048;
+
+pub fn isBuiltinKey(key: []const u8) bool {
+    for (builtin_keys) |b| if (std.mem.eql(u8, b, key)) return true;
+    return false;
+}
+
+/// A key a plugin may publish: 1..`max_key_len` bytes of `[a-z0-9_-]`
+/// segments joined by dots, at least two segments. The dot is the namespace,
+/// and its presence is what keeps every builtin (none has one) out of reach.
+pub fn isPublishableKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > max_key_len) return false;
+    var dots: usize = 0;
+    var prev_dot = true; // a leading dot is an empty segment
+    for (key) |c| {
+        switch (c) {
+            'a'...'z', '0'...'9', '_', '-' => prev_dot = false,
+            '.' => {
+                if (prev_dot) return false;
+                dots += 1;
+                prev_dot = true;
+            },
+            else => return false,
+        }
+    }
+    return dots > 0 and !prev_dot;
+}
+
+/// A key a reader or predicate may name: a builtin or a publishable key.
+/// Anything else is a spelling mistake, refused where it is written rather
+/// than matching nothing forever.
+pub fn isKeyName(key: []const u8) bool {
+    return isBuiltinKey(key) or isPublishableKey(key);
+}
+
+/// Which level of the stack a value is published at. The wire value is the
+/// integer (`wl_context_set`'s last argument).
+pub const ScopeKind = enum(u32) { entry = 0, place = 1, global = 2 };
+
+/// A publication's coordinate. The host packs its identities into these
+/// integers exactly (no hashing): an entry is its generation, unique for the
+/// life of the process and never reused; a place is its identity fields.
+pub const Scope = union(ScopeKind) {
+    entry: u64,
+    place: u128,
+    global,
+
+    pub fn eql(a: Scope, b: Scope) bool {
+        return switch (a) {
+            .entry => |e| b == .entry and b.entry == e,
+            .place => |p| b == .place and b.place == p,
+            .global => b == .global,
+        };
+    }
+
+    /// How specific: an entry says more than its place, a place more than
+    /// the workspace. Higher wins.
+    fn rank(self: Scope) u8 {
+        return switch (self) {
+            .entry => 2,
+            .place => 1,
+            .global => 0,
+        };
+    }
+};
+
+/// WHERE a question is asked: the entry (0 = none) and the place it is in.
+/// Every value whose scope covers these coordinates is a candidate.
+pub const At = struct {
+    entry: u64 = 0,
+    place: u128 = 0,
+
+    fn covers(self: At, s: Scope) bool {
+        return switch (s) {
+            .entry => |e| e != 0 and e == self.entry,
+            .place => |p| p == self.place,
+            .global => true,
+        };
+    }
+};
+
+const Value = struct {
+    owner: []u8,
+    scope: Scope,
+    key: []u8,
+    value: []u8,
+
+    fn free(self: Value, gpa: Allocator) void {
+        gpa.free(self.owner);
+        gpa.free(self.key);
+        gpa.free(self.value);
+    }
+};
+
+pub const SetError = error{
+    /// Not a publishable key (see `isPublishableKey`).
+    BadKey,
+    /// Longer than `max_value_len`.
+    BadValue,
+    /// Another owner already publishes this key at this scope.
+    Held,
+} || Allocator.Error;
+
+pub const Store = struct {
+    gpa: Allocator,
+    values: std.ArrayList(Value) = .empty,
+    /// Bumps on every change that could move a resolution — a cache key for
+    /// anything that folds the open context into a signature.
+    revision: u64 = 0,
+
+    pub fn init(gpa: Allocator) Store {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *Store) void {
+        for (self.values.items) |v| v.free(self.gpa);
+        self.values.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    fn find(self: *const Store, scope: Scope, key: []const u8) ?usize {
+        for (self.values.items, 0..) |v, i| {
+            if (v.scope.eql(scope) and std.mem.eql(u8, v.key, key)) return i;
+        }
+        return null;
+    }
+
+    fn removeAt(self: *Store, i: usize) void {
+        self.values.orderedRemove(i).free(self.gpa);
+        self.revision += 1;
+    }
+
+    /// Publish `value` for `key` at `scope`, as `owner`. An EMPTY value
+    /// retracts — "nothing is true here" is absence, not an empty claim.
+    /// Returns whether anything changed.
+    pub fn set(self: *Store, owner: []const u8, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
+        if (!isPublishableKey(key)) return error.BadKey;
+        if (value.len > max_value_len) return error.BadValue;
+        if (self.find(scope, key)) |i| {
+            const held = &self.values.items[i];
+            if (!std.mem.eql(u8, held.owner, owner)) return error.Held;
+            if (value.len == 0) {
+                self.removeAt(i);
+                return true;
+            }
+            if (std.mem.eql(u8, held.value, value)) return false;
+            const copy = try self.gpa.dupe(u8, value);
+            self.gpa.free(held.value);
+            held.value = copy;
+            self.revision += 1;
+            return true;
+        }
+        if (value.len == 0) return false;
+        const owned_owner = try self.gpa.dupe(u8, owner);
+        errdefer self.gpa.free(owned_owner);
+        const owned_key = try self.gpa.dupe(u8, key);
+        errdefer self.gpa.free(owned_key);
+        const owned_value = try self.gpa.dupe(u8, value);
+        errdefer self.gpa.free(owned_value);
+        try self.values.append(self.gpa, .{ .owner = owned_owner, .scope = scope, .key = owned_key, .value = owned_value });
+        self.revision += 1;
+        return true;
+    }
+
+    /// Retract everything `owner` published — what unloading a plugin does,
+    /// so a value can never outlive the code that knew it was true.
+    pub fn retractOwner(self: *Store, owner: []const u8) usize {
+        var n: usize = 0;
+        var i = self.values.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.values.items[i].owner, owner)) {
+                self.removeAt(i);
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// The winning value for `key` at `at`: the most specific scope that
+    /// covers it. Null when nothing is published there.
+    pub fn get(self: *const Store, at: At, key: []const u8) ?[]const u8 {
+        var best: ?*const Value = null;
+        for (self.values.items) |*v| {
+            if (!at.covers(v.scope) or !std.mem.eql(u8, v.key, key)) continue;
+            if (best == null or v.scope.rank() > best.?.scope.rank()) best = v;
+        }
+        return if (best) |b| b.value else null;
+    }
+
+    /// Visit every key resolved at `at`, once each, with its winning value.
+    pub fn each(self: *const Store, at: At, context: anytype, comptime visit: fn (@TypeOf(context), []const u8, []const u8) void) void {
+        for (self.values.items, 0..) |v, i| {
+            if (!at.covers(v.scope)) continue;
+            // Visit a key once: at its first covering occurrence.
+            const first = for (self.values.items[0..i]) |prior| {
+                if (at.covers(prior.scope) and std.mem.eql(u8, prior.key, v.key)) break false;
+            } else true;
+            if (!first) continue;
+            visit(context, v.key, self.get(at, v.key).?);
+        }
+    }
+};
+
+/// A reader into a store at fixed coordinates — what `Facts.context` holds.
+/// Absent (no store) means "this caller did not say", which the reflective
+/// `Facts.merge` reads through `present`.
+pub const Open = struct {
+    store: ?*const Store = null,
+    at: At = .{},
+
+    pub fn present(self: Open) bool {
+        return self.store != null;
+    }
+
+    pub fn get(self: Open, key: []const u8) ?[]const u8 {
+        const s = self.store orelse return null;
+        return s.get(self.at, key);
+    }
+
+    /// Moves whenever a resolution through this reader could: the store's
+    /// revision and the coordinates. For signatures and catalog clocks — a
+    /// fact a cache key omits changes resolution without invalidating it.
+    pub fn digest(self: Open) u64 {
+        const s = self.store orelse return 0;
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&s.revision));
+        h.update(std.mem.asBytes(&self.at.entry));
+        h.update(std.mem.asBytes(&self.at.place));
+        return h.final();
+    }
+};
+
+const t = std.testing;
+
+test "context: the most specific scope wins, and each scope is only seen where it covers" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    _ = try s.set("a", .global, "x.k", "global");
+    _ = try s.set("a", .{ .place = 7 }, "x.k", "place");
+    _ = try s.set("a", .{ .entry = 3 }, "x.k", "entry");
+
+    try t.expectEqualStrings("entry", s.get(.{ .entry = 3, .place = 7 }, "x.k").?);
+    // Another entry in the same place sees the place's value…
+    try t.expectEqualStrings("place", s.get(.{ .entry = 4, .place = 7 }, "x.k").?);
+    // …another place sees the workspace's…
+    try t.expectEqualStrings("global", s.get(.{ .entry = 4, .place = 8 }, "x.k").?);
+    // …and an entry value never leaks to an entryless question.
+    try t.expectEqualStrings("place", s.get(.{ .place = 7 }, "x.k").?);
+    try t.expectEqual(@as(?[]const u8, null), s.get(.{}, "y.k"));
+
+    // Retracting the entry's value uncovers the place's.
+    _ = try s.set("a", .{ .entry = 3 }, "x.k", "");
+    try t.expectEqualStrings("place", s.get(.{ .entry = 3, .place = 7 }, "x.k").?);
+}
+
+test "context: a key at a scope has one owner, and unloading retracts it" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    try t.expect(try s.set("repl", .{ .place = 1 }, "repl.session", "*repl*"));
+    // The same write again changes nothing.
+    try t.expect(!try s.set("repl", .{ .place = 1 }, "repl.session", "*repl*"));
+    try t.expectError(error.Held, s.set("other", .{ .place = 1 }, "repl.session", "mine"));
+    // A different scope is a different claim.
+    try t.expect(try s.set("other", .{ .place = 2 }, "repl.session", "mine"));
+
+    const rev = s.revision;
+    try t.expectEqual(@as(usize, 1), s.retractOwner("repl"));
+    try t.expect(s.revision != rev);
+    try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = 1 }, "repl.session"));
+    try t.expectEqualStrings("mine", s.get(.{ .place = 2 }, "repl.session").?);
+}
+
+test "context: no plugin can publish a builtin, or a key that is not namespaced" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    for (builtin_keys) |b| try t.expectError(error.BadKey, s.set("p", .global, b, "v"));
+    for ([_][]const u8{ "", "repl", ".x", "x.", "a..b", "A.b", "a b.c", "a.b/c" }) |bad|
+        try t.expectError(error.BadKey, s.set("p", .global, bad, "v"));
+    try t.expect(isKeyName("mode") and isKeyName("repl.session") and !isKeyName("repl"));
+    const long = [_]u8{'x'} ** (max_value_len + 1);
+    try t.expectError(error.BadValue, s.set("p", .global, "a.b", &long));
+}
+
+test "context: each visits every resolved key once, with its winner" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    _ = try s.set("a", .global, "a.k", "g");
+    _ = try s.set("a", .{ .entry = 1 }, "a.k", "e");
+    _ = try s.set("b", .global, "b.k", "g2");
+    _ = try s.set("b", .{ .place = 9 }, "c.k", "elsewhere");
+    const Seen = struct {
+        buf: [4][2][]const u8 = undefined,
+        n: usize = 0,
+        fn visit(self: *@This(), k: []const u8, v: []const u8) void {
+            self.buf[self.n] = .{ k, v };
+            self.n += 1;
+        }
+    };
+    var seen: Seen = .{};
+    s.each(.{ .entry = 1 }, &seen, Seen.visit);
+    try t.expectEqual(@as(usize, 2), seen.n);
+    try t.expectEqualStrings("a.k", seen.buf[0][0]);
+    try t.expectEqualStrings("e", seen.buf[0][1]);
+    try t.expectEqualStrings("b.k", seen.buf[1][0]);
+}
