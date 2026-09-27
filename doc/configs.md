@@ -58,32 +58,31 @@ e2e must stay green with one selection.
   `clearSelection`, `selectRange`, so `wl_jump`, `wl_set_selection` and a click) first
   collapses the set to the primary. A grammar that moves every selection computes the
   targets and calls `setSelections`. The one exception is a VISIT
-  (`Editor.beginVisit`/`visit`): inside `wl_run_range_each` and `wl_run_range_arg_each`
-  the single-selection API addresses the visited selection alone.
+  (`Editor.beginVisit`/`visit`): while dispatch runs a command once per selection
+  (doc/model.md §2.6, phase 4) the single-selection API addresses the visited
+  selection alone.
 - Typing, backspace, delete, newline and tab act at every selection through
   `Context.editEach`: one gate check over every range, then one `replaceAll` commit, so
   the edit is one undo unit.
 - The ABI:
-  - `wl_selections_get`/`wl_selections_set` exchange one u32 record,
-    `[primary, anchor0, head0, …]`, in document order. add, remove and collapse are
-    SDK compositions over that pair (`addSelection`, `removeSelection`,
-    `collapseSelections`), not doors.
-  - `wl_run_range_each` runs a motion once per selection, with that selection as the
-    primary.
-  - `wl_run_range_arg_each` runs an operator once per range, in reverse offset order,
-    inside `UndoLog.beginUnit`/`endUnit`, so barriers the operator raises cannot split
-    the unit.
+  - `wl_selections_get`/`wl_selections_set` exchange one u32 record, `[primary, kind0,
+    anchor0, head0, …]`, in document order — since phase 4 the same record for a scene,
+    whose extents are rows. add, remove and collapse are SDK compositions over that
+    pair (`addSelection`, `removeSelection`, `collapseSelections`), not doors.
+  - Phase 4 retired the per-selection runners `wl_run_range_each` and
+    `wl_run_range_arg_each`: a command DECLARES its mapping (`wl_declare_arity`) and
+    dispatch runs it once per selection, reverse offset order, inside one undo unit.
   - `wl_undo_unit(open)` (SDK `weft.undoUnit(f, args)`) brackets anything a grammar does
-    as one unit. Units nest and the outermost owns the unit, so helix's `3>` (a count
-    loop over `run_range_arg_each`) and find's replace-all are one undo each. A unit is
-    scoped to the command dispatch that opened it: one a guest leaves open ends as that
-    dispatch returns.
-- Registers hold one value per selection (`wl_yank_each`). The distribution rule
-  (`Register.pasteSpan`): when the register holds exactly as many values as there are
-  selections, selection *i* pastes value *i*. Otherwise every selection pastes the joined
-  text: all the values, with a `\n` between two values when the first doesn't already
-  end in one. `wl_register_paste_value` and `wl_paste_value_at` answer that rule, so no
-  grammar re-derives it.
+    as one unit. Units nest and the outermost owns the unit, so helix's `&` and find's
+    replace-all are one undo each. A unit is scoped to the command dispatch that opened
+    it: one a guest leaves open ends as that dispatch returns.
+- Registers hold one value per selection. The distribution rule (`Register.pasteSpan`):
+  when the register holds exactly as many values as there are selections, selection *i*
+  pastes value *i*. Otherwise every selection pastes the joined text: all the values,
+  with a `\n` between two values when the first doesn't already end in one. Since phase
+  4 dispatch drives it: a yank in a mapping's run files that run's value, and a paste
+  reads it (`wl_register_text`, `wl_paste_at`); `wl_yank_each`,
+  `wl_register_paste_value` and `wl_paste_value_at` are gone.
 - The view draws a wash for every selection and a caret for every head. Presence still
   publishes only the primary.
 
@@ -239,27 +238,26 @@ Phases:
 - Each motion is generated twice, `hx/n/<m>` (move: the motion's own selection) and
   `hx/x/<m>` (extend: the anchor stays). `helix-normal` binds the first, `helix-select`
   (`v`) the second. `helix-op` is gone: a verb acts on the selections.
-- Every edit is one mechanism: `putEach` anchors a range per selection and runs helix's
-  own operator `hx-op-put` over them through `run_range_arg_each`, so each verb is one undo
-  unit. The operator receives only its range, so the plan (which job, what to write) is
-  set before the run and claimed by start offset. `d c p P R r ~ \` A-\` o O` are all
-  `putEach` with a different source; `J` has its own operator, and `> <` and `SPC c` run
-  `op.indent`/`op.dedent`/`op.comment` over merged line blocks.
-- Per-selection reads of other plugins go through `run_range_each`: `mi`/`ma` over
-  `textobjects`, `mm` over `motion.match-pair`, and `A-o A-i A-n A-p ]f [f` over new
-  range forms in `ts` (`ts.expand`, `ts.shrink`, `ts.sibling-next/prev`,
-  `ts.function-next/prev`). `A-i` first retraces the sets `A-o` replaced, then asks for a
+- Every verb is a one-selection program that declares how it maps over the set
+  (doc/model.md §2.6): `d c y p P R r ~ \` A-\` o O i a` run once per selection, and
+  dispatch runs them last first as one undo unit. `J`, `> <`, `SPC c` and `[ space`
+  map over a TARGET — the selection's line block — so two selections on one line edit it
+  once. (Until phase 4 this was `putEach`, a plan-and-claim library over the
+  `run_range_arg_each` door; both are gone.)
+- Per-selection reads of other plugins are plain `runRange` calls inside a mapped verb:
+  `mi`/`ma` over `textobjects`, `mm` over `motion.match-pair`, and `A-o A-i A-n A-p ]f
+  [f` over new range forms in `ts` (`ts.expand`, `ts.shrink`, `ts.sibling-next/prev`,
+  `ts.function-next/prev`). `A-i` first retraces the sets `A-o` replaced (a whole-set
+  trail, so `A-o`/`A-i` are `.whole` around a mapped `hx-ts-expand`), then asks for a
   child.
-- `surround` is a new plugin of operators (`surround.add/delete/replace`), with the pair
-  chosen by an earlier `surround-pair <c> [r]`. helix captures the characters (`ms md mr`)
-  and runs the operators per selection. vim's `ys ds cs` are not bound: vim has no capture
-  that feeds an operator yet. `md`/`mr` over several selections PLAN first
-  (`surround.plan` per range finds each pair on the untouched text, a pair two ranges
-  share once) and then `surround.apply delete|replace` edits the plan, last first, as
-  one unit: per-range deletes found the next pair out once the first job removed the
-  shared one (`f((a b))` → `fa b`).
-- `putEach` is now the `put` plugin library (`src/plugin_lib/put`), which ide's transfer
-  and line keys share; helix's own sources (`r`, case, `&`) are `derive` callbacks.
+- `surround` is a new plugin (`surround.add/delete/replace`), with the pair chosen by an
+  earlier `surround-pair <c> [r]`. helix captures the characters (`ms md mr`). vim's `ys
+  ds cs` are not bound: vim has no capture that feeds an operator yet.
+  `surround.delete`/`.replace` declare their target: `surround.find`, the pair around
+  the selection. Dispatch finds every selection's pair on the untouched text and runs
+  once per distinct pair, so two selections inside one pair edit it once — per-selection
+  deletes, one after another, found the next pair out once the first had removed the
+  shared one (`f((a b))` → `fa b`). Until phase 4 surround planned and applied by hand.
 - Counts (`3w`, `5gg`, `2x`, `3C`) and registers (`"a`) live in the grammar and die with
   the command that used them (the manifest's `after` hook).
 - The new doors are commands, not ABI: `buffer-previous` (core) for `gp`, and
@@ -372,12 +370,14 @@ Built in the emacs mold: a resting mode `ide` that falls back to `default`, plus
   sidebar.
 
 **Every selection.** After C-d, C-S-l or C-click, every key acts at each selection:
-moves map over the set (`weft.step`, `run_range_each` for the word motions, then one
-`setSelections`; a lone caret's Up/Down stays core's for the sticky column). C-c/C-x
-yank one value per selection (only carets: each caret's line, linewise), and C-x, C-v,
-Tab/S-Tab, C-S-k and C-Return/C-S-Return are one `put` write per selection or line
-block, one undo unit. M-Up/Down alone collapse to the primary first, since two moved
-blocks could swap into each other. Word characters everywhere (C-d, `\b`, the word
+each command declares how it maps (doc/model.md §2.6) and dispatch runs it once per
+selection, one undo unit, the register holding one value per selection. Moves are
+one-selection programs (Up/Down are core's, which owns the visual column). C-c/C-x take
+each selection's text, or a caret's whole line, linewise — mapped over that TARGET, so
+two carets on one line take it once — and Tab/S-Tab, C-S-k and C-Return/C-S-Return map
+over line blocks. M-Up/Down alone take the whole set and collapse it first, since two
+moved blocks could swap into each other. C-click in a listing marks a row
+(`pointer-add-selection`), and Delete removes every marked row. Word characters everywhere (C-d, `\b`, the word
 motions, text objects, helix's `*`) are the regex library's `isWordByte`: ASCII
 alphanumerics, `_`, and any byte of a non-ASCII character.
 

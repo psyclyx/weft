@@ -199,6 +199,54 @@ The shifts:
   `.each` once per extent inside one undo unit. Plugins stop writing
   per-selection loops.
 
+As built (phase 4, `core/selection.zig`):
+
+- **Extent** `{kind, anchor, head}`: `text` (byte offsets, an `Editor`
+  selection) or `rows` (a range of a scene's focusable rows). A tree-sitter
+  node selection stays a text extent — nothing yet needs a node's identity to
+  outlive an edit. A scene's selection is `Head.SceneSelection` (what was
+  `semantic_focus`): the focus path is its primary extent, grown from
+  `anchor` (`mark-rows`, vim's `V`), and `others` are marked rows
+  (`pointer-add-selection`, C-click). Both kinds cross the same door record
+  (`wl_selections_get/set`: `[primary, kind, anchor, head, …]`; rows by their
+  place in the view's focus order) and the same SDK `Selection`.
+- **Arity**, declared per command (`Command.arity`; guests through
+  `wl_declare_arity`, the SDK's `CommandEntry.arity` or `Hooks.arity`, JS's
+  fifth `weft.command` argument):
+  - `.each` — dispatch (`command.run` → `selection.run`) visits every extent,
+    last first, inside one undo unit; in a run the single-selection API and
+    the selection doors address the visited extent alone. Register yanks are
+    staged one value per extent and land joined when the mapping ends, a
+    paste reads its own value, a flash joins one set. `.each` with `over`
+    names a target command: each extent's target is found on the untouched
+    text (edits are refused meanwhile), identical targets run once, nested
+    ones each run, partially overlapping ones refuse the command (`merge`
+    unions them — line blocks); the command then runs per target with it as
+    its range argument. This is what surround's `md(` over two carets in one
+    pair, and two carets on one line under `>`, need: a per-extent view of
+    the untouched text and a whole-set dedupe, which is exactly target
+    finding plus settling, so no command needs both views itself.
+  - `.whole` — once; the command reads the set (split, add-next-match,
+    align) or never looks at it (save, a picker).
+  - `.homogeneous` — once, refused when the extents differ in kind.
+  - A dispatch handed an explicit range runs once: its subject is the
+    argument.
+- **The default is refusal.** An undeclared command on several extents is
+  not run; it says `<name>: acts on one selection; several are selected`.
+  Running it once on the primary is precisely the bug every review finding
+  was, and running it per extent would repeat commands that were never
+  per-selection (a picker, a save). Refusal is the only default that can
+  never do the wrong thing silently; a command that is safe says so in one
+  word. Core's own tables are audited, so a core `Command` defaults to
+  `.whole` and each selection-touching builtin says `.each`; a guest's
+  arity is only ever what it declared.
+- **Availability agrees.** A catalog offer carries its command's arity; a
+  snapshot for a selection it cannot map over reports it disabled with the
+  same reason code (`one-selection`, `mixed-selection`), so the toolbar
+  greys it, the context menu drops it, explain/which-key show it blocked,
+  and a key that reaches it echoes the reason. A scene node's own action
+  says nothing about several rows, so it is refused on them.
+
 ### 2.7 Snapshot and frame: when
 
 A frame is a pure function of a workspace snapshot at version *v*: document
@@ -426,6 +474,33 @@ kept alive past its phase.
 4. **Extent sets.** Unify text selections and listing focus; declared
    mapping; dispatch-owned `.each`. Migrate vim, helix, ide, surround, find
    and files; delete their hand loops.
+
+   *Landed (2026-09-27, branch `arc/model`).* See §2.6 "As built". Every
+   guest command declares its arity or is refused on several extents; core's
+   selection-touching builtins say `.each`. helix's and ide's verbs are
+   one-selection programs (their `load`/loop/`store` bodies, `putEach`, the
+   `put` library and surround's `plan`/`apply` are deleted); line verbs and
+   surround's delete/replace map over targets; `&`, `%`, `C`, `(`, the
+   tree-sitter trail, C-d/C-S-l, find's replace-all and select-all-matches
+   are `.whole`. The doors `wl_run_range_each`, `wl_run_range_arg_each`,
+   `wl_yank_each`, `wl_register_paste_value` and `wl_paste_value_at` are
+   gone; `wl_declare_arity`, `wl_visit` (a guest epilogue — helix's count —
+   waits for a mapping's last run) and `qjs_declare_arity` are new
+   (imports 259 → 256, semantic operations 279 → 276). A user edit lifts
+   only the anchor of the selection it replaced (typing over it), not every
+   selection's, so runs do not collapse their siblings. In a listing,
+   C-click marks rows, `V j` grows a range, Delete/`d` remove every selected
+   row (the files controller takes a range as one delete request), and the
+   view washes selected rows.
+   Still open: vim keeps its clearing count (`consumeCount`), so a count
+   typed before a vim verb on several extents applies to the first run only
+   (vim makes no multi-selections); `mixed` shape is always false today —
+   no entry yet holds text and rows at once (a listing's focused name field
+   is text *inside* the primary row, not an extent), so `.homogeneous` is
+   exercised by unit tests only; transfers of several rows (copy, paste) are
+   one row at a time (the files controller refuses a range); row navigation
+   moves the primary and keeps marks, as a file manager does; `.each` over a
+   target is text-only.
 5. **Snapshot frames.** Versioned provider answers, highlight off the frame
    path, delete `render_safe`. Can run alongside phases 3-4, since it touches
    the render path rather than plugins.
