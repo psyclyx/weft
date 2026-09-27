@@ -496,8 +496,30 @@ pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8)
 /// than by grouping several commits. One item is exactly the single-cursor
 /// edit, byte for byte.
 pub fn applyUserEdits(self: *Editor, gpa: Allocator, items: []const Document.Replacement) Allocator.Error!void {
+    // A selection the edit REPLACES (typing or pasting over it) is spent: it
+    // becomes a caret after what was written. A selection an edit merely
+    // touches (an indent at its first line's start, a pair wrapped around
+    // it) keeps its range, carried by its anchors.
+    const replaced = try gpa.alloc(bool, self.selections.items.len);
+    defer gpa.free(replaced);
+    for (self.selections.items, replaced) |sel, *r| {
+        const span = self.spanOf(sel);
+        r.* = false;
+        if (sel.anchor == null or span.isEmpty()) continue;
+        for (items) |it| if (it.range.start == span.start and it.range.end == span.end) {
+            r.* = true;
+        };
+    }
     try self.doc.replaceAll(gpa, items);
-    self.liftAnchors();
+    for (self.selections.items, replaced) |*sel, r| {
+        const a = sel.anchor orelse continue;
+        // A selection an edit emptied is a caret, not an anchor waiting to
+        // grow one on the next motion.
+        if (r or self.doc.anchorOffset(a) == self.doc.anchorOffset(sel.head)) {
+            self.doc.removeAnchor(a);
+            sel.anchor = null;
+        }
+    }
     self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
     // Two carets can land on one offset (backspace from both sides of a
@@ -690,20 +712,6 @@ pub fn selectRange(self: *Editor, gpa: Allocator, anchor: usize, head: usize) Al
     self.placeCursor(head);
 }
 
-/// Lift every selection's anchor, keeping every caret — what an edit at every
-/// selection leaves behind. Internal: the public verb is one selection's.
-/// Inside a visit only the visited selection edited: its siblings keep
-/// their ranges for their own runs.
-fn liftAnchors(self: *Editor) void {
-    const all = self.selections.items;
-    for (if (self.visiting > 0) all[self.primary..][0..1] else all) |*sel| {
-        if (sel.anchor) |m| {
-            self.doc.removeAnchor(m);
-            sel.anchor = null;
-        }
-    }
-}
-
 /// The primary selection's text range, or null when it is a caret.
 pub fn selectedRange(self: *const Editor) ?Range {
     return self.rangeOf(self.primarySelection());
@@ -791,17 +799,19 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
 
 /// Inside a visit: replace the VISITED selection with `ends` (at least one),
 /// the first of them becoming the one the visit addresses; its siblings stay.
-/// How a run splits its extent (`s`), or reshapes it. Allocates first: on
-/// failure the set is untouched.
+/// How a run splits its extent (`s`), or reshapes it. The visited selection
+/// keeps its head HANDLE — re-pointed, not replaced — because a mapping names
+/// its extents by those handles while it runs. Allocates first: on failure
+/// the set is untouched.
 pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocator.Error!void {
     assert(self.visiting > 0 and ends.len > 0);
     const len = self.text().byteLen();
-    try self.selections.ensureUnusedCapacity(gpa, ends.len);
-    const fresh = try gpa.alloc(Selection, ends.len);
+    try self.selections.ensureUnusedCapacity(gpa, ends.len - 1);
+    const fresh = try gpa.alloc(Selection, ends.len - 1);
     defer gpa.free(fresh);
     var made: usize = 0;
     errdefer for (fresh[0..made]) |sel| self.releaseSelection(sel);
-    for (ends, fresh) |e, *slot| {
+    for (ends[1..], fresh) |e, *slot| {
         const head_off = @min(e.head, len);
         const anchor_off = @min(e.anchor, len);
         const head = try self.doc.addAnchor(gpa, head_off, .right);
@@ -810,10 +820,21 @@ pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocat
         slot.* = .{ .head = head, .anchor = anchor };
         made += 1;
     }
-    self.releaseSelection(self.selections.orderedRemove(self.primary));
-    self.primary = self.selections.items.len;
+    const first = ends[0];
+    const head_off = @min(first.head, len);
+    const anchor_off = @min(first.anchor, len);
+    const visited = &self.selections.items[self.primary];
+    if (anchor_off != head_off and visited.anchor == null)
+        visited.anchor = try self.doc.addAnchor(gpa, anchor_off, .left);
+    self.doc.anchors.set(visited.head, .{ .offset = head_off, .bias = .right });
+    if (visited.anchor) |a| {
+        if (anchor_off == head_off) {
+            self.doc.removeAnchor(a);
+            visited.anchor = null;
+        } else self.doc.anchors.set(a, .{ .offset = anchor_off, .bias = .left });
+    }
     self.selections.appendSliceAssumeCapacity(fresh);
-    self.normalize(); // carries the primary to wherever the first one lands
+    self.normalize(); // the visited one stays primary wherever it lands
     self.clearGoal();
     self.history.barrier();
 }

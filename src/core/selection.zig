@@ -246,10 +246,20 @@ pub const Stage = struct {
 /// once, or once per extent/target, or not at all (a refusal). The body of
 /// `command.run` past name resolution.
 pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value) anyerror!command.Value {
-    if (ctx.visit != null or explicitSubject(args)) return cmd.handler(ctx, cmd.data, args);
+    if (explicitSubject(args)) return cmd.handler(ctx, cmd.data, args);
+    const over = if (cmd.arity) |a| switch (a) {
+        .each => |e| e.over,
+        .whole, .homogeneous => null,
+    } else null;
+    if (ctx.visit) |v| {
+        // Nested in a run: the visited extent is the selection. A command
+        // that maps over targets still finds this one's first.
+        const target = over orelse return cmd.handler(ctx, cmd.data, args);
+        return runOnTarget(ctx, cmd, args, target, v);
+    }
     const shape = shapeOf(ctx);
     if (admits(cmd.arity, shape)) |refused| return refused;
-    if (shape.count <= 1) return cmd.handler(ctx, cmd.data, args);
+    if (shape.count <= 1 and over == null) return cmd.handler(ctx, cmd.data, args);
     const arity = cmd.arity orelse return cmd.handler(ctx, cmd.data, args); // WIP: until every plugin declares
     const each = switch (arity) {
         .whole, .homogeneous => return cmd.handler(ctx, cmd.data, args),
@@ -258,6 +268,24 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
     const entry = ctx.entry() orelse return cmd.handler(ctx, cmd.data, args);
     const ed = entry.textEditor() orelse return cmd.handler(ctx, cmd.data, args);
     return mapText(ctx, cmd, args, entry.ref(), ed, each);
+}
+
+/// Inside a run: find the visited extent's target, then run on it — the
+/// one-extent case of `mapTargets`, under the run's own undo unit and stage.
+fn runOnTarget(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value, over: []const u8, v: *Visit) anyerror!command.Value {
+    const was = v.targeting;
+    v.targeting = true;
+    const rv = command.run(ctx.commands, ctx, over, &.{}) catch |e| {
+        v.targeting = was;
+        return e;
+    };
+    v.targeting = was;
+    if (rv != .range) return .nil;
+    const full = try ctx.gpa.alloc(command.Value, args.len + 1);
+    defer ctx.gpa.free(full);
+    full[0] = rv;
+    @memcpy(full[1..], args);
+    return cmd.handler(ctx, cmd.data, full);
 }
 
 fn explicitSubject(args: []const command.Value) bool {

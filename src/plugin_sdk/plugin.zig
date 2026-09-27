@@ -164,7 +164,8 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                     weft.describeCommand(c.name, c.params, c.summary)
                 else
                     weft.declareCommand(c.name);
-                if (c.arity orelse hooks.arity) |a| weft.declareArity(c.name, a);
+                const arity: ?Arity = if (c.arity) |own| own else hooks.arity;
+                if (arity) |a| weft.declareArity(c.name, a);
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);

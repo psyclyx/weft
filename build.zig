@@ -491,7 +491,7 @@ const guests = [_]Guest{
     .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels, .put } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
-    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{ .regex, .put } },
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{.regex} },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
     // Line numbers: binds `ui/gutter-segment` for text entries and answers a
     // window of cells per round (absolute or caret-relative). No commands.
