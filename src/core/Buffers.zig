@@ -1291,7 +1291,7 @@ test "buffers: keeping this run's documents takes every parked and open scratch 
     const empty = bufs.get(try bufs.create(gpa, "*empty*")).?.textEditor().?.doc.id;
     const tool = try bufs.create(gpa, "*run*");
     try bufs.get(tool).?.textEditor().?.insertText(gpa, "output\n");
-    bufs.get(tool).?.read_only = true;
+    bufs.get(tool).?.read_only = produced;
     const tool_doc = bufs.get(tool).?.textEditor().?.doc.id;
 
     try bufs.keepDocuments(gpa);
