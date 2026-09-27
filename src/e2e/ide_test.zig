@@ -967,6 +967,33 @@ fn rowsFlaggedDeleted(ed: *Editor) usize {
     return n;
 }
 
+/// Focus the files sidebar, click a.txt and C-click c.txt: two rows, two
+/// extents, b.txt unmarked between them.
+fn markTwoRows(ed: *Editor) !void {
+    try openFile(ed, "a.txt", "x\n");
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expectEqualStrings("ide-structural", ed.mode());
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+}
+
+/// How the active context offers `intention`: null when nothing offers it,
+/// "" when enabled, else the disabled reason code.
+fn offerReason(ed: *Editor, intention: []const u8) ?[]const u8 {
+    const plane = ed.ctx.intent orelse return null;
+    const id = plane.catalog.findIntention(intention) orelse return null;
+    const snap = plane.snapshotFor(ed.ctx) orelse return null;
+    for (snap.candidates) |c| if (c.intention == id) return switch (c.availability) {
+        .disabled => |d| d.reason,
+        else => "",
+    };
+    return null;
+}
+
 test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one, and a one-row action is disabled with the reason" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
@@ -974,17 +1001,7 @@ test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one
     defer app.deinit();
     const ed = &app.ed;
     for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
-    try openFile(ed, "a.txt", "x\n");
-    ed.run("window-focus-left");
-    ed.applyWindow();
-    try t.expectEqualStrings("ide-structural", ed.mode());
-
-    // A click on a.txt, then C-click on c.txt: two rows, two extents.
-    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
-    ed.applyWindow();
-    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
-    ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+    try markTwoRows(ed);
     // The view washes both as selected.
     const rows = core.selection.read(ed.ctx, gpa) catch return error.OutOfMemory;
     defer gpa.free(rows.extents);
@@ -1044,4 +1061,32 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     ed.run("files-enter");
     try t.expect(fileOpen(ed, "a.txt"));
     try t.expect(fileOpen(ed, "c.txt"));
+}
+
+test "e2e/ide: a one-row verb on several marked rows is refused — Rename, insert beside and step out act on one row, and the offers say so" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try markTwoRows(ed);
+
+    // Rename (F2, the toolbar's button) edits ONE row's name: with two rows
+    // marked the offer is disabled, with the reason, instead of renaming
+    // the focused row alone.
+    try t.expectEqualStrings("one-selection", offerReason(ed, "plugin.ide.rename") orelse return error.RenameNotOffered);
+    const view_ref = ed.toolView().?;
+    const rows_before = ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len;
+    for ([_][]const u8{ "field-edit", "item-insert-before", "item-insert-after", "hierarchy-step-out" }) |verb|
+        try t.expectError(error.UndeclaredMapping, core.command.run(ed.commands, ed.ctx, verb, &.{}));
+    // F2 reaches the same refusal, and says so.
+    ed.press("F2", "");
+    try t.expectEqualStrings("plugin.ide.rename: acts on one selection; several are selected", ed.echoText());
+    // Nothing ran: no row inserted, the listing where it was, both rows
+    // still marked.
+    try t.expectEqualStrings("ide-structural", ed.mode());
+    try t.expect(view_ref.eql(ed.toolView().?));
+    try t.expectEqual(rows_before, ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
 }

@@ -840,10 +840,14 @@ const table = [_]command.Command{
     command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.each_extent),
     command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused).maps(.each_extent),
     command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded).maps(.each_extent),
-    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut),
-    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore),
-    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter),
-    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit),
+    // One row's verbs: a name edited, a row inserted beside it, its container
+    // stepped out to. On several marked rows none has a meaning (which name?
+    // beside which row?), so they are refused there rather than acting on the
+    // focused row alone.
+    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut).maps(null),
+    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore).maps(null),
+    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter).maps(null),
+    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit).maps(null),
     command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
