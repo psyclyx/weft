@@ -598,6 +598,21 @@ pub const FrameBuilder = struct {
 
     /// Per-byte markdown attributes for a `.md` buffer over that pane's
     /// window, into `arena` (the frame input's). Null for non-md.
+    /// The status note for an entry in a remote place: where it is and how
+    /// reachable (`shell:box connecting`, `peer 3f2a… offline`). Null for a
+    /// place here, or with no locus registry to ask.
+    pub fn remoteNote(arena: std.mem.Allocator, loci: ?*core.locus.Loci, place: core.Place) !?[]const u8 {
+        const l = place.locus();
+        if (l == .here) return null;
+        const registry = loci orelse return null;
+        const state = @tagName(registry.liveness(l));
+        return switch (registry.authority(l)) {
+            .here => null,
+            .shell => |id| try std.fmt.allocPrint(arena, "shell:{s} {s}", .{ id, state }),
+            .peer => |fp| try std.fmt.allocPrint(arena, "peer {s}… {s}", .{ fp[0..@min(fp.len, 8)], state }),
+        };
+    }
+
     fn mdInlineFor(arena: std.mem.Allocator, editor: *core.Editor, name: []const u8, window: stemma.Range) ?view_mod.MdInline {
         if (!cursor_config.isMarkdownPath(name)) return null;
         const attrs = core.markdown.analyze(arena, editor.text(), window) catch return null;
@@ -786,7 +801,12 @@ pub const FrameBuilder = struct {
             .shell => if (shared_here) "shell+shared" else "shell",
         };
         var listen_buf: [40]u8 = undefined;
-        const link_note: ?[]const u8 = if (fx.collab_session.*) |s|
+        // An entry in a remote place says how that place is reachable (R5):
+        // its locus's liveness, whichever tier it is on — a shell connecting,
+        // a peer's tree gone offline — ahead of the connection's own note.
+        const link_note: ?[]const u8 = if (try remoteNote(arena, fx.cmd_ctx.loci, abuf.place)) |note|
+            note
+        else if (fx.collab_session.*) |s|
             @tagName(s.liveness())
         else if (fx.hub.*) |*h|
             (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")

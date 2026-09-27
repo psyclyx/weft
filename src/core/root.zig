@@ -134,6 +134,7 @@ pub const peer_fs = @import("peer_fs.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
 pub const ShellFs = @import("ShellFs.zig");
+pub const ShellProvider = @import("ShellProvider.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

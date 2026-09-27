@@ -120,7 +120,13 @@ pub fn spawn(gpa: Allocator, argv: []const []const u8, environ: std.process.Envi
     }) catch return error.Shell;
     errdefer self.child.kill(io);
     // Deterministic parsing locale; detect the hash tool once.
-    self.probe_seq = try self.send(gpa, "LC_ALL=C; export LC_ALL; command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo cksum");
+    // A far side that is already gone makes an `offline` channel, not a
+    // failed spawn: whether the write beat its exit is a race, and what the
+    // caller sees must not depend on who won it.
+    self.probe_seq = self.send(gpa, "LC_ALL=C; export LC_ALL; command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo cksum") catch |err| switch (err) {
+        error.Shell => 0,
+        else => |e| return e,
+    };
     return self;
 }
 
@@ -455,43 +461,69 @@ pub fn list(self: *ShellFs, gpa: Allocator, path: []const u8) Error!Listing {
     var dir_stamp: []const u8 = "";
     var lines = std.mem.splitScalar(u8, r.out, '\n');
     while (lines.next()) |line| {
-        if (line.len == 0 or std.mem.startsWith(u8, line, "total")) continue;
-        // mode links owner group size month day time name...
-        var toks = std.mem.tokenizeAny(u8, line, " \t");
-        const mode = toks.next() orelse continue;
-        var skip: usize = 0;
-        var sz: u64 = 0;
-        var name_start: usize = 0;
-        // size = 5th field; name starts after the 8th.
-        while (toks.next()) |tok| {
-            skip += 1;
-            if (skip == 4) sz = std.fmt.parseInt(u64, tok, 10) catch 0;
-            if (skip == 7) {
-                name_start = (toks.index);
-                break;
-            }
-        }
-        if (skip < 7) continue;
-        var name = std.mem.trim(u8, line[name_start..], " \t\r");
-        if (mode[0] == 'l') {
-            if (std.mem.indexOf(u8, name, " -> ")) |arrow| name = name[0..arrow];
-        }
-        const stamp = std.mem.trim(u8, line[0..name_start], " \t");
-        if (std.mem.eql(u8, name, ".")) dir_stamp = stamp;
-        if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        try entries.append(gpa, .{
-            .name = name,
-            .kind = switch (mode[0]) {
-                '-' => .file,
-                'd' => .dir,
-                'l' => .link,
-                else => .other,
-            },
-            .size = sz,
-            .stamp = stamp,
-        });
+        const e = parseLine(line) orelse continue;
+        if (std.mem.eql(u8, e.name, ".")) dir_stamp = e.stamp;
+        if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
+        try entries.append(gpa, e);
     }
     return .{ .entries = try entries.toOwnedSlice(gpa), .bytes = r.out, .stamp = dir_stamp };
+}
+
+/// One `ls -l` line as an entry, borrowing from `line`; null for the
+/// `total` line and anything too short to be an entry.
+fn parseLine(line: []const u8) ?Entry {
+    if (line.len == 0 or std.mem.startsWith(u8, line, "total")) return null;
+    // mode links owner group size month day time name...
+    var toks = std.mem.tokenizeAny(u8, line, " \t");
+    const mode = toks.next() orelse return null;
+    var skip: usize = 0;
+    var sz: u64 = 0;
+    var name_start: usize = 0;
+    // size = 5th field; name starts after the 8th.
+    while (toks.next()) |tok| {
+        skip += 1;
+        if (skip == 4) sz = std.fmt.parseInt(u64, tok, 10) catch 0;
+        if (skip == 7) {
+            name_start = toks.index;
+            break;
+        }
+    }
+    if (skip < 7) return null;
+    var name = std.mem.trim(u8, line[name_start..], " \t\r");
+    if (mode[0] == 'l') {
+        if (std.mem.indexOf(u8, name, " -> ")) |arrow| name = name[0..arrow];
+    }
+    if (name.len == 0) return null;
+    return .{
+        .name = name,
+        .kind = switch (mode[0]) {
+            '-' => .file,
+            'd' => .dir,
+            'l' => .link,
+            else => .other,
+        },
+        .size = sz,
+        .stamp = std.mem.trim(u8, line[0..name_start], " \t"),
+    };
+}
+
+/// What `path` itself is (`ls -ld`, no link followed): an entry named by
+/// the whole path, borrowing from `bytes`, which the caller frees. Null
+/// when there is nothing there.
+pub fn stat(self: *ShellFs, gpa: Allocator, path: []const u8) Error!?struct { entry: Entry, bytes: []u8 } {
+    const q = try quote(gpa, path);
+    defer gpa.free(q);
+    const cmd = try std.fmt.allocPrint(gpa, "ls -ld {s} 2>/dev/null", .{q});
+    defer gpa.free(cmd);
+    const r = try self.run(gpa, cmd);
+    errdefer gpa.free(r.out);
+    if (r.status != 0) {
+        gpa.free(r.out);
+        return null;
+    }
+    const line = std.mem.trimEnd(u8, r.out, "\n");
+    const entry = parseLine(line) orelse return error.Shell;
+    return .{ .entry = entry, .bytes = r.out };
 }
 
 // ── Tests (local /bin/sh — the same protocol ssh would carry) ───────

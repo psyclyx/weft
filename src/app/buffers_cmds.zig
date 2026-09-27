@@ -122,7 +122,8 @@ fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: dur
         },
         .shell => |host| switch (d.kind) {
             .file => try openShell(ctx, command_context, host, d.ref),
-            else => return .{ .string = "open: a shell locus holds only files" },
+            .directory => try openShellDirectory(ctx, command_context, host, d.ref, text),
+            else => return .{ .string = "open: a shell locus holds files and directories" },
         },
         .peer => blk: {
             const peers = command_context.peers orelse return .{ .string = core.designation.refuse_unreachable };
@@ -204,7 +205,7 @@ fn scpSpec(spec: []const u8) ?struct { host: []const u8, path: []const u8 } {
 /// document.
 fn openShell(ctx: *core.command.Context, command_context: *Context, host: []const u8, path: []const u8) anyerror!core.command.Value {
     const deps = command_context.attachments;
-    const fs0 = deps.shells.get(host);
+    const fs0: ?*core.ShellFs = if (deps.shells.get(host)) |sh| &sh.channel else null;
     var rit = ctx.buffers.iterator();
     while (rit.next()) |b| {
         switch ((b.textEditor() orelse continue).backing) {
@@ -224,10 +225,35 @@ fn openShell(ctx: *core.command.Context, command_context: *Context, host: []cons
         var named: [core.designation.max_len]u8 = undefined;
         const d: durable.Designation = .{ .authority = .{ .shell = host }, .kind = .file, .ref = path };
         if (d.render(&named)) |text| try buf.setDesignation(ctx.gpa, text) else |_| {}
+        // Its place is the directory it is in, on the shell's locus — so it
+        // reads `remote`, a sidebar following the place lists that
+        // directory, and the file's row is revealed there.
+        const parent = try deps.shellDirectory(ctx, host, std.fs.path.dirnamePosix(path) orelse "/");
+        if (try core.designation.placeOf(ctx, parent)) |p| ctx.buffers.setPlace(id, p);
     }
     try attachProviders(deps, buf);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
+}
+
+/// A directory over `host`'s shell, presented as a listing like every other
+/// directory (`session.presentDirectory`) — through the shell's filesystem
+/// provider, so it lists, descends, reveals and opens its files the way a
+/// local or a peer's directory does — and in its own place, on the shell's
+/// locus. A listing already showing it is focused instead.
+fn openShellDirectory(ctx: *core.command.Context, command_context: *Context, host: []const u8, path: []const u8, text: []const u8) anyerror!core.command.Value {
+    if (core.designation.findText(ctx.buffers, text)) |live| {
+        try ctx.buffers.switchTo(ctx.gpa, live.id, ctx.head, ctx.keymap);
+        return .{ .integer = @intCast(live.id) };
+    }
+    const at = command_context.attachments.shellDirectory(ctx, host, path) catch |err| return switch (err) {
+        error.NotFound, error.NotDirectory => .{ .string = "open: the shell has no such directory" },
+        error.Io => .{ .string = "open: the shell is not answering" },
+        else => |e| e,
+    };
+    try @import("session.zig").presentDirectory(ctx, at);
+    if (try core.designation.placeOf(ctx, at)) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
+    return .nil;
 }
 
 // ── Remote directory browsing (fs_source over the host's shell) ─────

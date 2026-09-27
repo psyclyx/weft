@@ -88,6 +88,20 @@ pub const Router = struct {
         result.value_ptr.* = provider;
     }
 
+    /// An authority no provider of this router has ever held, for a provider
+    /// about to be attached (a peer's shared tree, a remote shell). The one
+    /// place a number is picked, so two attachers can never pick the same
+    /// one, and — above every retired authority — a fresh provider can never
+    /// be handed an old root.
+    pub fn freshAuthority(self: *const Router) semantic.handle.Authority {
+        var highest: u32 = 0;
+        var live = self.providers.keyIterator();
+        while (live.next()) |key| highest = @max(highest, @intFromEnum(key.*));
+        var retired = self.retired.keyIterator();
+        while (retired.next()) |key| highest = @max(highest, @intFromEnum(key.*));
+        return @enumFromInt(highest + 1);
+    }
+
     pub fn unregister(self: *Router, authority: semantic.handle.Authority) Error!void {
         if (!self.providers.contains(authority)) {
             if (self.retired.contains(authority)) return error.AuthorityRetired;

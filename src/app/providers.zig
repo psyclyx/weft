@@ -99,38 +99,134 @@ pub const AttachDeps = struct {
     /// Set once the connection exists: buffer close unbinds shares
     /// before the document dies.
     share: ?*collab.ShareCtx = null,
-    /// Persistent shells per remote host (ssh spawner), created on
-    /// first `open host:path` and reused for every buffer on that host.
-    shells: std.StringHashMapUnmanaged(*core.ShellFs) = .empty,
+    /// Persistent shells per remote host, created on first use (`open
+    /// host:path`, `open weft://shell:<host>/…`) and reused for every entry
+    /// and listing on that host.
+    shells: std.StringHashMapUnmanaged(*Shell) = .empty,
+    /// How a shell is started for a host. ssh is the default, not a
+    /// dependency (substrate §7): anything that yields a POSIX sh with
+    /// coreutils on its stdio is the same tier.
+    spawner: Spawner = .ssh,
 
+    pub const Spawner = union(enum) {
+        /// `ssh -o BatchMode=yes -o ConnectTimeout=8 <host> sh`.
+        ssh,
+        /// This argv for every host — a container exec, an adb shell, or a
+        /// local `sh` standing in for a remote one.
+        command: []const []const u8,
+    };
+
+    /// One remote shell: the channel, the filesystem provider over it, and
+    /// the directories published through that provider (`shellDirectory`).
+    pub const Shell = struct {
+        channel: core.ShellFs,
+        provider: core.ShellProvider,
+        mount: ?Mount = null,
+
+        /// The provider as a system's router knows it: registered under its
+        /// own authority, its directories published under one owner.
+        const Mount = struct {
+            owner: @import("weft_semantic").owner.Id,
+            locus: core.locus.Locus,
+            published: std.ArrayList(Published) = .empty,
+        };
+
+        const Published = struct {
+            path: []u8,
+            registration: fs_runtime.publication.Registration,
+        };
+    };
+
+    /// Free the shells. Runs after the system is gone (see `Providers`), so
+    /// the publications are simply forgotten — their registries died first.
     pub fn deinitShells(self: *AttachDeps) void {
         var it = self.shells.iterator();
         while (it.next()) |e| {
-            e.value_ptr.*.deinit();
-            self.gpa.destroy(e.value_ptr.*);
+            const sh = e.value_ptr.*;
+            if (sh.mount) |*m| {
+                for (m.published.items) |p| self.gpa.free(p.path);
+                m.published.deinit(self.gpa);
+            }
+            sh.provider.deinit();
+            sh.channel.deinit();
+            self.gpa.destroy(sh);
             self.gpa.free(e.key_ptr.*);
         }
         self.shells.deinit(self.gpa);
     }
 
-    pub fn shellFor(self: *AttachDeps, host: []const u8) !*core.ShellFs {
-        if (self.shells.get(host)) |fs| return fs;
-        const fs = try self.gpa.create(core.ShellFs);
-        errdefer self.gpa.destroy(fs);
+    fn shell(self: *AttachDeps, host: []const u8) !*Shell {
+        if (self.shells.get(host)) |sh| return sh;
+        const sh = try self.gpa.create(Shell);
+        errdefer self.gpa.destroy(sh);
         // BatchMode=yes: never block on an interactive password prompt (a
-        // classic hang); ConnectTimeout bounds an unreachable host. The
-        // spawn is still synchronous on the frame thread, but now it fails
-        // fast instead of wedging the editor.
-        fs.* = try core.ShellFs.spawn(self.gpa, &.{
-            "ssh", "-o",               "BatchMode=yes",
-            "-o",  "ConnectTimeout=8", host,
-            "sh",
-        }, self.environ);
-        errdefer fs.deinit();
-        try self.shells.put(self.gpa, try self.gpa.dupe(u8, host), fs);
-        return fs;
+        // classic hang); ConnectTimeout bounds an unreachable host. The spawn
+        // does not wait for the far side at all: the channel is `connecting`
+        // until its first round trip, which is whoever needs it first.
+        const ssh_argv = [_][]const u8{ "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "sh" };
+        const argv: []const []const u8 = switch (self.spawner) {
+            .ssh => &ssh_argv,
+            .command => |argv| argv,
+        };
+        sh.channel = try core.ShellFs.spawn(self.gpa, argv, self.environ);
+        errdefer sh.channel.deinit();
+        // The provider's authority is assigned when it is mounted in a router.
+        sh.provider = core.ShellProvider.init(self.gpa, &sh.channel, .here);
+        sh.mount = null;
+        const key = try self.gpa.dupe(u8, host);
+        errdefer self.gpa.free(key);
+        try self.shells.put(self.gpa, key, sh);
+        return sh;
+    }
+
+    pub fn shellFor(self: *AttachDeps, host: []const u8) !*core.ShellFs {
+        return &(try self.shell(host)).channel;
+    }
+
+    /// The directory at absolute `path` on `host`'s shell, published as a
+    /// directory target named `weft://shell:<host>/dir<path>` — what `open`
+    /// presents as a listing, and what a shell file's place is. The shell's
+    /// provider is mounted in the system's router on first use, and its
+    /// locus (`shell:<host>`) bound to the channel, so every place made here
+    /// reads `remote` and its status line reports the channel. One target
+    /// per path: asking again returns the live one.
+    pub fn shellDirectory(self: *AttachDeps, ctx: *core.command.Context, host: []const u8, path: []const u8) !@import("weft_semantic").target.Located {
+        const services = ctx.semantic orelse return error.SemanticUnavailable;
+        const router = ctx.filesystems orelse return error.FilesystemsUnavailable;
+        const loci = ctx.loci orelse return error.LociUnavailable;
+        const sh = try self.shell(host);
+        const mount = if (sh.mount) |*m| m else blk: {
+            const authority = router.freshAuthority();
+            sh.provider.authority = authority;
+            try router.register(authority, sh.provider.provider());
+            errdefer router.unregister(authority) catch {};
+            const locus = try loci.shell(host);
+            loci.bindShell(locus, &sh.channel);
+            sh.mount = .{ .owner = try services.acquireOwner(), .locus = locus };
+            break :blk &sh.mount.?;
+        };
+        const wanted = std.mem.trimEnd(u8, path, "/");
+        const key = if (wanted.len == 0) "/" else wanted;
+        for (mount.published.items) |p| {
+            if (!std.mem.eql(u8, p.path, key)) continue;
+            if (services.targets.get(p.registration.ref)) |d| if (d.revision == p.registration.revision) return p.registration.located();
+        }
+        var named: [core.designation.max_len]u8 = undefined;
+        const designation = try (core.designation.Designation{ .authority = .{ .shell = host }, .kind = .directory, .ref = key }).render(&named);
+        const root = try sh.provider.acquireRoot(key);
+        const registration = try fs_runtime.publication.publish(self.gpa, &services.targets, router, mount.owner, .{
+            .display_name = std.fs.path.basenamePosix(key),
+            .directory = .{ .root = root },
+            .designation = designation,
+        });
+        const owned = try self.gpa.dupe(u8, key);
+        errdefer self.gpa.free(owned);
+        try mount.published.append(self.gpa, .{ .path = owned, .registration = registration });
+        return registration.located();
     }
 };
+
+const fs_runtime = @import("weft_fs_runtime");
 
 /// Idempotent: give a buffer its provider bundle (syntax by extension,
 /// LSP when locally placed). Buffers without a path get an empty

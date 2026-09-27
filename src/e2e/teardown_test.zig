@@ -71,12 +71,11 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     try sess.init(gpa, pool, "teardown-user", &prov.grammars);
     prov.initAttach(gpa, &sess.system.caps, environ);
 
-    // A persistent shell registered in Providers.attach_deps.shells, exactly as
-    // AttachDeps.shellFor does (gpa.create + spawn + put with a duped key), so
-    // Providers.deinit is what frees it — the cross-cluster resource.
-    const fs = try gpa.create(core.ShellFs);
-    fs.* = try core.ShellFs.spawn(gpa, &.{"/bin/sh"}, environ);
-    try prov.attach_deps.shells.put(gpa, try gpa.dupe(u8, "localhost"), fs);
+    // A persistent shell registered in Providers.attach_deps.shells by
+    // AttachDeps.shellFor itself (over a local sh), so Providers.deinit is
+    // what frees it — the cross-cluster resource.
+    prov.attach_deps.spawner = .{ .command = &.{"/bin/sh"} };
+    const fs = try prov.attach_deps.shellFor("localhost");
 
     // Back buffer 0 by that shell and kick an in-flight save: the pool worker now
     // holds `fs`, and Editor.deinit will spin-wait it out at teardown.

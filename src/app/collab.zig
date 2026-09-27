@@ -291,7 +291,6 @@ pub const Collab = struct {
     remote_system: ?*core.System,
     remote_owner: ?semantic.owner.Id,
     remote_publication: ?fs_runtime.publication.Registration,
-    next_remote_authority: u32,
     /// The peer locus the published tree is on, while this connection is
     /// what reaches it.
     remote_locus: ?core.locus.Locus,
@@ -379,7 +378,6 @@ pub const Collab = struct {
         self.remote_system = null;
         self.remote_owner = null;
         self.remote_publication = null;
-        self.next_remote_authority = 1;
         self.remote_locus = null;
         self.remote_attempted_session = null;
         // Best-effort: a failed eventfd create (fd exhaustion) falls back to
@@ -527,11 +525,7 @@ pub const Collab = struct {
         if (self.remote_attempted_session == active_session) return false;
         self.remote_attempted_session = active_session;
 
-        var authority_raw = self.next_remote_authority;
-        while (authority_raw == 0) : (authority_raw +%= 1) {}
-        self.next_remote_authority = authority_raw +% 1;
-        if (self.next_remote_authority == 0) self.next_remote_authority = 1;
-        const authority: semantic.handle.Authority = @enumFromInt(authority_raw);
+        const authority = system.filesystems.freshAuthority();
         self.remote_provider = try fs_remote.Provider.init(authority, .init(&self.remote_exchange));
         var provider_registered = false;
         errdefer {

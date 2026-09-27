@@ -43,4 +43,5 @@ test {
     _ = @import("designation_test.zig");
     _ = @import("snapshot_frames_test.zig");
     _ = @import("projection_test.zig");
+    _ = @import("remote_test.zig");
 }
