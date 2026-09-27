@@ -280,7 +280,7 @@ pub const Stage = struct {
             const parts = self.gpa.alloc(*const Register, list.items.len) catch continue;
             defer self.gpa.free(parts);
             for (list.items, 0..) |*piece, i| parts[i] = &piece.value;
-            Register.putEachIn(bank, self.gpa, @intCast(slot), parts) catch {};
+            bank.putEach(self.gpa, @intCast(slot), parts) catch {};
         }
     }
 };
@@ -708,4 +708,82 @@ test "arity wire codes round-trip" {
     try testing.expect(Arity.fromCode(4, "lines").?.each.merge);
     try testing.expect(Arity.fromCode(3, "") == null);
     try testing.expect(Arity.fromCode(9, "") == null);
+}
+
+// ── A mapping, end to end over core commands ────────────────────────
+
+const TestHost = @import("TestHost.zig");
+
+/// A target: the line THE selection's head is on. The anchors it answers
+/// with belong to the document, which frees them with itself.
+fn testLine(ctx: *command.Context, args: struct {}) anyerror!command.Value {
+    _ = args;
+    const ed = try ctx.textEditor();
+    const at = ed.cursorOffset();
+    const text = try ed.text().toOwnedSlice(ctx.gpa);
+    defer ctx.gpa.free(text);
+    const s = if (std.mem.lastIndexOfScalar(u8, text[0..at], '\n')) |i| i + 1 else 0;
+    const e = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+    return live(ctx, ed, s, e);
+}
+
+/// A target: five bytes from THE selection's head — which, from two carets
+/// three apart, overlap without either holding the other.
+fn testTail(ctx: *command.Context, args: struct {}) anyerror!command.Value {
+    _ = args;
+    const ed = try ctx.textEditor();
+    const at = ed.cursorOffset();
+    return live(ctx, ed, at, @min(at + 5, ed.text().byteLen()));
+}
+
+fn live(ctx: *command.Context, ed: *Editor, s: usize, e: usize) anyerror!command.Value {
+    const a = try ed.doc.addRangeAnchors(ctx.gpa, .{ .start = s, .end = e });
+    return .{ .range = .{ .document = &ed.doc, .start = a.start, .end = a.end } };
+}
+
+/// The command mapped over targets: a `#` at the start of its range.
+fn testMark(ctx: *command.Context, args: struct { r: command.Value }) anyerror!command.Value {
+    const doc = ctx.document().?;
+    const r = args.r.range.resolve(doc).?;
+    try ctx.edit(.{ .start = r.start, .end = r.start }, "#");
+    return .nil;
+}
+
+test "mapping: targets found per selection; identical ones run once, as one undo unit; a partial overlap refuses the command" {
+    const gpa = testing.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+    _ = try env.commands.bind(gpa, "t-line", command.define("t-line", "", testLine).maps(Arity.each_extent));
+    _ = try env.commands.bind(gpa, "t-tail", command.define("t-tail", "", testTail).maps(Arity.each_extent));
+    _ = try env.commands.bind(gpa, "t-mark-lines", command.define("t-mark-lines", "", testMark).maps(.{ .each = .{ .over = "t-line" } }));
+    _ = try env.commands.bind(gpa, "t-mark-tails", command.define("t-mark-tails", "", testMark).maps(.{ .each = .{ .over = "t-tail" } }));
+    _ = try env.commands.bind(gpa, "t-undeclared", command.define("t-undeclared", "", testLine).maps(null));
+
+    const ed = env.editor();
+    try ed.insertText(gpa, "ab cd\nef\n");
+    ed.placeCursor(0);
+    // Two carets on line one, one on line two: two targets, not three.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 }, .{ .anchor = 6, .head = 6 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "t-mark-lines", &.{});
+    const once = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(once);
+    try testing.expectEqualStrings("#ab cd\n#ef\n", once);
+    // One unit: one undo takes both back. Every selection survives.
+    try testing.expectEqual(@as(usize, 3), ed.selectionCount());
+    try testing.expect(try ed.undo(gpa, .user_driven));
+    const back = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(back);
+    try testing.expectEqualStrings("ab cd\nef\n", back);
+
+    // Tails of carets 0 and 3 overlap without nesting: refused, not half-run.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 } }, 0);
+    try testing.expectError(error.OverlappingTargets, command.run(&env.commands, &env.ctx, "t-mark-tails", &.{}));
+    const untouched = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(untouched);
+    try testing.expectEqualStrings("ab cd\nef\n", untouched);
+
+    // An undeclared command never runs on several selections.
+    try testing.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "t-undeclared", &.{}));
 }

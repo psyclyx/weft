@@ -76,59 +76,38 @@ pub const Bank = struct {
         selected.* = next;
     }
 
+    /// Yank `range` of `doc` (whose live bytes are `bytes`) into slot `name`
+    /// as its one value — one selection's yank.
     pub fn yank(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, range: Range, bytes: []const u8, linewise: bool) !void {
-        return self.yankEach(gpa, name, subs, doc, &.{.{ .range = range, .bytes = bytes }}, linewise);
+        var value: Register = .empty;
+        defer value.deinit(gpa);
+        try value.yank(gpa, subs, doc, range, bytes, linewise);
+        return self.putEach(gpa, name, &.{&value});
     }
 
-    /// Yank one value per selection into slot `name` (see `Register.yankEach`).
-    pub fn yankEach(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, pieces: []const Piece, linewise: bool) !void {
+    /// Land `parts` in slot `name`, one value each, identities and all — a
+    /// single yank, or what a selection mapping staged: one value per
+    /// extent that yanked, in document order. A named slot updates unnamed
+    /// too, and both destinations are prepared before either is swapped, so
+    /// the capture is atomic under allocator failure.
+    pub fn putEach(self: *Bank, gpa: Allocator, name: u8, parts: []const *const Register) !void {
         const selected = self.get(name) orelse return error.InvalidRegister;
-        // Prepare a complete independent snapshot for each destination before
-        // swapping either one. This keeps named+unnamed capture atomic under
-        // allocator failure.
         var next_selected = Register.empty;
         errdefer next_selected.deinit(gpa);
-        try next_selected.yankEach(gpa, subs, doc, pieces, linewise);
+        try next_selected.join(gpa, parts);
         var next_unnamed = Register.empty;
         if (name != 0) {
             errdefer next_unnamed.deinit(gpa);
-            try next_unnamed.yankEach(gpa, subs, doc, pieces, linewise);
+            try next_unnamed.join(gpa, parts);
         }
         selected.deinit(gpa);
         selected.* = next_selected;
-        next_selected = .empty;
         if (name != 0) {
             self.slots[0].deinit(gpa);
             self.slots[0] = next_unnamed;
-            next_unnamed = .empty;
         }
     }
 };
-
-/// Land `parts` (each a one-value register, in document order — what a
-/// selection mapping staged, one per extent that yanked) in slot `name`
-/// as one value each, identities and all. Named slots update unnamed too,
-/// atomically, as a yank does.
-pub fn putEachIn(bank: *Bank, gpa: Allocator, name: u8, parts: []const *const Register) !void {
-    const selected = bank.get(name) orelse return error.InvalidRegister;
-    var next_selected = Register.empty;
-    errdefer next_selected.deinit(gpa);
-    try next_selected.join(gpa, parts);
-    var next_unnamed = Register.empty;
-    if (name != 0) {
-        errdefer next_unnamed.deinit(gpa);
-        try next_unnamed.join(gpa, parts);
-    }
-    selected.deinit(gpa);
-    selected.* = next_selected;
-    if (name != 0) {
-        bank.slots[0].deinit(gpa);
-        bank.slots[0] = next_unnamed;
-    }
-}
-
-/// One captured value: the range it came from and its live bytes.
-pub const Piece = struct { range: Range, bytes: []const u8 };
 
 /// Every value's bytes, JOINED: the values in order, a `\n` between two when
 /// the earlier does not already end in one. The joined text is the register's
@@ -194,12 +173,13 @@ pub fn slice(self: *const Register) []const u8 {
     return self.text.items;
 }
 
-/// Capture `bytes` as the register content and snapshot the facts of every
-/// subbuffer on `doc` that overlaps `range` (whose live bytes ARE `bytes`).
-/// Called at yank time — while the source subbuffers still span their names,
-/// BEFORE any delete collapses their anchors. Text-only sources (no subbuffer
-/// service, or a range with no id-spans) capture bytes and zero payloads, so a
-/// later paste re-stamps nothing → a CREATE, structurally.
+/// Capture `bytes` as the register's one value and snapshot the facts of
+/// every subbuffer on `doc` that overlaps `range` (whose live bytes ARE
+/// `bytes`). Called at yank time — while the source subbuffers still span
+/// their names, BEFORE any delete collapses their anchors. Text-only sources
+/// (no subbuffer service, or a range with no id-spans) capture bytes and zero
+/// payloads, so a later paste re-stamps nothing → a CREATE, structurally.
+/// Several selections' yanks are several such values, `join`ed.
 pub fn yank(
     self: *Register,
     gpa: Allocator,
@@ -209,42 +189,21 @@ pub fn yank(
     bytes: []const u8,
     linewise: bool,
 ) Allocator.Error!void {
-    return self.yankEach(gpa, subs, doc, &.{.{ .range = range, .bytes = bytes }}, linewise);
-}
-
-/// Capture one value per selection: `pieces` in selection order, each the
-/// live bytes of its range. Joined into `text` (see its doc) with each value's
-/// span recorded; each piece's subbuffer facts are snapshotted at offsets into
-/// the joined text. One piece is exactly `yank`.
-pub fn yankEach(
-    self: *Register,
-    gpa: Allocator,
-    subs: ?*const subbuffer.SubBuffers,
-    doc: *const Document,
-    pieces: []const Piece,
-    linewise: bool,
-) Allocator.Error!void {
     self.text.clearRetainingCapacity();
     self.spans.clearRetainingCapacity();
     self.linewise = linewise;
     self.clearPayloads(gpa);
-    for (pieces) |piece| {
-        const t_items = self.text.items;
-        if (t_items.len > 0 and t_items[t_items.len - 1] != '\n') try self.text.append(gpa, '\n');
-        const base = self.text.items.len;
-        try self.text.appendSlice(gpa, piece.bytes);
-        try self.spans.append(gpa, .{ .start = base, .end = self.text.items.len });
-        const sub_service = subs orelse continue;
-        const range = piece.range;
-        for (sub_service.list.items) |s| {
-            if (s.doc != doc) continue;
-            const r = s.resolve();
-            // Half-open overlap with [range.start, range.end); skip the disjoint.
-            if (r.end <= range.start or r.start >= range.end) continue;
-            const st = @max(r.start, range.start);
-            const en = @min(r.end, range.end);
-            try self.snapshot(gpa, s, base + st - range.start, en - st);
-        }
+    try self.text.appendSlice(gpa, bytes);
+    try self.spans.append(gpa, .{ .start = 0, .end = bytes.len });
+    const sub_service = subs orelse return;
+    for (sub_service.list.items) |s| {
+        if (s.doc != doc) continue;
+        const r = s.resolve();
+        // Half-open overlap with [range.start, range.end); skip the disjoint.
+        if (r.end <= range.start or r.start >= range.end) continue;
+        const st = @max(r.start, range.start);
+        const en = @min(r.end, range.end);
+        try self.snapshot(gpa, s, st - range.start, en - st);
     }
 }
 
@@ -403,11 +362,14 @@ test "register: one value per selection — distribute on a matching count, else
 
     var reg: Register = .empty;
     defer reg.deinit(gpa);
-    try reg.yankEach(gpa, &subs, &doc, &.{
-        .{ .range = .{ .start = 0, .end = 3 }, .bytes = "foo" },
-        .{ .range = .{ .start = 4, .end = 7 }, .bytes = "bar" },
-        .{ .range = .{ .start = 8, .end = 12 }, .bytes = "baz\n" },
-    }, false);
+    // Three selections' yanks, one value each — what a mapping stages and
+    // lands.
+    var parts: [3]Register = @splat(.empty);
+    defer for (&parts) |*p| p.deinit(gpa);
+    try parts[0].yank(gpa, &subs, &doc, .{ .start = 0, .end = 3 }, "foo", false);
+    try parts[1].yank(gpa, &subs, &doc, .{ .start = 4, .end = 7 }, "bar", false);
+    try parts[2].yank(gpa, &subs, &doc, .{ .start = 8, .end = 12 }, "baz\n", false);
+    try reg.join(gpa, &.{ &parts[0], &parts[1], &parts[2] });
     try t.expectEqual(@as(usize, 3), reg.valueCount());
     // Joined with a newline between values, none added after one that ends in one.
     try t.expectEqualStrings("foo\nbar\nbaz\n", reg.slice());
