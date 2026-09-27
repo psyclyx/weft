@@ -370,3 +370,95 @@ test "e2e/files: config.js — `yy` over two marked rows copies both, as one tra
     var buf: [256]u8 = undefined;
     try t.expectEqualStrings("alpha.txt gamma.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
 }
+
+test "e2e/files: config.js — `V j y` over rows copies the range as one transfer, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    // Visual `y` is a transfer key, as `yy` is: the range is ONE copy.
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expect(ed.head.scene_selection.anchor == null);
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
+    try goToRow(ed, vim_keys, "gamma.txt");
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt beta.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/files: config.js — `V j d` over rows cuts the range as one transfer: both flagged, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+    try goToRow(ed, vim_keys, "gamma.txt");
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt beta.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lines yanked, put and deleted" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "lines.txt", "one\ntwo\nthree");
+    ed.runStr("open", "lines.txt");
+    ed.applyWindow();
+
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("G", "");
+    ed.press("p", "");
+    try expectPrimaryText(ed, "one\ntwo\nthree\none\ntwo\n");
+
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "three\none\ntwo\n");
+
+    // Visual `P` is normal `P`'s put, as it was when visual fell through to it.
+    ed.press("v", "");
+    ed.press("P", "");
+    const visual_put = try primaryText(ed);
+    defer gpa.free(visual_put);
+    ed.press("Escape", "");
+    ed.press("u", "");
+    try expectPrimaryText(ed, "three\none\ntwo\n");
+    ed.press("P", "");
+    try expectPrimaryText(ed, visual_put);
+}
+
+fn primaryText(ed: *Editor) ![]u8 {
+    ed.applyWindow();
+    const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
+    const entry = ed.buffers.get(primary.pane().buffer_id) orelse return error.NoEntry;
+    const text_editor = entry.textEditor() orelse return error.PrimaryShowsNoFile;
+    return text_editor.text().toOwnedSlice(ed.gpa);
+}
