@@ -749,6 +749,27 @@ pub const Syntax = struct {
     /// its own doc comment for the ownership split and the CAS handoff).
     /// While set: `self.tree` is null. Never set by `create`.
     pending_initial: ?*InitialParseJob = null,
+    /// Moves whenever `tree` does (a reparse, the initial tree adopted): paint
+    /// is a pure function of `(generation, range)`, which is what lets it be
+    /// cached.
+    generation: u64 = 0,
+    /// The windows painted from the current tree, most recent first. A frame
+    /// that changed nothing the text shows — a caret blink, a status chip —
+    /// asks for the window it asked for last, and gets it without a query
+    /// (two panes on one buffer each keep theirs). Entries of an older
+    /// generation are dead and are overwritten first.
+    painted: [paint_cache_len]?Painted = @splat(null),
+    /// What the highlight layer was last given, so republishing the same
+    /// paint for the same revision is skipped rather than copied again.
+    published: ?Published = null,
+    /// How many windows were actually painted (a query run) — the witness a
+    /// test or a bench reads to tell a cache hit from a miss.
+    paints: u64 = 0,
+
+    pub const paint_cache_len = 4;
+
+    const Painted = struct { generation: u64, range: stemma.Range, classes: []Class };
+    const Published = struct { generation: u64, range: stemma.Range, revision: Document.Revision };
 
     /// Shared setup for both constructors below: makes this buffer's own
     /// parse-time state (parser, query cursor) over the already-`Compiled`
@@ -788,6 +809,7 @@ pub const Syntax = struct {
     pub fn create(gpa: Allocator, rt: *Runtime, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
         const self = try createUnparsed(gpa, try rt.compiledFor(gpa, spec), spec, doc);
         self.tree = self.parse(doc.text(), null);
+        self.generation += 1;
         return self;
     }
 
@@ -814,12 +836,14 @@ pub const Syntax = struct {
             // background job specifically, where parsing inline THIS
             // ONCE beats a buffer that never highlights at all).
             self.tree = self.parse(doc.text(), null);
+            self.generation += 1;
             return self;
         };
         var handle = pool.spawn(initialParseWorker, .{job}) catch {
             job.abandonUnstarted();
             // Same degraded-fallback reasoning as above (OOM spawning).
             self.tree = self.parse(doc.text(), null);
+            self.generation += 1;
             return self;
         };
         // Fire-and-forget: `task.Handle` only owns the pool's bookkeeping
@@ -860,6 +884,7 @@ pub const Syntax = struct {
             self.pending_initial = null;
         }
         if (self.tree) |t_| c.ts_tree_delete(t_);
+        for (self.painted) |p| if (p) |w| gpa.free(w.classes);
         c.ts_query_cursor_delete(self.qcursor);
         c.ts_parser_delete(self.parser);
         self.mirror.deinit(gpa);
@@ -886,6 +911,7 @@ pub const Syntax = struct {
         const new_tree = self.parse(doc.text(), self.tree);
         if (self.tree) |old| c.ts_tree_delete(old);
         self.tree = new_tree;
+        self.generation += 1;
         return true;
     }
 
@@ -904,6 +930,7 @@ pub const Syntax = struct {
         // observe is the worker's own.
         assert(st == InitialParseJob.claimed_by_worker);
         self.tree = job.result;
+        self.generation += 1;
         self.pending_initial = null;
         job.gpa.destroy(job);
         return true;
@@ -974,10 +1001,14 @@ pub const Syntax = struct {
         const new_tree = self.parse(rope, null);
         if (self.tree) |old| c.ts_tree_delete(old);
         self.tree = new_tree;
+        self.generation += 1;
     }
 
     /// Publish paint over `range` into a highlight feed layer, stamped
-    /// with the document's head version.
+    /// with the document's head version. The paint comes from `painted`
+    /// when this tree already painted this window, and a layer already
+    /// holding exactly it for this revision is left alone — so a frame that
+    /// changed nothing the text shows costs no query and no copy.
     pub fn publishHighlight(
         self: *Syntax,
         gpa: Allocator,
@@ -985,11 +1016,39 @@ pub const Syntax = struct {
         layer: *@import("layers.zig").Layer,
         range: stemma.Range,
     ) !void {
-        const classes = try self.paint(gpa, range);
-        defer gpa.free(classes);
+        const now: Published = .{ .generation = self.generation, .range = range, .revision = doc.revision() };
+        if (self.published) |p| if (std.meta.eql(p, now)) if (layer.bulk) |b| {
+            if (b.start == range.start and b.classes.len == range.len()) return;
+        };
+        const classes = try self.paintCached(range);
         const token = try doc.version(gpa);
         defer gpa.free(token);
         try layer.publishBulk(gpa, token, range.start, @ptrCast(classes));
+        self.published = now;
+    }
+
+    /// `paint(range)` from the current tree, through `painted`: borrowed,
+    /// valid until the next miss evicts it.
+    fn paintCached(self: *Syntax, range: stemma.Range) ![]const Class {
+        var victim: usize = self.painted.len - 1;
+        for (self.painted, 0..) |p, i| {
+            const w = p orelse {
+                victim = @min(victim, i);
+                continue;
+            };
+            if (w.generation == self.generation and w.range.start == range.start and w.range.end == range.end) {
+                // Most recent first: a hit moves to the front.
+                std.mem.rotate(?Painted, self.painted[0 .. i + 1], i);
+                return w.classes;
+            }
+            if (w.generation != self.generation) victim = @min(victim, i);
+        }
+        const classes = try self.paint(self.gpa, range);
+        self.paints += 1;
+        if (self.painted[victim]) |old| self.gpa.free(old.classes);
+        self.painted[victim] = .{ .generation = self.generation, .range = range, .classes = classes };
+        std.mem.rotate(?Painted, self.painted[0 .. victim + 1], victim);
+        return classes;
     }
 
     // ── Instant-tier providers ──────────────────────────────────
