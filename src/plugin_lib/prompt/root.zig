@@ -79,6 +79,11 @@ pub const Config = struct {
     /// asks its owner what to trail the line with, and its owner — which does
     /// know — answers. Return "" for nothing to say.
     hint: ?*const fn (line: []const u8) []const u8 = null,
+    /// Tab: what the line completes to, or null to leave it (the owner may
+    /// say why through `hint`, which is asked again right after). A hook for
+    /// the same reason `hint` is one: the prompt knows nothing about what is
+    /// being typed. With it, the prompt answers a sixth command, `-complete`.
+    complete: ?*const fn (line: []const u8) ?[]const u8 = null,
     /// Called after every change to the line (a keystroke, a backspace, a
     /// clear) with the line as it now stands, before the redraw — for a
     /// LIVE preview: helix's `s` and `/` select their matches as you type,
@@ -158,7 +163,9 @@ pub fn Prompt(comptime cfg: Config) type {
             .{ .name = cfg.name ++ "-clear", .handler = onClear, .summary = "Clear the prompt's line." },
             .{ .name = cfg.name ++ "-accept", .handler = onAccept, .summary = "Accept the prompt's line." },
             .{ .name = cfg.name ++ "-cancel", .handler = onCancel, .summary = "Leave the prompt without answering." },
-        };
+        } ++ (if (cfg.complete != null) [_]Command{
+            .{ .name = cfg.name ++ "-complete", .handler = onComplete, .summary = "Complete what the prompt's line is naming." },
+        } else [_]Command{});
 
         /// Bind the mode: printable keys commit through `-type`, Enter
         /// accepts, Escape and C-c back out, C-u clears. Call from `init`,
@@ -175,6 +182,7 @@ pub fn Prompt(comptime cfg: Config) type {
             weft.bindKey(mode, "Escape", cfg.name ++ "-cancel");
             weft.bindKey(mode, "C-c", cfg.name ++ "-cancel");
             weft.bindKey(mode, "C-u", cfg.name ++ "-clear");
+            if (cfg.complete != null) weft.bindKey(mode, "Tab", cfg.name ++ "-complete");
         }
 
         /// Declare the five command names (call from `describe`).
@@ -290,6 +298,17 @@ pub fn Prompt(comptime cfg: Config) type {
         pub fn onClear() void {
             if (!open_now) return;
             len = 0;
+            changed();
+        }
+
+        pub fn onComplete() void {
+            if (!open_now) return;
+            const complete = cfg.complete orelse return;
+            if (complete(buf[0..len])) |next| {
+                if (next.len > buf.len) return;
+                std.mem.copyForwards(u8, buf[0..next.len], next);
+                len = next.len;
+            }
             changed();
         }
 

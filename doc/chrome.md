@@ -138,6 +138,16 @@ All of §1.
   plugin intention's label and every icon from the command they run, so the
   toolbar's buttons carry icons.
 
+- **The `:` line reads short names** (`weft_invoke`, so vim's and helix's
+  alike): after vim's own words (`w`, `q`, `e`, `wq`, `:N`, `s/…/…/`), a
+  typed name is an id exactly; else the id whose part after a `.` it is,
+  when only one (`listen` → `collab.listen`); else the command whose label
+  it is, case and `…` aside, `-` for a space (`split-editor-right`). Two
+  answers are listed, never guessed. Tab completes the same reading, then by
+  prefix, and shows the candidates when there are several. Not aliases:
+  nothing is registered twice, and `internal` commands are never offered by
+  a short name or a label.
+
 Found on the way: which-key's page clamp, stepping 12 but clamping to a
 multiple of 32, cycled a short menu (0, 12, 0, …) under repeated page-down;
 ide.js pinned a toolbar button to a command that no longer existed.

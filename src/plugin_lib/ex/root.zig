@@ -89,10 +89,17 @@ pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8, compti
                     return asker.hint(text);
                 }
             }.f,
+            // Tab completes the command name as Enter would read it: an id,
+            // a short name (`listen` → `collab.listen`), or a label.
+            .complete = struct {
+                fn f(text: []const u8) ?[]const u8 {
+                    return asker.complete(text);
+                }
+            }.f,
         });
 
         /// The commands this command line answers to, for a guest's table:
-        /// the line's own five, then the argument prompt's five.
+        /// the line's own six (Tab completes), then the argument prompt's five.
         pub const commands = line.commands ++ asker.commands;
 
         /// `:` in normal — open the command line, empty.

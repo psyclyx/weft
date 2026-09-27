@@ -91,6 +91,23 @@ fn expectSelections(ed: *Editor, want: []const [2]usize) !void {
     }
 }
 
+test "e2e/helix: `:` reads a short name and a label, and lists an ambiguous one — the same reading as vim's" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "h.txt", "x\n");
+    const names = h.ShortNames;
+    try names.bind(ed);
+    names.ex(ed, "frob-widget", "Return");
+    names.ex(ed, "Polish-The-Gadget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+    names.ex(ed, "twin", "Return");
+    try t.expectEqual(@as(usize, 0), names.ran[1] + names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+}
+
 test "e2e/helix: motions select, counts repeat them, and `v` extends" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

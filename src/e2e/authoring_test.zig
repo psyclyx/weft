@@ -2072,6 +2072,57 @@ test "authoring: `V` linewise visual — select whole lines and delete them" {
     try t.expectEqualStrings("line3", disk);
 }
 
+test "authoring: the `:` line reads a short name, then a label, lists an ambiguous one, and Tab completes — `:w` stays vim's" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const names = h.ShortNames;
+    try names.bind(ed);
+
+    // The part after the namespace, when only one command has it.
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    // The label, case aside, spaces as dashes.
+    names.ex(ed, "polish-the-gadget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+    // Two commands answer `twin`: neither runs, both are named.
+    names.ex(ed, "twin", "Return");
+    try t.expectEqual(@as(usize, 0), names.ran[1] + names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzt.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+    // The full id still runs, as it always did.
+    names.ex(ed, "zzq.twin", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[2]);
+
+    // Tab completes a name being typed to the one it can mean.
+    ed.press("colon", "");
+    ed.typeText("frob-w");
+    ed.press("Tab", "");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), ":zzt.frob-widget") != null);
+    ed.press("Return", "");
+    try t.expectEqual(@as(usize, 3), names.ran[0]);
+    // …and lists them when it can mean several.
+    ed.press("colon", "");
+    ed.typeText("twi");
+    ed.press("Tab", "");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzt.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+    ed.press("Escape", "");
+
+    // Vim's own words are vim's: `:w` writes.
+    ed.runStr("file.open", "short.txt");
+    ed.press("i", "");
+    ed.typeText("kept");
+    ed.press("Escape", "");
+    names.ex(ed, "w", "Return");
+    ed.waitSave();
+    const disk = try core.file.readAlloc(gpa, "short.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("kept", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;

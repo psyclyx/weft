@@ -1598,6 +1598,41 @@ pub fn focusBuffer(ed: *Editor, name: []const u8) !void {
 /// A writable path inside the test's tmpdir (which lives under
 /// `.zig-cache/tmp/<sub_path>/`, the codebase's convention — see
 /// core/tests.zig). Caller frees.
+/// Commands a `:` line reads by short name and by label (doc/chrome.md
+/// §1.1): `zzt.frob-widget` ("Polish The Gadget"), and two `twin`s. Counts
+/// what ran, per command.
+pub const ShortNames = struct {
+    pub var ran: [3]usize = @splat(0);
+
+    fn frob(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[0] += 1;
+        return .nil;
+    }
+    fn twinA(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[1] += 1;
+        return .nil;
+    }
+    fn twinB(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[2] += 1;
+        return .nil;
+    }
+
+    pub fn bind(ed: *Editor) !void {
+        ran = @splat(0);
+        const cmds = ed.ctx.commands;
+        _ = try cmds.bind(ed.gpa, "zzt.frob-widget", core.command.define("zzt.frob-widget", "Polish.", frob).present(.{ .label = "Polish The Gadget" }));
+        _ = try cmds.bind(ed.gpa, "zzt.twin", core.command.define("zzt.twin", "One twin.", twinA).present(.{ .label = "Twin" }));
+        _ = try cmds.bind(ed.gpa, "zzq.twin", core.command.define("zzq.twin", "The other twin.", twinB).present(.{ .label = "Twin" }));
+    }
+
+    /// Type `line` on the `:` line (opened with `colon`), then `finish`.
+    pub fn ex(ed: *Editor, line: []const u8, finish: []const u8) void {
+        ed.press("colon", "");
+        ed.typeText(line);
+        ed.press(finish, "");
+    }
+};
+
 pub fn tmpPath(gpa: Allocator, sub_path: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
 }
