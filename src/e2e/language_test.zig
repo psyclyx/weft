@@ -307,6 +307,59 @@ test "e2e/places: two projects, ONE language — two servers, each rooted in and
     }
 }
 
+/// A javascript file several paint windows long, so the end of it is far
+/// outside any window painted around its top.
+fn longJs(gpa: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (0..3000) |i| try out.print(gpa, "const v{d} = \"s{d}\"; // line {d}\n", .{ i, i, i });
+    return out.toOwnedSlice(gpa);
+}
+
+/// Wake the app with no input until the shown frame is highlighted, spinning
+/// (never sleeping) against a deadline. False = no wake ever drew it colored.
+fn wakeUntilHighlighted(ed: *h.Editor) bool {
+    const deadline = h.core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (h.core.task.nowNs() < deadline) {
+        ed.applyWindow();
+        if (lang.shownHighlighted(ed)) return true;
+    }
+    return false;
+}
+
+test "e2e/languages: a long file opened colors itself when its parse lands, and a jump's first frame is colored" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const src = try longJs(gpa);
+    defer gpa.free(src);
+    try h.core.file.writeBytesMakingDirs(gpa, app.proj.root, "long.js", src);
+
+    // The initial parse runs on a pool worker, so the first frame is drawn
+    // before any tree exists. Its landing must draw again by itself: before,
+    // nothing damaged the frame, and the file stayed uncolored until a key.
+    ed.runStr("open", "long.js");
+    try t.expect(wakeUntilHighlighted(ed));
+
+    // A jump far past the paint window: its FIRST frame is colored. Before,
+    // the window was painted around where the pane was before the build
+    // scrolled to the caret, and nothing drew again until the next key.
+    const te = ed.buffers.active().textEditor().?;
+    te.moveTo(te.text().byteLen());
+    ed.application.noteInput();
+    ed.applyWindow();
+    try t.expect((try ed.ensureView()).top_row > 2000);
+    try t.expect(lang.shownHighlighted(ed));
+
+    te.moveTo(0);
+    ed.application.noteInput();
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 0), (try ed.ensureView()).top_row);
+    try t.expect(lang.shownHighlighted(ed));
+}
+
 test "e2e/languages: the harness registers exactly what languages.js does" {
     // The harness stands in for config, because most e2e tests boot none — so
     // its grammar list is a copy of the one in `config/plugins/languages.js`. A copy

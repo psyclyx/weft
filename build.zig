@@ -1236,6 +1236,16 @@ pub fn build(b: *std.Build) void {
     latency_step.dependOn(&run_latency.step);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&runInstrument(b, instrument_tests, "popup-layout").step);
+    // The syntax-highlight timing instrument (src/e2e/syntax_bench_test.zig):
+    // a measurement, not a gate — `test` runs it once as a smoke check of the
+    // path, this step runs it for real in a fresh process.
+    //   zig build bench-syntax -Doptimize=ReleaseFast [WEFT_BENCH_JS=file.js]
+    const syntax_bench_tests = b.addTest(.{
+        .root_module = instrument_mod,
+        .filters = &.{"e2e/bench-syntax"},
+    });
+    const syntax_bench_step = b.step("bench-syntax", "Time syntax highlighting on a large JavaScript buffer through the real app");
+    syntax_bench_step.dependOn(&runInstrument(b, syntax_bench_tests, "bench-syntax").step);
 
     // task #8's deny-vs-crash channel split (src/e2e/trap_kinds_main.zig):
     // a PLAIN EXECUTABLE, not `addTest`, deliberately — this is the one
