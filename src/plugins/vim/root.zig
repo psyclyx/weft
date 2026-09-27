@@ -913,6 +913,13 @@ fn insertLine() void {
     enterInsert();
 }
 /// LINEWISE visual (`V`): the operators snap the selection to whole lines.
+///
+/// Written ONLY where visual mode is entered (`v` false, `V` true) — the one
+/// way into it — and never cleared on the way out. A visual verb over several
+/// carets is one run per extent, and every run must read the visual state the
+/// user chose: when each run cleared it on leaving, the first run (the last
+/// caret) was linewise and every later one charwise. Nothing reads it outside
+/// visual mode, so there is nothing a stale value could reach.
 var visual_linewise: bool = false;
 
 /// The effective operated range for the current selection: verbatim charwise,
@@ -939,7 +946,6 @@ fn visualLine() void { // V — linewise
 /// Leave visual mode: the selection is spent.
 fn endVisual() void {
     weft.run("clear-selection");
-    visual_linewise = false;
     weft.exitToResting();
 }
 
@@ -969,7 +975,6 @@ fn visualDeleteText() void {
         if (semanticDid(semantic_action.copy, slot)) {
             if (semanticDid(semantic_action.delete, 0)) {
                 weft.run("clear-selection");
-                visual_linewise = false;
                 weft.exitToResting();
                 return;
             }
@@ -983,7 +988,6 @@ fn visualDeleteText() void {
         weft.jump(s.start);
     }
     weft.run("clear-selection");
-    visual_linewise = false;
     weft.exitToResting();
 }
 fn visualYankText() void {
@@ -991,7 +995,6 @@ fn visualYankText() void {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
             weft.run("clear-selection");
-            visual_linewise = false;
             weft.exitToResting();
             return;
         }
@@ -1003,7 +1006,6 @@ fn visualYankText() void {
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("clear-selection");
-    visual_linewise = false;
     weft.exitToResting();
 }
 
@@ -1015,7 +1017,6 @@ fn visualChange() void {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot) and semanticDid(semantic_action.delete, 0)) {
             weft.run("clear-selection");
-            visual_linewise = false;
             enterInsert();
             return;
         }
@@ -1028,7 +1029,6 @@ fn visualChange() void {
         weft.jump(s.start);
     }
     weft.run("clear-selection");
-    visual_linewise = false;
     enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (op.comment, op.upcase, …) over
@@ -1046,7 +1046,6 @@ fn visualOp(comptime cmd: []const u8) fn () void {
                 weft.jump(s.start);
             }
             weft.run("clear-selection");
-            visual_linewise = false;
             weft.exitToResting();
         }
     }.h;

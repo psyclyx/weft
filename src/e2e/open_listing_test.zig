@@ -455,6 +455,27 @@ test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lin
     try expectPrimaryText(ed, visual_put);
 }
 
+test "e2e/files: config.js — `V` then `d` over two carets deletes both lines: linewise holds for every extent" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "carets.txt", "a1\nb1\nc1\na2\nb2\nc2\n");
+    ed.runStr("open", "carets.txt");
+    ed.applyWindow();
+    ed.chord("g g");
+    // A second caret on `a2`: `V j` grows a line range from each, and `d`
+    // maps over both, last first. Each run is linewise, not only the first
+    // to read the visual state.
+    try ed.buffers.active().textEditor().?.addSelection(gpa, .{ .anchor = 9, .head = 9 });
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "c1\nc2\n");
+}
+
 fn primaryText(ed: *Editor) ![]u8 {
     ed.applyWindow();
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
