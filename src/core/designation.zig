@@ -179,6 +179,7 @@ pub const refuse_unreachable = "open: that designation's authority is not reacha
 pub const refuse_doc_gone = "open: that document is gone — closed, and no longer kept";
 pub const refuse_proc_gone = "open: that process is gone — a live resource lasts only as long as it runs";
 pub const refuse_no_producer = "open: nothing here produces that kind";
+pub const refuse_producer_unloaded = "open: the plugin that produced that kind is no longer loaded";
 pub const refuse_produced_nothing = "open: that projection produced nothing to show";
 
 /// The view parameter that picks a projection (doc/model.md §2.4): a layout
@@ -250,7 +251,8 @@ pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) anyerro
         },
         .projection => |kind| {
             const openers = ctx.designations orelse return .{ .refused = refuse_no_producer };
-            const opener = openers.find(kind) orelse return .{ .refused = refuse_no_producer };
+            const opener = openers.find(kind) orelse
+                return .{ .refused = if (openers.wasReleased(kind)) refuse_producer_unloaded else refuse_no_producer };
             const here = ctx.buffers.active().ref();
             return try produce(ctx, opener, text, d, here, here);
         },
@@ -359,9 +361,27 @@ pub const Openers = struct {
         command: []u8,
         /// Who claimed it — the plugin's name. Compared, never interpreted.
         owner: []u8,
+        /// Its owner unloaded. Kept, so a designation of the kind is refused
+        /// as having lost its producer rather than as never having had one,
+        /// until a producer claims it again.
+        released: bool = false,
     };
 
     pub const ClaimError = Allocator.Error || error{ NotAProjectionKind, ClaimedByAnother };
+
+    /// Whether plugin `owner` may claim `kind` by its name alone: the kind is
+    /// the plugin's name, or under it (`git` → `git.status`), or the process
+    /// namespace of it (`repl` → `proc.repl`). A kind outside its name a
+    /// plugin must DECLARE (`designation/<kind>` in its describe manifest), so
+    /// what resolves where is read from the manifests, never from which
+    /// plugin loaded first.
+    pub fn inNamespace(owner: []const u8, kind: []const u8) bool {
+        if (owner.len == 0) return false;
+        if (std.mem.eql(u8, kind, owner)) return true;
+        if (kind.len > owner.len and std.mem.startsWith(u8, kind, owner) and kind[owner.len] == '.') return true;
+        const proc = "proc.";
+        return kind.len == proc.len + owner.len and std.mem.startsWith(u8, kind, proc) and std.mem.eql(u8, kind[proc.len..], owner);
+    }
 
     pub fn deinit(self: *Openers, gpa: Allocator) void {
         for (self.list.items) |o| free(gpa, o);
@@ -387,7 +407,7 @@ pub const Openers = struct {
         errdefer gpa.free(next.owner);
         for (self.list.items) |*o| {
             if (!std.mem.eql(u8, o.kind, kind)) continue;
-            if (!std.mem.eql(u8, o.owner, owner)) return error.ClaimedByAnother;
+            if (!o.released and !std.mem.eql(u8, o.owner, owner)) return error.ClaimedByAnother;
             free(gpa, o.*);
             o.* = next;
             return;
@@ -395,19 +415,25 @@ pub const Openers = struct {
         try self.list.append(gpa, next);
     }
 
-    /// Drop every kind `owner` claimed (the plugin unloaded).
+    /// Release every kind `owner` claimed (the plugin unloaded): no command
+    /// answers it any more, and `released` says so.
     pub fn release(self: *Openers, gpa: Allocator, owner: []const u8) void {
-        var i: usize = 0;
-        while (i < self.list.items.len) {
-            if (std.mem.eql(u8, self.list.items[i].owner, owner)) {
-                free(gpa, self.list.swapRemove(i));
-            } else i += 1;
+        _ = gpa;
+        for (self.list.items) |*o| {
+            if (std.mem.eql(u8, o.owner, owner)) o.released = true;
         }
     }
 
+    /// The live producer of `kind`, if any.
     pub fn find(self: *const Openers, kind: []const u8) ?Opener {
-        for (self.list.items) |o| if (std.mem.eql(u8, o.kind, kind)) return o;
+        for (self.list.items) |o| if (!o.released and std.mem.eql(u8, o.kind, kind)) return o;
         return null;
+    }
+
+    /// Whether `kind` had a producer that has since unloaded.
+    pub fn wasReleased(self: *const Openers, kind: []const u8) bool {
+        for (self.list.items) |o| if (o.released and std.mem.eql(u8, o.kind, kind)) return true;
+        return false;
     }
 };
 
@@ -457,6 +483,15 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
         try t.expectError(error.NotAProjectionKind, openers.claim(gpa, reserved, "x", "git"));
     openers.release(gpa, "git");
     try t.expect(openers.find("git.status") == null);
+    try t.expect(openers.wasReleased("git.status"));
+    // A released kind is claimable again.
+    try openers.claim(gpa, "git.status", "git-status-open", "git");
+    try t.expect(openers.find("git.status") != null and !openers.wasReleased("git.status"));
+
+    // A plugin's namespace is its name: the kind itself, under it, its
+    // processes — and nothing that merely starts with the same letters.
+    for ([_][]const u8{ "git", "git.status", "proc.git" }) |mine| try t.expect(Openers.inNamespace("git", mine));
+    for ([_][]const u8{ "gitk", "gitx.status", "proc.gitk", "grep", "proc", "" }) |theirs| try t.expect(!Openers.inNamespace("git", theirs));
 }
 
 /// The producers the opening tests register: one that makes nothing, and one

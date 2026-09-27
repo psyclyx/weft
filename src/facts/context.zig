@@ -17,10 +17,13 @@
 //!     builtin — not by policy, but because no builtin name passes
 //!     `isPublishableKey`. Core names no plugin key, and no plugin can name a
 //!     core one.
-//!   - **A key at a scope has one owner.** The first plugin to publish
-//!     `(scope, key)` holds it until it retracts or unloads; a second
-//!     plugin's write is refused (`error.Held`), never silently merged or
-//!     raced. Resolution therefore cannot depend on load order.
+//!   - **A namespace is its publisher's name.** A plugin publishes only
+//!     keys under its own name (`repl` publishes `repl.session`), so a key
+//!     has exactly one possible owner by construction: no plugin can take
+//!     another's key by publishing it first, and resolution cannot depend
+//!     on load order (`ownsKey`; a write outside one's namespace is
+//!     `error.NotOwnNamespace`). `error.Held` stays as the store's own
+//!     guard for a write by a different owner of a held key.
 //!
 //! Values are strings, because the values worth publishing are names — and a
 //! durable name for content is a designation, which is a string
@@ -66,6 +69,13 @@ pub fn isPublishableKey(key: []const u8) bool {
         }
     }
     return dots > 0 and !prev_dot;
+}
+
+/// Whether publisher `owner` may write `key`: the key's namespace (its first
+/// segment) is the owner's name.
+pub fn ownsKey(owner: []const u8, key: []const u8) bool {
+    return owner.len != 0 and key.len > owner.len and
+        std.mem.startsWith(u8, key, owner) and key[owner.len] == '.';
 }
 
 /// A key a reader or predicate may name: a builtin or a publishable key.
@@ -148,6 +158,8 @@ pub const SetError = error{
     BadValue,
     /// Another owner already publishes this key at this scope.
     Held,
+    /// The key is not under the publisher's own name (`ownsKey`).
+    NotOwnNamespace,
     /// A place scope that names no place (the entry is in none this editor
     /// can name, or the publisher gave an empty designation).
     NoPlace,
@@ -187,6 +199,7 @@ pub const Store = struct {
     /// Returns whether anything changed.
     pub fn set(self: *Store, owner: []const u8, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
         if (!isPublishableKey(key)) return error.BadKey;
+        if (!ownsKey(owner, key)) return error.NotOwnNamespace;
         if (scope == .place and scope.place.len == 0) return error.NoPlace;
         if (value.len > max_value_len) return error.BadValue;
         if (self.find(scope, key)) |i| {
@@ -294,9 +307,9 @@ const t = std.testing;
 test "context: the most specific scope wins, and each scope is only seen where it covers" {
     var s = Store.init(t.allocator);
     defer s.deinit();
-    _ = try s.set("a", .global, "x.k", "global");
-    _ = try s.set("a", .{ .place = "weft://here/dir/p7" }, "x.k", "place");
-    _ = try s.set("a", .{ .entry = 3 }, "x.k", "entry");
+    _ = try s.set("x", .global, "x.k", "global");
+    _ = try s.set("x", .{ .place = "weft://here/dir/p7" }, "x.k", "place");
+    _ = try s.set("x", .{ .entry = 3 }, "x.k", "entry");
 
     try t.expectEqualStrings("entry", s.get(.{ .entry = 3, .place = "weft://here/dir/p7" }, "x.k").?);
     // Another entry in the same place sees the place's value…
@@ -308,25 +321,27 @@ test "context: the most specific scope wins, and each scope is only seen where i
     try t.expectEqual(@as(?[]const u8, null), s.get(.{}, "y.k"));
 
     // Retracting the entry's value uncovers the place's.
-    _ = try s.set("a", .{ .entry = 3 }, "x.k", "");
+    _ = try s.set("x", .{ .entry = 3 }, "x.k", "");
     try t.expectEqualStrings("place", s.get(.{ .entry = 3, .place = "weft://here/dir/p7" }, "x.k").?);
 }
 
-test "context: a key at a scope has one owner, and unloading retracts it" {
+test "context: a key has one possible owner — its namespace's — whoever publishes first, and unloading retracts it" {
     var s = Store.init(t.allocator);
     defer s.deinit();
+    // Another plugin cannot take `repl.session`, at any scope, even first.
+    try t.expectError(error.NotOwnNamespace, s.set("other", .{ .place = "weft://here/dir/p2" }, "repl.session", "mine"));
+    try t.expectError(error.NotOwnNamespace, s.set("rep", .global, "repl.session", "mine"));
     try t.expect(try s.set("repl", .{ .place = "weft://here/dir/p1" }, "repl.session", "*repl*"));
     // The same write again changes nothing.
     try t.expect(!try s.set("repl", .{ .place = "weft://here/dir/p1" }, "repl.session", "*repl*"));
-    try t.expectError(error.Held, s.set("other", .{ .place = "weft://here/dir/p1" }, "repl.session", "mine"));
-    // A different scope is a different claim.
-    try t.expect(try s.set("other", .{ .place = "weft://here/dir/p2" }, "repl.session", "mine"));
+    try t.expectError(error.NotOwnNamespace, s.set("other", .{ .place = "weft://here/dir/p1" }, "repl.session", "mine"));
+    try t.expect(try s.set("other", .{ .place = "weft://here/dir/p1" }, "other.session", "mine"));
 
     const rev = s.revision;
     try t.expectEqual(@as(usize, 1), s.retractOwner("repl"));
     try t.expect(s.revision != rev);
     try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = "weft://here/dir/p1" }, "repl.session"));
-    try t.expectEqualStrings("mine", s.get(.{ .place = "weft://here/dir/p2" }, "repl.session").?);
+    try t.expectEqualStrings("mine", s.get(.{ .place = "weft://here/dir/p1" }, "other.session").?);
 }
 
 test "context: a place is its designation — named by value, held by the store, never empty" {
@@ -354,7 +369,7 @@ test "context: no plugin can publish a builtin, or a key that is not namespaced"
         try t.expectError(error.BadKey, s.set("p", .global, bad, "v"));
     try t.expect(isKeyName("mode") and isKeyName("repl.session") and !isKeyName("repl"));
     const long = [_]u8{'x'} ** (max_value_len + 1);
-    try t.expectError(error.BadValue, s.set("p", .global, "a.b", &long));
+    try t.expectError(error.BadValue, s.set("a", .global, "a.b", &long));
 }
 
 test "context: each visits every resolved key once, with its winner" {
@@ -363,7 +378,7 @@ test "context: each visits every resolved key once, with its winner" {
     _ = try s.set("a", .global, "a.k", "g");
     _ = try s.set("a", .{ .entry = 1 }, "a.k", "e");
     _ = try s.set("b", .global, "b.k", "g2");
-    _ = try s.set("b", .{ .place = "weft://here/dir/p9" }, "c.k", "elsewhere");
+    _ = try s.set("c", .{ .place = "weft://here/dir/p9" }, "c.k", "elsewhere");
     const Seen = struct {
         buf: [4][2][]const u8 = undefined,
         n: usize = 0,

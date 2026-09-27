@@ -108,12 +108,14 @@ fn designate(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32) ?Designate
         const d = durable.parse(text) orelse return .malformed;
         if (d.authority != .here) return .malformed;
         switch (d.kind) {
-            // A process in a namespace another plugin reattaches is that
-            // plugin's to declare (`designation.procKind`).
-            .proc => if (ctx.designations) |openers| {
+            // A process in the plugin's OWN namespace (`proc.<name>`, or one
+            // its manifest declares — `designation.procKind`), whoever has
+            // or has not claimed it yet: the namespace is the name's, not
+            // the first declarer's.
+            .proc => {
                 var kind_buf: [64]u8 = undefined;
                 const kind = designation.procKind(d.ref, &kind_buf) orelse return .malformed;
-                if (openers.find(kind)) |claimed| if (!std.mem.eql(u8, claimed.owner, p.name)) return .not_owner;
+                if (!mayClaim(p, kind)) return .not_owner;
             },
             .projection => |kind| {
                 const openers = ctx.designations orelse return .not_owner;
@@ -127,32 +129,50 @@ fn designate(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32) ?Designate
     return null;
 }
 
-/// `designationOpener(kind, command) -> 0 | -1 | -2`: claim projection
+/// Whether `p` may claim (and declare entries of) `kind`: it is in the
+/// plugin's own namespace (`Openers.inNamespace`), or its describe manifest
+/// declared it as the capability `designation/<kind>` — a kind named for
+/// what it shows (`diagnostics`) rather than for who shows it.
+fn mayClaim(p: *WasmPlugin, kind: []const u8) bool {
+    if (designation.Openers.inNamespace(p.name, kind)) return true;
+    var buf: [128]u8 = undefined;
+    const cap = std.fmt.bufPrint(&buf, "designation/{s}", .{kind}) catch return false;
+    return p.declaresCapability(cap);
+}
+
+/// `designationOpener(kind, command) -> 0 | -1 | -2 | -3`: claim projection
 /// `kind` for this plugin, answered by `command` (which receives the
 /// designation as its one argument). -1: not a projection kind (a grammar
-/// kind, or not a kind name at all); -2: another plugin claimed it.
+/// kind, or not a kind name at all); -2: another plugin claimed it; -3: not
+/// this plugin's to claim (`mayClaim`). A refused claim while the plugin
+/// LOADS fails the load, loudly: a producer that cannot own its kind would
+/// otherwise load and silently answer nothing.
 pub fn hDesignationOpener(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const openers = p.activeCtx().designations orelse {
+    // A host with no registry (a bare fixture) has nothing to claim into:
+    // refused, but no fault of the plugin's.
+    if (p.activeCtx().designations == null) {
         results[0] = -1;
         return;
-    };
-    const kind = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
+    }
+    results[0] = claimOpener(p, caller, args);
+    if (results[0] != 0 and p.loading) {
+        std.log.warn("plugin {s}: its designation opener was refused ({d}): a kind must be the plugin's name, under it, or declared as designation/<kind>", .{ p.name, results[0] });
+        p.load_error = error.DesignationKindRefused;
+    }
+}
+
+fn claimOpener(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32) i32 {
+    const openers = p.activeCtx().designations orelse return -1;
+    const kind = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return -1;
     defer p.gpa.free(kind);
-    const command_name = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
-    };
+    const command_name = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return -1;
     defer p.gpa.free(command_name);
-    openers.claim(p.gpa, kind, command_name, p.name) catch |err| {
-        results[0] = switch (err) {
-            error.ClaimedByAnother => -2,
-            else => -1,
-        };
-        return;
+    if (!durable.Kind.isProjectionName(kind)) return -1;
+    if (!mayClaim(p, kind)) return -3;
+    openers.claim(p.gpa, kind, command_name, p.name) catch |err| return switch (err) {
+        error.ClaimedByAnother => -2,
+        else => -1,
     };
-    results[0] = 0;
+    return 0;
 }

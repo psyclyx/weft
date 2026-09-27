@@ -36,7 +36,8 @@ pub const held: i32 = -2;
 /// for `key` at `scope` (0 entry, 1 place, 2 global) of the entry this call
 /// is about, as this plugin — or, at the place scope with a non-empty
 /// `place`, at the place that `dir` designation names. An empty value
-/// retracts. -1 for a key that is not namespaced (`repl.session`), an
+/// retracts. -1 for a key that is not under this plugin's own name (`repl`
+/// publishes `repl.session`, and nobody else can), an
 /// oversized value, an unknown scope, a `place` that is not a `dir`
 /// designation (or given at another scope), an entry in no nameable place,
 /// or no context to publish into; -2 when another plugin holds the key there.

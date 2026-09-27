@@ -443,12 +443,12 @@ test "e2e/designation: the guest doors — read an entry's name, declare only wh
     try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/proc/repl.9" }}));
     // Its own projection kind, claimed, it may declare — and then `open`
     // finds the entry by it.
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow-claim", &.{ .{ .string = "ow.probe" }, .{ .string = "ow-probe" } }));
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/ow.probe/one" }}));
-    try t.expectEqualStrings("weft://here/ow.probe/one", named(ed));
+    try t.expectEqualStrings("ok", result(ed, &buf, "ow-claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow-probe" } }));
+    try t.expectEqualStrings("ok", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/offerwatch.probe/one" }}));
+    try t.expectEqualStrings("weft://here/offerwatch.probe/one", named(ed));
     const produced = ed.buffers.active_id;
     ed.runStr("open", "a.txt");
-    try t.expect(openRaw(ed, "weft://here/ow.probe/one") == null);
+    try t.expect(openRaw(ed, "weft://here/offerwatch.probe/one") == null);
     try t.expectEqual(produced, ed.buffers.active_id);
 }
 
@@ -473,18 +473,18 @@ test "e2e/designation: a place is named by its designation — the builtin reads
 
     // Published at this place, named — then retracted by the same name from
     // an entry somewhere else entirely.
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "ow.session" }, .{ .string = "live" }, .{ .string = place_owned } }));
-    try t.expectEqualStrings("live", core.intent.factsFor(ed.ctx).get("ow.session").?);
+    try t.expectEqualStrings("ok", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "live" }, .{ .string = place_owned } }));
+    try t.expectEqualStrings("live", core.intent.factsFor(ed.ctx).get("offerwatch.session").?);
     // Another project: its own marker makes it its own place.
     try core.file.writeBytesMakingDirs(t.allocator, "other/.git", "other/.git/HEAD", "ref: refs/heads/main\n");
     try core.file.writeBytes(t.allocator, "other/b.txt", "b\n");
     ed.runStr("open", "other/b.txt");
     ed.applyWindow();
     try t.expectEqualStrings(app.under(&want, "dir", "/other"), core.intent.factsFor(ed.ctx).get("place").?);
-    try t.expect(core.intent.factsFor(ed.ctx).get("ow.session") == null); // not published here
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "ow.session" }, .{ .string = "" }, .{ .string = place_owned } }));
+    try t.expect(core.intent.factsFor(ed.ctx).get("offerwatch.session") == null); // not published here
+    try t.expectEqualStrings("ok", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "" }, .{ .string = place_owned } }));
     ed.runStr("open", "a.txt");
-    try t.expect(core.intent.factsFor(ed.ctx).get("ow.session") == null);
+    try t.expect(core.intent.factsFor(ed.ctx).get("offerwatch.session") == null);
     // Only a directory names a place.
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "ow.session" }, .{ .string = "v" }, .{ .string = "weft://here/proc/x" } }));
+    try t.expectEqualStrings("refused", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "v" }, .{ .string = "weft://here/proc/x" } }));
 }

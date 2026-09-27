@@ -373,13 +373,13 @@ test "quickjs: a JS plugin publishes context through the wasm door's body, confi
     // Config: a provider offered only where an agent session is live.
     try evalConfig(&engine, &env.ctx, null, null, null,
         \\weft.action("plugin.chat.send");
-        \\weft.provide("plugin.chat.send", { context: { "acp.session": "*" } }, "chat-send");
+        \\weft.provide("plugin.chat.send", { context: { "chat.session": "*" } }, "chat-send");
     );
     const src =
-        \\weft.command("go", () => weft.echo(String(weft.contextSet("acp.session", "*acp*", "place"))));
-        \\weft.command("read", () => weft.echo(String(weft.contextGet("acp.session"))));
+        \\weft.command("go", () => weft.echo(String(weft.contextSet("chat.session", "*acp*", "place"))));
+        \\weft.command("read", () => weft.echo(String(weft.contextGet("chat.session"))));
         \\weft.command("bad", () => weft.echo(String(weft.contextSet("mode", "x", "global"))));
-        \\weft.command("stop", () => weft.contextSet("acp.session", "", "place"));
+        \\weft.command("stop", () => weft.contextSet("chat.session", "", "place"));
     ;
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "chat", null, src);
     var loaded = true;

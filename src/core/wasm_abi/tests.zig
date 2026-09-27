@@ -4263,28 +4263,67 @@ test "context: a wasm plugin publishes at a scope, a predicate reads it, and unl
             return v.string;
         }
     };
-    const gated: facts.Predicate = .{ .context = .{ .key = "demo.session", .value = "*" } };
+    const gated: facts.Predicate = .{ .context = .{ .key = "offerwatch.session", .value = "*" } };
     try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
 
     // Published at the place of the entry the command ran in: this entry and
     // anything else in the same place now satisfy a predicate on the key.
-    try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "weft://here/proc/7", "place"));
+    try t.expectEqualStrings("ok", try S.set(&env, "offerwatch.session", "weft://here/proc/7", "place"));
     try t.expect(gated.matches(intent_mod.factsFor(&env.ctx)));
-    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("demo.session").?);
+    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("offerwatch.session").?);
     // An entry-scoped value is more specific than the place's.
-    try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "mine", "entry"));
-    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("demo.session").?);
+    try t.expectEqualStrings("ok", try S.set(&env, "offerwatch.session", "mine", "entry"));
+    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("offerwatch.session").?);
 
     // A builtin, or a key with no namespace, is refused at the door.
     try t.expectEqualStrings("refused", try S.set(&env, "mode", "normal", "global"));
     try t.expectEqualStrings("refused", try S.set(&env, "session", "x", "global"));
-    // Another owner's key is not this plugin's to overwrite.
-    _ = try env.context.store.set("someone-else", .global, "demo.other", "x");
-    try t.expectEqualStrings("held", try S.set(&env, "demo.other", "y", "global"));
+    // A key is its namespace's: another plugin's is refused whether or not
+    // its owner has published it yet — first come is not first served.
+    try t.expectEqualStrings("refused", try S.set(&env, "demo.session", "mine", "global"));
+    _ = try env.context.store.set("someone-else", .global, "someone-else.other", "x");
+    try t.expectEqualStrings("refused", try S.set(&env, "someone-else.other", "y", "global"));
 
     // Unloading the plugin retracts everything it published — and nothing else.
     plugin.deinit();
     loaded = false;
     try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
-    try t.expectEqualStrings("x", env.context.store.get(.{}, "demo.other").?);
+    try t.expectEqualStrings("x", env.context.store.get(.{}, "someone-else.other").?);
+}
+
+test "designation: a kind is its producer's by name or by manifest — a plugin claiming another's fails its load" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var openers: @import("../designation.zig").Openers = .empty;
+    defer openers.deinit(gpa);
+    env.ctx.designations = &openers;
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // The grep producer claims `grep` in its init: under any other name it
+    // is claiming someone else's kind, and does not load.
+    try t.expectError(error.DesignationKindRefused, loadPlugin(&engine, &env.ctx, "impostor", @embedFile("guest_grep_wasm"), .{}));
+    try t.expect(openers.find("grep") == null);
+    // Under its own name it loads and owns it — whatever loaded before.
+    const grep = try loadPlugin(&engine, &env.ctx, "grep", @embedFile("guest_grep_wasm"), .{});
+    try t.expectEqualStrings("grep", openers.find("grep").?.owner);
+    // A kind a manifest declares (`designation/diagnostics`) is the
+    // declarer's, though it is not its name.
+    const problems = try loadPlugin(&engine, &env.ctx, "problems", @embedFile("guest_problems_wasm"), .{});
+    try t.expectEqualStrings("problems", openers.find("diagnostics").?.owner);
+    problems.deinit();
+    // Unloaded: the kind is not answered, and says why.
+    try t.expect(openers.find("diagnostics") == null);
+    try t.expect(openers.wasReleased("diagnostics"));
+
+    // At run time a foreign claim is refused (-3), and the plugin stays.
+    const ow = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
+    defer ow.deinit();
+    const claim = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "stranger" }, .{ .string = "ow-probe" } });
+    try t.expectEqualStrings("refused", claim.string);
+    const own = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow-probe" } });
+    try t.expectEqualStrings("ok", own.string);
+    grep.deinit();
 }

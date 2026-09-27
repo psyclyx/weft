@@ -372,7 +372,10 @@ kept alive past its phase.
    core can answer: a live entry, a parked document (closing a scratch
    document with text parks it in `Buffers.parked`, bounded at 16), a
    projection's producer re-run (`Openers`: a producer claims its kind and a
-   command; the grammar's kinds cannot be claimed), a live process
+   command; the grammar's kinds cannot be claimed; a plugin claims only its
+   own name, kinds under it and `proc.<name>`, or a kind its manifest
+   declares as `designation/<kind>`, and a refused claim fails its load; an
+   unloaded producer's kind is refused as such), a live process
    reattached by the producer of its namespace (`proc.<ns>`), else a refusal
    by name. The shell's `open` adds `here` paths, `shell:` files, and peer
    authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
@@ -380,8 +383,10 @@ kept alive past its phase.
    is; a peer's `doc` opens the offer carrying that id, across reconnects;
    a peer's `file` is refused, see below); `peer-files` is now `open
    weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
-   `wl_entry_designate` (only `proc` in an unclaimed or own namespace, or a
-   projection kind the plugin claimed, and never on a file-backed entry),
+   `wl_entry_designate` (only on an entry the plugin made — `Buffer.creator`,
+   stamped from the guest call it was made in — only `proc` in its own
+   namespace or a projection kind it claimed, and never on a file-backed
+   entry),
    `wl_designation_opener`; SDK `designation`, `designate`,
    `designationOpener`, `openDesignation`, `openUnder` (since deleted, §4),
    `placeProjection`,
@@ -419,8 +424,9 @@ kept alive past its phase.
    `weft_facts`' `context.Store`: `(owner, scope, key, value)`, scope
    entry (the entry's generation) | place (the place's identity, packed
    exactly) | global, resolved entry → place → global. A published key must
-   be namespaced (contain a dot), so no builtin can be shadowed; a key at a
-   scope has one owner (a second writer is refused, never raced); a value
+   be namespaced (contain a dot), so no builtin can be shadowed, and its
+   namespace is its publisher's name (`repl.session` is repl's), so a key
+   has one possible owner whatever loads first; a value
    is retracted when set empty or when its plugin unloads. `Facts` carries
    a reader into the store (`Facts.context`), and `Facts.get(key)` is the
    one reader over the whole map — builtins from the typed fields, the rest

@@ -180,7 +180,7 @@ pub const imports = [_]Entry{
     e("qjs_macro_recording", 0, 1, .plugin, "weft.macroRecording(): the register a macro is recording into, or null"),
     // Context, running `wasm_host/context.zig`'s bodies — the ones
     // `wl_context_set`/`wl_context_get` run.
-    e("qjs_context_set", 7, 1, .plugin, "weft.contextSet(key, value, scope[, place]): publish a namespaced key at entry/place/global — at a place a designation names, when given; empty retracts"),
+    e("qjs_context_set", 7, 1, .plugin, "weft.contextSet(key, value, scope[, place]): publish a key under the plugin's own name at entry/place/global — at a place a designation names, when given; empty retracts"),
     e("qjs_context_get", 4, 1, .plugin, "weft.contextGet(key): the primary context's value for any key, or null"),
 };
 

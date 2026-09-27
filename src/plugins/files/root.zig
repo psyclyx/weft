@@ -33,6 +33,8 @@ const cmds = [_]weft.CommandEntry{
 comptime {
     weft.plugin(&cmds, .{
         .perms = &.{ .fs_read, .fs_write },
+        // The `places` projection is named for what it shows, not for us.
+        .capabilities = &.{"designation/places"},
         .init = start,
     }).exportAll();
 }
