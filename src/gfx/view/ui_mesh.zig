@@ -246,7 +246,7 @@ fn filePathProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bo
     try a.out.append(gpa, .{
         .text = try gpa.dupe(u8, file),
         .compact = if (base.len < file.len) try gpa.dupe(u8, base) else "",
-        .priority = 90,
+        .priority = 80,
         .elide = .start,
     });
     // Modified: its own mark, right after the name it is about.
@@ -308,7 +308,7 @@ fn echoProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const a = argsOf(raw);
     const msg = (a.head orelse return false).echo orelse return false;
     if (msg.len == 0) return false;
-    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, msg), .priority = 95, .elide = .end });
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, msg), .priority = 88, .elide = .end });
     return true;
 }
 
@@ -820,8 +820,9 @@ test "ui_mesh: statusline defaults — the grammar's mode chip, the path, and th
     try t.expectEqualStrings(go_to_line, segs[2].command);
     try t.expectEqualStrings("zig", segs[3].text);
     try t.expect(segs[3].align_right);
-    // The chip outlives the path, which outlives the position.
-    try t.expect(segs[0].priority > segs[1].priority and segs[1].priority > segs[2].priority);
+    // The chip outlives the position, which outlives the path — which
+    // yields gracefully, cut from its start down to its tail.
+    try t.expect(segs[0].priority > segs[2].priority and segs[2].priority > segs[1].priority);
 }
 
 test "ui_mesh: a mode no grammar named shows no chip; the head's extras show only where the head looks" {

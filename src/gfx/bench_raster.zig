@@ -60,7 +60,7 @@ const chrome_segs = [_]view_mod.ui_mesh.Seg{
     .{ .text = "src/core/Document.zig", .compact = "Document.zig", .command = "file.open", .priority = 90, .elide = .start },
     .{ .text = "●", .icon = "dot" },
     .{ .text = "saving…", .bg_override = .{ 0.9, 0.7, 0.4, 1 } },
-    .{ .text = "E 2", .icon = "circle-x", .command = "problems.open" },
+    .{ .text = "E 2", .icon = "error", .command = "problems.open" },
     .{ .text = "Ln 12, Col 4", .compact = "12:4", .align_right = true, .priority = 85 },
     .{ .text = "zig", .align_right = true },
 };

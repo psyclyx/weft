@@ -778,7 +778,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 261), census.imports);
+    try t.expectEqual(@as(usize, 262), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 283), census.semantic_operations);
+    try t.expectEqual(@as(usize, 284), census.semantic_operations);
 }

@@ -195,7 +195,7 @@ fn drawSegment(
         },
         // In the glyph's own cell, the glyph blanked (a space keeps the cell,
         // so every later column holds).
-        .stands_in => {
+        .stands_in => if (text.len > 0) {
             _ = try chrome_mod.drawIcon(sink, seg.icon, v.origin_x + (@as(f32, @floatFromInt(col)) + 0.5) * v.cell_w, cy, chrome_mod.iconSide(v), color);
             const len = std.unicode.utf8ByteSequenceLength(text[0]) catch 1;
             text = try std.mem.concat(scratch, u8, &.{ " ", text[@min(text.len, len)..] });

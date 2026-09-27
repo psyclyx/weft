@@ -78,7 +78,7 @@ fn onSlotFire(session: i32) callconv(.c) void {
         .text = std.fmt.bufPrint(&buf, "{s}…", .{what}) catch what,
         .role = .accent,
         .priority = 55,
-        .icon = "hammer",
+        .icon = "build",
         .tooltip = "Running",
     }});
 }

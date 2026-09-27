@@ -5,20 +5,22 @@
 //!
 //! Segments sit in two clusters: `left` from the row's start, `right` ending
 //! at its end. Every segment has a priority (who keeps its room longest), a
-//! full form and, optionally, a compact one. When the row is too short:
+//! full form and, optionally, a compact one. When the row is too short, the
+//! segments yield in order of priority, lowest first, each as little as
+//! makes the row fit and no less than it must:
 //!
-//!   1. segments shrink to their compact form, lowest priority first;
-//!   2. then they go, lowest priority first — except that a segment whose
-//!      text may be cut short (`elide`) is cut to fit, ending (or starting)
-//!      in `…`, when that leaves it at least `min_elided` cells;
-//!   3. and a segment compacted in step 1 gets its full form back, highest
-//!      priority first, wherever the room step 2 made lets it.
+//!   - one whose text may be cut short (`elide`) is cut to exactly what
+//!     fits, ending (or starting) in `…`, when that leaves it at least
+//!     `min_elided` cells — more of its text than its compact form would;
+//!   - else it shrinks to its compact form, when that makes the row fit;
+//!   - else it goes, and the next one yields.
 //!
-//! The two clusters draw from one budget, so a high-priority segment on the
-//! right (`Ln 12, Col 4`) outlives a low-priority one on the left. Equal
-//! priorities yield later-drawn first. Widths are cells of the mono grid —
-//! one per codepoint, the unit every status run is placed in — so a cut
-//! (`elide`) is always between two codepoints, never inside one.
+//! So a low-priority segment goes whole before a higher one so much as
+//! shortens, and the two clusters draw from one budget: a high-priority
+//! segment on the right (`Ln 12, Col 4`) outlives a low-priority one on the
+//! left. Equal priorities yield later-drawn first. Widths are cells of the
+//! mono grid — one per codepoint, the unit every status run is placed in —
+//! so a cut is always between two codepoints, never inside one.
 
 const std = @import("std");
 
@@ -60,7 +62,7 @@ pub const Placed = struct {
 };
 
 /// Cells between two neighbours in one cluster.
-pub const gap = 1;
+pub const gap = 2;
 /// At least this many cells between the two clusters when both show.
 pub const cluster_gap = 2;
 /// The shortest an elided segment may become, `…` included: shorter says
@@ -90,33 +92,22 @@ pub fn layout(items: []const Item, width: usize, out: []Placed) void {
     }.before);
     const yielding = order[0..n];
 
-    // 1. Compact, least important first.
-    for (yielding) |i| {
-        if (used(items, out, n) <= width) break;
-        const c = items[i].compact orelse continue;
-        if (out[i].form == .full and c > 0 and c < items[i].full) out[i] = .{ .form = .compact, .cols = c, .compact = true };
-    }
-    // 2. Elide or drop, least important first.
+    // Least important first, each as little as makes the row fit.
     for (yielding) |i| {
         const total = used(items, out, n);
         if (total <= width) break;
         if (out[i].form == .dropped) continue;
-        const over = total - width;
-        if (items[i].elide != .none and out[i].cols > over and out[i].cols - over >= min_elided) {
-            out[i] = .{ .form = .elided, .cols = out[i].cols - over, .compact = out[i].compact };
+        // The cells this segment may keep for the row to fit.
+        const room = out[i].cols -| (total - width);
+        if (room > 0 and items[i].elide != .none and room >= min_elided) {
+            out[i] = .{ .form = .elided, .cols = room };
             break;
         }
+        if (items[i].compact) |c| if (c > 0 and c <= room) {
+            out[i] = .{ .form = .compact, .cols = c, .compact = true };
+            break;
+        };
         out[i] = .{};
-    }
-    // 3. Give a compacted segment its full form back where it now fits, most
-    // important first.
-    var k = yielding.len;
-    while (k > 0) {
-        k -= 1;
-        const i = yielding[k];
-        if (out[i].form != .compact) continue;
-        const grow = items[i].full - out[i].cols;
-        if (used(items, out, n) + grow <= width) out[i] = .{ .form = .full, .cols = items[i].full };
     }
 
     // Columns: the left cluster from 0, the right one ending at `width`.
@@ -210,41 +201,46 @@ test "status_layout: everything fits — full forms, left from the start, right 
     };
     const out = run(&items, 40);
     try t.expectEqual(Placed{ .form = .full, .col = 0, .cols = 6 }, out[0]);
-    try t.expectEqual(Placed{ .form = .full, .col = 7, .cols = 8 }, out[1]);
-    // The right cluster ends on the last cell: 5 + gap + 3 = 9 cells.
-    try t.expectEqual(Placed{ .form = .full, .col = 31, .cols = 5 }, out[2]);
+    try t.expectEqual(Placed{ .form = .full, .col = 8, .cols = 8 }, out[1]);
+    // The right cluster ends on the last cell: 5 + gap + 3 = 10 cells.
+    try t.expectEqual(Placed{ .form = .full, .col = 30, .cols = 5 }, out[2]);
     try t.expectEqual(Placed{ .form = .full, .col = 37, .cols = 3 }, out[3]);
 }
 
-test "status_layout: short of room, the least important segment goes compact first" {
+test "status_layout: short of room, the least important segment yields first — compact when that is enough" {
     const items = [_]Item{
         .{ .full = 6, .compact = 3, .priority = 100 },
         .{ .full = 12, .compact = 4, .priority = 10 },
         .{ .side = .right, .full = 12, .compact = 5, .priority = 90 },
     };
-    // Full: 6 + 1 + 12 + 2 + 12 = 33. At 25, compacting the priority-10
+    // Full: 6 + 2 + 12 + 2 + 12 = 34. At 26, compacting the priority-10
     // segment (−8) is enough; nothing else changes.
-    const out = run(&items, 25);
+    const out = run(&items, 26);
     try t.expectEqual(Form.full, out[0].form);
-    try t.expectEqual(Placed{ .form = .compact, .col = 7, .cols = 4, .compact = true }, out[1]);
-    try t.expectEqual(Placed{ .form = .full, .col = 13, .cols = 12 }, out[2]);
+    try t.expectEqual(Placed{ .form = .compact, .col = 8, .cols = 4, .compact = true }, out[1]);
+    try t.expectEqual(Placed{ .form = .full, .col = 14, .cols = 12 }, out[2]);
+    // One cell less and its compact form is not enough: it goes whole, and
+    // the more important segments keep their full forms.
+    const short = run(&items, 25);
+    try t.expectEqual(Form.dropped, short[1].form);
+    try t.expectEqual(Placed{ .form = .full, .col = 0, .cols = 6 }, short[0]);
+    try t.expectEqual(Placed{ .form = .full, .col = 13, .cols = 12 }, short[2]);
 }
 
-test "status_layout: then segments go, least important first — a high-priority right segment outlives a low-priority left one" {
+test "status_layout: a low-priority segment goes before a high-priority one shortens — across the clusters" {
     const items = [_]Item{
         .{ .full = 6, .priority = 100 }, // the mode chip
-        .{ .full = 10, .priority = 20 }, // a low-priority left segment
+        .{ .full = 10, .compact = 3, .priority = 20 }, // a low-priority left segment
         .{ .side = .right, .full = 12, .compact = 5, .priority = 90 }, // Ln/Col
     };
-    // 6 + 1 + 10 + 2 + 12 = 31. At 16: compacting Ln/Col (−7) leaves 24,
-    // still too long, so the priority-20 segment goes — and with it gone
-    // Ln/Col has room for its full form again (6 + 2 + 12 = 20 > 16: no).
+    // 6 + 2 + 10 + 2 + 12 = 32. At 16 the priority-20 segment goes (its
+    // compact form would still leave the row too long), then Ln/Col shrinks
+    // to its compact form: 6 + 2 + 5 = 13.
     const out = run(&items, 16);
     try t.expectEqual(Form.full, out[0].form);
     try t.expectEqual(Form.dropped, out[1].form);
     try t.expectEqual(Placed{ .form = .compact, .col = 11, .cols = 5, .compact = true }, out[2]);
-    // With a little more room, the full form comes back once the low one is
-    // gone: 6 + 2 + 12 = 20.
+    // With a little more room, the low one's going is enough: 6 + 2 + 12.
     const wider = run(&items, 20);
     try t.expectEqual(Form.dropped, wider[1].form);
     try t.expectEqual(Placed{ .form = .full, .col = 8, .cols = 12 }, wider[2]);
@@ -253,13 +249,17 @@ test "status_layout: then segments go, least important first — a high-priority
 test "status_layout: text too long for the room is cut to fit with an ellipsis, never below the shortest useful cut" {
     const items = [_]Item{
         .{ .full = 6, .priority = 100 },
-        .{ .full = 30, .priority = 50, .elide = .start },
+        .{ .full = 30, .compact = 4, .priority = 50, .elide = .start },
     };
+    // A cut shows more of the text than the compact form would: 12 cells.
     const out = run(&items, 20);
     try t.expectEqual(Form.full, out[0].form);
-    try t.expectEqual(Placed{ .form = .elided, .col = 7, .cols = 13 }, out[1]);
-    // Too little left for a useful cut: it goes whole.
-    const narrow = run(&items, 12);
+    try t.expectEqual(Placed{ .form = .elided, .col = 8, .cols = 12 }, out[1]);
+    // Too little room for a useful cut, but enough for the compact form.
+    const tight = run(&items, 12);
+    try t.expectEqual(Placed{ .form = .compact, .col = 8, .cols = 4, .compact = true }, tight[1]);
+    // Too little for either: it goes whole.
+    const narrow = run(&items, 10);
     try t.expectEqual(Form.dropped, narrow[1].form);
     try t.expectEqual(Form.full, narrow[0].form);
 }
@@ -270,7 +270,7 @@ test "status_layout: equal priorities yield later-drawn first, and the same inpu
         .{ .full = 5, .priority = 30 },
         .{ .side = .right, .full = 5, .priority = 30 },
     };
-    // 5 + 1 + 5 + 2 + 5 = 18. At 12 one must go: the right one, drawn last.
+    // 5 + 2 + 5 + 2 + 5 = 19. At 12 one must go: the right one, drawn last.
     const a = run(&items, 12);
     const b = run(&items, 12);
     try t.expectEqualSlices(Placed, a[0..3], b[0..3]);

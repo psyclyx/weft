@@ -333,6 +333,80 @@ Col 4`, selection count when several, indentation, encoding, line endings,
 language, notifications. Each is an ordinary segment a plugin publishes
 (git publishes branch, lsp publishes problems), so none of this is ide code.
 
+### 4.4 Landed (2026-09-27, branch `arc/chrome`)
+
+All of §4.
+
+- **Flush.** `View.carve` cuts the status row off the pane's frame before
+  the content inset: edge to edge, the pane's last row, no margin and no
+  leftover cell; the body keeps its margins and its row count. The text sits
+  on the body's columns inside the bar. A docked viewport may declare
+  `extent: { rows: 0 }` when it has a status line — a pane that is only its
+  status row, with no body margins (`Rows.px`).
+- **Layout** (`gfx/view/status_layout.zig`, pure, unit-tested). A segment
+  has a side, a priority, a full and a compact form, and whether its text
+  may be cut (`elide`, at its start for a path, its end for a message). Both
+  clusters share one budget; segments yield lowest priority first, each as
+  little as makes the row fit: a cuttable one is cut to exactly what fits
+  (ending or starting in `…`, never below six cells, always between
+  codepoints), else it takes its compact form if that fits, else it goes
+  whole and the next one yields. Equal priorities yield later-drawn first.
+  Widths are measured in the frame's chrome style (a chip's padding, an
+  icon's cells), so nothing is clipped at a pane's edge. An icon stands in
+  for a leading glyph that stands alone (`● `, `✦ 2`, `E 2`), else takes
+  two cells before the text where the style draws icons.
+- **Every status fact is a segment.** The save and fetch chips, the
+  modified mark, the message, the plugin chip (`weft.status`), the peers
+  and the link left the `Hud` and became core providers beside the mode
+  chip and the path, joined by the place, `Ln 12, Col 4` (compact `12:4`,
+  click → `jump.line`), the selection count and the language. The wire
+  (`core.status_segment`, restated in `weft_statusline`) carries the compact
+  form, priority, icon and tooltip; `surface.Role` learned `warning` and
+  `danger` (the problems counts were the third user of those colours).
+- **Mode names.** A grammar declares a mode's name and tone
+  (`weft.modeDisplay`, `wl_mode_display`): vim `NORMAL`, `INSERT`,
+  `VISUAL`/`V-LINE`, `O-PENDING`, `REPLACE`; helix `NOR`, `INS`, `SEL`;
+  emacs and ide none. A mode no grammar named shows no chip — so ide shows
+  none — except that a transient mode left unnamed (a count, a menu, the
+  picker) shows the entry's resting mode's name, so the chip holds still
+  through a chord. The chip's colour is the theme's for the tone
+  (`Theme.modeChipColor(tone)`); the prefix sniffing is gone.
+- **Status as a projection.** `weft://here/status/primary|active`, produced
+  by core (`status_projection.zig`). A pane presenting one draws that
+  context's segments on its one row (`Hud.status_of`), and a click on a
+  segment acts in the context it describes (`Chrome.acts_in`).
+  `config/statusbar.js` docks it along the bottom, `{ rows: 0 }`, and sets
+  `weft.set("editor", "pane-status", "off")` so no pane — tiled or docked —
+  carries a line of its own; ide.js uses it, last among its docks. A
+  viewport docked later stays outermost however late an earlier one is
+  shown (`Layout.dockWithin`), so the panel opens above the bar.
+- **Owners.** git publishes the branch (one `git rev-parse` per place, said
+  as `git.branch`; click → `git.status`); problems the error and warning
+  counts (`problems.count`; click → `problems.open`); make and run what is
+  running (`make.running`, `run.running`, through `output.Running`); indent
+  its unit (`Spaces: 2`). Core's are the place, Ln/Col, the selection count,
+  the language, the link and the notifications. Encoding and line endings
+  are OMITTED: weft keeps no encoding (it reads UTF-8) and no line-ending
+  style, and the bar does not invent one. The language has no click: there
+  is no language picker. repl, terminal and dap publish no running segment
+  yet (terminal and repl already say `*.session`; a segment is theirs to
+  add).
+- **Go to Line** is core's `jump.line [n]` (every grammar has it); ide's
+  `ide.goto-line` was its duplicate and is gone.
+
+Found on the way:
+
+- The status answers are cached by a key that includes the facts' digest,
+  whose open keys hash the context store's REVISION. A plugin whose segment
+  changes between entry edits (git's branch, a build ending) invalidates by
+  publishing a context key — honest, since each is a real fact — but any
+  publish anywhere re-asks every pane's status. Coarse, cheap today.
+- Panels were found by their edge (`dockedPanel(.bottom)`), which stops
+  identifying one once a panel and a bar share an edge; the e2e harness
+  finds a viewport by its name now (`viewportPane`).
+- The which-key host fallback panel still headlines the raw menu mode id;
+  that panel is which-key's.
+
 ## 5. Focus in structural views
 
 This is the hard one. The goal: the files listing knows nothing about vim or

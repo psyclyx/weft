@@ -47,4 +47,5 @@ test {
     _ = @import("remote_test.zig");
     _ = @import("focus_test.zig");
     _ = @import("command_identity_test.zig");
+    _ = @import("status_test.zig");
 }

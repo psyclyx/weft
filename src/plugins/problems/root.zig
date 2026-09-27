@@ -249,11 +249,11 @@ fn onSlotFire(session: i32) callconv(.c) void {
     // `E 2`: the letter is the text styles' mark, and the icon stands in for
     // it where a style draws icons.
     if (c.errors > 0) {
-        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[0], "E {d}", .{c.errors}) catch "E", .role = .danger, .priority = 65, .icon = "circle-x", .command = "problems.open", .tooltip = "Errors — open Problems" };
+        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[0], "E {d}", .{c.errors}) catch "E", .role = .danger, .priority = 65, .icon = "error", .command = "problems.open", .tooltip = "Errors — open Problems" };
         n += 1;
     }
     if (c.warnings > 0) {
-        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[1], "W {d}", .{c.warnings}) catch "W", .role = .warning, .priority = 64, .icon = "triangle-alert", .command = "problems.open", .tooltip = "Warnings — open Problems" };
+        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[1], "W {d}", .{c.warnings}) catch "W", .role = .warning, .priority = 64, .icon = "warning", .command = "problems.open", .tooltip = "Warnings — open Problems" };
         n += 1;
     }
     statusline.tell(handle, segs[0..n]);
