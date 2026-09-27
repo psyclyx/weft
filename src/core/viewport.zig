@@ -94,7 +94,8 @@ pub const Attrs = struct {
 pub const Extent = union(enum) {
     /// A share of the frame, clamped to (0.05, 0.95).
     fraction: f32,
-    /// Whole text rows, at least one.
+    /// Whole text rows, at least one — or none, for a viewport that is only
+    /// its status line (`status_line` set): a bar presenting a status.
     rows: u16,
 
     pub fn eql(a: Extent, b: Extent) bool {

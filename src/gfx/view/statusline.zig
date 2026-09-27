@@ -64,12 +64,13 @@ pub fn buildHud(
     // left-to-right from `segRun`; a right-anchored cluster (peers, diag
     // count) is measured backwards from the right edge.
     const base_y = baseIn(v, status_rect.y, 0);
-    // Full-width status background so the chips read as one bar.
+    // The bar is the whole row, edge to edge across the pane: the text sits
+    // on the body's columns inside it, the background does not.
     try rects.append(scratch, .{
-        .x = v.origin_x,
-        .y = base_y - v.ascent,
-        .w = @as(f32, @floatFromInt(cols_visible)) * v.cell_w,
-        .h = v.line_h,
+        .x = status_rect.x,
+        .y = status_rect.y,
+        .w = status_rect.w,
+        .h = status_rect.h,
         .color = v.theme.selection,
     });
 

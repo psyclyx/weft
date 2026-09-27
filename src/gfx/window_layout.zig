@@ -161,10 +161,12 @@ pub const Rows = struct {
     inset: f32 = 16,
 
     /// The pixel extent of `n` body rows in a pane under `attrs`: its own
-    /// status line is one more row.
+    /// status line is one more row, flush, outside the margins. A pane of no
+    /// body rows is only its status line, with no body to put margins round.
     pub fn px(self: Rows, n: u16, attrs: core.viewport.Attrs) f32 {
-        const status: f32 = if (attrs.status_line) 1 else 0;
-        return (@as(f32, @floatFromInt(n)) + status) * self.line_h + self.inset;
+        const status: f32 = if (attrs.status_line) self.line_h else 0;
+        if (n == 0) return status;
+        return @as(f32, @floatFromInt(n)) * self.line_h + self.inset + status;
     }
 };
 
@@ -937,6 +939,22 @@ test "dock: a row-sized strip is its rows plus chrome, at any frame and row heig
     try t.expect(l.focusNeighbor(editor, frame, .up) == null);
     try t.expect(l.focusNext(editor) == null);
     try t.expect(!l.paneById(strip.leaf.id).?.leaf.attrs.isPrimary());
+}
+
+test "dock: a bar of no body rows is exactly its status line, across the whole frame" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const editor = l.root;
+    // A panel docked last is the outermost: it spans the frame's full width,
+    // under every panel docked before it.
+    const side = try l.dock(.left, .{ .fraction = 0.25 }, 5, companion);
+    const bar_attrs: core.viewport.Attrs = .{ .cycles = false, .persistent = true, .focus_source = false, .takes_focus = false };
+    const bar = try l.dock(.bottom, .{ .rows = 0 }, 7, bar_attrs);
+    l.rows = .{ .line_h = 20, .inset = 16 };
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 300 };
+    try t.expectEqual(Rect{ .x = 0, .y = 280, .w = 400, .h = 20 }, l.focusedRect(bar, frame));
+    try t.expectEqual(@as(f32, 280), l.focusedRect(side, frame).h);
+    try t.expectEqual(@as(f32, 280), l.focusedRect(editor, frame).h);
 }
 
 test "dock: the workspace enforces the attributes the panel declares" {

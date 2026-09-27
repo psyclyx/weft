@@ -940,6 +940,10 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = gfx_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-gfx-only", "Run the gfx tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     test_step.dependOn(&b.addRunArtifact(gfx_tests).step);
 
     // The raster timing instrument. `latency_test.zig` measures dispatch and

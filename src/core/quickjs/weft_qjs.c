@@ -807,7 +807,9 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
             if (!JS_IsUndefined(jrows) && !JS_IsNull(jrows)) JS_ToInt32(ctx, &rows, jrows);
             JS_FreeValue(ctx, jrows);
             flags |= WEFT_VP_EXTENT_ROWS;
-            extent_arg = rows < 1 ? 1 : rows;
+            // 0 is a viewport that is only its status line; the host holds
+            // any other viewport to one row.
+            extent_arg = rows < 0 ? 0 : rows;
         } else if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) {
             JS_ToFloat64(ctx, &extent, jextent);
         }

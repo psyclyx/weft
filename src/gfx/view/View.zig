@@ -496,9 +496,11 @@ fn settleRows(editor: *const core.TextSnapshot, top_row: *usize, body_rows: usiz
 }
 
 /// A pane's frame carved into regions (no element computes an offset against
-/// another): content is the frame inset by `margin`; a top tab strip and a
-/// bottom HUD (status line + optional panel) are cut off it, and the body is
-/// what remains.
+/// another). The status line is cut off the FRAME, edge to edge, before any
+/// inset: it is the pane's own bottom row, flush with its sides, never a bar
+/// floating inside the margin (doc/chrome.md §4.2). Content is what remains,
+/// inset by `margin`; a top tab strip and the panel above the status line
+/// are cut off it, and the body is the rest.
 const Regions = struct {
     content: region.Rect,
     tab: ?region.Rect,
@@ -508,11 +510,17 @@ const Regions = struct {
 };
 
 fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
+    // A pane that declares no status line (a one-row strip) gives the row
+    // to its body.
+    const status_cut = frame.cutBottom(if (hud.status_line) self.line_h else 0);
+    const rest = status_cut.rest;
+    // A pane that is only its status line has no body to inset: its content
+    // is empty, never negative.
     const content: region.Rect = .{
-        .x = frame.x + margin,
-        .y = frame.y + margin,
-        .w = frame.w - 2 * margin,
-        .h = frame.h - 2 * margin,
+        .x = rest.x + margin,
+        .y = rest.y + margin,
+        .w = @max(0, rest.w - 2 * margin),
+        .h = @max(0, rest.h - 2 * margin),
     };
     var stack = content;
     var tab: ?region.Rect = null;
@@ -521,10 +529,7 @@ fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
         tab = c.strip;
         stack = c.rest;
     }
-    // A pane that declares no status line (a one-row strip) gives the row
-    // to its body.
-    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
-    const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
+    const panel_cut = stack.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
     return .{ .content = content, .tab = tab, .status = status_cut.strip, .panel = panel_cut.strip, .body = panel_cut.rest };
 }
 

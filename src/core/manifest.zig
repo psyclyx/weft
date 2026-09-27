@@ -646,7 +646,8 @@ pub const Manifest = struct {
             .attrs = attrs,
             .extent = switch (extent) {
                 .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
-                .rows => |n| .{ .rows = @max(n, 1) },
+                // No body rows only for a viewport with a status line to be.
+                .rows => |n| .{ .rows = if (attrs.status_line) n else @max(n, 1) },
             },
             .hidden = hidden,
         });

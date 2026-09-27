@@ -352,6 +352,46 @@ test "harness: a single pane renders text into the body" {
     writePpm(gpa, ".zig-cache/tmp/weft-harness-single.ppm", pixels, w, h) catch {};
 }
 
+test "harness: the status row spans its pane edge to edge, flush with the bottom — no margin, no leftover cell" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var ed = try makeEditor(gpa, pool, "flush\n");
+    defer ed.deinit(gpa);
+
+    // A pane that does not start at the window's corner, and whose width is
+    // no whole number of cells: the row must still cover every pixel of it.
+    const w: u32 = 400;
+    const h: u32 = 200;
+    const pane: region.Rect = .{ .x = 37, .y = 11, .w = 301.5, .h = 173 };
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    view.resetFrame();
+    var tr: usize = 0;
+    var built = try buildOf(gpa, &view, arena.allocator(), &ed, .{ .mode = "normal" }, &tr, pane, .{}, w2p);
+    defer built.deinit(gpa);
+    const pixels = try rasterize(gpa, &view, &.{built.items}, w, h);
+    defer gpa.free(pixels);
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-status-flush.ppm", pixels, w, h) catch {};
+
+    const bottom: u32 = @intFromFloat(pane.y + pane.h - 1);
+    const top: u32 = @intFromFloat(@ceil(pane.y + pane.h - view.line_h));
+    // Its first and last pixel columns, on its first and last pixel rows.
+    const left: u32 = @intFromFloat(pane.x);
+    const right: u32 = @intFromFloat(@floor(pane.x + pane.w - 1));
+    for ([_]u32{ left, right }) |x| for ([_]u32{ top, bottom }) |y| {
+        try t.expect(hasContent(pixels, w, x, y, x + 1, y + 1));
+    };
+    // And nothing past the pane on either side: the row is the pane's, not
+    // the window's.
+    try t.expect(!hasContent(pixels, w, left - 1, top, left, bottom + 1));
+    try t.expect(!hasContent(pixels, w, right + 2, top, right + 3, bottom + 1));
+}
+
 test "harness: which-key panel does not collide with the status line" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
