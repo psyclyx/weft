@@ -245,6 +245,35 @@ kept alive past its phase.
    leaves, `on_context_changed(keys)`. Migrate the toolbar and delete
    `on_offers_changed` and `Companion`. The repl plugin publishes
    `repl.session`.
+
+   *Landed (2026-09-26, branch `arc/model`).* The open keys live in
+   `weft_facts`' `context.Store`: `(owner, scope, key, value)`, scope
+   entry (the entry's generation) | place (the place's identity, packed
+   exactly) | global, resolved entry → place → global. A published key must
+   be namespaced (contain a dot), so no builtin can be shadowed; a key at a
+   scope has one owner (a second writer is refused, never raced); a value
+   is retracted when set empty or when its plugin unloads. `Facts` carries
+   a reader into the store (`Facts.context`), and `Facts.get(key)` is the
+   one reader over the whole map — builtins from the typed fields, the rest
+   from the store — so `Facts.merge` stays reflective. Predicates gained a
+   `context` leaf (`{ context: { "repl.session": "*" } }`, wire tag 13); an
+   unset key matches nothing. Doors: `wl_context_set`, `wl_context_get`
+   (the primary context, readable by any plugin), `wl_context_changed`;
+   `qjs_context_set/get` run the same bodies. `core/context.zig` computes
+   the primary context's per-key fingerprints once per frame after layout
+   and delivers `on_context_changed` (and Zig `Listener`s) with the keys
+   that moved. It reads focus only from `Head.primary_focus`, so a
+   companion taking focus moves no key: the focus feed's `Companion` filter
+   is unnecessary, and deleted with `focus_feed.zig` and
+   `on_offers_changed`. The toolbar redraws when `offers` or `mode` moves;
+   repl and terminal publish `repl.session`/`terminal.session`; ide.js's
+   "Send to REPL" is gated on the key, and the strip shows it only while a
+   REPL is live.
+   Still open: `entry`/`place` values are paths and packed coordinates
+   until phase 1's designations; `scope: "place"` means the calling entry's
+   place, so a publisher cannot later name a different one; a REPL that
+   exits on its own is retracted at the plugin's next command, not at the
+   exit; JS plugins can publish and read but have no `on_context_changed`.
 3. **Chrome as projections.** Context-key subjects, `as`, `reveal`. The
    `offers` provider replaces the toolbar and contextmenu plugins; the
    palette and which-key read the same offers. Sidebar, outline, problems

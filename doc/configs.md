@@ -477,6 +477,9 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   `Plane.signatureAt(.primary)` changes. That signature is a content hash of the rows
   (intention, owner, availability, presentation) and of the context (entry, mode), not
   the catalog epoch, so a caret move or focusing a companion fires nothing.
+  *Superseded by doc/model.md phase 2:* the export is now `on_context_changed`, listing
+  which keys of the primary context moved (`offers` is one of them, fingerprinted by
+  `Plane.offersFingerprint`); `on_offers_changed` is gone.
 - Metadata: `catalog.Affordance {label, group, order}` rides on `Offer` and `Candidate`
   and is never a ranking key. `intent.presentation` fills in what a provider left out.
   The label comes from `intentions.zig`'s new per-intention `label`, the group is the
@@ -535,7 +538,8 @@ The plugins:
 - **`toolbar`** (`config/toolbar.js`) lists the pinned entries (`weft.set("toolbar",
   "pinned", ...)`) plus every non-`std.*` offer of the primary context. It arranges them
   with the shared `affordances` plugin library (groups by their most urgent `order`,
-  separators between). It redraws only on `on_offers_changed`. A click runs
+  separators between). It redraws only when `on_context_changed` reports `offers` or
+  `mode` moved (it was `on_offers_changed` until doc/model.md phase 2). A click runs
   `invokeIntentionIn(.primary)`, and a refusal is echoed. A disabled offer is greyed by
   a `tone` fact and stays clickable so it can say why. Measured in ide.js: a Zig file
   shows `Save Undo Redo Palette | Build Test Debug | Format Rename`; a files listing
@@ -588,7 +592,7 @@ sidebar.
   shown and focused, replacing what it showed. `weft.viewport(..., {shown: false})`
   starts one hidden. A hidden viewport keeps its entry for when it is shown again.
 - Named signals: `wl_signal_emit(name)` and `wl_signal_subscribe(name)` →
-  `on_signal(id)`, delivered at the frame boundary like `on_offers_changed`. Core
+  `on_signal(id)`, delivered at the frame boundary like `on_context_changed`. Core
   knows no signal names and carries no payload.
 - `wl_outline(start, end)`: the active entry's outline symbols from the grammar's
   `outline.scm` that overlap `[start, end)`, each whole.
