@@ -37,6 +37,7 @@ pub extern "weft:abi/1" fn wl_log(level: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command_doc(ptr: u32, len: u32, params: u32, params_len: u32, summary: u32, summary_len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_arity(ptr: u32, len: u32, code: u32, over: u32, over_len: u32) void;
+pub extern "weft:abi/1" fn wl_declare_command_meta(ptr: u32, len: u32, meta: u32, meta_len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_capability(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_request_perm(perm: u32) void;
 pub extern "weft:abi/1" fn wl_cursor() u32;
@@ -130,6 +131,8 @@ pub extern "weft:abi/1" fn wl_command_owner(i: u32, out_ptr: u32, out_cap: u32) 
 pub extern "weft:abi/1" fn wl_command_arity(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_command_meta(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_keys_for(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 // The focused context's live offers, and the door one is accepted through.
 pub extern "weft:abi/1" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;
@@ -158,6 +161,7 @@ pub extern "weft:abi/1" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_
 pub extern "weft:abi/1" fn wl_pick_free_text(on: u32) void;
 pub extern "weft:abi/1" fn wl_pick_category(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
+pub extern "weft:abi/1" fn wl_pick_add_keyed(t: u32, tl: u32, d: u32, dl: u32, k: u32, kl: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 pub extern "weft:abi/1" fn wl_pick_end() void;
 pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;

@@ -461,7 +461,7 @@ const static_cmds = [_]weft.CommandEntry{
 /// vim's `Cmd` so `on_command`'s id indexing stays one flat table.
 const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
     var arr: [ex.commands.len]weft.CommandEntry = undefined;
-    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole, .summary = c.summary, .internal = true };
     break :blk arr;
 };
 

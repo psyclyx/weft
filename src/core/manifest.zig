@@ -137,6 +137,10 @@ pub const GroupDecl = struct { mode: []u8, prefix: []u8, name: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
+/// `weft.command(id, {label, summary, menu, …})`: how a command is presented
+/// at the config tier (doc/chrome.md §1.2), in the shared text form
+/// (`weft_membrane.presentation`) — plain data, hashed and compared as bytes.
+pub const DescribeDecl = struct { name: []u8, meta: []u8 };
 /// `weft.provide(action, when, cmd, prio | opts)`. The predicate is held in
 /// its WIRE form (`facts.encode`) — owned bytes, so the decl is plain data a
 /// manifest hash reads and a reload compares, and applying it decodes through
@@ -395,6 +399,7 @@ pub const Manifest = struct {
     menus: std.ArrayList(MenuDecl) = .empty,
     actions: std.ArrayList(ActionDecl) = .empty,
     semantic_actions: std.ArrayList(SemanticActionDecl) = .empty,
+    describes: std.ArrayList(DescribeDecl) = .empty,
     provides: std.ArrayList(ProvideDecl) = .empty,
     values: std.ArrayList(ValueDecl) = .empty,
     runs: std.ArrayList(RunDecl) = .empty,
@@ -439,6 +444,11 @@ pub const Manifest = struct {
         self.actions.deinit(gpa);
         for (self.semantic_actions.items) |d| gpa.free(d.name);
         self.semantic_actions.deinit(gpa);
+        for (self.describes.items) |d| {
+            gpa.free(d.name);
+            gpa.free(d.meta);
+        }
+        self.describes.deinit(gpa);
         for (self.provides.items) |d| {
             gpa.free(d.action);
             gpa.free(d.predicate);
@@ -535,6 +545,15 @@ pub const Manifest = struct {
     /// focused retained view with the exact protocol name.
     pub fn addSemanticAction(self: *Manifest, name: []const u8) !void {
         try self.semantic_actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
+    }
+
+    /// Describe how command `name` is presented (`meta` in the shared text
+    /// form). Applied into the context's `presentations` at this manifest's
+    /// owner, where it wins field by field over what the command declared.
+    pub fn addDescribe(self: *Manifest, name: []const u8, meta: []const u8) !void {
+        const owned_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned_name);
+        try self.describes.append(self.gpa, .{ .name = owned_name, .meta = try self.gpa.dupe(u8, meta) });
     }
     pub fn addProvide(
         self: *Manifest,
@@ -695,6 +714,11 @@ pub const Manifest = struct {
         for (self.actions.items) |d| hStr(h, d.name);
         hLen(h, self.semantic_actions.items.len);
         for (self.semantic_actions.items) |d| hStr(h, d.name);
+        hLen(h, self.describes.items.len);
+        for (self.describes.items) |d| {
+            hStr(h, d.name);
+            hStr(h, d.meta);
+        }
         hLen(h, self.provides.items.len);
         for (self.provides.items) |d| {
             hStr(h, d.action);
@@ -910,7 +934,9 @@ pub const Manifest = struct {
         for (self.groups.items) |d|
             actx.ctx.keymap.setGroupName(gpa, d.mode, d.prefix, d.name, prio, self.owner) catch {};
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
-        for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
+        for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick, command.action_summary, .{}) catch {};
+        if (actx.ctx.presentations) |table| for (self.describes.items) |d|
+            table.put(gpa, d.name, @import("weft_membrane").presentation.decode(d.meta), self.owner) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
@@ -1418,6 +1444,7 @@ pub const Manifest = struct {
         // literal string-prefix pair a `startsWith` teardown would
         // wrongly conflate (nit R-b).
         if (self.provides.items.len > 0) actx.ctx.actions.unregisterByOwner(self.owner);
+        if (self.describes.items.len > 0) if (actx.ctx.presentations) |table| table.dropOwner(gpa, self.owner);
         // `weft.statusSegment` bindings share the SAME Container `actions`
         // adapts onto (task #19's shared-Container fold-in) — unbind them
         // by the identical owner-exact convention `provides` uses just

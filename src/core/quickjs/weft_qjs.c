@@ -79,6 +79,16 @@ extern void host_declare_command_doc(const char *name, int name_len,
 __attribute__((import_module("weft"), import_name("qjs_declare_arity")))
 extern void host_declare_arity(const char *name, int name_len, int code,
                                const char *over, int over_len);
+// How a declared command is presented (`wl_declare_command_meta`, same body).
+__attribute__((import_module("weft"), import_name("qjs_declare_command_meta")))
+extern void host_declare_command_meta(const char *name, int name_len,
+                                      const char *meta, int meta_len);
+// What a name is called here, and which key runs it (`wl_command_meta` and
+// `wl_keys_for`, same bodies): the full length, written only when it fits.
+__attribute__((import_module("weft"), import_name("qjs_command_meta")))
+extern int host_command_meta(const char *name, int name_len, char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_keys_for")))
+extern int host_keys_for(const char *name, int name_len, char *out, int cap);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
@@ -209,6 +219,11 @@ __attribute__((import_module("weft"), import_name("qjs_status")))
 extern void host_status(const char *text, int len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
+// weft.command(id, {label, summary, menu, …}): describe how a command is
+// presented, at the config tier (doc/chrome.md §1.2). `meta` is the shared
+// text form (`weft_membrane.presentation`). Plugins stub it.
+__attribute__((import_module("weft"), import_name("qjs_describe")))
+extern void host_describe(const char *name, int name_len, const char *meta, int meta_len);
 __attribute__((import_module("weft"), import_name("qjs_semantic_action")))
 extern void host_semantic_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -513,6 +528,91 @@ static JSValue js_group(JSContext *ctx, JSValueConst this_val,
 // weft.action(name) — declare an abstract intent a key can bind to; providers
 // registered with weft.provide resolve it by context at fire time. Policy is
 // `pick` (the config plane drives synchronous, command-shaped actions).
+// ── A command's presentation, as the shared text form ───────────────────
+// One `key\tvalue\n` line per field that is set (`weft_membrane.presentation`
+// is the one reader). String fields are taken as written; a tab or newline
+// in one would break the form, so such a value is dropped. `with_summary`
+// says whether `summary` belongs here: config describes it, while a plugin's
+// command declares its summary through `declare_command_doc`.
+static const char *const meta_string_keys[] = { "label", "menu", "group", "icon", "toggle" };
+
+static int meta_put(char *out, int cap, int at, const char *key, const char *value, size_t vl) {
+    size_t kl = strlen(key);
+    if (memchr(value, '\t', vl) || memchr(value, '\n', vl)) return at;
+    if (at + (int)(kl + vl + 2) > cap) return at;
+    memcpy(out + at, key, kl);
+    at += (int)kl;
+    out[at++] = '\t';
+    memcpy(out + at, value, vl);
+    at += (int)vl;
+    out[at++] = '\n';
+    return at;
+}
+
+static int meta_from_object(JSContext *ctx, JSValueConst obj, int with_summary, char *out, int cap) {
+    int at = 0;
+    if (!JS_IsObject(obj)) return 0;
+    for (size_t i = 0; i < sizeof meta_string_keys / sizeof meta_string_keys[0] + 1; i++) {
+        const char *key = i < sizeof meta_string_keys / sizeof meta_string_keys[0] ? meta_string_keys[i] : "summary";
+        if (!with_summary && strcmp(key, "summary") == 0) continue;
+        JSValue v = JS_GetPropertyStr(ctx, obj, key);
+        if (JS_IsString(v)) {
+            size_t vl;
+            const char *s = JS_ToCStringLen(ctx, &vl, v);
+            if (s) {
+                at = meta_put(out, cap, at, key, s, vl);
+                JS_FreeCString(ctx, s);
+            }
+        }
+        JS_FreeValue(ctx, v);
+    }
+    JSValue order = JS_GetPropertyStr(ctx, obj, "order");
+    if (JS_IsNumber(order)) {
+        int32_t o = 0;
+        if (JS_ToInt32(ctx, &o, order) == 0) {
+            char num[16];
+            int n = 0;
+            uint32_t mag = o < 0 ? (uint32_t)(-(int64_t)o) : (uint32_t)o;
+            char rev[12];
+            int r = 0;
+            do {
+                rev[r++] = (char)('0' + mag % 10);
+                mag /= 10;
+            } while (mag > 0 && r < (int)sizeof rev);
+            if (o < 0) num[n++] = '-';
+            while (r > 0) num[n++] = rev[--r];
+            at = meta_put(out, cap, at, "order", num, (size_t)n);
+        }
+    }
+    JS_FreeValue(ctx, order);
+    for (int b = 0; b < 2; b++) {
+        const char *key = b == 0 ? "prompts" : "internal";
+        JSValue v = JS_GetPropertyStr(ctx, obj, key);
+        if (JS_ToBool(ctx, v) > 0) at = meta_put(out, cap, at, key, "on", 2);
+        JS_FreeValue(ctx, v);
+    }
+    return at;
+}
+
+// weft.command(id, {label, summary, menu, group, order, icon, prompts, toggle,
+// internal}) — the CONFIG plane's: describe how any command is presented,
+// whoever registers it and whenever (doc/chrome.md §1.2). A plugin's own
+// commands declare theirs through the same fields on `weft.command` in the
+// plugin plane; this is the tier that wins over them.
+static JSValue js_describe(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    if (argc < 2 || !JS_IsObject(argv[1]))
+        return JS_ThrowTypeError(ctx, "command(id, {label, summary, menu, group, order, icon, prompts, toggle, internal})");
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    char meta[2048];
+    int ml = meta_from_object(ctx, argv[1], 1, meta, (int)sizeof meta);
+    host_describe(name, (int)nl, meta, ml);
+    JS_FreeCString(ctx, name);
+    return JS_UNDEFINED;
+}
+
 static JSValue js_action(JSContext *ctx, JSValueConst this_val,
                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "action(name)");
@@ -802,6 +902,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
     JS_SetPropertyStr(ctx, weft, "group", JS_NewCFunction(ctx, js_group, "group", 3));
     JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
+    JS_SetPropertyStr(ctx, weft, "command", JS_NewCFunction(ctx, js_describe, "command", 2));
     JS_SetPropertyStr(ctx, weft, "semanticAction", JS_NewCFunction(ctx, js_semantic_action, "semanticAction", 1));
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, weft, "statusSegment", JS_NewCFunction(ctx, js_status_segment, "statusSegment", 2));
@@ -839,20 +940,35 @@ static JSValue g_on_subject_changed; // handler (designation) => void, bound to 
 // entry has. It used to be registered with the literal string "js", which is
 // not a summary: it named the plane, and the plane is what the command's OWNER
 // already says.
+// The options form, `weft.command(name, fn, {summary, params, arity, label,
+// menu, group, order, icon, prompts, toggle, internal})`, carries a command's
+// presentation too (doc/chrome.md §1.2) — the same fields a `.wasm` plugin's
+// `CommandEntry` has, through the same declare bodies.
+static const char *opt_string(JSContext *ctx, JSValueConst obj, const char *key, size_t *len) {
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    const char *s = JS_IsUndefined(v) ? NULL : JS_ToCStringLen(ctx, len, v);
+    JS_FreeValue(ctx, v);
+    return s;
+}
+
 static JSValue js_command(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]))
-        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params[, arity]]])");
+        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params[, arity]]] | {summary, params, arity, label, …})");
     size_t nl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     if (!name) return JS_EXCEPTION;
     size_t sl = 0, pl = 0, al = 0;
-    const char *summary = argc >= 3 && !JS_IsUndefined(argv[2]) ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
-    const char *params = argc >= 4 && !JS_IsUndefined(argv[3]) ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
+    const int opts = argc >= 3 && JS_IsObject(argv[2]) && !JS_IsFunction(ctx, argv[2]);
+    const char *summary = opts ? opt_string(ctx, argv[2], "summary", &sl)
+                          : argc >= 3 && !JS_IsUndefined(argv[2]) ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
+    const char *params = opts ? opt_string(ctx, argv[2], "params", &pl)
+                         : argc >= 4 && !JS_IsUndefined(argv[3]) ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
     // `arity` — "each", "whole" or "homogeneous" — is how the command maps
     // over several selections. Left out, it is undeclared, and dispatch
     // refuses it on several selections rather than guess.
-    const char *arity = argc >= 5 && !JS_IsUndefined(argv[4]) ? JS_ToCStringLen(ctx, &al, argv[4]) : NULL;
+    const char *arity = opts ? opt_string(ctx, argv[2], "arity", &al)
+                        : argc >= 5 && !JS_IsUndefined(argv[4]) ? JS_ToCStringLen(ctx, &al, argv[4]) : NULL;
     if (summary || params || arity)
         host_declare_command_doc(name, (int)nl, params ? params : "", (int)pl,
                                  summary ? summary : "", (int)sl);
@@ -863,6 +979,11 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
         else if (al == 11 && memcmp(arity, "homogeneous", 11) == 0) code = 2;
         if (code >= 0) host_declare_arity(name, (int)nl, code, "", 0);
         JS_FreeCString(ctx, arity);
+    }
+    if (opts) {
+        char meta[2048];
+        int ml = meta_from_object(ctx, argv[2], 0, meta, (int)sizeof meta);
+        if (ml > 0) host_declare_command_meta(name, (int)nl, meta, ml);
     }
     if (summary) JS_FreeCString(ctx, summary);
     if (params) JS_FreeCString(ctx, params);
@@ -1506,6 +1627,76 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.commandMeta(name) -> {label, summary, menu, group, order, icon,
+// prompts, toggle, internal} | undefined: how a command, action or intention
+// is presented HERE — the answer every UI reads (`wl_command_meta`).
+static JSValue js_command_meta(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    static char buf[4096];
+    int n = host_command_meta(name, (int)nl, buf, (int)sizeof buf);
+    JS_FreeCString(ctx, name);
+    if (n < 0 || n > (int)sizeof buf) return JS_UNDEFINED;
+    JSValue obj = JS_NewObject(ctx);
+    int at = 0;
+    while (at < n) {
+        char *nl_at = memchr(buf + at, '\n', (size_t)(n - at));
+        int end = nl_at ? (int)(nl_at - buf) : n;
+        char *tab = memchr(buf + at, '\t', (size_t)(end - at));
+        if (tab) {
+            char key[16];
+            int kl = (int)(tab - (buf + at));
+            if (kl < (int)sizeof key) {
+                memcpy(key, buf + at, (size_t)kl);
+                key[kl] = 0;
+                const char *value = tab + 1;
+                int vl = end - (int)(value - buf);
+                if (strcmp(key, "order") == 0) {
+                    char num[16];
+                    int cl = vl < 15 ? vl : 15;
+                    memcpy(num, value, (size_t)cl);
+                    num[cl] = 0;
+                    JS_SetPropertyStr(ctx, obj, key, JS_NewInt32(ctx, atoi(num)));
+                } else if (strcmp(key, "prompts") == 0 || strcmp(key, "internal") == 0) {
+                    JS_SetPropertyStr(ctx, obj, key, JS_NewBool(ctx, vl == 2 && memcmp(value, "on", 2) == 0));
+                } else {
+                    JS_SetPropertyStr(ctx, obj, key, JS_NewStringLen(ctx, value, (size_t)vl));
+                }
+            }
+        }
+        at = end + 1;
+    }
+    return obj;
+}
+
+// weft.keysFor(name) -> [key, …]: the keys that run a command, action or
+// intention where the person is, shortest first, as a person reads them
+// (`wl_keys_for`).
+static JSValue js_keys_for(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    JSValue arr = JS_NewArray(ctx);
+    if (argc < 1) return arr;
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return arr;
+    static char buf[1024];
+    int n = host_keys_for(name, (int)nl, buf, (int)sizeof buf);
+    JS_FreeCString(ctx, name);
+    if (n <= 0 || n > (int)sizeof buf) return arr;
+    int at = 0;
+    uint32_t i = 0;
+    while (at < n) {
+        char *nl_at = memchr(buf + at, '\n', (size_t)(n - at));
+        int end = nl_at ? (int)(nl_at - buf) : n;
+        JS_SetPropertyUint32(ctx, arr, i++, JS_NewStringLen(ctx, buf + at, (size_t)(end - at)));
+        at = end + 1;
+    }
+    return arr;
+}
+
 // weft.onPick(fn): register the handler fired with a structured pick outcome.
 static JSValue js_on_pick(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
@@ -1589,6 +1780,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 3));
     JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
+    JS_SetPropertyStr(g_ctx, weft, "commandMeta", JS_NewCFunction(g_ctx, js_command_meta, "commandMeta", 1));
+    JS_SetPropertyStr(g_ctx, weft, "keysFor", JS_NewCFunction(g_ctx, js_keys_for, "keysFor", 1));
     JS_SetPropertyStr(g_ctx, weft, "status", JS_NewCFunction(g_ctx, js_status, "status", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_SetPropertyStr(g_ctx, weft, "onExit", JS_NewCFunction(g_ctx, js_on_exit, "onExit", 1));

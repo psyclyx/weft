@@ -26,6 +26,10 @@ const semantic_model = @import("weft_semantic");
 
 pub const Principal = authority.Principal;
 
+/// What a person reads about a command (doc/chrome.md §1.2): its label, menu
+/// path, icon, … The one type and text form every plane shares.
+pub const Presentation = @import("weft_membrane").presentation.Presentation;
+
 /// The embedding shell's workspace placement policy for an activated target
 /// (doc/contextual-workspace-architecture.md §9.4). Registered target
 /// handlers are asked first; a target none of them claims is offered here,
@@ -189,6 +193,10 @@ pub const Context = struct {
     entries: ?EntryOpener = null,
     /// The shell's half of opening and retiring entries (`EntryShell`).
     entry_shell: ?EntryShell = null,
+    /// The config tier of what commands are called (`presentations.zig`):
+    /// `weft.command(id, {…})` descriptions. `null` in embeddings without a
+    /// config, where every command reads as it declared itself.
+    presentations: ?*@import("presentations.zig").Presentations = null,
     /// The shell's pane operations for pointer commands (focus and scroll
     /// the pane under the pointer). `null` in embeddings without panes.
     panes: ?@import("pointer.zig").Panes = null,
@@ -246,7 +254,12 @@ pub const Context = struct {
     /// Lookup-only mode for the active presentation. A semantic scene owns
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
-        const mode = self.head.currentMode();
+        return self.bindingModeFor(self.head.currentMode());
+    }
+
+    /// `bindingMode`, for `mode` rather than the head's current one — the
+    /// mode a picker was opened from, say (`keys_for.personMode`).
+    pub fn bindingModeFor(self: *Context, mode: []const u8) []const u8 {
         if (self.head.scene_selection.path() != null) {
             if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
         }
@@ -797,8 +810,14 @@ pub fn applyActionResult(
 
 pub const Command = struct {
     name: []const u8,
+    /// One sentence, capitalised, ending in a full stop: what it does.
     summary: []const u8,
     args: []const ArgSpec,
+    /// How a person sees it (doc/chrome.md §1.2): label, menu, icon, … The
+    /// config tier may rewrite it (`presentations.zig`), which is why a UI
+    /// reads `presentations.of`, never this field directly. Borrowed, like
+    /// `name` and `summary`.
+    meta: Presentation = .{},
     /// WHO BOUND IT. Borrowed, and outlives the binding for the same reason
     /// `name` does — a guest's is its plugin name, which the host holds for
     /// the plugin's whole life.
@@ -844,6 +863,13 @@ pub const Command = struct {
     pub fn maps(self: Command, arity: ?selection.Arity) Command {
         var c = self;
         c.arity = arity;
+        return c;
+    }
+
+    /// This command, presented to people as `p`.
+    pub fn present(self: Command, p: Presentation) Command {
+        var c = self;
+        c.meta = p;
         return c;
     }
 };
@@ -1003,6 +1029,10 @@ pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) a
     return .nil;
 }
 
+/// What a config-declared action says about itself until `weft.command`
+/// describes it: it runs whichever provider answers it here.
+pub const action_summary = "Run whichever provider answers this action here.";
+
 /// Declare an action and bind its same-named trampoline `Command`, so the
 /// keymap, ex, palette, and `command.run` all dispatch it uniformly. Idempotent
 /// per the underlying `Actions.declare`; a re-declare just binds another
@@ -1013,14 +1043,17 @@ pub fn registerAction(
     actions: *Actions,
     name: []const u8,
     policy: Actions.Policy,
+    summary: []const u8,
+    meta: Presentation,
 ) !void {
     const tr = try actions.declare(name, policy);
     _ = try commands.bind(gpa, name, .{
         .name = name,
-        .summary = "action",
+        .summary = summary,
         .args = &.{},
         .handler = actionTrampoline,
         .data = tr,
+        .meta = meta,
     });
 }
 

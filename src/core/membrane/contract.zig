@@ -95,6 +95,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
     .{ .name = "wl_declare_command_doc", .handler = declare.hDeclareCommandDoc },
     .{ .name = "wl_declare_arity", .handler = declare.hDeclareArity },
+    .{ .name = "wl_declare_command_meta", .handler = declare.hDeclareCommandMeta },
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
@@ -199,6 +200,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_arity", .handler = commands.hCommandArity },
     .{ .name = "wl_command_arity_required", .handler = commands.hCommandArityRequired },
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
+    .{ .name = "wl_command_meta", .handler = commands.hCommandMeta },
+    .{ .name = "wl_keys_for", .handler = commands.hKeysFor },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
@@ -228,6 +231,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_pick_category", .handler = pick.hPickCategory },
     .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
     .{ .name = "wl_pick_add_buffer", .handler = pick.hPickAddBuffer },
+    .{ .name = "wl_pick_add_keyed", .handler = pick.hPickAddKeyed },
     .{ .name = "wl_pick_end", .handler = pick.hPickEnd },
     .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
     .{ .name = "wl_pick_outcome_kind", .handler = pick.hPickOutcomeKind },

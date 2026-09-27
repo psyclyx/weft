@@ -69,6 +69,13 @@ pub const Handle = struct {
 
 pub const InvokeFn = *const fn (data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void;
 
+/// The command (or action) an endpoint RUNS, when it runs a named one — what
+/// "which key runs `file.save` here" (`keys_for.zig`) and "what is this offer
+/// called" (`presentations.zig`) read. Null for an endpoint that runs no named
+/// command (a scene node's own action). Trace text for a key hint, never
+/// authority: the effect door still decides what runs.
+pub const CommandOfFn = *const fn (data: ?*anyopaque, ctx: *command.Context, payload: u32) ?[]const u8;
+
 pub const Error = error{ StaleEndpoint, StaleDecision };
 
 /// Token → invoke fn + generation.
@@ -77,6 +84,7 @@ pub const Invokers = struct {
         /// Borrowed (a literal at every call site); trace text only.
         name: []const u8,
         invoke: ?InvokeFn,
+        command_of: ?CommandOfFn = null,
         data: ?*anyopaque,
         generation: u16,
     };
@@ -93,15 +101,26 @@ pub const Invokers = struct {
         gpa: Allocator,
         name: []const u8,
         run: InvokeFn,
+        command_of: ?CommandOfFn,
         data: ?*anyopaque,
     ) Allocator.Error!Handle {
         for (self.slots.items, 0..) |*s, i| {
             if (s.invoke != null) continue;
-            s.* = .{ .name = name, .invoke = run, .data = data, .generation = s.generation };
+            s.* = .{ .name = name, .invoke = run, .command_of = command_of, .data = data, .generation = s.generation };
             return .{ .slot = @intCast(i), .generation = s.generation };
         }
-        try self.slots.append(gpa, .{ .name = name, .invoke = run, .data = data, .generation = 1 });
+        try self.slots.append(gpa, .{ .name = name, .invoke = run, .command_of = command_of, .data = data, .generation = 1 });
         return .{ .slot = @intCast(self.slots.items.len - 1), .generation = 1 };
+    }
+
+    /// The command a live token's endpoint runs (`CommandOfFn`), or null.
+    pub fn commandOf(self: *const Invokers, ctx: *command.Context, raw: catalog_mod.EndpointToken) ?[]const u8 {
+        const e = Endpoint.of(raw);
+        if (e.slot >= self.slots.items.len) return null;
+        const s = self.slots.items[e.slot];
+        if (s.generation != e.generation or s.invoke == null) return null;
+        const f = s.command_of orelse return null;
+        return f(s.data, ctx, e.payload);
     }
 
     /// Retire an invoker: every token it minted is refused from here on, and
@@ -218,6 +237,13 @@ fn invokeCore(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!v
     _ = try command.run(ctx.commands, ctx, core_offers[payload].command, &.{});
 }
 
+fn coreCommandOf(data: ?*anyopaque, ctx: *command.Context, payload: u32) ?[]const u8 {
+    _ = data;
+    _ = ctx;
+    if (payload >= core_offers.len) return null;
+    return core_offers[payload].command;
+}
+
 // ── The plane ────────────────────────────────────────────────────────
 
 /// Pinned once initialized: the published core table BORROWS `rows`, per the
@@ -266,7 +292,7 @@ pub const Plane = struct {
         // resolves without a first-use allocation on the keystroke path.
         for (intentions.std_intentions) |i| _ = try self.catalog.intention(i.name);
         self.provider = try self.catalog.provider("core.editing");
-        self.handle = try self.invokers.register(gpa, "core.editing", invokeCore, null);
+        self.handle = try self.invokers.register(gpa, "core.editing", invokeCore, coreCommandOf, null);
         try self.publishCore();
         self.views = try .init(gpa, self);
     }
@@ -724,6 +750,19 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
     };
 }
 
+/// The command `intention` would run HERE: the winning offer's endpoint, read
+/// through its invoker (`Invokers.commandOf`). Null when nothing offers it,
+/// the offer is refused, or its endpoint runs no named command.
+pub fn providerCommand(ctx: *command.Context, intention: []const u8) ?[]const u8 {
+    const plane = ctx.intent orelse return null;
+    const id = plane.catalog.findIntention(intention) orelse return null;
+    const snap = plane.snapshotFor(ctx) orelse return null;
+    return switch (snap.resolveOne(id)) {
+        .decision => |d| plane.invokers.commandOf(ctx, d.endpoint),
+        else => null,
+    };
+}
+
 // ── Explanation (architecture §9.5) ──────────────────────────────────
 
 /// What a binding's authored arms WOULD do here — the answer an explain UI
@@ -848,7 +887,7 @@ test "intent: an endpoint token refused once its invoker is retired" {
         }
     };
     S.runs = 0;
-    const h = try inv.register(gpa, "fixture", S.go, null);
+    const h = try inv.register(gpa, "fixture", S.go, null, null);
     try inv.invoke(undefined, h.endpoint(7)); // `go` never dereferences the ctx
     try t.expectEqual(@as(u32, 1), S.runs);
 
@@ -856,7 +895,7 @@ test "intent: an endpoint token refused once its invoker is retired" {
     try t.expectError(Error.StaleEndpoint, inv.invoke(undefined, h.endpoint(7)));
 
     // The reused slot is a DIFFERENT generation, so the old token stays dead.
-    const h2 = try inv.register(gpa, "fixture-2", S.go, null);
+    const h2 = try inv.register(gpa, "fixture-2", S.go, null, null);
     try t.expectEqual(h.slot, h2.slot);
     try t.expectError(Error.StaleEndpoint, inv.invoke(undefined, h.endpoint(7)));
     try inv.invoke(undefined, h2.endpoint(7));

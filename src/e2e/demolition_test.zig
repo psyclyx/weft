@@ -97,7 +97,6 @@ const retired_dead_doors = [_][]const u8{
     "wl_declare_action",
     "wl_env_retract",
     "wl_fs_list_async",
-    "wl_pick_add_keyed",
     "wl_readonly_clear",
     "wl_readonly_span",
     "wl_semantic_active",

@@ -29,9 +29,9 @@ const weft = @import("weft");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
-    .{ .name = "try-read", .handler = tryRead },
-    .{ .name = "try-write", .handler = tryWrite },
-    .{ .name = "try-exists", .handler = tryExists },
+    .{ .name = "try.read", .handler = tryRead },
+    .{ .name = "try.write", .handler = tryWrite },
+    .{ .name = "try.exists", .handler = tryExists },
 };
 
 fn describe() callconv(.c) void {

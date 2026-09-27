@@ -80,7 +80,7 @@ const own_cmds = [_]weft.CommandEntry{
 const arg_cmds: [asker.commands.len]weft.CommandEntry = blk: {
     var arr: [asker.commands.len]weft.CommandEntry = undefined;
     // Editing the prompt's own line: never the selection.
-    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
+    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole, .summary = c.summary, .internal = true };
     break :blk arr;
 };
 const cmds = own_cmds ++ arg_cmds;

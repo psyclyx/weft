@@ -55,7 +55,7 @@ const window_layout = h.window_layout;
 
 /// Run `cmd` (no args) and return its integer result, or 0 if it didn't set
 /// one — a thin wrapper `Editor`/`SecondHead` don't expose (they only run
-/// for side effects), used below to observe `head-poll-count` without
+/// for side effects), used below to observe `head.poll-count` without
 /// depending on a head mutation `on_poll` itself no longer makes.
 fn runInt(ed: *Editor, cmd: []const u8) i64 {
     const v = command.run(ed.commands, ed.ctx, cmd, &.{}) catch return 0;
@@ -398,8 +398,8 @@ test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head,
     try t.expectEqualStrings("default", ed.mode());
     try t.expectEqualStrings("default", b.mode());
 
-    // "head-poke" (weft.setMode + weft.echo) dispatched "as" B.
-    b.run("head-poke");
+    // "head.poke" (weft.setMode + weft.echo) dispatched "as" B.
+    b.run("head.poke");
 
     // B mutated: both writes landed on B's Head.
     try t.expectEqualStrings("poked", b.mode());
@@ -424,14 +424,14 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // "head-relay": wl_run("head-poke") (a nested, in-guest reentrant
+    // "head.relay": wl_run("head.poke") (a nested, in-guest reentrant
     // dispatch through THIS SAME plugin) then a SECOND weft.echo write AFTER
     // the nested call returns. Both the nested call's writes and the outer
     // handler's post-nesting write must land on B throughout — this is what
     // fails under a "reset active_ctx to the load-time default as soon as a
     // nested dispatch returns" bug (a bare set instead of save/restore):
     // the post-nesting echo would land back on A instead.
-    b.run("head-relay");
+    b.run("head.relay");
 
     try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head-poke
     try t.expectEqualStrings("after-relay", b.echoText()); // written AFTER the nested call returned — still B
@@ -457,13 +457,13 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     // (perm proc; spawns a real subprocess so a REAL readiness-driven
     // on_poll fires off the frame-loop tick, not a synthetic direct export
     // call).
-    b.run("head-poke");
-    b.run("head-spawn");
+    b.run("head.poke");
+    b.run("head.spawn");
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("default", ed.mode()); // A untouched by B's dispatches
 
     // Drive the async loop for real until on_poll has fired at least once —
-    // observed via `head-poll-count` (a command result, not a head mutation:
+    // observed via `head.poll-count` (a command result, not a head mutation:
     // on_poll's OWN head-touching writes are exactly what this test proves
     // no longer take effect, so the loop can't key off them the way the
     // pre-item-4 version of this test did). Bounded, generous — a plain
@@ -471,9 +471,9 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     var round: usize = 0;
     while (round < 200) : (round += 1) {
         ed.settle(1);
-        if (runInt(&ed, "head-poll-count") != 0) break;
+        if (runInt(&ed, "head.poll-count") != 0) break;
     }
-    try t.expect(runInt(&ed, "head-poll-count") >= 1); // on_poll really did fire
+    try t.expect(runInt(&ed, "head.poll-count") >= 1); // on_poll really did fire
 
     // BEFORE task #19 item 4: on_poll's `weft.setMode("polled")`/
     // `weft.echo("polled")` silently landed on A (the load-time/system-

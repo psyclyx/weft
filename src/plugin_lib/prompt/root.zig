@@ -104,7 +104,13 @@ pub fn modeOf(comptime name: []const u8) []const u8 {
 /// One of the five commands a prompt answers to. Named at MODULE scope, not
 /// inside `Prompt`, so two instantiations' tables share a type and a plugin
 /// holding several prompts can concatenate them into one flat command table.
-pub const Command = struct { name: []const u8, handler: *const fn () void };
+pub const Command = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    /// One sentence for the command's summary. The five are a prompt's own
+    /// machinery, bound in its mode: a guest splices them in `internal`.
+    summary: []const u8,
+};
 
 /// One prompt. Instantiate at container scope (`const rename = Prompt(.{…});`)
 /// — the state below is per-instantiation, so a plugin may hold several.
@@ -147,11 +153,11 @@ pub fn Prompt(comptime cfg: Config) type {
         /// into its own command table rather than this module registering
         /// behind its back — one place still owns "what commands do I have".
         pub const commands = [_]Command{
-            .{ .name = cfg.name ++ "-type", .handler = onType },
-            .{ .name = cfg.name ++ "-backspace", .handler = onBackspace },
-            .{ .name = cfg.name ++ "-clear", .handler = onClear },
-            .{ .name = cfg.name ++ "-accept", .handler = onAccept },
-            .{ .name = cfg.name ++ "-cancel", .handler = onCancel },
+            .{ .name = cfg.name ++ "-type", .handler = onType, .summary = "Add typed text to the prompt's line." },
+            .{ .name = cfg.name ++ "-backspace", .handler = onBackspace, .summary = "Delete the last character of the prompt's line." },
+            .{ .name = cfg.name ++ "-clear", .handler = onClear, .summary = "Clear the prompt's line." },
+            .{ .name = cfg.name ++ "-accept", .handler = onAccept, .summary = "Accept the prompt's line." },
+            .{ .name = cfg.name ++ "-cancel", .handler = onCancel, .summary = "Leave the prompt without answering." },
         };
 
         /// Bind the mode: printable keys commit through `-type`, Enter

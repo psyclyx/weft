@@ -960,7 +960,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
     // The trampoline `save` dispatches through — `builtins.install` binds
     // this in the real app; a focused unit test binds just the piece it
     // exercises.
-    try command.registerAction(gpa, &commands, &actions, "file.save", .pick);
+    try command.registerAction(gpa, &commands, &actions, "file.save", .pick, "Save.", .{});
 
     var tr = try TranscriptDoc.create(gpa, "alice");
     defer tr.deinit(gpa);

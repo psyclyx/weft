@@ -66,6 +66,64 @@ const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const Door = @import("../plugin_resources.zig").Door;
+const presentations = @import("../presentations.zig");
+const keys_for = @import("../keys_for.zig");
+const presentation_codec = @import("weft_membrane").presentation;
+
+// ── What a name is called, and which key runs it (doc/chrome.md §1.2-1.3) ──
+// One body each, run by `wl_*` and `qjs_*` alike: a UI written as a `.wasm`
+// plugin and one written in JS read the same answer from the same code.
+
+/// `command_meta(name, out, cap) -> len`: how `name` — a command, an action,
+/// an intention — is presented HERE (`presentations.of`), in the shared text
+/// form. Answers the whole length and writes only when it fits; -1 when
+/// nothing by that name answers.
+pub fn commandMetaBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const gpa = d.resources.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const shown = presentations.of(d.ctx, name) orelse return;
+    var buf: [4096]u8 = undefined;
+    const text = presentation_codec.encode(&buf, shown) catch return;
+    const cap: usize = @intCast(args[3]);
+    if (text.len <= cap) _ = caller.writeMemory(@intCast(args[2]), cap, text) catch return;
+    results[0] = @intCast(text.len);
+}
+
+/// `keys_for(name, out, cap) -> len`: the keys that run `name` where the
+/// person is (`keys_for.personMode`), shortest first, one DISPLAYED sequence
+/// per line (`SPC f s`, not `space f s`). Answers the whole length and writes
+/// only when it fits; 0 when no key runs it here.
+pub fn keysForBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const ctx = d.ctx;
+    const gpa = d.resources.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const keys = keys_for.keysFor(ctx, gpa, name, keys_for.personMode(ctx)) catch return;
+    defer keys_for.free(gpa, keys);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    for (keys, 0..) |key, i| {
+        var shown_buf: [256]u8 = undefined;
+        if (i > 0) out.append(gpa, '\n') catch return;
+        out.appendSlice(gpa, ctx.keymap.displayKey(&shown_buf, key)) catch return;
+    }
+    const cap: usize = @intCast(args[3]);
+    if (out.items.len <= cap) _ = caller.writeMemory(@intCast(args[2]), cap, out.items) catch return;
+    results[0] = @intCast(out.items.len);
+}
+
+pub const hCommandMeta = shared.wasmDoor(commandMetaBody, null);
+pub const hKeysFor = shared.wasmDoor(keysForBody, null);
+
+/// The two doors both planes run, for the anti-drift gate.
+pub const read_doors = .{
+    .{ .name = "command_meta", .body = commandMetaBody, .wl = hCommandMeta },
+    .{ .name = "keys_for", .body = keysForBody, .wl = hKeysFor },
+};
 
 pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -107,6 +165,7 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .handler = wpCmdTrampoline,
         .ended = wpCmdEnded,
         .arity = decl.arity,
+        .meta = decl.meta,
         .data = wc,
     }) catch {
         results[0] = -1;

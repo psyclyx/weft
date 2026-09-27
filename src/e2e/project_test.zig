@@ -2276,23 +2276,23 @@ test "e2e/place: an ungranted fs capability reads the project it is in and refus
     defer gpa.free(b_file);
 
     // ── Acting in B (where focus is). ──
-    const in_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }});
+    const in_b = try core.command.run(ed.commands, ed.ctx, "try.read", &.{.{ .string = b_file }});
     try t.expect(std.mem.indexOf(u8, in_b.string, "beta secret") != null);
     // A place-relative name means "in this project" — which is what makes one
     // grant follow the user instead of naming a directory forever.
-    const rel_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = "b.txt" }});
+    const rel_b = try core.command.run(ed.commands, ed.ctx, "try.read", &.{.{ .string = "b.txt" }});
     try t.expect(std.mem.indexOf(u8, rel_b.string, "beta secret") != null);
     // THE GATE: the sibling project is refused. Nothing in config changed, and
     // nothing in config could have — the confinement is the dispatch's place.
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }}));
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-exists", &.{.{ .string = a_file }}));
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try.read", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try.exists", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try.write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
 
     // ── The same plugin, the same grant, focus moved to A: the answers swap. ──
     ed.runStr("file.open", "place-a/a.txt");
-    const in_a = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }});
+    const in_a = try core.command.run(ed.commands, ed.ctx, "try.read", &.{.{ .string = a_file }});
     try t.expect(std.mem.indexOf(u8, in_a.string, "alpha secret") != null);
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try.read", &.{.{ .string = b_file }}));
 
     // B's bytes are untouched: the refused write above was refused, not
     // silently redirected somewhere harmless.

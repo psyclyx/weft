@@ -102,6 +102,10 @@ pub const selection = @import("selection.zig");
 pub const scene_edit = @import("scene_edit.zig");
 pub const type_ahead = @import("type_ahead.zig");
 pub const intent = @import("intent.zig");
+/// What a command, action or intention is called here (doc/chrome.md §1.2).
+pub const presentations = @import("presentations.zig");
+/// "Which key runs this, here" (doc/chrome.md §1.3).
+pub const keys_for = @import("keys_for.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");
 pub const System = @import("System.zig");

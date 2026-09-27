@@ -82,7 +82,7 @@ pub const Publisher = struct {
             .provider = try plane.catalog.provider(name),
             .handle = undefined,
         };
-        self.handle = try plane.invokers.register(gpa, name, invokeRow, self);
+        self.handle = try plane.invokers.register(gpa, name, invokeRow, commandOfRow, self);
     }
 
     pub fn deinit(self: *Publisher, gpa: Allocator) void {
@@ -200,6 +200,11 @@ fn invokeRow(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!vo
     const self: *Publisher = @ptrCast(@alignCast(data orelse return intent.Error.StaleEndpoint));
     const name = self.commandAt(payload) orelse return intent.Error.StaleEndpoint;
     _ = try command.run(ctx.commands, ctx, name, &.{});
+}
+
+fn commandOfRow(data: ?*anyopaque, _: *command.Context, payload: u32) ?[]const u8 {
+    const self: *Publisher = @ptrCast(@alignCast(data orelse return null));
+    return self.commandAt(payload);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

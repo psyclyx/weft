@@ -209,6 +209,9 @@ plugins: ?Plugins = null,
 /// `Ctx.capture`'s grant resolution and a loaded plugin's possession checks
 /// both consult exactly one source of truth.
 grants: grants_mod.HandleTable = undefined,
+/// What commands are called at the config tier (`presentations.zig`):
+/// `weft.command(id, {…})` descriptions, over what each command declared.
+presentations: @import("presentations.zig").Presentations = .{},
 /// Semantic targets/views/fields and target-handler registrations belong to
 /// the system, just like buffers and commands. Heads carry only focus and
 /// active interactions into whichever system they are attached to.
@@ -343,6 +346,7 @@ pub fn destroy(self: *System) void {
     self.environments.deinit();
     self.config_kv.deinit(gpa);
     self.grants.deinit();
+    self.presentations.deinit(gpa);
     gpa.free(self.name);
     gpa.destroy(self);
 }
@@ -366,6 +370,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .semantic = &self.semantic,
         .filesystems = &self.filesystems,
         .intent = &self.intent,
+        .presentations = &self.presentations,
         .context = &self.context,
         .viewports = &self.viewports,
         .designations = &self.designations,
@@ -639,6 +644,7 @@ pub const Host = struct {
         c.semantic = &to.semantic;
         c.filesystems = &to.filesystems;
         c.intent = &to.intent;
+        c.presentations = &to.presentations;
         c.context = &to.context;
         c.viewports = &to.viewports;
         c.designations = &to.designations;

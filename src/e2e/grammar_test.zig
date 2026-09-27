@@ -642,7 +642,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try h.Editor.init(gpa, &ed);
         defer ed.deinit();
         try h.loadGrammar(&ed, case.grammar);
-        try h.loadHeadtest(&ed); // `head-capture`: a presentation owner, across the membrane
+        try h.loadHeadtest(&ed); // `head.capture`: a presentation owner, across the membrane
 
         // No capture consumer exists in-tree (§10.4), so what is wired is the
         // DECLARATION and its pairing: a presentation declares capture on its
@@ -652,7 +652,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try ed.buffers.switchTo(gpa, view_id, ed.head, ed.keymap);
         try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
 
-        ed.run("head-capture");
+        ed.run("head.capture");
         try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
         // A capture entry still rests where its grammar answers keys, so the
         // break-out chord can be pressed at all.
@@ -666,7 +666,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         // (An in-process presentation owner declares through the same door a
         // guest's `weft.declarePosture` funnels into.)
         ed.buffers.active().declarePosture(.text);
-        ed.run("head-capture");
+        ed.run("head.capture");
         ed.chord(case.break_out);
         try t.expectEqual(core.input.Posture.text, ed.ctx.posture());
     }

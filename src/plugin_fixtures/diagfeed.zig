@@ -6,7 +6,7 @@
 //!   - `diagfeed-set <rows>`: replace the rows (`path\tline\tcol\tseverity\t
 //!     message`, newline-separated) and raise the `diagnostics` signal, as
 //!     `lsp` does when a publish lands.
-//!   - `diagfeed-list`: the rows, as the command's string result — what
+//!   - `diagfeed.list`: the rows, as the command's string result — what
 //!     `weft.set("problems", "source", "diagfeed-list")` points the list at.
 
 const weft = @import("weft");
@@ -27,8 +27,8 @@ fn list() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "diagfeed-set", .arity = .one, .call = set, .params = "rows" },
-    .{ .name = "diagfeed-list", .arity = .one, .call = list },
+    .{ .name = "diagfeed.set", .arity = .one, .call = set, .params = "rows" },
+    .{ .name = "diagfeed.list", .arity = .one, .call = list },
 };
 
 comptime {

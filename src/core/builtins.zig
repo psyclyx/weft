@@ -991,14 +991,26 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // Priority -1 keeps it the FLOOR it was when it was unconstrained: the
     // `not` makes it one conjunct specific, which would otherwise tie (and
     // collide at bind) with every projection's own one-conjunct `tool` save.
-    try command.registerAction(gpa, commands, actions, "file.save", .pick);
+    try command.registerAction(gpa, commands, actions, "file.save", .pick, "Save the focused entry: write a file, apply a listing's draft, send a commit message.", .{
+        .label = "Save",
+        .menu = "File",
+        .group = "save",
+        .order = 10,
+        .icon = "save",
+    });
     try actions.provide(.{ .action = "file.save", .predicate = .{ .not = &not_a_projection }, .command = "file.write", .priority = -1, .owner = "core" });
 
     // Retiring an entry is an ACTION too, for the same reason `save` is: what a
     // tool's entry is worth is the tool's question. The default provider drops
     // it (refusing an unsaved file); a projection whose text is unrecoverable —
     // a commit draft — provides its own and asks first.
-    try command.registerAction(gpa, commands, actions, "buffer.close", .pick);
+    try command.registerAction(gpa, commands, actions, "buffer.close", .pick, "Close the focused entry, letting its provider refuse when it holds unsaved work.", .{
+        .label = "Close Editor",
+        .menu = "File",
+        .group = "close",
+        .order = 10,
+        .icon = "close",
+    });
     try actions.provide(.{ .action = "buffer.close", .command = "buffer.close-unmodified", .owner = "core" });
 
     // NO BLANKET std VOCABULARY FOR A TOOL LOCUS.

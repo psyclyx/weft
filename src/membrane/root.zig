@@ -33,6 +33,13 @@
 const std = @import("std");
 const census_mod = @import("census.zig");
 
+/// A command's presentation — label, menu, icon, … — and its one text form
+/// on the wire (doc/chrome.md §1.2).
+pub const presentation = @import("presentation.zig");
+/// The command id grammar (doc/chrome.md §1.1), checked by guests at comptime
+/// and by the host's registry gate alike.
+pub const command_id = @import("command_id.zig");
+
 /// The wasm-level value crossing the membrane, carrying GUEST-SOURCE
 /// signedness. Every `wl_*` import is a scalar i32/u32 (or a `(ptr,len)`
 /// pair of them for bulk data) at the wasm level — both `i32` and `u32`
@@ -182,6 +189,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_declare_command", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command name (id assigned on first declare)" },
     .{ .name = "wl_declare_command_doc", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command with its parameter list and one-line summary" },
     .{ .name = "wl_declare_arity", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: say how a declared command maps over a selection of several extents (0 each, 1 whole, 2 homogeneous, 3 each over a target command, 4 the same merging overlaps)" },
+    .{ .name = "wl_declare_command_meta", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: say how a declared command is presented to people — label, menu, group, order, icon, prompts, toggle, internal — in the `presentation` text form" },
     .{ .name = "wl_declare_capability", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare an abstract capability name this plugin provides" },
     .{ .name = "wl_request_perm", .params = &.{.u32}, .results = &.{}, .group = .declare, .doc = "describe-phase: request a permission bit (fs_read/fs_write/net/proc/timer)" },
 
@@ -286,6 +294,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_arity", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many arguments the `i`-th command declares, or -1 if unbound" },
     .{ .name = "wl_command_arity_required", .params = &.{.u32}, .results = &.{.i32}, .group = .commands, .doc = "how many of them a caller must supply (optional arguments trail), or -1" },
     .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
+    .{ .name = "wl_command_meta", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "how the command, action or intention `name` is presented here, in the `presentation` text form; returns its length (written only if it fits), -1 when nothing by that name answers" },
+    .{ .name = "wl_keys_for", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the keys that run `name` in the context a person is in (a pick's origin while one is open), shortest first, one displayed sequence per line; returns the length (written only if it fits)" },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
@@ -317,6 +327,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pick_category", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "declare the KIND of the pick being built (`file`/`buffer`/`command`); empty — the default — means it is never annotated" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
+    .{ .name = "wl_pick_add_keyed", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) whose public KEY is not its text — a command row labelled for people and keyed by its id, which an annotator reads" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick over the directory of the place this dispatch runs in (core resolves it; a place with none is refused)" },
     .{ .name = "wl_pick_outcome_kind", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "callback-scoped pick outcome: 0 cancelled, 1 input, 2 candidate, -1 outside callback" },
@@ -606,9 +617,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 259;
+const max_import_count: usize = 263;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 281;
+const max_semantic_operation_count: usize = 285;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -666,6 +677,11 @@ comptime {
 
 // ── Tests ───────────────────────────────────────────────────────────
 const t = std.testing;
+
+test {
+    _ = presentation;
+    _ = command_id;
+}
 
 test "membrane contract data: every import entry is well-formed, documented, and unique" {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -763,7 +779,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 259), census.imports);
+    try t.expectEqual(@as(usize, 263), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 281), census.semantic_operations);
+    try t.expectEqual(@as(usize, 285), census.semantic_operations);
 }

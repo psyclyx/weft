@@ -100,6 +100,17 @@ pub fn hPickAddBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     addItem(data, caller, args, b.ref(), annot_key);
 }
 
+/// `wl_pick_add_keyed`: like `wl_pick_add`, but the row's public KEY is its
+/// own — a command row a person reads by label, which an annotator looks up
+/// by id (`args[4..6]`). The accept still reads it by add order.
+pub fn hPickAddKeyed(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const key = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer p.gpa.free(key);
+    addItem(data, caller, args, null, key);
+}
+
 fn addItem(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, buffer: ?Buffers.Ref, key: []const u8) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;

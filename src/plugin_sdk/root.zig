@@ -58,6 +58,13 @@ pub const schema = @import("weft_schema");
 /// modules under the wasm target too: a plugin can author scenes and targets,
 /// but cannot import host runtime implementation files sideways.
 pub const semantic = @import("weft_semantic");
+/// A command's presentation and its text form (doc/chrome.md §1.2) — the
+/// same module the host decodes it with.
+pub const presentation = @import("weft_membrane").presentation;
+pub const Presentation = presentation.Presentation;
+/// The command id grammar (doc/chrome.md §1.1); `plugin` checks every entry
+/// against it at comptime.
+pub const command_id = @import("weft_membrane").command_id;
 pub const semantic_codec = @import("weft_scene_codec");
 pub const fs = @import("weft_fs");
 pub const fs_codec = @import("weft_fs_codec");
@@ -81,6 +88,11 @@ var arg_scratch: [1 << 12]u8 = undefined;
 /// A command.s OWNER, apart again: one palette row reads a name, a summary and
 /// an owner, and each read would otherwise land on the last one.
 var owner_scratch: [1 << 8]u8 = undefined;
+/// What `commandMeta` decodes from: its strings borrow this, so a caller can
+/// hold a presentation beside a name and a summary.
+var meta_scratch: [1 << 10]u8 = undefined;
+/// What `keysFor` answers into.
+var keys_scratch: [1 << 10]u8 = undefined;
 /// A separate scratch for a command's declared ARGUMENT NAMES
 /// (`commandArg`) — the third of the introspection trio, and it needs its own
 /// so all three compose. A palette row is `commandName` + `commandSummary` +
@@ -131,6 +143,16 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
         p(summary.ptr),
         @intCast(summary.len),
     );
+}
+/// Say how a declared command is PRESENTED to people (doc/chrome.md §1.2):
+/// its label, menu path, icon and the rest. The manifest calls this for every
+/// entry that sets any of them; an entry that sets none says nothing, and its
+/// id is what a UI shows.
+pub fn declareCommandMeta(name: []const u8, meta: Presentation) void {
+    var buf: [1024]u8 = undefined;
+    const text = presentation.encode(&buf, meta) catch return;
+    if (text.len == 0) return;
+    e.wl_declare_command_meta(p(name.ptr), @intCast(name.len), p(text.ptr), @intCast(text.len));
 }
 /// Say how a declared command maps over a selection of several extents
 /// (`Arity`). The manifest calls this for every entry; `.one` sends
@@ -1038,6 +1060,30 @@ pub fn commandArityRequired(i: usize) ?usize {
     if (n < 0) return null;
     return @intCast(n);
 }
+/// How `name` — a command, an action, or an intention — is presented to a
+/// person HERE: its label, menu, icon, and whether it is keymap machinery.
+/// An intention answers with its provider's presentation where one answers
+/// it, else the standard vocabulary's. Null when nothing by that name
+/// answers. Strings borrow one shared scratch, overwritten by the next call.
+pub fn commandMeta(name: []const u8) ?Presentation {
+    const n = e.wl_command_meta(p(name.ptr), @intCast(name.len), p(&meta_scratch), meta_scratch.len);
+    if (n < 0 or n > meta_scratch.len) return null;
+    return presentation.decode(meta_scratch[0..@intCast(n)]);
+}
+/// The keys that run `name` where the person is — the binding mode of the
+/// focused context, or the one a pick was opened from — shortest first, as a
+/// person reads them (`C-s`, `SPC f s`). Walk the answer with `keyLines`.
+/// Empty when no key runs it here.
+pub fn keysFor(name: []const u8) []const u8 {
+    const n = e.wl_keys_for(p(name.ptr), @intCast(name.len), p(&keys_scratch), keys_scratch.len);
+    if (n < 0 or n > keys_scratch.len) return "";
+    return keys_scratch[0..@intCast(n)];
+}
+/// The first (shortest) key `keysFor` answered, or "".
+pub fn firstKey(listing: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, listing, '\n') orelse listing.len;
+    return listing[0..end];
+}
 /// The `i`-th command's `k`-th argument NAME (into `param_scratch`, so it
 /// survives a paired `commandName`/`commandSummary` read), or null when there
 /// is no such argument. Successive calls reuse it — copy each name out before
@@ -1661,6 +1707,12 @@ pub fn pickAdd(text: []const u8, doc: []const u8) void {
 /// whatever took its slot.
 pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
     e.wl_pick_add_buffer(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), @intCast(i));
+}
+/// Add one item whose public KEY is not its text: a command row a person
+/// reads by its label and an annotator looks up by its id. The accept still
+/// reads the candidate by its add order (`PickCandidate.index`).
+pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
+    e.wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
 }
 /// Open the accumulated pick.
 pub fn pickEnd() void {

@@ -125,6 +125,7 @@ pub const imports = [_]Entry{
     e("qjs_status_segment", 7, 0, .config, "weft.statusSegment(text, role, priority, command): stage a static ui/statusline-seg segment onto the manifest; a click on it runs `command` (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
     e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent | {rows}, cycles, persistent, followFocus, takesFocus, statusLine, shown}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),
+    e("qjs_describe", 4, 0, .config, "weft.command(id, {label, summary, menu, group, order, icon, prompts, toggle, internal}): stage how a command is presented, at the config tier, in the shared presentation text form (doc/chrome.md §1.2)"),
     e("qjs_present", 9, 0, .config, "weft.present(viewport, {subject, as, reveal}): stage \"show this subject in that viewport\" — a designation or ONE context key (flags bit 0), as a projection, revealing a designation or key (bit 1) inside it (doc/model.md §2.5)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
@@ -132,6 +133,9 @@ pub const imports = [_]Entry{
     e("qjs_declare_command", 2, 0, .plugin, "declare a command name — the twin of wl_declare_command, same body"),
     e("qjs_declare_command_doc", 6, 0, .plugin, "declare a command with its parameter list and one-line summary — the twin of wl_declare_command_doc, same body"),
     e("qjs_declare_arity", 5, 0, .plugin, "say how a declared command maps over several selections — the twin of wl_declare_arity, same body"),
+    e("qjs_declare_command_meta", 4, 0, .plugin, "say how a declared command is presented to people — the twin of wl_declare_command_meta, same body"),
+    e("qjs_command_meta", 4, 1, .plugin, "how a command, action or intention is presented here — the twin of wl_command_meta, same body"),
+    e("qjs_keys_for", 4, 1, .plugin, "the keys that run a name where the person is, shortest first — the twin of wl_keys_for, same body"),
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
@@ -271,7 +275,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 58;
+const expected_count = 62;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -341,8 +345,8 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 16), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 42), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 17), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 45), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -405,7 +409,11 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     // tool doors — tool backing and the designation trio — one body each,
     // with the context event and the subject event delivered to JS at the
     // same frame boundary as to wasm.
-    try t.expectEqual(@as(usize, 58), imports.len);
+    //
+    // 58 → 62 with what a command is called and which key runs it
+    // (doc/chrome.md §1.2-1.3): the meta declaration, the two reads, and the
+    // config tier's `weft.command(id, {…})` — shared bodies from birth.
+    try t.expectEqual(@as(usize, 62), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

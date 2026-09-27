@@ -211,6 +211,7 @@ const config_handlers = .{
     .{ .name = "qjs_group", .handler = cGroup },
     .{ .name = "qjs_action", .handler = cAction },
     .{ .name = "qjs_semantic_action", .handler = cSemanticAction },
+    .{ .name = "qjs_describe", .handler = cDescribe },
     .{ .name = "qjs_provide", .handler = cProvide },
     .{ .name = "qjs_status_segment", .handler = cStatusSegment },
     .{ .name = "qjs_grant", .handler = cGrant },
@@ -231,6 +232,11 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_declare_command", .handler = cDeclareCommand },
     .{ .name = "qjs_declare_command_doc", .handler = cDeclareCommandDoc },
     .{ .name = "qjs_declare_arity", .handler = cDeclareArity },
+    .{ .name = "qjs_declare_command_meta", .handler = cDeclareCommandMeta },
+    // What a name is called here and which key runs it: `wasm_host/commands.zig`'s
+    // bodies, the ones `wl_command_meta` and `wl_keys_for` run.
+    .{ .name = "qjs_command_meta", .handler = cCommandMeta },
+    .{ .name = "qjs_keys_for", .handler = cKeysFor },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
@@ -823,6 +829,9 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
 const cDeclareCommand = jsDoor(declare_doors.declareBody, null);
 const cDeclareCommandDoc = jsDoor(declare_doors.declareDocBody, null);
 const cDeclareArity = jsDoor(declare_doors.declareArityBody, null);
+const cDeclareCommandMeta = jsDoor(declare_doors.declareMetaBody, null);
+pub const cCommandMeta = jsDoor(@import("wasm_host/commands.zig").commandMetaBody, null);
+pub const cKeysFor = jsDoor(@import("wasm_host/commands.zig").keysForBody, null);
 
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
@@ -1514,6 +1523,7 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .owner = self.name,
         .handler = jsCmdTramp,
         .arity = if (decl) |d| d.arity else null,
+        .meta = if (decl) |d| d.meta else .{},
         .data = c,
     }) catch {
         results[0] = -1;
@@ -1741,7 +1751,7 @@ fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
         m.addAction(name) catch {};
         return;
     }
-    command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick) catch {};
+    command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick, command.action_summary, .{}) catch {};
 }
 
 /// weft.semanticAction(name) — declare a focused structured-view action
@@ -1759,6 +1769,26 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     }
     if (br.activeCtx().semantic) |services|
         @import("builtins.zig").registerSemanticAction(gpa, br.activeCtx().commands, services, name) catch {};
+}
+
+/// weft.command(id, {label, summary, menu, …}) — the config plane's: describe
+/// how a command is presented (doc/chrome.md §1.2). `meta` arrives in the
+/// shared text form the C side built. Staged on the manifest when there is
+/// one; otherwise applied straight into the live table under "config".
+fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    const meta = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(meta);
+    if (br.manifest) |m| {
+        m.addDescribe(name, meta) catch {};
+        return;
+    }
+    const table = br.activeCtx().presentations orelse return;
+    table.put(gpa, name, @import("weft_membrane").presentation.decode(meta), "config") catch {};
 }
 
 /// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`

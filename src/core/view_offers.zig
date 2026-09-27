@@ -162,12 +162,12 @@ pub const Publisher = struct {
             .intentions = undefined,
             .endpoints = undefined,
         };
-        const handle = try plane.invokers.register(gpa, provider_name, invokeRoute, null);
+        const handle = try plane.invokers.register(gpa, provider_name, invokeRoute, routeCommand, null);
         for (bindings, 0..) |binding, index| {
             self.intentions[index] = try plane.catalog.intention(binding.intention);
             self.endpoints[index] = handle.endpoint(@intCast(index));
         }
-        self.node_handle = try plane.invokers.register(gpa, provider_name, invokeNodeAction, &plane.views);
+        self.node_handle = try plane.invokers.register(gpa, provider_name, invokeNodeAction, nodeActionCommand, &plane.views);
         return self;
     }
 
@@ -375,6 +375,19 @@ fn coveredByStandard(id: []const u8) bool {
 fn invokeRoute(_: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void {
     if (payload >= bindings.len) return intent.Error.StaleEndpoint;
     _ = try command.run(ctx.commands, ctx, bindings[payload].route, &.{});
+}
+
+fn routeCommand(_: ?*anyopaque, _: *command.Context, payload: u32) ?[]const u8 {
+    if (payload >= bindings.len) return null;
+    return bindings[payload].route;
+}
+
+/// A node action's protocol name — a semantic action, which is a command by
+/// that name where one is registered.
+fn nodeActionCommand(data: ?*anyopaque, _: *command.Context, payload: u32) ?[]const u8 {
+    const self: *Publisher = @ptrCast(@alignCast(data.?));
+    if (payload >= self.node_action_count) return null;
+    return self.node_actions[payload].id();
 }
 
 /// Run a published node action through the SAME door a key bound to its

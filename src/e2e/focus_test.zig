@@ -286,8 +286,8 @@ test "e2e/focus: ide.js — a status listing and the problems list show a focuse
     // label starts with it.
     try core.file.writeBytes(gpa, "p.zig", "const a = 1;\nconst bee = 2;\n");
     try h.loadDiagfeed(ed);
-    try ed.setConfig("problems", "source", "diagfeed-list");
-    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n");
+    try ed.setConfig("problems", "source", "diagfeed.list");
+    ed.runStr("diagfeed.set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n");
     ed.press("C-S-m", "");
     ed.applyWindow();
     try t.expectEqualStrings("*problems*", ed.buffers.active().name);

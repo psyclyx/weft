@@ -242,7 +242,7 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
         .args = &.{},
         .handler = noopCommand,
     });
-    try core.command.registerAction(gpa, ed.commands, ed.ctx.actions, "latency-action", .pick);
+    try core.command.registerAction(gpa, ed.commands, ed.ctx.actions, "latency-action", .pick, "Measure an action's dispatch.", .{});
 
     var buf: [64]u8 = undefined;
     // 10 decoys: `lang` mismatch only.

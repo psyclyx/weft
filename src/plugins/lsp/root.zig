@@ -99,7 +99,7 @@ const base_cmds = [_]weft.CommandEntry{
 const prompt_cmds: [rename_prompt.commands.len]weft.CommandEntry = blk: {
     var arr: [rename_prompt.commands.len]weft.CommandEntry = undefined;
     // Editing the prompt's own line: never the selection.
-    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
+    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole, .summary = c.summary, .internal = true };
     break :blk arr;
 };
 

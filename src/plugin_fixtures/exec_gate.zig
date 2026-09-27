@@ -7,12 +7,12 @@
 //!   - the EXIT STATUS crosses as a number, not as a sentinel the command
 //!     prints into its own stdout for the plugin to scan back out;
 //!   - stderr arrives SEPARATELY, not folded into stdout with `2>&1`;
-//!   - an argument is one argument. `exec-argv` passes a string full of the
+//!   - an argument is one argument. `exec.argv` passes a string full of the
 //!     characters a shell would act on — spaces, a quote, a `;`, a `$` — and
 //!     the child sees it whole. There is no quoting layer to get wrong because
 //!     there is no shell.
 //!
-//! …and that the spool contract survives the move to argv: `exec-spool` hands
+//! …and that the spool contract survives the move to argv: `exec.spool` hands
 //! the child bytes as a real file through a bare `{}` argument, with no `fs`
 //! permission anywhere in this guest.
 //!
@@ -24,11 +24,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "exec-ok", .arity = .one, .call = execOk },
-    .{ .name = "exec-fail", .arity = .one, .call = execFail },
-    .{ .name = "exec-argv", .arity = .one, .call = execArgv },
-    .{ .name = "exec-spool", .arity = .one, .call = execSpool },
-    .{ .name = "exec-ctx", .arity = .one, .call = execCtx },
+    .{ .name = "exec.ok", .arity = .one, .call = execOk },
+    .{ .name = "exec.fail", .arity = .one, .call = execFail },
+    .{ .name = "exec.argv", .arity = .one, .call = execArgv },
+    .{ .name = "exec.spool", .arity = .one, .call = execSpool },
+    .{ .name = "exec.ctx", .arity = .one, .call = execCtx },
 };
 comptime {
     weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();

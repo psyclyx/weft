@@ -169,6 +169,10 @@ pub const Resources = struct {
         /// an `over` target command borrows `over`, which this owns.
         arity: ?@import("selection.zig").Arity = null,
         over: []u8 = &.{},
+        /// How it is presented to people (`declare_command_meta`): the text
+        /// form as declared, owned, and the value decoded from it, borrowing it.
+        meta_text: []u8 = &.{},
+        meta: command_mod.Presentation = .{},
 
         /// Parse a declared parameter list into `ArgSpec`s. Every guest argument
         /// crosses as a string (the membrane carries nothing else), so the only
@@ -201,6 +205,7 @@ pub const Resources = struct {
             gpa.free(self.params);
             gpa.free(self.args);
             gpa.free(self.over);
+            gpa.free(self.meta_text);
         }
     };
 

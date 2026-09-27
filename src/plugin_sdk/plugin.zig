@@ -61,6 +61,35 @@ pub const Entry = struct {
     /// at, and every plugin that had one ran some of them on the primary
     /// alone.
     arity: Arity,
+
+    // ── How it is presented to people (doc/chrome.md §1.2) ─────────────
+    // Declared through `declareCommandMeta`; see `Presentation` for each.
+    /// Title Case, never ending in `…` (`prompts` adds it).
+    label: []const u8 = "",
+    /// `/`-separated menubar path under the conventional top level (File,
+    /// Edit, Selection, View, Go, Run, Terminal, Help).
+    menu: []const u8 = "",
+    group: []const u8 = "",
+    order: ?i32 = null,
+    icon: []const u8 = "",
+    prompts: bool = false,
+    /// A context key whose truthy value shows a check mark.
+    toggle: []const u8 = "",
+    /// Keymap machinery: never listed in the palette, a menu or which-key.
+    internal: bool = false,
+
+    pub fn presentation(self: Entry) weft.Presentation {
+        return .{
+            .label = self.label,
+            .menu = self.menu,
+            .group = self.group,
+            .order = self.order,
+            .icon = self.icon,
+            .prompts = self.prompts,
+            .toggle = self.toggle,
+            .internal = self.internal,
+        };
+    }
 };
 
 /// How a command maps over a selection of several extents (doc/model.md
@@ -153,6 +182,10 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
         var seen: []const []const u8 = &.{};
         for (cmds) |c| {
             if (c.name.len == 0) @compileError("a command with no name");
+            // The id grammar is checked HERE, at the plugin's build, so an id
+            // the host's gate would refuse cannot ship (doc/chrome.md §1.1).
+            if (weft.command_id.check(c.name)) |why|
+                @compileError("command id '" ++ c.name ++ "' " ++ why.describe());
             for (seen) |prior| {
                 if (std.mem.eql(u8, prior, c.name))
                     @compileError("duplicate command name: " ++ c.name);
@@ -173,6 +206,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                 else
                     weft.declareCommand(c.name);
                 weft.declareArity(c.name, c.arity);
+                if (!c.presentation().isEmpty()) weft.declareCommandMeta(c.name, c.presentation());
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);

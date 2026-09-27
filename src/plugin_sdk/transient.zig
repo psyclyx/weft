@@ -80,7 +80,19 @@ pub const Action = struct {
 };
 
 pub const Spec = struct {
+    /// What the menu is called, and the label its open command shows (`Push`,
+    /// read as `Push…`: opening it asks what to do).
     title: []const u8,
+    /// The open command's one-sentence summary; "Open the <title> menu." when
+    /// empty.
+    summary: []const u8 = "",
+    /// Where the open command sits in the menubar, its icon, its position
+    /// (doc/chrome.md §1.2). The generated switches, actions and cancel are
+    /// the menu's machinery and are never listed.
+    menu: []const u8 = "",
+    group: []const u8 = "",
+    order: ?i32 = null,
+    icon: []const u8 = "",
     switches: []const Switch = &.{},
     actions: []const Action = &.{},
     /// Keys that leave. `Escape` and `C-g` unless a plugin says otherwise.
@@ -197,15 +209,27 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
             var out: []const Entry = &.{
                 // Opening, leaving and toggling touch the menu, never the
                 // selection.
-                .{ .name = open_command, .call = openFn, .summary = spec.title, .arity = .whole },
-                .{ .name = cancel_command, .call = cancelFn, .arity = .whole },
+                .{
+                    .name = open_command,
+                    .call = openFn,
+                    .summary = if (spec.summary.len > 0) spec.summary else "Open the " ++ spec.title ++ " menu.",
+                    .arity = .whole,
+                    .label = spec.title,
+                    .prompts = true,
+                    .menu = spec.menu,
+                    .group = spec.group,
+                    .order = spec.order,
+                    .icon = spec.icon,
+                },
+                .{ .name = cancel_command, .call = cancelFn, .arity = .whole, .summary = "Close the " ++ spec.title ++ " menu.", .internal = true },
             };
             for (spec.switches, 0..) |s, i| {
                 out = out ++ [_]Entry{.{
                     .name = toggleName(s),
                     .call = toggleFn(i),
-                    .summary = "toggle " ++ s.flag ++ " for " ++ spec.title,
+                    .summary = "Toggle " ++ s.flag ++ " in the " ++ spec.title ++ " menu.",
                     .arity = .whole,
+                    .internal = true,
                 }};
             }
             for (spec.actions, 0..) |a, i| {
@@ -218,9 +242,10 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
                 out = out ++ [_]Entry{.{
                     .name = actionName(a),
                     .call = actionFn(i),
-                    .summary = a.label,
+                    .summary = sentence(spec.title ++ ": " ++ a.label),
                     // A wrapper around a command only runs it: that one maps.
                     .arity = a.arity orelse .whole,
+                    .internal = true,
                 }};
             }
             break :blk out;
@@ -345,6 +370,12 @@ fn stripDashes(comptime flag: []const u8) []const u8 {
     comptime var i: usize = 0;
     inline while (i < flag.len and flag[i] == '-') i += 1;
     return flag[i..];
+}
+
+/// `"Push: push elsewhere"` → `"Push: push elsewhere."` — a label read as the
+/// one-sentence summary a generated command carries.
+fn sentence(comptime text: []const u8) []const u8 {
+    return text ++ ".";
 }
 
 /// `"push elsewhere"` → `"push-elsewhere"`. Labels are prose; command names are

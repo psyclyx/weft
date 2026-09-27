@@ -96,8 +96,8 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     try core.file.writeBytes(gpa, "p.zig", "const a = 1;\nconst bee = 2;\nconst c = 3;\n");
     try ide.openFile(ed, "q.txt", "one\ntwo\n");
     try h.loadDiagfeed(ed);
-    try ed.setConfig("problems", "source", "diagfeed-list");
-    ed.runStr("diagfeed-set", "p.zig\t2\t7\terror\tbee is unused\n");
+    try ed.setConfig("problems", "source", "diagfeed.list");
+    ed.runStr("diagfeed.set", "p.zig\t2\t7\terror\tbee is unused\n");
 
     // The panel starts hidden; C-S-m opens the list in it and focuses it.
     ed.applyWindow();
@@ -127,7 +127,7 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     // The source changes and says so; the open list follows at the next
     // frame boundary, with nothing re-run by hand. A row from outside the
     // place is not this place's.
-    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
+    ed.runStr("diagfeed.set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
     ed.applyWindow();
     {
         const text = try ed.semanticText(view);
@@ -156,10 +156,10 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
 
     try ide.openFile(ed, "q.txt", "one\ntwo\n");
     try h.loadDiagfeed(ed);
-    try ed.setConfig("problems", "source", "diagfeed-list");
+    try ed.setConfig("problems", "source", "diagfeed.list");
     const rows = try std.fmt.allocPrint(gpa, "{s}/p.zig\t1\t1\terror\tin the project\n{s}/other/x.zig\t1\t1\terror\tin other\n", .{ app.proj.root, app.proj.root });
     defer gpa.free(rows);
-    ed.runStr("diagfeed-set", rows);
+    ed.runStr("diagfeed.set", rows);
 
     var a_buf: [4096]u8 = undefined;
     var b_buf: [4096]u8 = undefined;
@@ -196,7 +196,7 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
 
     // The signal refreshes both, and another frame presents neither again.
     const ids = .{ entry_a.id, entry_b.id };
-    ed.runStr("diagfeed-set", rows);
+    ed.runStr("diagfeed.set", rows);
     ed.applyWindow();
     ed.applyWindow();
     try t.expectEqual(ids[0], pane_a.pane().buffer_id);
