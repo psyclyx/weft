@@ -488,6 +488,15 @@ pub const Session = struct {
     /// nothing new — the router must still authorize the exact revision, and
     /// the path is reconstructed from a root this session itself opened, so a
     /// plugin's opaque target never becomes an arbitrary path.
+    ///
+    /// The file's directory need not be one this session opened: a listing
+    /// reaches deeper directories by publishing their targets itself (a
+    /// descent, a folded-open row), and those carry no path. The generic
+    /// `container` relation — which whoever published a target answers — walks
+    /// back up to a directory this session did open, and the leaf names on the
+    /// way are joined onto its path. Nothing about that walk is trusted: the
+    /// reconstructed directory must be, by the provider's identity, the very
+    /// directory that holds the authorized entry, or nothing opens.
     pub fn openWorkspaceEntry(
         self: *Session,
         ctx: *core.command.Context,
@@ -498,15 +507,99 @@ pub const Session = struct {
         const descriptor = system.semantic.targets.get(located.target) orelse return false;
         if (descriptor.revision != located.revision or descriptor.kind != .file) return false;
         const entry = system.filesystems.authorizedEntry(located.target, located.revision) catch return false;
-        for (self.directory_targets.items) |directory| {
-            const same_root = system.filesystems.sameRoot(directory.root, entry.root) catch continue;
-            if (!same_root) continue;
-            const path = try std.fs.path.join(ctx.gpa, &.{ directory.path, descriptor.display_name });
-            defer ctx.gpa.free(path);
-            _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = path }});
-            return true;
+        const directory = (try self.directoryPathHolding(ctx.gpa, located, entry.root)) orelse return false;
+        defer ctx.gpa.free(directory);
+        const path = try std.fs.path.join(ctx.gpa, &.{ directory, descriptor.display_name });
+        defer ctx.gpa.free(path);
+        _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = path }});
+        return true;
+    }
+
+    /// How far `directoryPathHolding` climbs before giving up — a bound on a
+    /// provider that answers `container` in a cycle, not a limit anyone
+    /// browsing a real tree meets.
+    const max_container_depth = 256;
+
+    /// The path of the directory holding `target`, whose provider root is
+    /// `root`, or null when no directory this session opened contains it.
+    /// Caller owns the result.
+    fn directoryPathHolding(
+        self: *Session,
+        gpa: std.mem.Allocator,
+        target: semantic.target.Located,
+        root: fs.contract.Root,
+    ) !?[]u8 {
+        if (self.localDirectoryPath(root)) |base| return try gpa.dupe(u8, base);
+
+        // Leaf names from the directory holding `target` upward, innermost
+        // first.
+        var names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (names.items) |name| gpa.free(name);
+            names.deinit(gpa);
         }
-        return false;
+        var current = target;
+        for (0..max_container_depth) |_| {
+            const directory = (try self.containerOf(gpa, current)) orelse return null;
+            const binding = self.filesystem_system.filesystems.authorizedDirectory(directory.target, directory.revision) catch return null;
+            if (self.localDirectoryPath(binding.root)) |base| {
+                var parts: std.ArrayList([]const u8) = .empty;
+                defer parts.deinit(gpa);
+                try parts.append(gpa, base);
+                var i = names.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    try parts.append(gpa, names.items[i]);
+                }
+                const path = try std.fs.path.join(gpa, parts.items);
+                if (!self.namesRoot(path, root)) {
+                    gpa.free(path);
+                    return null;
+                }
+                return path;
+            }
+            // Not ours: a target someone published below one of ours, named
+            // by its leaf. Anything else cannot be joined onto a path.
+            const descriptor = self.filesystem_system.semantic.targets.get(directory.target) orelse return null;
+            const leaf = descriptor.display_name;
+            if (leaf.len == 0 or std.mem.indexOfScalar(u8, leaf, '/') != null or
+                std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return null;
+            try names.ensureUnusedCapacity(gpa, 1);
+            names.appendAssumeCapacity(try gpa.dupe(u8, leaf));
+            current = .{ .target = directory.target, .revision = directory.revision };
+        }
+        return null;
+    }
+
+    /// This session's path for the directory whose provider identity is
+    /// `root`. Borrowed from `directory_targets`.
+    fn localDirectoryPath(self: *Session, root: fs.contract.Root) ?[]const u8 {
+        for (self.directory_targets.items) |directory| {
+            const same_root = self.filesystem_system.filesystems.sameRoot(directory.root, root) catch continue;
+            if (same_root) return directory.path;
+        }
+        return null;
+    }
+
+    /// The directory target holding `source`, by the `container` relation.
+    fn containerOf(self: *Session, gpa: std.mem.Allocator, source: semantic.target.Located) !?semantic.target.Located {
+        var relation = self.filesystem_system.semantic.resolveTargetRelation(gpa, source, "container") catch return null;
+        defer relation.deinit();
+        const located = switch (relation.value) {
+            .resolved => |located| located,
+            .absent, .ambiguous => return null,
+        };
+        if (located.location != .whole) return null;
+        return .{ .target = located.target, .revision = located.revision };
+    }
+
+    /// Whether `path` names, by the provider's own identity, the directory
+    /// `root` pins — the proof a path reconstructed from leaf names must pass
+    /// before anything is opened through it.
+    fn namesRoot(self: *Session, path: []const u8, root: fs.contract.Root) bool {
+        const acquired = self.filesystem_provider.acquireRoot(path) catch return false;
+        defer self.filesystem_provider.releaseRoot(acquired);
+        return self.filesystem_system.filesystems.sameRoot(acquired, root) catch false;
     }
 
     pub fn openWorkspaceEntryOpaque(

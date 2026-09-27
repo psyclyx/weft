@@ -31,6 +31,7 @@ test {
     _ = @import("demolition_test.zig");
     _ = @import("notes_test.zig");
     _ = @import("ide_test.zig");
+    _ = @import("open_listing_test.zig");
     _ = @import("visual_aids_test.zig");
     _ = @import("pointer_test.zig");
     _ = @import("find_test.zig");
