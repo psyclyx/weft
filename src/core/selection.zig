@@ -47,6 +47,7 @@ const subbuffer = @import("subbuffer.zig");
 const Document = @import("Document.zig");
 const Buffers = @import("Buffers.zig");
 const Head = @import("Head.zig");
+const semantic_model = @import("weft_semantic");
 
 /// What an extent is a range of.
 pub const Kind = enum(u32) {
@@ -147,15 +148,14 @@ pub fn reason(r: Refusal) struct { code: []const u8, message: []const u8 } {
 pub fn shapeOf(ctx: *command.Context) Shape {
     if (ctx.visit != null) return .{};
     const entry = ctx.entry() orelse return .{};
-    return shapeOfEntry(entry, &ctx.head.semantic_focus);
+    return shapeOfEntry(entry, &ctx.head.scene_selection);
 }
 
 /// The shape of `entry`'s selection: its editor's text extents, or — for an
 /// entry with no text — the rows `focus` (its scene selection) holds.
-pub fn shapeOfEntry(entry: *Buffers.Buffer, focus: *const Head.SemanticFocus) Shape {
+pub fn shapeOfEntry(entry: *Buffers.Buffer, focus: *const Head.SceneSelection) Shape {
     if (entry.textEditor()) |ed| return .{ .count = ed.selectionCount() };
-    _ = focus;
-    return .{};
+    return .{ .count = @max(1, focus.extentCount()) };
 }
 
 // ── The visit ────────────────────────────────────────────────────────
@@ -311,7 +311,7 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
         .each => |e| e,
     };
     const entry = ctx.entry() orelse return cmd.handler(ctx, cmd.data, args);
-    const ed = entry.textEditor() orelse return cmd.handler(ctx, cmd.data, args);
+    const ed = entry.textEditor() orelse return mapRows(ctx, cmd, args, each);
     return mapText(ctx, cmd, args, entry.ref(), ed, each);
 }
 
@@ -508,6 +508,96 @@ fn mapTargets(
         var v: Visit = .{ .index = t.producer, .count = heads.len, .remaining = k, .stage = stage };
         ctx.visit = &v;
         result = try cmd.handler(ctx, cmd.data, full);
+    }
+    return result;
+}
+
+// ── Rows ─────────────────────────────────────────────────────────────
+
+const Rows = Head.SceneSelection.Rows;
+
+/// Where a row extent sits in its view's focus order: its first row.
+fn orderOf(order: []const semantic_model.scene.NodeId, r: Rows) usize {
+    var first: usize = order.len;
+    for (order, 0..) |id, i| if (id == r.anchor or id == r.head) {
+        first = i;
+        break;
+    };
+    return first;
+}
+
+/// Focus row extent `r` as THE selection of the scene: its head focused,
+/// grown from its anchor, nothing marked beside it. False when its head is
+/// gone from the view.
+fn focusRows(ctx: *command.Context, instance: anytype, r: Rows) bool {
+    const focus = &ctx.head.scene_selection;
+    var storage: [1026]semantic_model.scene.NodeId = undefined;
+    const path = (instance.focusPath(r.head, &storage) catch return false) orelse return false;
+    focus.others.clearRetainingCapacity();
+    focus.set(ctx.gpa, path) catch return false;
+    focus.anchor = if (r.anchor != r.head and instance.containsFocusable(r.anchor)) r.anchor else null;
+    return true;
+}
+
+/// Map over row extents: last first in the view's order, each run with its
+/// extent as the scene's one selection. The set is put back afterwards —
+/// every extent whose rows are still there, the primary focused.
+fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value, each: Arity.Each) anyerror!command.Value {
+    // A target is found by a range command over text; a scene has none.
+    if (each.over != null) return cmd.handler(ctx, cmd.data, args);
+    const gpa = ctx.gpa;
+    const focus = &ctx.head.scene_selection;
+    const services = ctx.semantic orelse return cmd.handler(ctx, cmd.data, args);
+    const view = focus.view orelse return cmd.handler(ctx, cmd.data, args);
+    const instance = services.views.get(view) orelse return cmd.handler(ctx, cmd.data, args);
+    const primary = focus.primaryRows() orelse return cmd.handler(ctx, cmd.data, args);
+
+    const others = try gpa.dupe(Rows, focus.others.items);
+    defer gpa.free(others);
+    const extents = try gpa.alloc(Rows, others.len + 1);
+    defer gpa.free(extents);
+    @memcpy(extents[0..others.len], others);
+    extents[others.len] = primary;
+    const order = instance.focus_order;
+    std.mem.sort(Rows, extents, order, struct {
+        fn lt(o: []const semantic_model.scene.NodeId, a: Rows, b: Rows) bool {
+            return orderOf(o, a) < orderOf(o, b);
+        }
+    }.lt);
+
+    var primary_at: usize = 0;
+    for (extents, 0..) |r, i| if (std.meta.eql(r, primary)) {
+        primary_at = i;
+    };
+
+    var stage = Stage.init(gpa);
+    defer stage.deinit();
+    defer {
+        ctx.visit = null;
+        stage.commit(ctx, true);
+        // Put the set back as the runs left it, as far as its rows still
+        // exist: a run may have republished the view.
+        if (services.views.get(view)) |now| {
+            _ = focusRows(ctx, now, extents[primary_at]);
+            for (extents, 0..) |r, i| {
+                if (i == primary_at or !now.containsFocusable(r.head) or !now.containsFocusable(r.anchor)) continue;
+                focus.others.append(gpa, r) catch {};
+            }
+        }
+    }
+    var result: command.Value = .nil;
+    var i = extents.len;
+    while (i > 0) {
+        i -= 1;
+        const now = services.views.get(view) orelse break;
+        if (!focusRows(ctx, now, extents[i])) continue;
+        var v: Visit = .{ .index = i, .count = extents.len, .remaining = i, .stage = &stage };
+        ctx.visit = &v;
+        result = try cmd.handler(ctx, cmd.data, args);
+        // What the run left its extent as (a mark set, a move made).
+        if (focus.view) |still| if (still.eql(view)) {
+            extents[i] = focus.primaryRows() orelse extents[i];
+        };
     }
     return result;
 }

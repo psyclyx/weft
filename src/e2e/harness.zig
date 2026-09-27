@@ -718,7 +718,7 @@ pub const Editor = struct {
 
     /// WHICH VIEW IS SHOWING HERE — from whichever plane is live.
     ///
-    /// These tests used to read `head.semantic_focus.path().?.view`, which was
+    /// These tests used to read `head.scene_selection.path().?.view`, which was
     /// only ever a PROXY for "the tool view this buffer is showing". Now that a
     /// listing is an ordinary text buffer, it has no semantic focus at all and
     /// the proxy panics. The entry says it directly.
@@ -726,7 +726,7 @@ pub const Editor = struct {
         // An explicit focus wins, for the same reason it does in
         // `subjectHere`: a head that focused a view is looking at THAT,
         // whatever buffer is underneath.
-        if (self.head.semantic_focus.path()) |path| return path.view;
+        if (self.head.scene_selection.path()) |path| return path.view;
         return self.buffers.active().tool_view;
     }
 
@@ -737,7 +737,7 @@ pub const Editor = struct {
         // AN EXPLICIT FOCUS WINS. A head that focused a scene is pointing at
         // it, whatever buffer happens to be underneath; only when nothing is
         // focused does the question fall to what point is on.
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             if (path.leaf()) |leaf| return leaf;
         }
         const entry = self.buffers.active();
@@ -750,7 +750,7 @@ pub const Editor = struct {
                 }
             }
         }
-        return (self.head.semantic_focus.path() orelse return null).leaf();
+        return (self.head.scene_selection.path() orelse return null).leaf();
     }
 
     /// WHAT THE ROW UNDER POINT SAYS NOW — its editable region, read live out
@@ -761,7 +761,7 @@ pub const Editor = struct {
     /// republishing anything. The anchors bracketing the editable span are what
     /// survive the typing, which is exactly how the row ferry reads it back.
     pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             const provider = self.session.system.semantic.fields.get(path.field orelse return gpa.dupe(u8, "")) orelse return error.StaleField;
             var field_snapshot = try provider.snapshot(gpa);
             defer field_snapshot.deinit();
@@ -846,7 +846,7 @@ pub const Editor = struct {
     /// projection puts point on the ROW, whose name field is a child. Same
     /// question, asked of the row.
     pub fn fieldHere(self: *Editor) ?semantic_model.scene.FieldRef {
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             if (path.field) |ref| return ref;
         }
         const instance = self.session.system.semantic.views.get(self.toolView() orelse return null) orelse return null;

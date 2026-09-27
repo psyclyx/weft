@@ -992,8 +992,8 @@ test "session: local directories become deduplicated semantic targets while file
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(@as(usize, 1), sess.directory_targets.items.len);
     const first_target = sess.directory_targets.items[0].publication.ref;
-    const first_view = sess.head.semantic_focus.view.?;
-    try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
+    const first_view = sess.head.scene_selection.view.?;
+    try t.expectEqual(first_view, sess.head.scene_selection.view.?);
     const scene = sess.system.semantic.views.get(first_view).?.scene;
     try t.expectEqualStrings("directory-test", scene.role);
     try t.expect(scene.focusable);
@@ -1023,7 +1023,7 @@ test "session: local directories become deduplicated semantic targets while file
     _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "open-relative", &.{.{ .string = "child\n\xfe" }});
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
     const child_target = sess.directory_targets.items[2].publication.ref;
-    const child_view = sess.head.semantic_focus.path().?.view;
+    const child_view = sess.head.scene_selection.path().?.view;
     try t.expectEqual(child_target, sess.system.semantic.views.get(child_view).?.descriptor.target.?.ref);
     try t.expectEqualStrings("child\n\xfe", sess.system.semantic.targets.get(child_target).?.display_name);
 
@@ -1067,7 +1067,7 @@ test "session: local directories become deduplicated semantic targets while file
     // it does not create shared mutable draft state or a text-buffer twin.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(first_target, sess.directory_targets.items[0].publication.ref);
-    try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
+    try t.expectEqual(first_view, sess.head.scene_selection.view.?);
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
     try t.expect(!try sess.openLocalDirectory(&sess.cmd_ctx, file_path));
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);

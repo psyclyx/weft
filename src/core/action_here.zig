@@ -33,7 +33,7 @@ pub fn invokeHere(
     const services = ctx.semantic orelse return null;
     const source = ctx.buffers.active().ref();
     if (ctx.buffers.active().editor == null)
-        try ctx.buffers.active().rememberViewCursor(ctx.gpa, &ctx.head.semantic_focus);
+        try ctx.buffers.active().rememberViewCursor(ctx.gpa, &ctx.head.scene_selection);
     // The FOCUSED SCENE first, when there is one. A `declined` provider has
     // answered "not me", which is the same standing as no focus at all.
     if (services.invokeFocusedActionInRegister(
@@ -54,7 +54,7 @@ pub fn invokeHere(
                         const entry = ctx.buffers.active();
                         if (entry.id == source.id and entry.generation == source.generation and entry.editor == null) {
                             _ = try services.focusView(ctx.head, ctx.gpa, ref, entry.viewCursor(ref));
-                            try entry.semantic_focus.copyFrom(ctx.gpa, &ctx.head.semantic_focus);
+                            try entry.scene_selection.copyFrom(ctx.gpa, &ctx.head.scene_selection);
                             // The entry now represents what it presents: its
                             // designation and its title follow the target, so
                             // a descent reads as absolute as the first open.
@@ -134,7 +134,7 @@ fn applyToHead(ctx: *command.Context, effect: Effect) void {
     switch (effect) {
         .working_target_requested => |target| ctx.head.working_target = target,
         // WHERE POINT IS is what a text projection focuses with, so a focus
-        // request moves the caret rather than `semantic_focus`.
+        // request moves the caret rather than `scene_selection`.
         .focus_requested => |focus| focusPart(ctx, focus.node),
         // Deliberately NOT focusing the opened view. A handler that shows a
         // listing shows a BUFFER, and attaching its scene on top is the second
@@ -150,7 +150,7 @@ fn applyToHead(ctx: *command.Context, effect: Effect) void {
 ///
 /// A provider that creates a row focuses its name field so the next keystroke
 /// replaces the placeholder; one that offers permissions focuses the mode. On a
-/// scene that moved `semantic_focus`. Here the same request has to move the
+/// scene that moved `scene_selection`. Here the same request has to move the
 /// CARET, because point is what a text buffer focuses with — and the span is
 /// selected for the same reason the scene pre-selected the placeholder.
 ///

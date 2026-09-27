@@ -111,7 +111,7 @@ fn firstFocusableSemanticNode(root: *const semantic.scene.Node) ?semantic.scene.
 }
 
 fn focusedSemanticNode(head: *const core.Head, view_ref: semantic.view.Ref, root: *const semantic.scene.Node) ?semantic.scene.NodeId {
-    const path = head.semantic_focus.path() orelse return firstFocusableSemanticNode(root);
+    const path = head.scene_selection.path() orelse return firstFocusableSemanticNode(root);
     if (!path.view.eql(view_ref) or path.nodes.len == 0) return firstFocusableSemanticNode(root);
     const wanted = path.nodes[path.nodes.len - 1];
     return if (containsSemanticNode(root, wanted)) wanted else firstFocusableSemanticNode(root);
@@ -219,8 +219,8 @@ const PaneLayers = struct {
 pub fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, pane: u32) core.facts.Facts {
     const head = fx.head;
     const open = core.context.openAt(fx.cmd_ctx.context, buffer);
-    if (buffer == fx.buffers.active()) return core.intent.entryFacts(buffer, head.currentMode(), &head.semantic_focus, pane, open);
-    return core.intent.entryFacts(buffer, core.intent.restingModeOf(fx.buffers, buffer), &buffer.semantic_focus, pane, open);
+    if (buffer == fx.buffers.active()) return core.intent.entryFacts(buffer, head.currentMode(), &head.scene_selection, pane, open);
+    return core.intent.entryFacts(buffer, core.intent.restingModeOf(fx.buffers, buffer), &buffer.scene_selection, pane, open);
 }
 
 /// What an answer about `buffer` depends on besides the ask itself: which
@@ -405,10 +405,10 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 }
 
 fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
-    return semanticDocumentFor(fx, fx.buffers.active(), &fx.head.semantic_focus, true);
+    return semanticDocumentFor(fx, fx.buffers.active(), &fx.head.scene_selection, true);
 }
 
-fn semanticDocumentFor(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SemanticFocus, active: bool) ?view_mod.semantic_data.Document {
+fn semanticDocumentFor(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
     const path = focus.path() orelse return null;
     const instance = fx.semantic.views.get(path.view) orelse return null;
     return .{
@@ -940,7 +940,7 @@ pub const FrameBuilder = struct {
                     .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
                     .status_line = slot.pane.attrs.status_line,
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
-                    .semantic_view = semanticDocumentFor(fx, ob, &ob.semantic_focus, false),
+                    .semantic_view = semanticDocumentFor(fx, ob, &ob.scene_selection, false),
                     .cursor_on = false, // the caret belongs to the focused pane
                     .pane_border = slot.border,
                 },

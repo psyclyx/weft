@@ -46,7 +46,7 @@ fn toolbarPane(ed: *Editor) !*window_layout.Node {
 fn toolbarView(ed: *Editor) !*const view_runtime.view.Instance {
     const pane = try toolbarPane(ed);
     const entry = ed.buffers.get(pane.pane().buffer_id) orelse return error.NoToolbarEntry;
-    const ref = entry.semantic_focus.view orelse return error.ToolbarNotPresented;
+    const ref = entry.scene_selection.view orelse return error.ToolbarNotPresented;
     return ed.ctx.semantic.?.views.get(ref) orelse error.ToolbarViewGone;
 }
 

@@ -43,7 +43,7 @@ const Search = struct {
             else => return,
         };
         const services = ctx.semantic orelse return;
-        const path = ctx.head.semantic_focus.path() orelse return;
+        const path = ctx.head.scene_selection.path() orelse return;
         if (!std.meta.eql(path.view, self.view)) return;
         const view = services.views.get(self.view) orelse return;
         // A refreshed scene may have removed or repurposed a candidate. Never
@@ -79,7 +79,7 @@ const Search = struct {
 /// False lets another presentation plane implement the same action.
 pub fn open(ctx: *command.Context) !bool {
     const services = ctx.semantic orelse return false;
-    const path = ctx.head.semantic_focus.path() orelse return false;
+    const path = ctx.head.scene_selection.path() orelse return false;
     const view = services.views.get(path.view) orelse return false;
     const search = try ctx.gpa.create(Search);
     search.* = .{ .arena = .init(ctx.gpa), .view = path.view, .revision = view.descriptor.revision };
@@ -115,12 +115,12 @@ test "semantic view edits: search uses scene identity without a text document" {
     try t.expect(effect.? == .handled);
     _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
     _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
-    try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.scene_selection.path().?.leaf().?);
 
     // Replacement invalidates the candidate snapshot even if its node survives.
     try t.expect(try open(&env.ctx));
     _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "alpha" }});
     try services.replaceView(gpa, owner, view, 2, scene);
     _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
-    try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.scene_selection.path().?.leaf().?);
 }

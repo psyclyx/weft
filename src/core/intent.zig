@@ -287,7 +287,7 @@ pub const Plane = struct {
     pub fn syncFocus(
         self: *Plane,
         services: *const semantic.Services,
-        focus: *const Head.SemanticFocus,
+        focus: *const Head.SceneSelection,
         here: ?view_offers.Here,
     ) Allocator.Error!void {
         _ = try self.views.refresh(&self.catalog, services, focus, here);
@@ -563,7 +563,7 @@ pub fn factsIn(scope: Scope) catalog_mod.Facts {
 /// with, so every pane is described by this one builder too. `open` is the
 /// published context at the entry (`context.openAt`): the keys no typed
 /// field names.
-pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32, open: @import("weft_facts").context.Open) catalog_mod.Facts {
+pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SceneSelection, pane: u32, open: @import("weft_facts").context.Open) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
         .designation = entry.designationText(),
@@ -583,7 +583,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
 /// head left it, else where its posture rests (an entry never visited).
 pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
     if (entry.mode.len > 0) return entry.mode;
-    return buffers.restingModeFor(entry.posture(entry.semantic_focus.field != null));
+    return buffers.restingModeFor(entry.posture(entry.scene_selection.field != null));
 }
 
 // ── Chosen contexts ──────────────────────────────────────────────────
@@ -612,7 +612,7 @@ pub const Scope = struct {
     live: bool,
     mode: []const u8,
     pane: u32,
-    focus: *const Head.SemanticFocus,
+    focus: *const Head.SceneSelection,
     clock: *Head.CatalogClock,
     /// The published context at this entry — its open keys.
     open: @import("weft_facts").context.Open,
@@ -626,7 +626,7 @@ pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
         .live = true,
         .mode = head.currentMode(),
         .pane = head.focused_pane,
-        .focus = &head.semantic_focus,
+        .focus = &head.scene_selection,
         .clock = &head.catalog_clock,
         .open = context_mod.openAt(ctx.context, ctx.buffers.active()),
     };
@@ -651,7 +651,7 @@ pub fn primaryScopeOf(ctx: *command.Context) ?Scope {
         .live = false,
         .mode = entry.mode,
         .pane = primary.pane,
-        .focus = &entry.semantic_focus,
+        .focus = &entry.scene_selection,
         .clock = &head.primary_clock,
         .open = context_mod.openAt(ctx.context, entry),
     };

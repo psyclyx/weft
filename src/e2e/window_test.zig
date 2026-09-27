@@ -132,7 +132,7 @@ test "app/window: a further split tiles three panes and still composites" {
 
 /// The current name field in the focused semantic entry.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
-    if (ed.head.semantic_focus.field == null) return null;
+    if (ed.head.scene_selection.field == null) return null;
     return try ed.draftHere(gpa);
 }
 

@@ -48,7 +48,7 @@ fn sidebarShows(ed: *Editor) ![]const u8 {
 fn sidebarHighlights(ed: *Editor) ?[]const u8 {
     const pane = sidebarPane(ed) catch return null;
     const entry = paneEntry(ed, pane) catch return null;
-    const focus = if (entry.id == ed.buffers.active_id) &ed.head.semantic_focus else &entry.semantic_focus;
+    const focus = if (entry.id == ed.buffers.active_id) &ed.head.scene_selection else &entry.scene_selection;
     const path = focus.path() orelse return null;
     const instance = ed.session.system.semantic.views.get(path.view) orelse return null;
     const node = instance.node(path.leaf() orelse return null) orelse return null;
@@ -210,7 +210,7 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
     const outline = ed.win_layout.dockedPanel(.right) orelse return error.NoOutline;
     {
         const entry = try paneEntry(ed, outline);
-        const text = try ed.semanticText(entry.semantic_focus.view.?);
+        const text = try ed.semanticText(entry.scene_selection.view.?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "hammer") != null);
         try t.expect(std.mem.indexOf(u8, text, "saw") != null);
@@ -221,13 +221,13 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
     ed.applyWindow();
     {
         const entry = try paneEntry(ed, outline);
-        const text = try ed.semanticText(entry.semantic_focus.view.?);
+        const text = try ed.semanticText(entry.scene_selection.view.?);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "Point") != null);
         try t.expect(std.mem.indexOf(u8, text, "norm") != null);
         // Nested inside the struct that encloses it.
-        try t.expectEqualStrings("1", symbolDepth(ed, entry.semantic_focus.view.?, "norm") orelse return error.NoNorm);
-        try t.expectEqualStrings("0", symbolDepth(ed, entry.semantic_focus.view.?, "Point") orelse return error.NoPoint);
+        try t.expectEqualStrings("1", symbolDepth(ed, entry.scene_selection.view.?, "norm") orelse return error.NoNorm);
+        try t.expectEqualStrings("0", symbolDepth(ed, entry.scene_selection.view.?, "Point") orelse return error.NoPoint);
         try t.expect(std.mem.indexOf(u8, text, "hammer") == null);
         try t.expect(std.mem.startsWith(u8, entry.designationText(), "weft://here/symbols/file/"));
     }

@@ -171,7 +171,7 @@ pub const Publisher = struct {
         self: *Publisher,
         cat: *catalog.Catalog,
         services: *const semantic.Services,
-        focus: *const Head.SemanticFocus,
+        focus: *const Head.SceneSelection,
         here: ?Here,
     ) Allocator.Error!bool {
         const path = self.pathHere(services, focus, here) orelse return self.withdraw(cat);
@@ -215,7 +215,7 @@ pub const Publisher = struct {
     fn pathHere(
         self: *Publisher,
         services: *const semantic.Services,
-        focus: *const Head.SemanticFocus,
+        focus: *const Head.SceneSelection,
         here: ?Here,
     ) ?model.focus.Path {
         if (focus.path()) |path| return path;
@@ -279,6 +279,9 @@ pub const Publisher = struct {
                     else
                         .{ .disabled = .{ .reason = offers.provider_disabled, .message = disabled_message } },
                     .affordance = .{ .label = slot.label() },
+                    // A node's own action acts on that node: it says nothing
+                    // about several selected rows, so it is refused on them.
+                    .arity = null,
                 };
                 self.node_action_count += 1;
             }
@@ -431,7 +434,7 @@ const Fixture = struct {
     }
 
     fn refresh(self: *Fixture) !bool {
-        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head.semantic_focus, null);
+        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head.scene_selection, null);
     }
 
     fn context(self: *const Fixture) catalog.Context {
@@ -527,7 +530,7 @@ test "republication follows focus, scene revision, and the loss of a view" {
 
     // The view closes: the table is withdrawn, not left published as empty.
     try t.expect(fixture.services.closeView(t.allocator, fixture.owner, view));
-    fixture.head.semantic_focus.clear();
+    fixture.head.scene_selection.clear();
     try t.expect(try fixture.refresh());
     try t.expect(fixture.plane.catalog.published(fixture.plane.views.provider) == null);
     try t.expect(!try fixture.refresh());

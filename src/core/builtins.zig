@@ -62,9 +62,9 @@ fn dropFocusIfShownAsBuffer(ctx: *Context) void {
     // showing, which is wrong the moment the two differ: a handler that opens
     // some OTHER view and focuses it had that focus thrown away because a
     // listing happened to be the active buffer.
-    const path = ctx.head.semantic_focus.path() orelse return;
+    const path = ctx.head.scene_selection.path() orelse return;
     if (!path.view.eql(tool)) return;
-    ctx.head.semantic_focus.clear();
+    ctx.head.scene_selection.clear();
 }
 
 /// The typed target the ROW UNDER POINT links to, when the active entry is a
@@ -108,7 +108,19 @@ pub fn registerSemanticAction(
         .args = &.{},
         .handler = semanticActionTrampoline,
         .data = target,
+        .arity = semanticArity(name),
     });
+}
+
+/// How an open semantic action maps over several selected rows. The standard
+/// vocabulary says: a `selection.*` action and `target.open` act on each row;
+/// a `view.*` action acts on the view once. Any other name says nothing, so
+/// it is refused on several rows rather than run on the focused one alone.
+fn semanticArity(name: []const u8) ?@import("selection.zig").Arity {
+    if (std.mem.startsWith(u8, name, "selection.") or std.mem.eql(u8, name, semantic_model.action.standard.open))
+        return .each_extent;
+    if (std.mem.startsWith(u8, name, "view.")) return .whole;
+    return null;
 }
 
 fn semanticActionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
@@ -428,14 +440,34 @@ fn cRowUp(ctx: *Context, args: struct {}) anyerror!Value {
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .set_mark)) return ok;
+    // In a scene the focused row anchors a range of rows (`V j` in a
+    // listing): the next move grows the selection from here.
+    if (sceneRows(ctx)) |scene| {
+        scene.anchor = scene.head();
+        return ok;
+    }
     const ed = ctx.textEditor() catch |e| return editErr(e);
     try ed.setMark(ctx.gpa);
     return ok;
 }
 
+/// The scene selection the dispatching head holds, when the entry this call
+/// is about is a scene (no text of its own).
+fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
+    const entry = ctx.entry() orelse return null;
+    if (entry.textEditor() != null) return null;
+    const scene = &ctx.head.scene_selection;
+    return if (scene.head() != null) scene else null;
+}
+
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .clear_selection)) return ok;
+    // In a scene: drop the row range this extent was growing.
+    if (sceneRows(ctx)) |scene| {
+        scene.anchor = null;
+        return ok;
+    }
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.clearSelection();
     return ok;
@@ -797,13 +829,13 @@ const table = [_]command.Command{
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
     command.define("open-relative", "Open a raw name below the semantic working target.", cOpenRelative),
-    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy),
-    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut),
-    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete),
-    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore),
-    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter),
-    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused),
-    command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded),
+    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy).maps(.each_extent),
+    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut).maps(.each_extent),
+    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete).maps(.each_extent),
+    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore).maps(.each_extent),
+    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.each_extent),
+    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused).maps(.each_extent),
+    command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded).maps(.each_extent),
     command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut),
     command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore),
     command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter),

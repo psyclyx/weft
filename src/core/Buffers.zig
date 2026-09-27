@@ -134,7 +134,7 @@ pub const Buffer = struct {
 
     /// The buffer-local semantic cursor, restored when the buffer is selected
     /// again.
-    semantic_focus: Head.SemanticFocus = .empty,
+    scene_selection: Head.SceneSelection = .empty,
     /// Navigation within one semantic entry retains a cursor per visited view.
     view_cursors: std.ArrayList(struct { view: semantic.view.Ref, node: semantic.scene.NodeId }) = .empty,
 
@@ -148,7 +148,7 @@ pub const Buffer = struct {
     /// to take the derivation. Set through `declarePosture`.
     declared_posture: ?Posture = null,
     /// WHERE this entry's effects run (`doc/place.md`). Buffer-local for the
-    /// same reason `mode` and `semantic_focus` are, and for the reason Emacs
+    /// same reason `mode` and `scene_selection` are, and for the reason Emacs
     /// makes `default-directory` buffer-local: a tool entry produced inside a
     /// project belongs to that project for its whole life, not to whatever the
     /// user happens to be looking at when its output lands.
@@ -169,7 +169,7 @@ pub const Buffer = struct {
     /// why capture can never be a one-way door.
     pre_capture: ?Posture = null,
 
-    pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SemanticFocus) Allocator.Error!void {
+    pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SceneSelection) Allocator.Error!void {
         const path = focus.path() orelse return;
         const node = path.leaf() orelse return;
         for (self.view_cursors.items) |*saved| {
@@ -404,7 +404,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         view.deinit();
         gpa.destroy(view);
     }
-    b.semantic_focus.deinit(gpa);
+    b.scene_selection.deinit(gpa);
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);
@@ -643,8 +643,8 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
     // guarantees a text buffer never inherits a tool's editable field.
-    try old.semantic_focus.copyFrom(gpa, &head.semantic_focus);
-    try head.semantic_focus.copyFrom(gpa, &target.semantic_focus);
+    try old.scene_selection.copyFrom(gpa, &head.scene_selection);
+    try head.scene_selection.copyFrom(gpa, &target.scene_selection);
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
     // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
@@ -662,7 +662,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         const resting = if (!keymap.anyModeHasTag("resting") or keymap.modeHasTag(base, "resting"))
             base
         else
-            self.restingModeFor(old.posture(old.semantic_focus.field != null));
+            self.restingModeFor(old.posture(old.scene_selection.field != null));
         const held = try gpa.dupe(u8, resting);
         gpa.free(old.mode);
         old.mode = held;
@@ -695,7 +695,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         // declared what that posture means, so a structural entry can never
         // be stamped with the text editing base. This is the mode-leak
         // class's remaining half — the founding bug's mirror image.
-        const resting = self.restingModeFor(target.posture(head.semantic_focus.field != null));
+        const resting = self.restingModeFor(target.posture(head.scene_selection.field != null));
         if (resting.len > 0) {
             try head.setModeRaw(gpa, resting);
             target.mode = try gpa.dupe(u8, resting);
@@ -760,11 +760,11 @@ pub fn attachFocusedSemanticView(
     name: []const u8,
     tool: []const u8,
 ) Error!Id {
-    const view = head.semantic_focus.view orelse return self.active_id;
+    const view = head.scene_selection.view orelse return self.active_id;
     var id: ?Id = null;
     var it = self.iterator();
     while (it.next()) |buffer| {
-        if (buffer.semantic_focus.view) |candidate| if (candidate.eql(view)) {
+        if (buffer.scene_selection.view) |candidate| if (candidate.eql(view)) {
             id = buffer.id;
             break;
         };
@@ -786,9 +786,9 @@ pub fn attachFocusedSemanticView(
     // Capture the just-opened path on its destination before switchTo saves
     // the outgoing buffer. Then clear the head so the outgoing buffer records
     // no foreign semantic cursor.
-    try target.semantic_focus.copyFrom(gpa, &head.semantic_focus);
+    try target.scene_selection.copyFrom(gpa, &head.scene_selection);
     if (target_id == self.active_id) return target_id;
-    head.semantic_focus.clear();
+    head.scene_selection.clear();
     try self.switchTo(gpa, target_id, head, keymap);
     return target_id;
 }
@@ -928,7 +928,7 @@ test "buffers: attaching a focused view makes an entry with no editor" {
     defer head.deinit(gpa);
 
     const view: semantic.view.Ref = .{ .authority = .here, .slot = 1, .generation = 7 };
-    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    try head.scene_selection.set(gpa, .{ .view = view, .nodes = &.{} });
     const id = try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files");
 
     const entry = bufs.get(id).?;
@@ -938,7 +938,7 @@ test "buffers: attaching a focused view makes an entry with no editor" {
     try t.expect(bufs.get(0).?.textEditor() != null);
 
     // Re-attaching the same view reuses the entry rather than opening a second.
-    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    try head.scene_selection.set(gpa, .{ .view = view, .nodes = &.{} });
     try t.expectEqual(id, try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files"));
 }
 

@@ -221,7 +221,7 @@ pub const Context = struct {
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
         const mode = self.head.currentMode();
-        if (self.head.semantic_focus.path() != null) {
+        if (self.head.scene_selection.path() != null) {
             if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
         }
         return self.buffers.active().bindingMode(self.keymap, mode);
@@ -301,7 +301,7 @@ pub const Context = struct {
         const b = self.buffer();
         // A focused semantic FIELD, or point inside a projection row.s editable
         // span — the same question asked of either plane.
-        return b.posture(self.head.semantic_focus.field != null or b.fieldAtPoint());
+        return b.posture(self.head.scene_selection.field != null or b.fieldAtPoint());
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the

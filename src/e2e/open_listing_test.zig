@@ -79,7 +79,7 @@ const ide_keys: Keys = .{ .down = "Down", .up = "Up", .step_out = null };
 
 /// Whether the focused row of the focused listing is named `want`.
 fn onRow(ed: *Editor, want: []const u8) bool {
-    if (ed.head.semantic_focus.field == null) return false;
+    if (ed.head.scene_selection.field == null) return false;
     const name = ed.draftHere(ed.gpa) catch return false;
     defer ed.gpa.free(name);
     return std.mem.eql(u8, name, want);

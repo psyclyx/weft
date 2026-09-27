@@ -141,7 +141,10 @@ pub const Controller = struct {
                 break :blk ids;
             },
             .nodes => |nodes| blk: {
-                if (nodes.len == 0 or nodes.len > max_selection or nodes.len != 1) return error.AmbiguousSubject;
+                // Several rows are one request only for what acts on each:
+                // delete marks them all; every other action takes one row.
+                const many = std.mem.eql(u8, request.action, action.standard.delete);
+                if (nodes.len == 0 or nodes.len > max_selection or (!many and nodes.len != 1)) return error.AmbiguousSubject;
                 const ids = try self.gpa.alloc(model.NodeId, nodes.len);
                 errdefer self.gpa.free(ids);
                 for (nodes, ids) |node, *id| id.* = try self.resolveRow(node, allow_deleted);
@@ -201,6 +204,25 @@ test "files actions capture copy and cut, delete selected rows, and reject ambig
     const ambiguous = [_]semantic.scene.NodeId{ rowNode(first), rowNode(second) };
     try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &ambiguous } }));
     try std.testing.expectEqual(model.Pending.observed, files.row(first).?.pending);
+}
+
+test "files actions delete every row of a range in one request, and copy refuses one" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
+        .{ .identity = ref(1, 1), .name = "one", .revision = "r1", .kind = .regular },
+        .{ .identity = ref(2, 1), .name = "two", .revision = "r2", .kind = .regular },
+        .{ .identity = ref(3, 1), .name = "three", .revision = "r3", .kind = .regular },
+    } });
+    const rows = files.rows.items;
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 4, .generation = 1 });
+    defer controller.deinit();
+    const range = [_]semantic.scene.NodeId{ rowNode(rows[0].id), rowNode(rows[1].id) };
+    try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(rows[1].id), .selection = .{ .nodes = &range } }));
+    _ = try controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(rows[1].id), .selection = .{ .nodes = &range } });
+    try std.testing.expectEqual(model.Pending.deleted, files.row(rows[0].id).?.pending);
+    try std.testing.expectEqual(model.Pending.deleted, files.row(rows[1].id).?.pending);
+    try std.testing.expectEqual(model.Pending.observed, files.row(rows[2].id).?.pending);
 }
 
 test "files actions paste relative to a retained deleted row" {

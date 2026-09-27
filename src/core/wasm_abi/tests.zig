@@ -107,7 +107,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqualStrings("renamed", snapshot.value.bytes);
     try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
     const child_id: @import("weft_semantic").scene.NodeId = @enumFromInt(0x1_0000_0002);
-    try t.expectEqual(child_id, env.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(child_id, env.head.scene_selection.path().?.leaf().?);
     try t.expect((try semantic.actions.invoke(&semantic.views, .{
         .action = "fixture.open",
         .view = view_ref,

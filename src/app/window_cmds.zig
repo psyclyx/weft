@@ -531,7 +531,7 @@ fn presentEmpty(
     entry.tool_view = view_ref;
     const instance = services.views.get(view_ref) orelse return;
     var storage: [4]semantic_model.scene.NodeId = undefined;
-    if (instance.focusPath(root.id, &storage) catch null) |path| entry.semantic_focus.set(gpa, path) catch {};
+    if (instance.focusPath(root.id, &storage) catch null) |path| entry.scene_selection.set(gpa, path) catch {};
     decl.empty = .{ .entry_generation = entry.generation, .view = view_ref };
     node.pane().buffer_id = id;
     node.pane().top_row = 0;
@@ -557,7 +557,7 @@ fn revealIn(
         const value = core.intent.factsIn(scope).get(decl.reveal.text) orelse return false;
         break :blk std.fmt.bufPrint(&buf, "{s}", .{value}) catch return false;
     };
-    const focus = if (entry.id == buffers.active_id) &head.semantic_focus else &entry.semantic_focus;
+    const focus = if (entry.id == buffers.active_id) &head.scene_selection else &entry.scene_selection;
     const view_ref = focus.view orelse entry.tool_view orelse return false;
     return services.reveal(&head.interactions, gpa, focus, view_ref, wanted) catch false;
 }
