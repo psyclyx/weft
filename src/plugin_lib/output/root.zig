@@ -277,7 +277,7 @@ pub fn visit() void {
     // The path is the table's; `open` reuses the read scratch, not this.
     // Relative to where the tool ran: this entry's place (it inherited the
     // place it was produced in, doc/place.md §2.1).
-    weft.openUnder(weft.placeRoot(), target.path);
+    weft.openTyped(target.path);
     var at = lineStartOffset(target.line);
     if (target.col > 1) at = @min(at + target.col - 1, weft.lineAt(at).end);
     weft.jump(at);

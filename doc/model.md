@@ -317,6 +317,10 @@ shared tree.
 - `on_offers_changed` and the focus feed's `Companion` → `on_context_changed(keys)`.
 - The toolbar and contextmenu plugins as viewport owners → one `offers` projection provider.
 - Path subjects and `weft.placeRoot()` as a browsing root → designations.
+  Done for names and pickers: a plugin hands a typed name to `open`
+  (`weft.openTyped`; `openUnder`, the guest-side join, is deleted) and
+  `openFilePick` names no directory — core lists the dispatch's place and
+  resolves the accepted name against the same place.
 - Raw entry ids in state that outlives entries → designations.
 - `semantic_focus` as a second selection model → extent sets.
 - Per-plugin selection loops, and the `put`/`surround.plan` style workarounds → declared mapping.
@@ -363,7 +367,8 @@ kept alive past its phase.
    `wl_entry_designate` (only `proc` in an unclaimed or own namespace, or a
    projection kind the plugin claimed, and never on a file-backed entry),
    `wl_designation_opener`; SDK `designation`, `designate`,
-   `designationOpener`, `openDesignation`, `openUnder`, `placeProjection`,
+   `designationOpener`, `openDesignation`, `openUnder` (since deleted, §4),
+   `placeProjection`,
    `placeDesignation`, `contextSetAt`. Trusted publishers name what they
    bind (`Router.designate`, never the guest-writable descriptor), and a
    child row's designation is its parent's plus the provider's leaf — so

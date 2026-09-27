@@ -158,7 +158,7 @@ pub extern "weft:abi/1" fn wl_pick_category(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 pub extern "weft:abi/1" fn wl_pick_end() void;
-pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
+pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
 pub extern "weft:abi/1" fn wl_pick_outcome_kind() i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;

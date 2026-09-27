@@ -58,6 +58,17 @@ const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8
     .{ .spelling = "weft.cwd(", .reason = "the process-directory guest shim is retired — use weft.placeRoot() (doc/place.md)" },
 };
 
+/// Guest-side resolution of a typed name, retired into core (doc/model.md
+/// §2.1, §4). `openUnder(weft.placeRoot(), name)` joined a relative name
+/// onto the place's directory in the guest, beside core's
+/// `designation.resolveRelative` — a second resolver with its own rules
+/// (`host:path` read as a local file, a place with no directory said in its
+/// own words). A plugin hands the typed name to `open` (`weft.openTyped`), and a
+/// file picker lists the dispatch's place with no directory named at all.
+const retired_guest_resolvers = [_]struct { spelling: []const u8, reason: []const u8 }{
+    .{ .spelling = "openUnder(", .reason = "a plugin resolving a typed name itself — hand it to `open` (weft.open); core resolves it once (doc/model.md §2.1)" },
+};
+
 /// Doors that were DECLARED AND NEVER CALLED — by any plugin, any shared
 /// library, any fixture, the config plane, or the JS plane. Twelve of them,
 /// found by a census rather than by suspicion.
@@ -216,6 +227,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
         }
 
         for (retired_process_cwd) |gone| {
+            if (std.mem.indexOf(u8, line, gone.spelling) != null)
+                try scan.record(rel_path, line_no, gone.reason);
+        }
+
+        for (retired_guest_resolvers) |gone| {
             if (std.mem.indexOf(u8, line, gone.spelling) != null)
                 try scan.record(rel_path, line_no, gone.reason);
         }

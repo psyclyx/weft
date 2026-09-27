@@ -113,7 +113,7 @@ fn open() void {
     // A notes file named relative to the project lives in the project — the
     // place this dispatch is in — never in whatever directory the editor
     // was launched from.
-    weft.openUnder(weft.placeRoot(), path);
+    weft.openTyped(path);
 }
 
 // ── Capture: where I am, as a durable embed ─────────────────────────

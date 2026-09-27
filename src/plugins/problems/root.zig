@@ -210,7 +210,7 @@ fn onSemanticAction() callconv(.c) void {
 /// Open the row's file (placement puts it in the primary pane, never in the
 /// panel) and put the caret at its line and column.
 fn jumpTo(row: Row) void {
-    weft.openUnder(weft.placeRoot(), row.path);
+    weft.openTyped(row.path);
     weft.jumpPush();
     var off: usize = 0;
     var line: usize = 1;

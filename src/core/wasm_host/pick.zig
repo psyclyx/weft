@@ -8,6 +8,7 @@ const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const pick_mod = @import("../pick.zig");
 const fs_source = @import("../fs_source.zig");
+const designation = @import("../designation.zig");
 const contract = @import("../membrane/contract.zig");
 
 const buffers = @import("buffers.zig");
@@ -167,10 +168,19 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     const gpa = p.gpa;
     const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(prompt);
-    const root = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    // What it lists is the place this dispatch runs in, resolved the way a
+    // typed name is (`designation.resolveRelative`), so the candidates it
+    // hands back are relative to exactly what `open` will resolve them
+    // against. The guest names no directory.
+    const ctx = p.activeCtx();
+    const root = (designation.resolveRelative(ctx, gpa, ".") catch return) orelse {
+        ctx.head.echo.clearRetainingCapacity();
+        ctx.head.echo.appendSlice(gpa, "open: this place has no local directory to list") catch {};
+        return;
+    };
     defer gpa.free(root);
     const bp = gpa.create(WasmBoundPick) catch return;
-    bp.* = .{ .plugin = p, .pick_id = @intCast(args[4]) };
+    bp.* = .{ .plugin = p, .pick_id = @intCast(args[2]) };
     const finder = fs_source.LocalFinder.create(gpa, p.activeCtx().buffers.pool, root) catch {
         gpa.destroy(bp);
         return;

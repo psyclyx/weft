@@ -1636,10 +1636,13 @@ pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
 pub fn pickEnd() void {
     e.wl_pick_end();
 }
-/// Open a fuzzy FILE picker rooted at `root` (native recursive finder);
-/// accept dispatches to `on_pick_accept` with the chosen path.
-pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
-    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), p(root.ptr), @intCast(root.len), pick_id);
+/// Open a fuzzy FILE picker over the place this dispatch runs in (native
+/// recursive finder); accept dispatches to `on_pick_accept` with the chosen
+/// path, relative to that place — hand it to `open` as typed. The plugin
+/// names no directory: core resolves the place, and refuses one with no
+/// local directory.
+pub fn openFilePick(prompt: []const u8, pick_id: u32) void {
+    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), pick_id);
 }
 
 // ── Surface (retained overlay: build begin→row→span…→end, then close) ────
@@ -2009,21 +2012,14 @@ pub fn openDesignation(target: []const u8) void {
     runStr("open", target);
 }
 
-var open_under_scratch: [8192]u8 = undefined;
-
-/// Open `name` found below `root`: as given when it is already a designation
-/// or absolute, else joined onto `root` (an absolute directory — the place a
-/// picker listed, the directory a search ran in). The explicit spelling of
-/// "relative to where I listed it", so nothing resolves a relative name
-/// against wherever the editor happens to have been launched.
-pub fn openUnder(root: []const u8, name: []const u8) void {
-    if (std.mem.startsWith(u8, name, semantic.durable.scheme) or std.fs.path.isAbsolutePosix(name))
-        return openDesignation(name);
-    if (root.len == 0) return echo("open: no directory to find that name in");
-    const base = std.mem.trimEnd(u8, root, "/");
-    const joined = std.fmt.bufPrint(&open_under_scratch, "{s}/{s}", .{ base, name }) catch
-        return echo("open: that name does not fit");
-    openDesignation(joined);
+/// Open a name as a person typed it — a designation, an absolute path, a
+/// `host:path`, or a name relative to the place this dispatch runs in —
+/// through the ordinary `open`, which resolves it ONCE, in core
+/// (`designation.resolveRelative`). A plugin never joins a name onto a
+/// directory itself: a second resolver is a second set of rules (`..`,
+/// `host:path`, a place with no local directory) to drift from the first.
+pub fn openTyped(name: []const u8) void {
+    runStr("open", name);
 }
 
 /// The designation of a projection that is ABOUT a place — a status, a

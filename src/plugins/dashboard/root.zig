@@ -197,7 +197,7 @@ fn onSemanticAction() callconv(.c) void {
 }
 
 fn openFile() void {
-    weft.openFilePick("Open file", weft.placeRoot(), file_pick);
+    weft.openFilePick("Open file", file_pick);
 }
 
 fn newBuffer() void {
@@ -213,5 +213,5 @@ fn onPick(id: u32) void {
         .input => |input| input,
         .cancelled => return,
     };
-    if (path.len > 0) weft.openUnder(weft.placeRoot(), path);
+    if (path.len > 0) weft.openTyped(path);
 }
