@@ -1,8 +1,9 @@
 //! The grammar's pending prefixes: a count (`3w`) and a register (`"a`).
 //! Both are typed before the verb that consumes them, and both must die with
-//! that verb — the `after` hook in `root.zig` clears them after every command
-//! that does not preserve them, so a stray prefix cannot leak into a later,
-//! unrelated key.
+//! that verb — the `after` hook in `root.zig` clears them once the command
+//! ends, so a stray prefix cannot leak into a later, unrelated key. Reading
+//! one never clears it: a verb dispatch runs once per selection reads the
+//! same count and register in every run.
 
 /// The typed count, 0 when none.
 pub var count: u32 = 0;
@@ -15,31 +16,21 @@ pub var register_char: u8 = 0;
 
 /// The count to repeat by: the typed one, else 1.
 pub fn takeCount() u32 {
-    const c = if (count == 0) 1 else count;
-    count = 0;
-    return c;
+    return if (count == 0) 1 else count;
 }
 
 /// The typed count itself, or null when none was typed (`gg` vs `5gg`).
 pub fn takeRawCount() ?u32 {
-    const c = count;
-    count = 0;
-    return if (c == 0) null else c;
+    return if (count == 0) null else count;
 }
 
 pub fn takeRegister() u8 {
-    const r = register;
-    register = 0;
-    register_char = 0;
-    return r;
+    return register;
 }
 
 /// The typed register's character, or `default` when none was typed.
 pub fn takeRegisterChar(default: u8) u8 {
-    const c = if (register_char == 0) default else register_char;
-    register = 0;
-    register_char = 0;
-    return c;
+    return if (register_char == 0) default else register_char;
 }
 
 pub fn digit(d: u32) void {

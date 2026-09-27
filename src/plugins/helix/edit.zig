@@ -1,105 +1,32 @@
-//! Every verb that edits, over every selection at once, as ONE undo unit.
+//! Every verb that edits.
 //!
-//! The one mechanism: `putEach` — the `put` library's one write per
-//! selection, run as helix's own operator `hx-op-put` through
-//! `runRangeArgEach`, reverse offset order, one undo unit (ide's transfer and
-//! line keys ride the same library). Delete, change, paste, replace, case,
-//! replace-with-a-character, join and open-a-line are all `putEach` with a
-//! different source. Each job leaves a live range over what it wrote, and the
-//! verb reads those back to place the selections afterwards.
+//! Each is a ONE-SELECTION program: it declares how it maps over the set
+//! (`root.zig`'s table) and dispatch runs it once per selection, last first,
+//! as one undo unit — the register filing one value per selection, the flash
+//! one set over them all (doc/model.md §2.6). A verb whose work is per LINE
+//! (`>`, `<`, `J`, `[ space`) maps over a target, the selection's lines, so
+//! two selections on one line edit it once.
 
 const std = @import("std");
 const weft = @import("weft");
-const put = @import("weft_put");
 const sel = @import("selection.zig");
 const text = @import("text.zig");
 const state = @import("state.zig");
 
-const max = sel.max;
 const semantic_action = weft.semantic.action.standard;
-
-// ── The plan ────────────────────────────────────────────────────────────
 
 pub const Case = enum { toggle, lower, upper };
 
-/// What each job writes over its range.
-const Source = union(enum) {
-    /// The same bytes everywhere (`""` deletes).
-    literal: []const u8,
-    /// Register `slot`'s value for this selection, under core's
-    /// distribution rule (`count` selections share it).
-    register: struct { slot: u8, count: usize },
-    /// Every character but a line end, replaced by this one (`r`).
-    fill: struct { buf: [4]u8, len: usize },
-    /// The range's own text, case-mapped (`~`, `` ` ``, `` A-` ``).
-    case: Case,
-    /// A line break plus the line's indentation (`o`), or the indentation plus
-    /// a line break (`O`).
-    open: enum { below, above },
-    /// Job `i` writes `pad[i]` spaces (`&`).
-    pad: []const usize,
-};
-
-/// The source of the `putEach` running now, for `derive`.
-var source: Source = .{ .literal = "" };
-
-/// Write `src` over each of `ranges` (document order, one per selection), as
-/// one undo unit. `newline[i]` writes a line break before job `i`'s bytes (a
-/// linewise paste after a last line with none to land after).
-fn putEach(ranges: []const weft.Range, src: Source, newline: ?[]const bool) void {
-    source = src;
-    const each: put.Source = switch (src) {
-        .literal => |l| .{ .literal = l },
-        .register => |reg| .{ .register = .{ .slot = reg.slot, .count = reg.count } },
-        .fill, .case, .open, .pad => .{ .derive = derive },
-    };
-    put.each("hx-op-put", ranges, each, newline);
+/// The range a target-mapped verb was handed.
+fn arg() ?weft.Range {
+    return weft.rangeEnds(weft.argRange(0) orelse return null);
 }
 
-/// What job `i` writes over `r` for the sources only helix has, built in the
-/// library's scratch.
-fn derive(i: usize, r: weft.Range) ?[]const u8 {
-    const out = put.scratch();
-    switch (source) {
-        .literal, .register => unreachable,
-        .fill => |f| {
-            const src = weft.slice(r.start, r.end);
-            var w: usize = 0;
-            var k: usize = 0;
-            while (k < src.len) {
-                const step = std.unicode.utf8ByteSequenceLength(src[k]) catch 1;
-                const piece: []const u8 = if (src[k] == '\n') "\n" else f.buf[0..f.len];
-                if (w + piece.len > out.len) return null;
-                @memcpy(out[w..][0..piece.len], piece);
-                w += piece.len;
-                k += step;
-            }
-            return out[0..w];
-        },
-        .case => |c| {
-            const src = weft.slice(r.start, r.end);
-            if (src.len > out.len) return null;
-            for (src, out[0..src.len]) |b, *o| o.* = switch (c) {
-                .lower => std.ascii.toLower(b),
-                .upper => std.ascii.toUpper(b),
-                .toggle => if (std.ascii.isUpper(b)) std.ascii.toLower(b) else std.ascii.toUpper(b),
-            };
-            return out[0..src.len];
-        },
-        .open => |where| return put.lineOpening(r.start, where == .below),
-        .pad => |pad| {
-            const k = @min(pad[i], out.len);
-            @memset(out[0..k], ' ');
-            return out[0..k];
-        },
-    }
+/// Write `bytes` over `r` and select what landed.
+fn writeSelect(r: weft.Range, bytes: []const u8) void {
+    weft.edit(r, bytes);
+    sel.put(.{ .anchor = r.start, .head = r.start + bytes.len });
 }
-
-/// `hx-op-put`: the operator `putEach` runs once per selection.
-pub const opPut = put.run;
-
-/// What job `i` wrote, where it is now.
-const wrote = put.wrote;
 
 // ── The last modification (`g.`) ────────────────────────────────────────
 
@@ -131,11 +58,11 @@ pub fn gotoLastModified() void {
     weft.echo("no other modified buffer");
 }
 
-/// Remember where the primary selection is as the last place edited.
+/// Remember where the selection is as the last place edited. In a mapping
+/// the last run — the first selection — is where `g.` returns.
 pub fn noteEdit() void {
     noteBuffer();
-    if (!sel.load()) return;
-    const r = sel.primarySpan();
+    const r = sel.span(sel.get());
     const h = weft.anchorRange(.{ .start = r.start, .end = r.start }) orelse return;
     if (!weft.retainRange(h)) return;
     if (last_edit) |old| weft.releaseRange(old);
@@ -151,36 +78,21 @@ pub fn gotoLastEdit() void {
 
 // ── Transfer: yank, delete, change, paste, replace ──────────────────────
 
-/// Every selection's span, and whether they are all whole lines.
-fn spans(out: []weft.Range) bool {
-    var lines = true;
-    for (sel.items[0..sel.n], out[0..sel.n]) |s, *r| {
-        r.* = sel.span(s);
-        lines = lines and sel.isLinewise(r.*);
-    }
-    return lines;
-}
-
-/// `y`'s text arm: one register value per selection. The selections stay.
+/// `y`'s text arm: the selection into the register (one value per
+/// selection). The selection stays.
 pub fn yank() void {
-    const slot = state.takeRegister();
-    if (!sel.load()) return;
-    var ranges: [max]weft.Range = undefined;
-    const lines = spans(&ranges);
-    weft.yankEachIn(slot, ranges[0..sel.n], lines);
-    sel.flashAll();
+    const r = sel.span(sel.get());
+    weft.yankRangeIn(state.takeRegister(), r.start, r.end, sel.isLinewise(r));
+    weft.flash(r.start, r.end);
 }
 
-/// Delete every selection, first yanking it into `slot` (null: no yank),
-/// and leave a caret where each one was.
+/// Delete the selection, first yanking it into `slot` (null: no yank),
+/// leaving a caret where it was.
 fn remove(slot: ?u8) void {
-    if (!sel.load()) return;
-    var ranges: [max]weft.Range = undefined;
-    const lines = spans(&ranges);
-    if (slot) |s| weft.yankEachIn(s, ranges[0..sel.n], lines);
-    putEach(ranges[0..sel.n], .{ .literal = "" }, null);
-    for (sel.items[0..sel.n], 0..) |*s, i| s.* = sel.caret((wrote(i) orelse ranges[i]).start);
-    sel.store();
+    const r = sel.span(sel.get());
+    if (slot) |s| weft.yankRangeIn(s, r.start, r.end, sel.isLinewise(r));
+    weft.edit(r, "");
+    sel.put(sel.caret(r.start));
     noteEdit();
 }
 
@@ -191,15 +103,15 @@ pub fn delete(keep_register: bool) void {
     weft.exitToResting();
 }
 
-/// `c` (and `A-c`): delete every selection, then type where each one was.
+/// `c` (and `A-c`): delete the selection, then type where it was.
 pub fn change(keep_register: bool) void {
     const slot = state.takeRegister();
     if (onText()) remove(if (keep_register) null else slot);
     enterInsert();
 }
 
-/// `p` / `P`: place the register after (before) every selection — each its
-/// own value when the register holds one per selection. A linewise value lands
+/// `p` / `P`: place the register after (before) the selection — its own
+/// value when the register holds one per selection. A linewise value lands
 /// on the line after (before) the selection's lines. The pasted text is
 /// selected afterwards, as in helix.
 pub fn paste(after: bool) void {
@@ -208,42 +120,47 @@ pub fn paste(after: bool) void {
         .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => return,
         .unavailable, .failed, _ => {},
     };
-    if (!sel.load()) return;
-    if (weft.registerTextIn(slot).len == 0) return weft.echo("register is empty");
-    pasteFrom(.{ .register = .{ .slot = slot, .count = sel.n } }, weft.registerLinewiseIn(slot), after);
+    const value = weft.registerTextIn(slot);
+    if (value.len == 0) return weft.echo("register is empty");
+    pasteText(value, weft.registerLinewiseIn(slot), after, slot);
 }
 
-/// Place `src` after (before) every loaded selection — on the next
-/// (previous) line when it is whole lines — and select what landed.
-fn pasteFrom(src: Source, lines: bool, after: bool) void {
-    var points: [max]weft.Range = undefined;
-    var newline: [max]bool = undefined;
-    for (sel.items[0..sel.n], 0..) |s, i| {
-        const r = sel.span(s);
-        newline[i] = false;
-        var at = if (after) r.end else r.start;
-        if (lines) {
-            if (after) {
-                const l = weft.lineAt(if (r.end > r.start) r.end - 1 else r.start);
-                at = if (l.end >= text.len()) l.end else l.end + 1;
-                newline[i] = l.end >= text.len();
-            } else at = weft.lineAt(r.start).start;
-        }
-        points[i] = .{ .start = at, .end = at };
+/// Place `bytes` after (before) the selection — on the next (previous) line
+/// when it is whole lines — select what landed, and re-stamp the identity a
+/// register value ferries (`slot`).
+fn pasteText(bytes: []const u8, lines: bool, after: bool, slot: ?u8) void {
+    const r = sel.span(sel.get());
+    var at = if (after) r.end else r.start;
+    var lead = false;
+    if (lines) {
+        if (after) {
+            const l = weft.lineAt(if (r.end > r.start) r.end - 1 else r.start);
+            at = if (l.end >= text.len()) l.end else l.end + 1;
+            // After a last line with no break of its own, one goes first.
+            lead = l.end >= text.len();
+        } else at = weft.lineAt(r.start).start;
     }
-    putEach(points[0..sel.n], src, newline[0..sel.n]);
-    selectWritten();
+    const point: weft.Range = .{ .start = at, .end = at };
+    if (lead) weft.edit(point, "\n");
+    const base = at + @intFromBool(lead);
+    weft.edit(.{ .start = base, .end = base }, bytes);
+    if (slot) |s| weft.pasteAtIn(s, base);
+    sel.put(.{ .anchor = base, .head = base + bytes.len });
+    sel.flash();
+    noteEdit();
 }
 
 // ── The system clipboard (`SPC y p P R`) ────────────────────────────────
 // The clipboard door is config-granted (helix.js grants it). What mirrors it
 // is helix's choice: the unnamed register. A clipboard that still holds what
 // the unnamed register holds pastes FROM the register, so a projection
-// row's ferried identity survives the round trip.
+// row's ferried identity survives the round trip. These read or write the
+// clipboard once, so they take the whole set; the per-selection part is the
+// verb they run.
 
 /// `SPC y`: yank, then hand the unnamed register's text to the clipboard.
 pub fn yankToClipboard() void {
-    yank();
+    weft.run("hx-yank");
     if (!weft.clipboardSet(weft.registerTextIn(0))) weft.echo("clipboard unavailable");
 }
 
@@ -272,12 +189,16 @@ pub fn pasteClipboard(after: bool) void {
     _ = state.takeRegister();
     switch (clipboard()) {
         .none => {},
-        .register => paste(after),
-        .text => |t| {
-            if (!sel.load()) return;
-            pasteFrom(.{ .literal = t }, t[t.len - 1] == '\n', after);
-        },
+        .register => weft.run(if (after) "hx-paste" else "hx-paste-before"),
+        .text => |t| weft.runStr2("hx-paste-text", if (after) "after" else "before", t),
     }
+}
+
+/// `hx-paste-text <after|before> <text>`: text from elsewhere after (before)
+/// the selection — whole lines when it ends in a line break.
+pub fn pasteClipboardText(where: []const u8, t: []const u8) void {
+    if (t.len == 0) return;
+    pasteText(t, t[t.len - 1] == '\n', std.mem.eql(u8, where, "after"), null);
 }
 
 /// `SPC R`: replace every selection with the clipboard.
@@ -285,9 +206,16 @@ pub fn replaceWithClipboard() void {
     _ = state.takeRegister();
     switch (clipboard()) {
         .none => {},
-        .register => replaceWithRegister(),
-        .text => |t| rewrite(.{ .literal = t }),
+        .register => weft.run("hx-replace-register"),
+        .text => |t| weft.runStr("hx-replace-text", t),
     }
+}
+
+/// `hx-replace-text <text>`: the selection becomes `t`, selected.
+pub fn replaceText(t: []const u8) void {
+    writeSelect(sel.span(sel.get()), t);
+    sel.flash();
+    noteEdit();
 }
 
 // ── Align (`&`) ─────────────────────────────────────────────────────────
@@ -296,14 +224,16 @@ pub fn replaceWithClipboard() void {
 /// on each line aligns with the first on every other line, the second with
 /// the second, and so on — each group's heads move to the rightmost head of
 /// the group, by spaces inserted before the selection. A column is counted
-/// in characters (a tab is one).
+/// in characters (a tab is one). How far each moves depends on every other,
+/// so this verb takes the WHOLE set, and writes its pads as one undo unit.
 pub fn alignSelections() void {
     if (!sel.load()) return;
-    var row: [max]usize = undefined;
-    var col: [max]usize = undefined;
-    var group: [max]usize = undefined;
+    const n = sel.n;
+    var row: [sel.max]usize = undefined;
+    var col: [sel.max]usize = undefined;
+    var group: [sel.max]usize = undefined;
     var groups: usize = 0;
-    for (sel.items[0..sel.n], 0..) |s, i| {
+    for (sel.items[0..n], 0..) |s, i| {
         const line = weft.lineAt(s.head);
         if (weft.lineAt(s.anchor).start != line.start) return weft.echo("align cannot work with multi line selections");
         row[i] = line.start;
@@ -314,40 +244,42 @@ pub fn alignSelections() void {
     // Each group aligns after the ones left of it have already pushed its
     // members right, so a member's column counts the pads before it on its
     // own line.
-    var pad: [max]usize = @splat(0);
+    var pad: [sel.max]usize = @splat(0);
     for (0..groups) |g| {
         var widest: usize = 0;
-        for (0..sel.n) |i| if (group[i] == g) {
+        for (0..n) |i| if (group[i] == g) {
             widest = @max(widest, col[i] + shiftBefore(&row, &group, &pad, i, g));
         };
-        for (0..sel.n) |i| if (group[i] == g) {
+        for (0..n) |i| if (group[i] == g) {
             pad[i] = widest - (col[i] + shiftBefore(&row, &group, &pad, i, g));
         };
     }
-    var points: [max]weft.Range = undefined;
-    var pads: [max]usize = undefined;
-    var m: usize = 0;
-    for (sel.items[0..sel.n], 0..) |s, i| {
-        if (pad[i] == 0) continue;
-        const at = s.range().start;
-        points[m] = .{ .start = at, .end = at };
-        pads[m] = pad[i];
-        m += 1;
-    }
-    if (m == 0) return;
-    const before = sel.items;
-    const count = sel.n;
-    putEach(points[0..m], .{ .pad = pads[0..m] }, null);
+    weft.undoUnit(writePads, .{ sel.items[0..n], pad[0..n] });
     // Every insertion sits at or before the selections after it: each moves
     // right by the pads up to and including its own.
     var shift: usize = 0;
-    for (before[0..count], 0..) |s, i| {
-        shift += pad[i];
-        sel.items[i] = .{ .anchor = s.anchor + shift, .head = s.head + shift };
+    for (sel.items[0..n], pad[0..n]) |*s, p| {
+        shift += p;
+        s.* = .{ .anchor = s.anchor + shift, .head = s.head + shift };
     }
-    sel.n = count;
     sel.store();
     noteEdit();
+}
+
+/// Each selection's pad, before it — last first, so earlier offsets hold.
+fn writePads(items: []const weft.Selection, pads: []const usize) void {
+    const spaces = " " ** 256;
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        const at = items[i].range().start;
+        var left = pads[i];
+        while (left > 0) {
+            const k = @min(left, spaces.len);
+            weft.edit(.{ .start = at, .end = at }, spaces[0..k]);
+            left -= k;
+        }
+    }
 }
 
 fn shiftBefore(row: []const usize, group: []const usize, pad: []const usize, i: usize, g: usize) usize {
@@ -361,114 +293,94 @@ fn shiftBefore(row: []const usize, group: []const usize, pad: []const usize, i: 
     return total;
 }
 
-/// `R`: replace every selection with the register (one value each where the
+/// `R`: replace the selection with the register (its own value where the
 /// counts match), selecting what was written.
 pub fn replaceWithRegister() void {
     const slot = state.takeRegister();
-    if (!sel.load()) return;
-    var ranges: [max]weft.Range = undefined;
-    _ = spans(&ranges);
-    putEach(ranges[0..sel.n], .{ .register = .{ .slot = slot, .count = sel.n } }, null);
-    selectWritten();
-}
-
-/// Select what each job wrote (a selection whose job wrote nothing stays).
-fn selectWritten() void {
-    for (sel.items[0..sel.n], 0..) |*s, i| {
-        const w = wrote(i) orelse continue;
-        s.* = .{ .anchor = w.start, .head = w.end };
-    }
-    sel.store();
-    sel.flashAll();
+    const r = sel.span(sel.get());
+    const value = weft.registerTextIn(slot);
+    weft.edit(r, value);
+    weft.pasteAtIn(slot, r.start);
+    sel.put(.{ .anchor = r.start, .head = r.start + value.len });
+    sel.flash();
     noteEdit();
 }
 
-/// Rewrite every selection in place from `src`, keeping them selected.
-fn rewrite(src: Source) void {
-    if (!sel.load()) return;
-    var ranges: [max]weft.Range = undefined;
-    _ = spans(&ranges);
-    putEach(ranges[0..sel.n], src, null);
-    selectWritten();
-}
+var rewrite_buf: [1 << 16]u8 = undefined;
 
-/// `r<c>`: every character of every selection becomes `c`.
+/// `r<c>`: every character of the selection becomes `c`.
 pub fn replaceWith(c: []const u8) void {
-    if (c.len == 0) return;
-    var f: @FieldType(Source, "fill") = .{ .buf = undefined, .len = @min(c.len, 4) };
-    @memcpy(f.buf[0..f.len], c[0..f.len]);
-    rewrite(.{ .fill = f });
+    if (c.len == 0 or c.len > 4) return;
+    const r = sel.span(sel.get());
+    const src = weft.slice(r.start, r.end);
+    var w: usize = 0;
+    var k: usize = 0;
+    while (k < src.len) {
+        const step = std.unicode.utf8ByteSequenceLength(src[k]) catch 1;
+        const piece: []const u8 = if (src[k] == '\n') "\n" else c;
+        if (w + piece.len > rewrite_buf.len) return;
+        @memcpy(rewrite_buf[w..][0..piece.len], piece);
+        w += piece.len;
+        k += step;
+    }
+    writeSelect(r, rewrite_buf[0..w]);
+    sel.flash();
+    noteEdit();
 }
 
 /// `~` / `` ` `` / `` A-` ``.
 pub fn setCase(c: Case) void {
-    rewrite(.{ .case = c });
+    const r = sel.span(sel.get());
+    const src = weft.slice(r.start, r.end);
+    if (src.len > rewrite_buf.len) return;
+    for (src, rewrite_buf[0..src.len]) |b, *o| o.* = switch (c) {
+        .lower => std.ascii.toLower(b),
+        .upper => std.ascii.toUpper(b),
+        .toggle => if (std.ascii.isUpper(b)) std.ascii.toLower(b) else std.ascii.toUpper(b),
+    };
+    writeSelect(r, rewrite_buf[0..src.len]);
+    sel.flash();
+    noteEdit();
 }
 
 // ── Lines: join, indent, comment ────────────────────────────────────────
 
-/// Every selection's lines as merged blocks, `[first line start, past the last
-/// line's newline)` — two selections on one line give that line once.
-fn lineBlocks(out: []weft.Range) usize {
-    var m: usize = 0;
-    for (sel.items[0..sel.n]) |s| {
-        const r = sel.span(s);
-        const first = weft.lineAt(r.start).start;
-        const last = weft.lineAt(@max(r.start, r.end -| 1));
-        const block: weft.Range = .{ .start = first, .end = @min(last.end + 1, text.len()) };
-        if (m > 0 and block.start < out[m - 1].end) {
-            out[m - 1].end = @max(out[m - 1].end, block.end);
-        } else {
-            out[m] = block;
-            m += 1;
-        }
-    }
-    return m;
+/// `hx-line-block`: the target the line verbs map over — the selection's
+/// lines, `[first line start, past the last line's newline)`.
+pub fn lineBlock() void {
+    const r = sel.span(sel.get());
+    const first = weft.lineAt(r.start).start;
+    const last = weft.lineAt(@max(r.start, r.end -| 1));
+    if (weft.anchorRange(.{ .start = first, .end = @min(last.end + 1, text.len()) })) |h| weft.setResultRange(h);
 }
 
-/// Run a line operator (`op.indent`, `op.comment`, …) once per line block.
+/// `>` `<` and the comment toggle: the line operator once per line block,
+/// `count` times — and `3>` is one edit, since the mapping is one unit.
 pub fn onLines(cmd: []const u8) void {
-    if (!sel.load()) return;
-    var blocks: [max]weft.Range = undefined;
-    const m = lineBlocks(&blocks);
-    var handles: [max]?u32 = undefined;
-    for (blocks[0..m], handles[0..m]) |b, *h| h.* = weft.anchorRange(b);
-    // `3>` is one edit: the count loop is one undo unit, not three.
-    weft.undoUnit(repeatOnLines, .{ cmd, handles[0..m], state.takeCount() });
-    sel.flashAll();
-    noteEdit();
-}
-
-fn repeatOnLines(cmd: []const u8, handles: []const ?u32, count: u32) void {
-    var k = count;
-    while (k > 0) : (k -= 1) weft.runRangeArgEach(cmd, handles);
-}
-
-/// `J`: join each selection's lines into one — or, for a selection on one
-/// line, that line and the next. Each line break and the next line's indent
-/// become a single space.
-pub fn join() void {
-    if (!sel.load()) return;
-    var blocks: [max]weft.Range = undefined;
-    const m = lineBlocks(&blocks);
-    var handles: [max]?u32 = undefined;
-    for (blocks[0..m], handles[0..m]) |*b, *h| {
-        // Past the block's own last newline is the next line: a one-line
-        // block joins with it.
-        var end = b.end;
-        if (weft.lineAt(b.start).end + 1 >= end) end = @min(weft.lineAt(@min(end, text.len())).end, text.len());
-        h.* = weft.anchorRange(.{ .start = b.start, .end = @max(b.start, end) });
-    }
-    weft.runRangeArgEach("hx-op-join", handles[0..m]);
-    sel.flashAll();
-    noteEdit();
-}
-
-/// `hx-op-join`: collapse every line break inside the range (and the indent
-/// after it) to one space, last first so earlier offsets hold.
-pub fn opJoin() void {
     const h = weft.argRange(0) orelse return;
-    const r = weft.rangeEnds(h) orelse return;
+    var k = state.takeCount();
+    while (k > 0) : (k -= 1) weft.runRangeArg(cmd, h);
+    sel.flash();
+    noteEdit();
+}
+
+/// `hx-join-target`: what `J` joins — the selection's lines, or, for a
+/// selection on one line, that line and the next.
+pub fn joinTarget() void {
+    const r = sel.span(sel.get());
+    const first = weft.lineAt(r.start).start;
+    const last = weft.lineAt(@max(r.start, r.end -| 1));
+    var end = @min(last.end + 1, text.len());
+    // Past the block's own last newline is the next line: a one-line block
+    // joins with it.
+    if (weft.lineAt(first).end + 1 >= end) end = @min(weft.lineAt(@min(end, text.len())).end, text.len());
+    if (weft.anchorRange(.{ .start = first, .end = @max(first, end) })) |h| weft.setResultRange(h);
+}
+
+/// `J`: collapse every line break inside the target (and the indent after
+/// it) to one space, last first so earlier offsets hold.
+pub fn join() void {
+    const r = arg() orelse return;
     text.begin();
     var end = r.end;
     // The range's own trailing newline, if any, is not a join point.
@@ -485,6 +397,8 @@ pub fn opJoin() void {
         const next_empty = text.at(after) == null or text.at(after) == '\n';
         weft.edit(.{ .start = i, .end = after }, if (next_empty) "" else " ");
     }
+    sel.flash();
+    noteEdit();
 }
 
 // ── Inserting ───────────────────────────────────────────────────────────
@@ -519,75 +433,74 @@ fn entryPoint(s: weft.Selection, where: Entry) usize {
     };
 }
 
-/// `i a I A`: a caret at the entry point of every selection, then type — at
-/// all of them at once.
+/// `i a I A`: a caret at the selection's entry point, then type — at every
+/// selection's at once.
 pub fn insertAt(where: Entry) void {
-    if (onText() and sel.load()) {
-        for (sel.items[0..sel.n]) |*s| s.* = sel.caret(entryPoint(s.*, where));
-        sel.store();
-    }
+    if (onText()) sel.put(sel.caret(entryPoint(sel.get(), where)));
     enterInsert();
 }
 
-/// `o` / `O`: open a line below (above) every selection, indented like its
+/// `o` / `O`: open a line below (above) the selection, indented like its
 /// own, and type there. A structured view answers the insertion intention (a
 /// new row) instead.
 pub fn openLine(below: bool) void {
     if (weft.invokeIntention(if (below) "std.editing.insert-after" else "std.editing.insert-before") == .invoked) return enterInsert();
-    if (!onText() or !sel.load()) return enterInsert();
-    var points: [max]weft.Range = undefined;
-    for (sel.items[0..sel.n], points[0..sel.n]) |s, *p| {
-        const r = sel.span(s);
-        const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
-        p.* = .{ .start = at, .end = at };
+    if (!onText()) return enterInsert();
+    const r = sel.span(sel.get());
+    const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
+    const l = weft.lineAt(r.start);
+    const line = weft.slice(l.start, l.end);
+    var indent: usize = 0;
+    while (indent < line.len and indent + 1 < rewrite_buf.len and (line[indent] == ' ' or line[indent] == '\t')) indent += 1;
+    if (below) {
+        rewrite_buf[0] = '\n';
+        @memcpy(rewrite_buf[1..][0..indent], line[0..indent]);
+    } else {
+        @memcpy(rewrite_buf[0..indent], line[0..indent]);
+        rewrite_buf[indent] = '\n';
     }
-    putEach(points[0..sel.n], .{ .open = if (below) .below else .above }, null);
-    for (sel.items[0..sel.n], 0..) |*s, i| {
-        const w = wrote(i) orelse continue;
-        s.* = sel.caret(if (below) w.end else w.end - 1);
-    }
-    sel.store();
+    weft.edit(.{ .start = at, .end = at }, rewrite_buf[0 .. indent + 1]);
+    sel.put(sel.caret(at + if (below) indent + 1 else indent));
     enterInsert();
 }
 
-/// `[ space` / `] space`: a blank line above (below) every selection, the
-/// selections left where they are.
-pub fn addBlankLine(below: bool) void {
-    if (!sel.load()) return;
-    var points: [max]weft.Range = undefined;
-    for (sel.items[0..sel.n], points[0..sel.n]) |s, *p| {
-        const r = sel.span(s);
-        const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
-        p.* = .{ .start = at, .end = at };
-    }
-    weft.undoUnit(repeatBlankLine, .{ points[0..sel.n], state.takeCount() });
+/// `hx-blank-point`: where `[ space` / `] space` insert — a line's start
+/// (end), once per line however many selections sit on it.
+pub fn blankPoint(below: bool) void {
+    const r = sel.span(sel.get());
+    const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
+    if (weft.anchorRange(.{ .start = at, .end = at })) |h| weft.setResultRange(h);
 }
 
-fn repeatBlankLine(points: []const weft.Range, count: u32) void {
-    var k = count;
-    while (k > 0) : (k -= 1) putEach(points, .{ .literal = "\n" }, null);
+/// `[ space` / `] space`: `count` blank lines at the target, the selection
+/// left where it is.
+pub fn addBlankLine() void {
+    const at = arg() orelse return;
+    var k = state.takeCount();
+    while (k > 0) : (k -= 1) weft.edit(at, "\n");
 }
 
-// ── Surround (the `surround` plugin, per selection) ─────────────────────
+// ── Surround (the `surround` plugin) ────────────────────────────────────
 
 pub const SurroundVerb = enum { add, delete, replace };
 
-/// Choose the pair, then surround every selection. Adding wraps each on its
-/// own; deleting and replacing PLAN every selection's pair on the untouched
-/// text first, so two selections inside one pair edit it once (the
-/// `surround` plugin's module doc), then apply the plan as one undo unit.
+/// Choose the pair, then surround. Adding wraps each selection
+/// (`hx-surround-wrap`, per selection); deleting and replacing are the
+/// surround plugin's own commands, which map over each selection's PAIR —
+/// so two selections inside one pair edit it once.
 pub fn surround(verb: SurroundVerb, pair: []const u8, replacement: ?[]const u8) void {
-    if (!sel.load()) return;
     if (replacement) |r| weft.runStr2("surround-pair", pair, r) else weft.runStr("surround-pair", pair);
-    var handles: [max]?u32 = undefined;
-    for (sel.items[0..sel.n], handles[0..sel.n]) |s, *h| h.* = weft.anchorRange(sel.span(s));
-    switch (verb) {
-        .add => weft.runRangeArgEach("surround.add", handles[0..sel.n]),
-        .delete, .replace => {
-            weft.runRangeArgEach("surround.plan", handles[0..sel.n]);
-            weft.runStr("surround.apply", @tagName(verb));
-        },
-    }
-    sel.flashAll();
+    weft.run(switch (verb) {
+        .add => "hx-surround-wrap",
+        .delete => "surround.delete",
+        .replace => "surround.replace",
+    });
+}
+
+/// `hx-surround-wrap`: the chosen pair around the selection.
+pub fn surroundWrap() void {
+    const r = sel.span(sel.get());
+    if (weft.anchorRange(r)) |h| weft.runRangeArg("surround.add", h);
+    sel.flash();
     noteEdit();
 }

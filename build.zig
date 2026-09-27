@@ -488,7 +488,7 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels, .put } },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
     .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{.regex} },

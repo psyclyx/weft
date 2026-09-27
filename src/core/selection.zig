@@ -177,8 +177,10 @@ pub const Stage = struct {
     /// system), and per slot the value each visited extent yanked.
     bank: ?*Register.Bank = null,
     yanks: [Register.Bank.slot_count]std.ArrayList(Piece) = @splat(.empty),
-    /// Whether a run has started the mapping's flash; later runs add to it.
-    flashed: bool = false,
+    /// What the runs flashed, anchored so later runs' edits carry it, and the
+    /// document it is in: landed as ONE flash, in document order.
+    flash_doc: ?*Document = null,
+    flashes: std.ArrayList(Document.RangeAnchors) = .empty,
 
     pub const Piece = struct { index: usize, value: Register };
 
@@ -190,6 +192,42 @@ pub const Stage = struct {
         for (&self.yanks) |*list| {
             for (list.items) |*piece| piece.value.deinit(self.gpa);
             list.deinit(self.gpa);
+        }
+        self.flashes.deinit(self.gpa);
+    }
+
+    /// A run flashed `r` in `doc`.
+    pub fn flash(self: *Stage, doc: *Document, r: Document.Range) Allocator.Error!void {
+        if (self.flash_doc) |d| if (d != doc) return;
+        self.flash_doc = doc;
+        try self.flashes.ensureUnusedCapacity(self.gpa, 1);
+        self.flashes.appendAssumeCapacity(try doc.addRangeAnchors(self.gpa, r));
+    }
+
+    /// Land the flash (every run's ranges, one set, document order) through
+    /// `ctx`'s flash service, and let go of the anchors. `alive` says the
+    /// document is still open; a closed one took its anchors with it.
+    fn landFlash(self: *Stage, ctx: *command.Context, alive: bool) void {
+        const doc = self.flash_doc orelse return;
+        defer self.flashes.clearRetainingCapacity();
+        if (!alive) return;
+        const ranges = self.gpa.alloc(Document.Range, self.flashes.items.len) catch return;
+        defer self.gpa.free(ranges);
+        for (self.flashes.items, ranges) |a, *r| {
+            r.* = doc.rangeOffsets(a.start, a.end);
+            doc.removeAnchor(a.start);
+            doc.removeAnchor(a.end);
+        }
+        std.mem.sort(Document.Range, ranges, {}, struct {
+            fn lt(_: void, a: Document.Range, b: Document.Range) bool {
+                return a.start < b.start;
+            }
+        }.lt);
+        for (ranges, 0..) |r, i| {
+            const fr: @import("flash.zig").Range = .{ .start = @intCast(r.start), .end = @intCast(r.end) };
+            if (i == 0) {
+                ctx.caps.flash.set(self.gpa, &ctx.caps.layers, doc, fr, .edit) catch return;
+            } else ctx.caps.flash.add(self.gpa, &ctx.caps.layers, doc, fr) catch return;
         }
     }
 
@@ -221,9 +259,10 @@ pub const Stage = struct {
         try list.append(self.gpa, .{ .index = index, .value = value });
     }
 
-    /// Land every staged slot: one value per extent that yanked, in document
-    /// order.
-    pub fn commit(self: *Stage) void {
+    /// Land the mapping: every staged slot, one value per extent that
+    /// yanked, in document order; and the flash.
+    pub fn commit(self: *Stage, ctx: *command.Context, alive: bool) void {
+        self.landFlash(ctx, alive);
         const bank = self.bank orelse return;
         for (&self.yanks, 0..) |*list, slot| {
             if (list.items.len == 0) continue;
@@ -232,7 +271,7 @@ pub const Stage = struct {
                     return a.index < b.index;
                 }
             }.lt);
-            var parts = self.gpa.alloc(*const Register, list.items.len) catch continue;
+            const parts = self.gpa.alloc(*const Register, list.items.len) catch continue;
             defer self.gpa.free(parts);
             for (list.items, 0..) |*piece, i| parts[i] = &piece.value;
             Register.putEachIn(bank, self.gpa, @intCast(slot), parts) catch {};
@@ -335,19 +374,20 @@ fn mapText(
     ed.beginVisit();
     defer {
         ctx.visit = null;
-        if (ctx.buffers.resolve(at)) |b| if (b.textEditor()) |still| {
-            if (indexOf(still, primary_head)) |i| still.visit(i) else still.visit(@min(still.primary, still.selectionCount() - 1));
-            still.endVisit();
-            still.history.endUnit();
-        };
+        const still = if (ctx.buffers.resolve(at)) |b| b.textEditor() else null;
+        if (still) |s| {
+            if (indexOf(s, primary_head)) |i| s.visit(i) else s.visit(@min(s.primary, s.selectionCount() - 1));
+            s.endVisit();
+            s.history.endUnit();
+        }
+        // What the runs yanked and flashed lands once, as the mapping ends.
+        stage.commit(ctx, still == ed);
     }
 
-    const result = if (each.over) |over|
+    return if (each.over) |over|
         try mapTargets(ctx, cmd, args, at, ed, heads, over, each.merge, &stage)
     else
         try mapExtents(ctx, cmd, args, at, ed, heads, &stage);
-    stage.commit();
-    return result;
 }
 
 /// `.each` over the extents themselves: last first, so a run's edits never
