@@ -142,7 +142,7 @@ pub fn hPlaces(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 /// nothing on later changes. Returns whether it ran.
 pub fn notifyContextChanged(p: *WasmPlugin) bool {
     if (p.context_listener == .deaf) return false;
-    contract.callOptionalExport("on_context_changed", &p.instance, .{}) catch |err| {
+    contract.callOptionalExport("on_context_changed", p, .{}) catch |err| {
         if (err == error.MissingExport) p.context_listener = .deaf;
         return false;
     };

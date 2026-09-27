@@ -167,7 +167,7 @@ fn wpSlotProvider(data: ?*anyopaque, host: *slot_mod.SlotHost, req: *const slot_
     const saved_ctx = p.active_ctx;
     if (req.ctx) |c| p.active_ctx = @ptrCast(@alignCast(c));
     defer p.active_ctx = saved_ctx;
-    contract.callOptionalExport("on_slot_fire", &p.instance, .{handle}) catch {
+    contract.callOptionalExport("on_slot_fire", p, .{handle}) catch {
         host.decline(req.session);
     };
 }

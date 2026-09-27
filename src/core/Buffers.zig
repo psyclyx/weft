@@ -72,6 +72,12 @@ status: @import("status_feed.zig").Feed = .{},
 /// `parked_cap` the oldest is released for good, and a designation naming
 /// it is refused as gone rather than answered with something else.
 parked: std.ArrayList(*Buffer) = .empty,
+/// The plugin whose code is running right now, or empty for the user and
+/// core: what a new entry's `creator` is stamped with. A bracket the plugin
+/// host sets around every call into a guest (`actAs`), so an entry a guest
+/// makes — by `buffer-create`, `open`, a door that spawns — is that guest's,
+/// however it came to be made. Borrowed for the bracket's duration.
+acting: []const u8 = "",
 
 pub const parked_cap = 16;
 
@@ -111,6 +117,12 @@ pub const Buffer = struct {
     /// `save` under `When{ .tool = … }` so it wins in its own entry, in any
     /// mode — and independent of whether the entry stores text.
     tool: []u8 = &.{},
+    /// The plugin that made this entry (`Buffers.acting` when it was
+    /// inserted), owned; empty for the user's and core's own. What says who
+    /// may declare what the entry IS (`tool`, `designation`): only its
+    /// maker, so no plugin can turn the user's scratch into a process whose
+    /// close destroys text, or strip another plugin's entry of its name.
+    creator: []u8 = &.{},
     /// Keymap mode restored when this buffer takes focus. Empty =
     /// never visited — inherits whatever mode is current.
     mode: []u8 = &.{},
@@ -408,6 +420,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);
+    gpa.free(b.creator);
     gpa.free(b.designation);
     gpa.free(b.mode);
     gpa.destroy(b);
@@ -466,6 +479,14 @@ pub const Iterator = struct {
     }
 };
 
+/// Run the code of plugin `name` (a bracket: entries created meanwhile are
+/// its). Answers what was acting, for the caller to put back with `actAs`.
+pub fn actAs(self: *Buffers, name: []const u8) []const u8 {
+    const was = self.acting;
+    self.acting = name;
+    return was;
+}
+
 /// Create a text buffer (no backing yet — callers open/adopt on its editor,
 /// or leave it scratch). Does not focus it.
 pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
@@ -487,6 +508,8 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
     errdefer gpa.free(owned_name);
     const owned_tool = try gpa.dupe(u8, tool);
     errdefer gpa.free(owned_tool);
+    const owned_creator = try gpa.dupe(u8, self.acting);
+    errdefer gpa.free(owned_creator);
 
     const id = try self.freeSlot(gpa);
     const generation = self.mintGeneration();
@@ -512,6 +535,7 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
         .editor = editor,
         .name = owned_name,
         .tool = owned_tool,
+        .creator = owned_creator,
         .place = inherited,
     };
     self.slots.items[id] = b;

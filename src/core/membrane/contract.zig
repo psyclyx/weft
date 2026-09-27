@@ -509,12 +509,24 @@ fn findExport(comptime name: []const u8) contract_data.Export {
 /// fails to coerce). Otherwise a thin, behavior-preserving pass to
 /// `instance.callVoid` — this helper does not itself swallow any error; the
 /// call site's own `try`/`catch` (as today) decides what a failure means.
-pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+///
+/// `plugin` is the `*WasmPlugin` whose instance is entered. Every call into a
+/// guest passes here, so this is where the guest becomes the ACTING plugin
+/// for the call's duration (`Buffers.actAs`): an entry it creates, however
+/// it comes to create it, is its own (`Buffer.creator`).
+pub fn callRequiredExport(comptime name: []const u8, plugin: anytype, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
     if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (!e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is optional in contract_data.exports — use callOptionalExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
+    return enter(plugin, contract_data.export_prefix ++ name, &arr);
+}
+
+fn enter(plugin: anytype, symbol: []const u8, args: []const i32) wasm.Error!void {
+    const entries = plugin.activeCtx().buffers;
+    const was = entries.actAs(plugin.name);
+    defer _ = entries.actAs(was);
+    return plugin.instance.callVoid(symbol, args);
 }
 
 /// Call an OPTIONAL guest export (`required = false`, e.g. `on_menu`): a
@@ -525,12 +537,12 @@ pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, a
 /// `describe` swallows only `error.MissingExport`) is preserved verbatim by
 /// leaving that decision at the call site, not centralizing it here (the
 /// two patterns differ today; unifying them would be a behavior change).
-pub fn callOptionalExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+pub fn callOptionalExport(comptime name: []const u8, plugin: anytype, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
     if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is required in contract_data.exports — use callRequiredExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
+    return enter(plugin, contract_data.export_prefix ++ name, &arr);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

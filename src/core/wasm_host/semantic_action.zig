@@ -21,7 +21,7 @@ pub fn initBridge(plugin: *WasmPlugin) plugin_semantic.action.Bridge {
 
 fn invokeGuest(raw: *anyopaque) plugin_semantic.action.CallbackError!void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
-    contract.callOptionalExport("on_semantic_action", &plugin.instance, .{}) catch return error.Failed;
+    contract.callOptionalExport("on_semantic_action", plugin, .{}) catch return error.Failed;
 }
 
 pub fn hProvider(data: ?*anyopaque, _: *wasm.Caller, _: []const i32, results: []i32) void {

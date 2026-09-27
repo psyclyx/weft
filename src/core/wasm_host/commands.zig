@@ -410,8 +410,8 @@ fn enterGuest(ctx: *command.Context, wc: *WasmCmd, args: []const command.Value, 
     p.result = .nil;
     const id: i32 = @intCast(wc.id);
     switch (entry) {
-        .command => try contract.callRequiredExport("on_command", &p.instance, .{id}),
-        .mapping_end => contract.callOptionalExport("on_mapping_end", &p.instance, .{id}) catch |e|
+        .command => try contract.callRequiredExport("on_command", p, .{id}),
+        .mapping_end => contract.callOptionalExport("on_mapping_end", p, .{id}) catch |e|
             if (e != error.MissingExport) return e,
     }
     return p.result;

@@ -96,6 +96,10 @@ fn designation() void {
 fn designate() void {
     weft.setResultStr(if (weft.designate(arg(0))) "ok" else "refused");
 }
+/// An entry this plugin makes (and focuses), by name.
+fn create() void {
+    weft.focusOrCreateBuffer(arg(0));
+}
 fn claim() void {
     const kind = arg(0);
     weft.setResultStr(if (weft.designationOpener(kind, arg(1))) "ok" else "refused");
@@ -149,6 +153,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ow-context-set-at", .arity = .one, .call = contextSetAt },
     .{ .name = "ow-designation", .arity = .one, .call = designation },
     .{ .name = "ow-designate", .arity = .one, .call = designate },
+    .{ .name = "ow-create", .arity = .one, .call = create },
     .{ .name = "ow-claim", .arity = .one, .call = claim },
     .{ .name = "ow-list", .arity = .one, .call = list },
     .{ .name = "ow-invoke", .arity = .one, .call = invoke },

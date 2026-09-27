@@ -422,8 +422,16 @@ test "e2e/designation: the guest doors — read an entry's name, declare only wh
     // A file is named by its file: nothing overrides that.
     try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/proc/mine" }}));
 
-    // On a scratch entry: no plugin may say it is a file or a document…
-    ed.runStr("buffer-create", "*produced*");
+    // The user's own scratch is no plugin's to re-declare: not as a process
+    // (closing it would then destroy the text), and not by clearing either.
+    ed.runStr("buffer-create", "*mine*");
+    try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/proc/ow.1" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "" }}));
+    try t.expect(ed.buffers.active().designation.len == 0);
+
+    // On a scratch entry it made: no plugin may say it is a file or a document…
+    _ = result(ed, &buf, "ow-create", &.{.{ .string = "*produced*" }});
+    try t.expectEqualStrings("*produced*", ed.bufferName());
     try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/file/etc/passwd" }}));
     try t.expectEqualStrings("refused", result(ed, &buf, "ow-designate", &.{.{ .string = "weft://here/doc/000102030405060708090a0b0c0d0e0f" }}));
     // …nor another producer's projection (the dashboard's is claimed)…

@@ -1002,7 +1002,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     // `on_poll` attempts `weft.setMode("polled")` then `weft.echo("polled")`.
     // `requireDispatch` (wasm_host/plugin.zig) traps on the FIRST one — the
     // guest call unwinds right there, so the echo never runs either.
-    try t.expectError(error.Trap, contract.callOptionalExport("on_poll", &plugin.instance, .{}));
+    try t.expectError(error.Trap, contract.callOptionalExport("on_poll", plugin, .{}));
     try t.expectEqualStrings("start", env.head.currentMode()); // untouched
     try t.expectEqual(@as(usize, 0), env.head.echo.items.len); // untouched
 }

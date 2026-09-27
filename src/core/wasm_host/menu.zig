@@ -125,5 +125,5 @@ pub fn hMenuBindingIntentNote(data: ?*anyopaque, caller: *wasm.Caller, args: []c
 /// another guest call), so a menu-owner plugin re-entering its own wasmtime
 /// store is impossible. Guests without the export are skipped.
 pub fn notifyMenu(p: *WasmPlugin, open: bool) void {
-    contract.callOptionalExport("on_menu", &p.instance, .{@as(i32, if (open) 1 else 0)}) catch {};
+    contract.callOptionalExport("on_menu", p, .{@as(i32, if (open) 1 else 0)}) catch {};
 }

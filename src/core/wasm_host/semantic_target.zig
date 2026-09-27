@@ -36,7 +36,7 @@ fn invokeGuestSettle(
     const wire = view.toWire();
     contract.callOptionalExport(
         "on_semantic_target_settle",
-        &plugin.instance,
+        plugin,
         .{
             @as(i32, @bitCast(token)),
             @as(i32, @bitCast(wire.authority)),
@@ -51,7 +51,7 @@ fn invokeGuestProbe(raw: *anyopaque, token: u32) plugin_semantic.target.Callback
     const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
     contract.callOptionalExport(
         "on_semantic_target_probe",
-        &plugin.instance,
+        plugin,
         .{@as(i32, @bitCast(token))},
     ) catch return error.Failed;
 }
@@ -60,7 +60,7 @@ fn invokeGuestOpen(raw: *anyopaque, token: u32) plugin_semantic.target.CallbackE
     const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
     contract.callOptionalExport(
         "on_semantic_target_open",
-        &plugin.instance,
+        plugin,
         .{@as(i32, @bitCast(token))},
     ) catch return error.Failed;
 }

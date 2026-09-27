@@ -366,7 +366,7 @@ pub const imports = [_]Entry{
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
     .{ .name = "wl_entry_designation", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "the designation (`weft://…`) of the entry this call is about into guest memory, or -1 when it has none" },
-    .{ .name = "wl_entry_designate", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "declare the designation the entry this call is about represents: `proc`, or a projection kind this plugin claimed; 0 ok, negative refused" },
+    .{ .name = "wl_entry_designate", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "declare the designation the entry this call is about represents: `proc`, or a projection kind this plugin claimed, on an entry this plugin made; 0 ok, negative refused" },
     .{ .name = "wl_designation_opener", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "claim projection kind `kind` for this plugin, re-run by `command` given the designation; 0 ok, -1 not a projection kind, -2 claimed by another" },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────

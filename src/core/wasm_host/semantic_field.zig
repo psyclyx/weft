@@ -27,7 +27,7 @@ pub fn initBridge(plugin: *WasmPlugin) plugin_semantic.field.Bridge {
 
 fn invokeGuestEdit(raw: *anyopaque, token: u32) plugin_semantic.field.CallbackError!void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
-    contract.callOptionalExport("on_semantic_field_edit", &plugin.instance, .{@as(i32, @bitCast(token))}) catch return error.Failed;
+    contract.callOptionalExport("on_semantic_field_edit", plugin, .{@as(i32, @bitCast(token))}) catch return error.Failed;
 }
 
 const OwnedInput = struct {

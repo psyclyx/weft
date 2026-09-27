@@ -337,7 +337,7 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
     // the guest's own word and must return to it unchanged; `@intCast` panicked
     // on exactly the ids `hPickBegin` had just been taught to accept, so the
     // crash simply moved from the ask to the answer.
-    try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @bitCast(bp.pick_id))});
+    try contract.callRequiredExport("on_pick_accept", p, .{@as(i32, @bitCast(bp.pick_id))});
 }
 
 fn wpPickCleanup(data: ?*anyopaque, gpa: Allocator) void {

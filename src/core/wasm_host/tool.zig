@@ -14,13 +14,25 @@ const wasm = @import("../wasm.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
-/// `toolBacking(name)`: mark the ACTIVE buffer as this plugin's tool projection.
+/// `toolBacking(name)`: mark the entry this call is about as this plugin's
+/// tool projection — only an entry this plugin made (`madeBy`).
 pub fn hToolBacking(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const entry = p.activeCtx().entry() orelse return;
+    if (!madeBy(entry, p)) return;
     const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(name);
-    (p.activeCtx().entry() orelse return).setTool(p.gpa, name) catch return;
+    entry.setTool(p.gpa, name) catch return;
+}
+
+/// Whether `p` made `entry` (`Buffer.creator`). What an entry IS — its tool,
+/// its designation — is its maker's to say, so no plugin can re-declare the
+/// user's scratch (and make its close destroy text) or another plugin's
+/// entry (and strip `*repl*` of its process). Compared by name: a reloaded
+/// plugin is still the maker of what it made.
+fn madeBy(entry: *const @import("../Buffers.zig").Buffer, p: *const WasmPlugin) bool {
+    return entry.creator.len != 0 and std.mem.eql(u8, entry.creator, p.name);
 }
 
 // ── Designations (doc/model.md §2.1–2.2) ─────────────────────────────
@@ -67,14 +79,18 @@ pub const DesignateRefusal = enum(i32) {
     derived = -3,
     /// There is no entry this call is about (a closed bound entry).
     no_entry = -4,
+    /// Another plugin made the entry, or the user did: only its maker says
+    /// what it is — clearing included.
+    not_maker = -5,
 };
 
 /// `designate(text) -> 0 | refusal`: declare the designation the entry this
 /// call is about represents. Admits exactly `weft://here/proc/…` (a live
 /// resource the plugin runs, in a namespace no other plugin reattaches —
 /// `designation.procKind`) and `weft://here/<kind>/…` for a projection kind
-/// this plugin claimed; empty clears the declaration. A file-backed entry is
-/// refused: it is named by its file.
+/// this plugin claimed; empty clears the declaration. Only on an entry this
+/// plugin made (`madeBy`), whatever the text — clearing included; and a
+/// file-backed entry is refused: it is named by its file.
 pub fn hEntryDesignate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = if (designate(p, caller, args)) |refusal| @intFromEnum(refusal) else 0;
@@ -84,6 +100,7 @@ pub fn hEntryDesignate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 fn designate(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32) ?DesignateRefusal {
     const ctx = p.activeCtx();
     const entry = ctx.entry() orelse return .no_entry;
+    if (!madeBy(entry, p)) return .not_maker;
     if (entry.textEditor()) |ed| if (ed.backing != .none) return .derived;
     const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return .malformed;
     defer p.gpa.free(text);

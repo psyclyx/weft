@@ -700,7 +700,7 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const ctx_bound = job.styler.activeCtx();
     const prev = ctx_bound.bindEntry(job.entry);
     defer _ = ctx_bound.bindEntry(prev);
-    contract.callOptionalExport("on_fill_token", &job.styler.instance, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_fill_token", job.styler, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
 }
 
 fn procFree(ctx: ?*anyopaque) void {
@@ -988,7 +988,7 @@ fn execDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const saved_dispatch = job.styler.in_dispatch;
     job.styler.in_dispatch = true;
     defer job.styler.in_dispatch = saved_dispatch;
-    contract.callOptionalExport("on_exec", &job.styler.instance, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_exec", job.styler, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
 }
 
 fn execFree(ctx: ?*anyopaque) void {
