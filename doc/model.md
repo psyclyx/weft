@@ -241,6 +241,63 @@ kept alive past its phase.
    as sugar, designations in jumplists, viewports and embeds. The files
    plugin and peer filesystem answer the same `dir` kind. Fixes the
    relative/absolute split as a side effect.
+
+   *Landed (2026-09-26, branch `arc/model`).* The grammar
+   (`semantic_model/durable.zig`) owns its kinds: `file`, `dir`, `doc` (a
+   `DocId`, 32 lowercase hex), `proc`, and any lowercase dotted name as a
+   producer's projection; a path kind's ref is absolute by construction (the
+   kind's separator is the path's root), so no relative designation can be
+   spelled. `durable.Spec` is the one reading of what `open`/`present` are
+   handed: a designation, an absolute path as sugar, or a refusal
+   (relative, malformed). Every `Document` mints 128 random bits at `init`;
+   a bulk load, an edit, a save and a reload keep them, and a joined
+   replica adopts the sharer's. The share announcement carries the id as a
+   second additive trailer after the kind byte (doc/wire.md): an older
+   receiver stops at the kind byte, an older sender's offer opens and names
+   the receiver's own replica; the wire version is unchanged, as with every
+   additive field before it. `core/designation.zig` answers an entry's
+   designation — what was declared for it, else its file, else its
+   document — finds the live entry for one, and routes `open` for the kinds
+   core can answer: a live entry, a parked document (closing a scratch
+   document with text parks it in `Buffers.parked`, bounded at 16), a
+   projection's producer re-run (`Openers`: a producer claims its kind and a
+   command; the grammar's kinds cannot be claimed), a live process
+   reattached by the producer of its namespace (`proc.<ns>`), else a refusal
+   by name. The shell's `open` adds `here` paths, `shell:` files, and peer
+   authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
+   tree by the provider's own listing and is presented as every directory
+   is; a peer's `doc` opens the offer carrying that id, across reconnects;
+   a peer's `file` is refused, see below); `peer-files` is now `open
+   weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
+   `wl_entry_designate` (only `proc` in an unclaimed or own namespace, or a
+   projection kind the plugin claimed, and never on a file-backed entry),
+   `wl_designation_opener`; SDK `designation`, `designate`,
+   `designationOpener`, `openDesignation`, `openUnder`, `placeProjection`,
+   `placeDesignation`, `contextSetAt`. Trusted publishers name what they
+   bind (`Router.designate`, never the guest-writable descriptor), and a
+   child row's designation is its parent's plus the provider's leaf — so
+   `Session.openWorkspaceEntry` opens a file row by its designation, with
+   one provider-identity check on the containing directory, and the
+   container walk f3fd272 added is gone (its tests pass unchanged). Titles
+   read the designation (`designation.title`, `$HOME` as `~`, a peer by the
+   address it was reached at); the status line shows a file relative to its
+   place, else absolute. Jumps are `(designation, anchor, offset)` and
+   reopen closed entries; a viewport holds the designation it shows and
+   reopens it when it docks again. git status, grep, make, the dashboard
+   and problems declare projection kinds; repl, terminal and console
+   declare `proc`. Phase 2's placeholders are closed: `entry` and `place`
+   are designations, a place scope is keyed by the place's designation, and
+   `contextSet` may name a place, so repl and terminal retract where they
+   published. The sidebar presents `{command: "files"}` (the place's
+   directory) until phase 3's `{context: "place"}`.
+   Still open: a peer's file cannot open as an entry — there is no remote
+   file backing, only shared documents; a peer is titled by the address we
+   connected to, since peers announce no name; scratch documents do not
+   outlive the process (nothing persists them), and a designation with `?`
+   in a path is not formed; JS plugins have no designation doors (the
+   `.tool` group is wasm-only); projection producers can re-run only in the
+   place they ran in (a spawn runs where the dispatch is), and say so; the
+   answer cache still keys by `Buffers.Ref` (phase 5's note).
 2. **Open context.** Keyed values with scopes, `weft.contextSet`, predicate
    leaves, `on_context_changed(keys)`. Migrate the toolbar and delete
    `on_offers_changed` and `Companion`. The repl plugin publishes
