@@ -179,6 +179,29 @@ test "e2e/focus: ide.js — a click focuses the sidebar ROW, typing jumps, F2 ed
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f renamed.zig && test ! -e main.zig && printf ok", "ok"));
 }
 
+test "e2e/focus: ide.js — switching panes mid-edit commits the edit; coming back finds no edit in progress" {
+    var app: IdeApp = undefined;
+    try sidebarApp(&app);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    ed.press("F2", "");
+    ed.typeText("moved.txt");
+    // Focus leaves for the editor pane: the edit is committed (and, one name
+    // typed, applied), not suspended in the listing to resume later.
+    ed.run("window.focus-right");
+    ed.applyWindow();
+    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f moved.txt && test ! -e m.txt && printf ok", "ok"));
+    ed.run("window.focus-left");
+    ed.applyWindow();
+    try t.expectEqualStrings("ide-structural", ed.mode());
+    try t.expect(!ed.head.scene_selection.began);
+    try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+}
+
 test "e2e/focus: ide.js — the listing asks before a delete, a draft of several rows, or a rename onto a name that exists" {
     var app: IdeApp = undefined;
     try sidebarApp(&app);

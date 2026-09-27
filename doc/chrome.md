@@ -404,7 +404,10 @@ What the build settled:
   listing's policy, read off the draft (`Model.applyAsks`): one name typed —
   a row renamed in place, a new row named — applies as typed; a delete, a
   paste, several rows, or a name a sibling holds asks first. Moving the
-  focus off the edited row commits the same way. Delete mid-edit deletes text, never the row.
+  focus off the edited row commits the same way, and so does the head
+  leaving the entry by any door — a pane switch, a buffer switch, an open
+  (`Buffers.switchTo` runs `leave_edit`) — so no edit is saved half-typed
+  into an entry to resume later. Delete mid-edit deletes text, never the row.
 - **Type-ahead** (`core/type_ahead.zig`) runs where an unbound printable key
   finds no commit, under `row`, with no edit in progress: a 1 s prefix
   searched from the focused row, one repeated key stepping through the rows

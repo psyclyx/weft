@@ -282,6 +282,9 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     self.caps = Caps.init(gpa, task.nowNs, &self.container);
     self.actions = Actions.init(gpa, &self.container);
     self.slot_host = SlotHost.init(gpa, &self.container);
+    // An edit the head carries out of its entry is committed on the way
+    // (`Buffers.leave_edit`), by the structural views that own edits.
+    self.buffers.leave_edit = self.semantic.leaveEdit();
     // The one slot core both fires and decodes (`pick/annotate.zig`). Core
     // declares it because core has to READ the answers, and it can only do
     // that against a shape it knows; a plugin-declared schema would leave

@@ -547,6 +547,18 @@ pub const Services = struct {
         return self.focusViewAs(head, gpa, ref, preferred, .navigate);
     }
 
+    /// The commit a head's entry switch runs on an edit it carries out
+    /// (`Buffers.leave_edit`): focus leaving the edited field commits it.
+    pub fn leaveEdit(self: *Services) @import("Buffers.zig").LeaveEdit {
+        return .{ .ctx = self, .commit = struct {
+            fn f(ctx: *anyopaque, head: *Head, gpa: std.mem.Allocator) void {
+                const services: *Services = @ptrCast(@alignCast(ctx));
+                _ = scene_edit.commit(services, head, gpa) catch |err|
+                    std.log.warn("scene_edit: committing the edit a switch left failed: {t}", .{err});
+            }
+        }.f };
+    }
+
     /// `focusView`, saying how the focus arrives (`scene_edit.How`): a
     /// provider ENTERING a node is an edit where navigating to it may not be.
     pub fn focusViewAs(

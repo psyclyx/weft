@@ -51,6 +51,12 @@ active_id: Id = 0,
 /// leaving a tool lands you where you came from, not a fresh scratch). Updated
 /// on every `switchTo`, so it toggles between the two most recent buffers.
 prev_id: Id = 0,
+/// What ends an edit a head carries out of its entry: the structural-view
+/// commit (`scene_edit.commit`, wired by `System`). Focus leaving the edited
+/// field commits it, by whichever door the head left — a pane switch, a
+/// buffer switch, an open — so a begun edit is never saved into the entry's
+/// selection to resume, half-typed, on the way back (`switchTo`).
+leave_edit: ?LeaveEdit = null,
 /// The mode a FRESH buffer (no saved mode) starts in — the config's base
 /// editing mode ("normal"/"helix-normal"), captured once after config load.
 /// A fresh buffer NEVER inherits the current keymap mode: that let a tool
@@ -779,6 +785,12 @@ pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8
     return b;
 }
 
+/// `leave_edit`'s shape: commit the edit `head` holds.
+pub const LeaveEdit = struct {
+    ctx: *anyopaque,
+    commit: *const fn (ctx: *anyopaque, head: *Head, gpa: Allocator) void,
+};
+
 /// Focus `id`: the outgoing buffer saves `head`'s current keymap mode; the
 /// incoming buffer's mode is restored INTO `head` (its saved mode, or — when
 /// it's fresh — the base `default_mode`). A fresh buffer does NOT inherit the
@@ -790,6 +802,12 @@ pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
+    // The edit ends here, committed, while the head still holds it; what is
+    // saved below is a row focus at most.
+    if (head.scene_selection.began) {
+        if (self.leave_edit) |leave| leave.commit(leave.ctx, head, gpa);
+        head.scene_selection.began = false;
+    }
     const old = self.active();
     // Moving between entries is a jump, and only here does core see every
     // one: remember where this head was (`jumplist.zig`). Travel along the
