@@ -56,6 +56,7 @@ const proj = @import("../wasm_host/projection.zig");
 const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
 const clipboard = @import("../wasm_host/clipboard.zig");
+const context_doors = @import("../wasm_host/context.zig");
 const history = @import("../wasm_host/history.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
@@ -93,6 +94,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_log", .handler = declare.hLog },
     .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
     .{ .name = "wl_declare_command_doc", .handler = declare.hDeclareCommandDoc },
+    .{ .name = "wl_declare_arity", .handler = declare.hDeclareArity },
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
@@ -124,9 +126,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_edit_range", .handler = edit.hEditRange },
     .{ .name = "wl_selections_get", .handler = edit.hSelectionsGet },
     .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
-    .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
-    .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
     .{ .name = "wl_undo_unit", .handler = edit.hUndoUnit },
+    .{ .name = "wl_visit", .handler = edit.hVisit },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .handler = pointer.hPointer },
@@ -198,10 +199,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
 
     // ── intent.zig — the focused context's live offers ──────────────────
-    .{ .name = "wl_offer_count", .handler = intent.hOfferCount },
-    .{ .name = "wl_offer_name", .handler = intent.hOfferName },
-    .{ .name = "wl_offer_provider", .handler = intent.hOfferProvider },
-    .{ .name = "wl_offer_reason", .handler = intent.hOfferReason },
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
     .{ .name = "wl_offers_begin", .handler = intent.hOffersBegin },
     .{ .name = "wl_offer", .handler = intent.hOffer },
@@ -280,20 +277,25 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
+    .{ .name = "wl_entry_designation", .handler = tool.hEntryDesignation },
+    .{ .name = "wl_entry_designate", .handler = tool.hEntryDesignate },
+    .{ .name = "wl_designation_opener", .handler = tool.hDesignationOpener },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────
     .{ .name = "wl_yank_range", .handler = register.hYankRange },
     .{ .name = "wl_register_text", .handler = register.hRegisterText },
     .{ .name = "wl_register_linewise", .handler = register.hRegisterLinewise },
     .{ .name = "wl_paste_at", .handler = register.hPasteAt },
-    .{ .name = "wl_yank_each", .handler = register.hYankEach },
-    .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
-    .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
     .{ .name = "wl_register_set", .handler = register.hRegisterSet },
 
     // ── clipboard.zig — the head's system clipboard (config-only grant) ──
     .{ .name = "wl_clipboard_set", .handler = clipboard.hClipboardSet },
     .{ .name = "wl_clipboard_get", .handler = clipboard.hClipboardGet },
+    // ── context.zig — publish a key, read the primary context ───────────
+    .{ .name = "wl_context_set", .handler = context_doors.hContextSet },
+    .{ .name = "wl_context_get", .handler = context_doors.hContextGet },
+    .{ .name = "wl_context_changed", .handler = context_doors.hContextChanged },
+    .{ .name = "wl_places", .handler = context_doors.hPlaces },
 
     // ── history.zig — the head's jumplist and macro recorder ──────────
     .{ .name = "wl_jump_push", .handler = history.hJumpPush },
@@ -437,66 +439,6 @@ fn zip() [contract_data.imports.len]Entry {
 /// that file).
 pub const imports: [contract_data.imports.len]Entry = zip();
 
-/// The doors a guest may call while ANSWERING a provider round
-/// (`WasmPlugin.answering` — a gutter or status segment asked during layout,
-/// an annotation round asked from the frame loop). Reads of the document,
-/// the editor, the workspace and configuration; the guest's own range and
-/// witness handles; and the answer doors themselves. Everything else — every
-/// edit, run, selection, flash, layer, mode, pick, process, write — is
-/// bound through `wasm_host/plugin.zig`'s `answerGate` and traps. An ALLOW
-/// list on purpose: a door added later is refused mid-round until someone
-/// decides it is a read, rather than admitted until someone notices it acts.
-pub const render_safe = [_][]const u8{
-    // Diagnostics and arguments; the document and editor; the tree;
-    // configuration and registers; the workspace; the answer itself.
-    "wl_log",                      "wl_arg_count",                  "wl_arg_int",
-    "wl_arg_str",                  "wl_cursor",                     "wl_byte_len",
-    "wl_slice",                    "wl_line_at",                    "wl_selection",
-    "wl_path",                     "wl_editor_step",                "wl_selections_get",
-    "wl_view_range",               "wl_pointer",                    "wl_breakpoint_offsets",
-    "wl_doc_snapshot",             "wl_doc_snapshot_is_current",    "wl_doc_snapshot_release",
-    "wl_anchor_range",             "wl_range_ends",                 "wl_range_release",
-    "wl_node_at",                  "wl_node_enclosing",             "wl_query",
-    "wl_query_capture",            "wl_outline",                    "wl_node_children",
-    "wl_kv_get",                   "wl_config_get",                 "wl_register_text",
-    "wl_register_linewise",        "wl_register_paste_value",       "wl_macro_recording",
-    "wl_buffer_count",             "wl_buffer_id",                  "wl_buffer_name",
-    "wl_buffer_active",            "wl_buffer_readonly",            "wl_buffer_path",
-    "wl_buffer_dirty",             "wl_buffer_lang",                "wl_buffer_byte_len",
-    "wl_buffer_tool",              "wl_place_root",                 "wl_place_id",
-    "wl_place_has",                "wl_posture",                    "wl_mode_names",
-    "wl_binding_table",            "wl_command_count",              "wl_command_name",
-    "wl_command_summary",          "wl_command_owner",              "wl_command_arity",
-    "wl_command_arity_required",   "wl_command_arg",                "wl_offer_count",
-    "wl_offer_name",               "wl_offer_provider",             "wl_offer_reason",
-    "wl_menu_binding_count",       "wl_menu_binding_key",           "wl_menu_binding_cmd",
-    "wl_menu_binding_is_group",    "wl_menu_binding_intent_status", "wl_menu_binding_intent",
-    "wl_menu_binding_intent_note", "wl_annotate_len",               "wl_annotate_read",
-    "wl_payload_read",             "wl_payload_push",
-};
-
-/// Whether `name` is callable while answering a provider round.
-pub fn renderSafe(comptime name: []const u8) bool {
-    @setEvalBranchQuota(100_000);
-    inline for (render_safe) |safe| {
-        if (comptime std.mem.eql(u8, safe, name)) return true;
-    }
-    return false;
-}
-
-comptime {
-    // Every name the list admits is a real door: a rename cannot leave a
-    // stale row admitting nothing (or, worse, a future door of that name).
-    @setEvalBranchQuota(100_000);
-    for (render_safe) |safe| {
-        var found = false;
-        for (contract_data.imports) |entry| {
-            if (std.mem.eql(u8, entry.name, safe)) found = true;
-        }
-        if (!found) @compileError("contract.render_safe names '" ++ safe ++ "', which is no wl_* import");
-    }
-}
-
 fn wasmType(comptime params: []const contract_data.ValType, comptime results: []const contract_data.ValType) wasm.ExternType {
     return .{
         .kind = .function,
@@ -567,12 +509,24 @@ fn findExport(comptime name: []const u8) contract_data.Export {
 /// fails to coerce). Otherwise a thin, behavior-preserving pass to
 /// `instance.callVoid` — this helper does not itself swallow any error; the
 /// call site's own `try`/`catch` (as today) decides what a failure means.
-pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+///
+/// `plugin` is the `*WasmPlugin` whose instance is entered. Every call into a
+/// guest passes here, so this is where the guest becomes the ACTING plugin
+/// for the call's duration (`Buffers.actAs`): an entry it creates, however
+/// it comes to create it, is its own (`Buffer.creator`).
+pub fn callRequiredExport(comptime name: []const u8, plugin: anytype, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
     if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (!e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is optional in contract_data.exports — use callOptionalExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
+    return enter(plugin, contract_data.export_prefix ++ name, &arr);
+}
+
+fn enter(plugin: anytype, symbol: []const u8, args: []const i32) wasm.Error!void {
+    const entries = plugin.activeCtx().buffers;
+    const was = entries.actAs(plugin.name);
+    defer _ = entries.actAs(was);
+    return plugin.instance.callVoid(symbol, args);
 }
 
 /// Call an OPTIONAL guest export (`required = false`, e.g. `on_menu`): a
@@ -583,12 +537,12 @@ pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, a
 /// `describe` swallows only `error.MissingExport`) is preserved verbatim by
 /// leaving that decision at the call site, not centralizing it here (the
 /// two patterns differ today; unifying them would be a behavior change).
-pub fn callOptionalExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+pub fn callOptionalExport(comptime name: []const u8, plugin: anytype, args: anytype) wasm.Error!void {
     const e = comptime findExport(name);
     if (e.transport != .full_plugin) @compileError("runGuest exports do not use the full-plugin callback helper");
     if (e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is required in contract_data.exports — use callRequiredExport");
     const arr: [e.params.len]i32 = args;
-    return instance.callVoid(contract_data.export_prefix ++ name, &arr);
+    return enter(plugin, contract_data.export_prefix ++ name, &arr);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

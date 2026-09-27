@@ -24,7 +24,7 @@ fn invokeGuestQuery(raw: *anyopaque, token: u32) plugin_semantic.relation.Callba
     const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
     contract.callOptionalExport(
         "on_semantic_relation_query",
-        &plugin.instance,
+        plugin,
         .{@as(i32, @bitCast(token))},
     ) catch return error.Failed;
 }

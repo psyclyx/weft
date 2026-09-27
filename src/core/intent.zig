@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const Actions = @import("action.zig");
 const catalog_mod = @import("catalog.zig");
 const command = @import("command.zig");
+const selection = @import("selection.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
@@ -20,6 +21,7 @@ const action_here = @import("action_here.zig");
 const action_offers = @import("action_offers.zig");
 const Head = @import("Head.zig");
 const Buffers = @import("Buffers.zig");
+const context_mod = @import("context.zig");
 
 pub const Catalog = catalog_mod.Catalog;
 pub const IntentionId = catalog_mod.IntentionId;
@@ -285,7 +287,7 @@ pub const Plane = struct {
     pub fn syncFocus(
         self: *Plane,
         services: *const semantic.Services,
-        focus: *const Head.SemanticFocus,
+        focus: *const Head.SceneSelection,
         here: ?view_offers.Here,
     ) Allocator.Error!void {
         _ = try self.views.refresh(&self.catalog, services, focus, here);
@@ -311,9 +313,9 @@ pub const Plane = struct {
     /// A signature comparison when nothing moved — the same pushed-offer
     /// discipline every other table here follows, so nothing recomputes
     /// eligibility on the keystroke path.
-    pub fn syncDerived(self: *Plane, gpa: Allocator, f: @import("weft_facts").Facts) !void {
+    pub fn syncDerived(self: *Plane, gpa: Allocator, f: @import("weft_facts").Facts, commands: *const command.Commands) !void {
         if (!self.derived_attached) return;
-        _ = try self.derived.refresh(gpa, &self.catalog, f);
+        _ = try self.derived.refresh(gpa, &self.catalog, f, commands);
     }
 
     /// Republish core's table when the focused entry's shape changes — the
@@ -405,25 +407,24 @@ pub const Plane = struct {
         // must read the same table. Hung off `dispatchSpec` first, and the
         // difference was visible immediately: `s` staged the row while
         // which-key, one call earlier, said nothing was offered.
-        self.syncDerived(ctx.gpa, factsIn(scope)) catch {};
+        self.syncDerived(ctx.gpa, factsIn(scope), ctx.commands) catch {};
         return self.catalog.snapshot(contextIn(ctx, scope)) catch |err| {
             std.log.warn("intent: catalog snapshot failed: {t}", .{err});
             return null;
         };
     }
 
-    /// A value that moves exactly when what `where` offers moves — the rows
-    /// (intention, owner, availability, presentation) or the context they
-    /// describe (entry, mode). The offers-changed event fires on it, so it is
-    /// content, not the catalog epoch: describing the primary from a sidebar
-    /// flips core's tables back and forth without changing a single row, and
-    /// that must not read as a change.
-    pub fn signatureAt(self: *Plane, ctx: *command.Context, where: Where) u64 {
-        const scope = scopeOf(ctx, where);
+    /// A value that moves exactly when what `where` offers moves — the rows:
+    /// intention, owner, availability, presentation. It is the primary
+    /// context's `offers` key (`context.zig`), so it is CONTENT, not the
+    /// catalog epoch: describing the primary from a sidebar flips core's
+    /// tables back and forth without changing a single row, and that must not
+    /// read as a change. The entry and mode the rows describe are keys of
+    /// their own; folding them in here would report every focus move as an
+    /// offers move too.
+    pub fn offersFingerprint(self: *Plane, ctx: *command.Context, where: Where) u64 {
         const snap = self.snapshotAt(ctx, where) orelse return 0;
         var h = std.hash.Wyhash.init(0);
-        h.update(std.mem.asBytes(&scope.entry_id));
-        h.update(scope.mode);
         for (snap.candidates, 0..) |c, i| {
             if (i != 0 and snap.candidates[i - 1].intention == c.intention) continue;
             h.update(self.catalog.intentionName(c.intention));
@@ -554,15 +555,18 @@ pub fn factsFor(ctx: *command.Context) catalog_mod.Facts {
 /// The facts of a chosen scope — `factsFor` is this for the active one, so
 /// the primary context is described by the same builder, never a copy.
 pub fn factsIn(scope: Scope) catalog_mod.Facts {
-    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane);
+    return entryFacts(scope.entry, scope.mode, scope.focus, scope.pane, scope.open);
 }
 
 /// The facts of `entry` in `mode`, as pane `pane` shows it — `factsIn` for
 /// a scope, and what the frame asks a pane's chrome (status line, gutter)
-/// with, so every pane is described by this one builder too.
-pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32) catalog_mod.Facts {
+/// with, so every pane is described by this one builder too. `open` is the
+/// published context at the entry (`context.openAt`): the keys no typed
+/// field names.
+pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SceneSelection, pane: u32, open: @import("weft_facts").context.Open) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
+        .designation = entry.designationText(),
         .name = entry.name,
         .mode = mode,
         .lang = Actions.langOfName(entry.name),
@@ -571,6 +575,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
         .locality = localityOf(entry),
         .posture = @tagName(entry.posture(focus.field != null)),
         .pane = pane,
+        .context = open,
     };
 }
 
@@ -578,7 +583,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
 /// head left it, else where its posture rests (an entry never visited).
 pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
     if (entry.mode.len > 0) return entry.mode;
-    return buffers.restingModeFor(entry.posture(entry.semantic_focus.field != null));
+    return buffers.restingModeFor(entry.posture(entry.scene_selection.field != null));
 }
 
 // ── Chosen contexts ──────────────────────────────────────────────────
@@ -607,8 +612,10 @@ pub const Scope = struct {
     live: bool,
     mode: []const u8,
     pane: u32,
-    focus: *const Head.SemanticFocus,
+    focus: *const Head.SceneSelection,
     clock: *Head.CatalogClock,
+    /// The published context at this entry — its open keys.
+    open: @import("weft_facts").context.Open,
 };
 
 pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
@@ -619,22 +626,34 @@ pub fn scopeOf(ctx: *command.Context, where: Where) Scope {
         .live = true,
         .mode = head.currentMode(),
         .pane = head.focused_pane,
-        .focus = &head.semantic_focus,
+        .focus = &head.scene_selection,
         .clock = &head.catalog_clock,
+        .open = context_mod.openAt(ctx.context, ctx.buffers.active()),
     };
     if (where == .active) return active;
-    // No primary recorded yet, or it IS where the head is: one context.
-    const primary = head.primary_focus orelse return active;
-    if (primary.entry == ctx.buffers.active_id) return active;
-    const entry = ctx.buffers.get(primary.entry) orelse return active;
+    return primaryScopeOf(ctx) orelse active;
+}
+
+/// The head's PRIMARY context, or null when there is none: no focus-source
+/// pane focused yet, or the entry it showed is gone. Offer readers fall back
+/// to the active context (`scopeOf`); the primary context (`context.zig`)
+/// does not, because the active pane may be a companion, and a companion that
+/// could observe its own focus as "primary" could follow itself.
+pub fn primaryScopeOf(ctx: *command.Context) ?Scope {
+    const head = ctx.head;
+    const primary = head.primary_focus orelse return null;
+    // It IS where the head is: the live context, with the head's own mode.
+    if (primary.entry == ctx.buffers.active_id) return scopeOf(ctx, .active);
+    const entry = ctx.buffers.get(primary.entry) orelse return null;
     return .{
         .entry = entry,
         .entry_id = primary.entry,
         .live = false,
         .mode = entry.mode,
         .pane = primary.pane,
-        .focus = &entry.semantic_focus,
+        .focus = &entry.scene_selection,
         .clock = &head.primary_clock,
+        .open = context_mod.openAt(ctx.context, entry),
     };
 }
 
@@ -682,19 +701,15 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
 fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
     const entry = scope.entry;
     const facts = factsIn(scope);
-    const locality = facts.locality;
-    const path = facts.path;
     var h = std.hash.Wyhash.init(0);
-    h.update(scope.mode);
-    h.update(entry.tool);
-    // Fold the locality too. The `.facts` literal below and this signature
-    // must always name the same fields: a fact the hash omits changes
-    // resolution without bumping the revision, so `cached()` keeps handing
-    // back a snapshot built for a different world. That is the one edit here
-    // with neither a compiler nor a test to catch it -- hence this comment
-    // sitting on the line it applies to.
-    h.update(&[_]u8{@intFromEnum(locality)});
-    h.update(&[_]u8{@intFromBool(path != null)});
+    // EVERY fact the snapshot is resolved against, through the one reflective
+    // signature (`Facts.digest`, walked at comptime — the open keys through
+    // their reader): a fact this signature omitted would change resolution
+    // without moving the revision, and `cached()` would hand back a snapshot
+    // built for a different world. No list here to keep in step.
+    const digest = facts.digest();
+    h.update(std.mem.asBytes(&digest));
+    // What is not a fact but decides the offers: the semantic view focused…
     if (scope.focus.view) |view| {
         h.update(std.mem.asBytes(&view.slot));
         h.update(std.mem.asBytes(&view.generation));
@@ -704,11 +719,16 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
             0;
         h.update(std.mem.asBytes(&rev));
     }
+    // …and the selection's shape, which decides the offers that can map over
+    // it — every field of it.
+    const shape = selection.shapeOfEntry(entry, scope.focus);
+    std.hash.autoHash(&h, shape);
     scope.clock.observe(scope.entry_id, h.final());
     return .{
         .key = scope.clock.key,
         .revision = scope.clock.revision,
         .facts = facts,
+        .shape = shape,
     };
 }
 
@@ -750,8 +770,14 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
     for (arms) |name| {
         if (!catalog_mod.isIntentionName(name)) {
             // A flat arm that resolves ends the walk exactly as it would for
-            // dispatch — no later intention is ever reached.
-            if (ctx.commands.resolve(name) != null or ctx.keymap.modeHasTag(name, "menu")) return .none;
+            // dispatch — no later intention is ever reached. It is BLOCKED
+            // when it cannot map over the selection here: dispatch would run
+            // it and be refused, for the reason said here.
+            if (ctx.commands.resolve(name)) |cmd| {
+                const refusal = selection.admits(cmd.arity, selection.shapeOf(ctx)) orelse return .none;
+                return .{ .blocked = .{ .intention = name, .provider = cmd.owner, .reason = selection.reason(refusal).code } };
+            }
+            if (ctx.keymap.modeHasTag(name, "menu")) return .none;
             continue;
         }
         if (first == null) first = name;
@@ -790,6 +816,33 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "intent: a context's catalog revision moves with every fact — the focused row's role included" {
+    const gpa = t.allocator;
+    var env: @import("TestHost.zig") = undefined;
+    try @import("TestHost.zig").init(gpa, &env);
+    defer env.deinit(gpa);
+
+    // A projection with two rows of two roles; a provider gated on one of
+    // them would be offered on the first row and not on the second.
+    const b = env.buffers.active();
+    const view = try gpa.create(@import("projection.zig").View);
+    view.* = .init(gpa);
+    b.projection = view;
+    view.begin();
+    _ = try view.add(.{ .key = "a", .role = "git.file", .text = "a.zig", .parent = null, .foldable = false, .focusable = true });
+    _ = try view.add(.{ .key = "a#0", .role = "git.hunk", .text = "@@ -1 +1 @@", .parent = null, .foldable = false, .focusable = true });
+    const text = try view.commit();
+    const ed = b.textEditor().?;
+    try ed.insertText(gpa, text);
+
+    ed.placeCursor(1);
+    try t.expectEqualStrings("git.file", b.focusedRole());
+    const on_file = catalogContext(&env.ctx).revision;
+    ed.placeCursor(text.len - 2);
+    try t.expectEqualStrings("git.hunk", b.focusedRole());
+    try t.expect(catalogContext(&env.ctx).revision != on_file);
+}
 
 test "intent: an endpoint token refused once its invoker is retired" {
     const gpa = t.allocator;

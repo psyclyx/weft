@@ -1218,6 +1218,43 @@ test "syntax: highlight feed publishes stamped bulk into its layer" {
     try t.expectEqual(core.capability.HighlightClass.number, classes[10]); // 1
 }
 
+test "syntax: an unchanged tree repaints nothing; an edit repaints once" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try testHost(gpa, &host);
+    defer host.deinit(gpa);
+    const ed = host.editor();
+    try ed.insertText(gpa, "const x = 1;\nconst y = 2;\n");
+
+    var spec_rt = try testRuntime(gpa);
+    defer spec_rt.deinit(gpa);
+    const syn = try core.syntax.Syntax.create(gpa, &spec_rt, spec_rt.forPath("a.zig").?, &ed.doc);
+    defer syn.destroy();
+    const layer = try host.caps.registerFeed(&ed.doc, "edit/highlight", "highlight", .local, "treesitter");
+    const top: stemma.Range = .{ .start = 0, .end = 13 };
+    const bottom: stemma.Range = .{ .start = 13, .end = ed.text().byteLen() };
+
+    // Frame after frame over one window: one query, then none.
+    try syn.publishHighlight(gpa, &ed.doc, layer, top);
+    try syn.publishHighlight(gpa, &ed.doc, layer, top);
+    try t.expectEqual(@as(u64, 1), syn.paints);
+    // Two panes over two windows keep theirs; alternating costs no query.
+    try syn.publishHighlight(gpa, &ed.doc, layer, bottom);
+    try syn.publishHighlight(gpa, &ed.doc, layer, top);
+    try syn.publishHighlight(gpa, &ed.doc, layer, bottom);
+    try t.expectEqual(@as(u64, 2), syn.paints);
+    try t.expectEqual(bottom.start, layer.bulk.?.start);
+
+    // An edit reparses: the old windows are of an older tree, and repaint.
+    ed.moveTo(0);
+    try ed.insertText(gpa, "var z = 3;\n");
+    try t.expect(try syn.sync(gpa, &ed.doc));
+    try syn.publishHighlight(gpa, &ed.doc, layer, top);
+    try t.expectEqual(@as(u64, 3), syn.paints);
+    const classes: []const core.capability.HighlightClass = @ptrCast(layer.bulk.?.classes);
+    try t.expectEqual(core.capability.HighlightClass.keyword, classes[0]); // var
+}
+
 test "syntax: holey document parses the realized prefix, never crashes" {
     const gpa = t.allocator;
     var doc = try Document.init(gpa, "user");
@@ -1358,11 +1395,20 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     // Open dedupes by path.
     var tmp_dir = t.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
+    const relative = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
+    defer gpa.free(relative);
+    // A relative name resolves against the place the command runs in (the
+    // process directory, for the degenerate place) and is made absolute once,
+    // at the door: it opens the SAME entry its absolute spelling does.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fs.path.resolve(gpa, &.{ @import("file.zig").processDirectory(&cwd_buf).?, relative });
     defer gpa.free(path);
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
+    const id3 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = relative }});
+    try t.expectEqual(id1.integer, id3.integer);
+    try t.expectEqualStrings(path, host.buffers.active().textEditor().?.backingPath().?);
     // A document binds through the source layer its grammar DECLARED; with no
     // declaration the mode binds as itself. Core names neither mode.
     try t.expectEqualStrings("normal", host.buffers.active().bindingMode(&host.keymap, "normal"));

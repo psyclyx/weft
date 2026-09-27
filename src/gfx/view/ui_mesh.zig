@@ -50,10 +50,11 @@
 //! **Plugins bind the gutter too.** `ui/gutter-segment` is declared with a
 //! schema (`core.gutter`), so a guest binds it with `wl_slot_bind` like any
 //! slot. Its binding is a `.schema_provider`, and `gutterCellsForLine` reads
-//! its cell from a `GutterBatch`: one slot round answers a WINDOW of lines,
-//! fetched the first time a row outside the current window asks — one
-//! membrane crossing per frame, never one per row. The `linenumbers` plugin
-//! is the live provider.
+//! its cell from a `GutterBatch`: one answer covers a WINDOW of lines, asked
+//! for between frames (`app/answers.zig`, doc/model.md §2.7) — one membrane
+//! crossing per window, never one per row, and never one during layout. The
+//! `linenumbers` plugin is the live provider. A plugin's status segments are
+//! read the same way (`StatuslineArgs.plugin_answers`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -117,58 +118,41 @@ pub const StatuslineArgs = struct {
     diag_layer: ?*const core.layers.Layer = null,
     link: ?[]const u8 = null,
     theme: *const Theme,
-    /// Where a PLUGIN provider's segments come from (`StatuslineRound`); null
-    /// means only in-process providers answer, and a `.schema_provider`
-    /// binding is skipped.
-    round: ?*StatuslineRound = null,
+    /// What the PLUGIN providers last said for this pane
+    /// (`app/answers.zig`), possibly to an older question: a frame never asks
+    /// a guest itself. Empty means a `.schema_provider` binding contributes
+    /// nothing this frame.
+    plugin_answers: []const StatuslineAnswer = &.{},
+    /// Set by `fireStatusline` when an eligible binding is a plugin's — the
+    /// caller then knows this pane's status is a question worth asking.
+    plugin_reached: bool = false,
     /// Set by `fireStatusline` itself before invoking providers — a caller
     /// building `StatuslineArgs` need not (and should not) set this.
     out: *std.ArrayList(Seg) = undefined,
 };
 
-/// The plugin half of the status line: ONE slot round (`core.status_segment`)
-/// per fire answers every plugin provider at once, fetched the first time a
-/// plugin binding is reached. HOW a plugin is reached is the app's `fetch`.
-pub const StatuslineRound = struct {
-    ctx: *anyopaque,
-    /// Fill `out.answers` with every eligible plugin provider's segments.
-    /// Allocate from `gpa` (the frame's scratch).
-    fetch: *const fn (ctx: *anyopaque, gpa: Allocator, out: *StatuslineRound) anyerror!void,
-    fetched: bool = false,
-    answers: std.ArrayList(Answer) = .empty,
-
-    pub const Answer = struct { owner: []const u8, segs: []const Seg };
-
-    fn segsOf(self: *StatuslineRound, gpa: Allocator, owner: []const u8) []const Seg {
-        if (!self.fetched) {
-            self.fetched = true;
-            self.fetch(self.ctx, gpa, self) catch |err| {
-                std.log.warn("ui_mesh: statusline round failed: {s}", .{@errorName(err)});
-                return &.{};
-            };
-        }
-        for (self.answers.items) |ans| if (std.mem.eql(u8, ans.owner, owner)) return ans.segs;
-        return &.{};
-    }
-};
+/// One plugin provider's segments, by the binding owner the slot host names
+/// it by: a decoded `core.status_segment` answer.
+pub const StatuslineAnswer = struct { owner: []const u8, segs: []const Seg };
 
 /// Decode one provider's `core.status_segment` answer into `Seg`s owned by
-/// `gpa` (text and command both), and append it to `out`. A malformed answer
-/// contributes nothing.
-pub fn appendStatuslineAnswer(out: *StatuslineRound, gpa: Allocator, owner: []const u8, payload: []const u8) !void {
-    var tell = core.status_segment.decodeTell(payload) orelse return;
+/// `gpa` (text and command both). A malformed answer says nothing.
+pub fn decodeStatuslineAnswer(gpa: Allocator, owner: []const u8, payload: []const u8) !StatuslineAnswer {
     var segs: std.ArrayList(Seg) = .empty;
-    while (tell.next()) |s| {
-        if (segs.items.len >= core.status_segment.max_segments) break;
-        if (s.text.len == 0) continue;
-        try segs.append(gpa, .{
-            .text = try gpa.dupe(u8, s.text),
-            .role = core.surface.Role.fromInt(s.role),
-            .align_right = s.right,
-            .command = try gpa.dupe(u8, s.command),
-        });
+    if (core.status_segment.decodeTell(payload)) |told| {
+        var tell = told;
+        while (tell.next()) |s| {
+            if (segs.items.len >= core.status_segment.max_segments) break;
+            if (s.text.len == 0) continue;
+            try segs.append(gpa, .{
+                .text = try gpa.dupe(u8, s.text),
+                .role = core.surface.Role.fromInt(s.role),
+                .align_right = s.right,
+                .command = try gpa.dupe(u8, s.command),
+            });
+        }
     }
-    try out.answers.append(gpa, .{ .owner = try gpa.dupe(u8, owner), .segs = segs.items });
+    return .{ .owner = try gpa.dupe(u8, owner), .segs = segs.items };
 }
 
 fn modeChipProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
@@ -236,11 +220,16 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
                 std.log.warn("ui_mesh: statusline provider '{s}' failed: {s}", .{ b.owner, @errorName(err) });
                 continue;
             },
-            // A plugin: its segments come from the one round, in the
-            // priority position its binding holds.
+            // A plugin: its segments are its last answer, in the priority
+            // position its binding holds (text copied like every segment's,
+            // the command borrowed like every segment's).
             .schema_provider => |ref| {
-                const round = args.round orelse continue;
-                for (round.segsOf(gpa, ref.owner)) |s| try out.append(gpa, s);
+                args.plugin_reached = true;
+                for (args.plugin_answers) |ans| {
+                    if (!std.mem.eql(u8, ans.owner, ref.owner)) continue;
+                    for (ans.segs) |s| try out.append(gpa, .{ .text = try gpa.dupe(u8, s.text), .role = s.role, .align_right = s.align_right, .command = s.command });
+                    break;
+                }
             },
             else => {},
         }
@@ -261,12 +250,12 @@ pub const GutterLineArgs = struct {
     row: stemma.Range,
     caret_line: usize = 0,
     line_count: usize = 0,
-    diag_layer: ?*const core.layers.Layer = null,
+    diag_layer: ?*const core.layers.Snapshot = null,
     /// `breakpoints.get(path)`'s "l1,l2,…" CSV, or "" for none.
     bp_lines: []const u8 = "",
     theme: *const Theme,
-    /// The PLUGIN providers' answers (`GutterFrame.batch`), fetched a window
-    /// at a time; null when the frame wired no fetch.
+    /// The PLUGIN providers' answers (`GutterFrame.batch`), a window at a
+    /// time; null when the frame has none to offer.
     batch: ?*GutterBatch = null,
     /// Set by `gutterCellsForLine` itself before invoking providers.
     out: *std.ArrayList(Seg) = undefined,
@@ -330,7 +319,7 @@ fn breakpointMarksProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anye
 /// row this frame.
 pub const GutterFrame = struct {
     bindings: []const *const container.Binding,
-    diag_layer: ?*const core.layers.Layer = null,
+    diag_layer: ?*const core.layers.Snapshot = null,
     bp_lines: []const u8 = "",
     caret_line: usize = 0,
     line_count: usize = 0,
@@ -340,68 +329,105 @@ pub const GutterFrame = struct {
     batch: ?*GutterBatch = null,
 };
 
-/// The plugin half of the gutter: one slot round (`core.gutter`) answers a
-/// WINDOW of lines, and every row inside it reads its cell from here — so a
-/// frame crosses the membrane once, not once per visible row.
+/// The plugin half of the gutter: what the pane's plugin providers last said,
+/// a WINDOW of lines per answer (`core.gutter`), so a question crosses the
+/// membrane once per window, never once per row — and never during layout:
+/// the answers were asked for between frames (`app/answers.zig`), and the
+/// layout only reads them.
 ///
-/// The fetch is lazy and view-driven on purpose: the view scrolls to the
-/// caret and skips folded rows while it lays out, so only the layout knows
-/// which lines are visible. The first row outside the current window asks
-/// for the window starting at that row; a normal frame asks once.
-///
-/// HOW a plugin is reached (the slot host, the firing context, the facts)
-/// is the app's `fetch`; the view only sees cells.
+/// Which lines are visible is still only known to the layout (it scrolls to
+/// the caret and skips folded rows), so the layout is what notices a missing
+/// answer: the first row with no answer to THIS frame's question is `wanted`,
+/// the line the next question's window starts at. Until that answer lands,
+/// the row shows the newest answer covering it, if any — at most a frame old.
 pub const GutterBatch = struct {
-    ctx: *anyopaque,
-    /// Replace `out.answers` with every eligible provider's cells for
-    /// `[first, first + core.gutter.window)`. Allocate from `gpa` — the
-    /// frame's scratch, which outlives every row that reads them.
-    fetch: *const fn (ctx: *anyopaque, gpa: Allocator, first: usize, out: *GutterBatch) anyerror!void,
-    first: usize = 0,
-    len: usize = 0,
-    answers: std.ArrayList(Answer) = .empty,
+    /// Every window the pane has an answer for, newest first.
+    windows: []const Window,
+    /// This frame's question (`app/answers.zig`'s `Key`): a window answered
+    /// for another key is drawn but is not an answer to this frame.
+    key: u64,
+    /// The first line the layout reached without an answer to `key`, or null
+    /// when every row it drew had one. Written while the layout reads, and
+    /// read by the frame after it — the batch's one output.
+    wanted: ?usize = null,
+    /// The caret line of the snapshot this frame draws — what an answer that
+    /// is a formula (`core.gutter.Rule`) is evaluated against, so a column
+    /// counted from the caret is right on the frame the caret moved.
+    caret_line: usize = 0,
 
-    /// One provider's cells, by the binding owner the slot host names it by.
+    /// One answered window: lines `[first, first + core.gutter.window)` as of
+    /// the question `key`.
+    pub const Window = struct {
+        key: u64,
+        first: usize,
+        answers: []const Answer,
+
+        fn covers(self: Window, line: usize) bool {
+            return line >= self.first and line - self.first < core.gutter.window;
+        }
+    };
+
+    /// One provider's cells, by the binding owner the slot host names it by
+    /// — or its formula, when it answered with one (`cells` is then empty).
     pub const Answer = struct {
         owner: []const u8,
         first: usize,
         cells: []const Seg,
+        rule: ?core.gutter.Rule = null,
     };
 
-    fn covers(self: *const GutterBatch, line: usize) bool {
-        return self.len > 0 and line >= self.first and line < self.first + self.len;
+    /// The window `line` reads from: the one answering this frame's question,
+    /// else the newest covering it. Notes `line` as wanted when the first is
+    /// missing.
+    fn windowFor(self: *GutterBatch, line: usize) ?Window {
+        var stale: ?Window = null;
+        for (self.windows) |w| {
+            if (!w.covers(line)) continue;
+            if (w.key == self.key) return w;
+            if (stale == null) stale = w;
+        }
+        if (self.wanted == null) self.wanted = line;
+        return stale;
     }
 
-    fn ensure(self: *GutterBatch, gpa: Allocator, line: usize) !void {
-        if (self.covers(line)) return;
-        self.answers.clearRetainingCapacity();
-        self.first = line;
-        self.len = core.gutter.window;
-        try self.fetch(self.ctx, gpa, line, self);
-    }
-
-    /// `owner`'s cell for `line`, or null when it said nothing there.
-    fn cell(self: *const GutterBatch, owner: []const u8, line: usize) ?Seg {
-        for (self.answers.items) |ans| {
+    /// `owner`'s cell for `line`, or null when it said nothing there. A
+    /// formula is evaluated here, against this frame's caret, into `gpa`.
+    fn cell(self: *GutterBatch, gpa: Allocator, owner: []const u8, line: usize) !?Seg {
+        const w = self.windowFor(line) orelse return null;
+        for (w.answers) |ans| {
             if (!std.mem.eql(u8, ans.owner, owner)) continue;
+            if (ans.rule) |rule| {
+                const width: usize = @min(@max(rule.width, 1), 20);
+                const on_caret = line == self.caret_line;
+                return .{
+                    .text = try std.fmt.allocPrint(gpa, "{d: >[1]} ", .{ rule.number(line, self.caret_line), width }),
+                    .role = core.surface.Role.fromInt(if (on_caret) rule.caret_role else rule.role),
+                };
+            }
             if (line < ans.first or line - ans.first >= ans.cells.len) return null;
             const c = ans.cells[line - ans.first];
-            return if (c.text.len == 0) null else c;
+            return if (c.text.len == 0) null else .{ .text = try gpa.dupe(u8, c.text), .role = c.role };
         }
         return null;
     }
 };
 
-/// Decode one provider's `core.gutter` answer into `Seg`s owned by `gpa`, and
-/// append it to `out`. A malformed answer contributes nothing.
-pub fn appendGutterAnswer(out: *GutterBatch, gpa: Allocator, owner: []const u8, payload: []const u8) !void {
-    var tell = core.gutter.decodeTell(payload) orelse return;
+/// Decode one provider's `core.gutter` answer into `Seg`s owned by `gpa`. A
+/// malformed answer says nothing.
+pub fn decodeGutterAnswer(gpa: Allocator, owner: []const u8, payload: []const u8) !GutterBatch.Answer {
+    if (core.gutter.decodeRule(payload)) |rule|
+        return .{ .owner = try gpa.dupe(u8, owner), .first = 0, .cells = &.{}, .rule = rule };
     var cells: std.ArrayList(Seg) = .empty;
-    while (tell.next()) |c| {
-        if (cells.items.len >= core.gutter.window) break;
-        try cells.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = core.surface.Role.fromInt(c.role) });
+    var first: usize = 0;
+    if (core.gutter.decodeTell(payload)) |told| {
+        var tell = told;
+        first = tell.first;
+        while (tell.next()) |c| {
+            if (cells.items.len >= core.gutter.window) break;
+            try cells.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = core.surface.Role.fromInt(c.role) });
+        }
     }
-    try out.answers.append(gpa, .{ .owner = try gpa.dupe(u8, owner), .first = tell.first, .cells = cells.items });
+    return .{ .owner = try gpa.dupe(u8, owner), .first = first, .cells = cells.items };
 }
 
 /// Resolve `ui/gutter-segment`'s eligible, priority-sorted provider list
@@ -427,15 +453,11 @@ pub fn gutterCellsForLine(bindings: []const *const container.Binding, gpa: Alloc
                 std.log.warn("ui_mesh: gutter provider '{s}' failed on line {d}: {s}", .{ b.owner, args.line, @errorName(err) });
                 continue;
             },
-            // A plugin: its cell comes from the window its round answered,
-            // in the same priority position its binding holds.
+            // A plugin: its cell comes from the window it last answered, in
+            // the same priority position its binding holds.
             .schema_provider => |ref| {
                 const batch = args.batch orelse continue;
-                batch.ensure(gpa, args.line) catch |err| {
-                    std.log.warn("ui_mesh: gutter round failed on line {d}: {s}", .{ args.line, @errorName(err) });
-                    continue;
-                };
-                if (batch.cell(ref.owner, args.line)) |c| try out.append(gpa, .{ .text = try gpa.dupe(u8, c.text), .role = c.role });
+                if (try batch.cell(gpa, ref.owner, args.line)) |c| try out.append(gpa, c);
             },
             else => {},
         }
@@ -713,9 +735,13 @@ test "ui_mesh: gutter — unbound is a zero-cost no-op; bound, line numbers + di
     try doc.insert(gpa, 0, "one\ntwo\nthree\n");
     var store: core.layers.Layers = .empty;
     defer store.deinit(gpa);
-    const dl = try store.claim(gpa, &doc, "diagnostics", .local, "test");
+    const live = try store.claim(gpa, &doc, "diagnostics", .local, "test");
     // A diagnostic on line 2 ("two", byte range [4,7)).
-    try dl.publishSpans(gpa, &.{.{ .start = 4, .end = 5, .kind = 1, .message = "bad" }});
+    try live.publishSpans(gpa, &.{.{ .start = 4, .end = 5, .kind = 1, .message = "bad" }});
+    var snap_arena = std.heap.ArenaAllocator.init(gpa);
+    defer snap_arena.deinit();
+    const snap = try live.snapshot(snap_arena.allocator(), .{ .start = 0, .end = doc.text().byteLen() });
+    const dl = &snap;
 
     const theme: Theme = .{};
 
@@ -768,7 +794,7 @@ test "ui_mesh: gutter — unbound is a zero-cost no-op; bound, line numbers + di
     }
 }
 
-test "ui_mesh: a PLUGIN gutter provider answers one window per round, only where its predicate holds" {
+test "ui_mesh: a PLUGIN gutter provider's window answers every row in it, only where its predicate holds" {
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
     defer c.deinit();
@@ -793,26 +819,25 @@ test "ui_mesh: a PLUGIN gutter provider answers one window per round, only where
     defer gpa.free(bindings);
     try t.expectEqual(@as(usize, 1), bindings.len);
 
-    // The round, as the app wires it — here answering "L<n>" for each line
-    // of the asked window through the real `core.gutter` encode/decode.
-    const Round = struct {
-        calls: usize = 0,
-        fn fetch(raw: *anyopaque, a: Allocator, first: usize, out: *GutterBatch) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.calls += 1;
-            var cells: [core.gutter.window]core.gutter.Cell = undefined;
-            for (&cells, 0..) |*cell, i| cell.* = .{ .text = try std.fmt.allocPrint(a, "L{d}", .{first + i}), .role = 5 };
-            const payload = try core.gutter.encodeTell(a, @intCast(first), &cells);
-            try appendGutterAnswer(out, a, "numbers", payload);
-        }
-    };
+    // An answer, as the app caches it — "L<n>" for each line of the asked
+    // window, through the real `core.gutter` encode/decode.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var round: Round = .{};
-    var batch: GutterBatch = .{ .ctx = &round, .fetch = Round.fetch };
+    const answer = struct {
+        fn of(al: Allocator, key: u64, first: usize, tag: []const u8) !GutterBatch.Window {
+            var cells: [core.gutter.window]core.gutter.Cell = undefined;
+            for (&cells, 0..) |*cell, i| cell.* = .{ .text = try std.fmt.allocPrint(al, "{s}{d}", .{ tag, first + i }), .role = 5 };
+            const payload = try core.gutter.encodeTell(al, @intCast(first), &cells);
+            const answers = try al.alloc(GutterBatch.Answer, 1);
+            answers[0] = try decodeGutterAnswer(al, "numbers", payload);
+            return .{ .key = key, .first = first, .answers = answers };
+        }
+    }.of;
     const theme: Theme = .{};
 
+    // One window answers every row inside it, and nothing is wanted.
+    var batch: GutterBatch = .{ .windows = &.{try answer(a, 1, 0, "L")}, .key = 1 };
     for ([_]usize{ 0, 7, 255 }) |line| {
         var args: GutterLineArgs = .{ .line = line, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &batch };
         const cells = try gutterCellsForLine(bindings, a, &args);
@@ -820,14 +845,23 @@ test "ui_mesh: a PLUGIN gutter provider answers one window per round, only where
         try t.expectEqualStrings(try std.fmt.allocPrint(a, "L{d}", .{line}), cells[0].text);
         try t.expectEqual(core.surface.Role.muted, cells[0].role);
     }
-    // Three rows, ONE membrane crossing: the window covered them all.
-    try t.expectEqual(@as(usize, 1), round.calls);
+    try t.expect(batch.wanted == null);
 
-    // A row past the window asks for the next one.
+    // A row past every window draws nothing and is what the pane asks for next.
     var args: GutterLineArgs = .{ .line = 300, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &batch };
-    const cells = try gutterCellsForLine(bindings, a, &args);
-    try t.expectEqualStrings("L300", cells[0].text);
-    try t.expectEqual(@as(usize, 2), round.calls);
+    try t.expectEqual(@as(usize, 0), (try gutterCellsForLine(bindings, a, &args)).len);
+    try t.expectEqual(@as(?usize, 300), batch.wanted);
+
+    // A window answered for an older question still draws — at most a frame
+    // late — but the row is wanted again; the current answer wins once it is in.
+    var stale: GutterBatch = .{ .windows = &.{try answer(a, 1, 0, "old")}, .key = 2 };
+    args = .{ .line = 3, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &stale };
+    try t.expectEqualStrings("old3", (try gutterCellsForLine(bindings, a, &args))[0].text);
+    try t.expectEqual(@as(?usize, 3), stale.wanted);
+    var fresh: GutterBatch = .{ .windows = &.{ try answer(a, 2, 0, "new"), try answer(a, 1, 0, "old") }, .key = 2 };
+    args = .{ .line = 3, .row = .{ .start = 0, .end = 0 }, .theme = &theme, .batch = &fresh };
+    try t.expectEqualStrings("new3", (try gutterCellsForLine(bindings, a, &args))[0].text);
+    try t.expect(fresh.wanted == null);
 }
 
 test "ui_mesh: MESH REACHABILITY — weft.statusSegment reaches ui/statusline-seg through the REAL sealed-eval manifest path (task #19)" {

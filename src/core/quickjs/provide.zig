@@ -24,6 +24,9 @@ pub const Error = error{
     UnknownFact,
     /// `locality` was not one of `local`, `remote`, `tool`, `none`.
     BadLocality,
+    /// `context` was not an object of `key: value` strings over key names
+    /// (a builtin, or a namespaced key like `repl.session`).
+    BadContext,
     /// The fourth argument was neither a number nor an options object.
     BadOptions,
 } || Allocator.Error;
@@ -75,6 +78,28 @@ fn parseWhen(gpa: Allocator, text: []const u8) Error!facts.Predicate {
             };
             const l = std.meta.stringToEnum(facts.Locality, name) orelse return error.BadLocality;
             try leaves.append(gpa, .{ .locus = l });
+            continue;
+        }
+        // `context: { "repl.session": "*" }` — one leaf per key, over the
+        // open map (doc/model.md §2.5). A key nothing publishes is allowed —
+        // the plugin may not have loaded yet — and matches nothing; a key no
+        // plugin COULD publish is a spelling mistake and refused.
+        if (std.mem.eql(u8, key, "context")) {
+            const pairs = switch (kv.value_ptr.*) {
+                .object => |o| o,
+                else => return error.BadContext,
+            };
+            var pit = pairs.iterator();
+            while (pit.next()) |pair| {
+                const name = pair.key_ptr.*;
+                if (!facts.context.isKeyName(name)) return error.BadContext;
+                const value = switch (pair.value_ptr.*) {
+                    .string => |v| v,
+                    else => return error.BadContext,
+                };
+                if (value.len == 0) return error.BadContext;
+                try leaves.append(gpa, .{ .context = .{ .key = name, .value = value } });
+            }
             continue;
         }
         const s = switch (kv.value_ptr.*) {
@@ -146,9 +171,10 @@ fn strOf(v: std.json.Value) ?[]const u8 {
 /// What a refused provide says, for the echo line.
 pub fn describe(err: Error) []const u8 {
     return switch (err) {
-        error.BadWhen => "`when` must be an object of facts {mode, lang, tool, role, posture, locality}",
-        error.UnknownFact => "`when` names a fact config cannot match (use mode, lang, tool, role, posture, locality)",
+        error.BadWhen => "`when` must be an object of facts {mode, lang, tool, role, posture, locality, context}",
+        error.UnknownFact => "`when` names a fact config cannot match (use mode, lang, tool, role, posture, locality, context)",
         error.BadLocality => "`locality` is one of local, remote, tool, none",
+        error.BadContext => "`context` is an object of key: value strings (\"*\" = any value), keys a builtin or namespaced (\"repl.session\")",
         error.BadOptions => "the fourth argument is a priority or {priority, label, group, order}",
         error.OutOfMemory => "out of memory",
     };
@@ -205,6 +231,33 @@ test "provide: posture narrows by how the entry rests, as the wasm door's leaf d
     defer facts.free(gpa, decoded);
     try t.expect(decoded.matches(.{ .posture = "structural", .tool = "files" }));
     try t.expect(!decoded.matches(.{ .posture = "text", .tool = "files" }));
+}
+
+test "provide: a context leaf gates on any key, and matches nothing where it is unset" {
+    const gpa = t.allocator;
+    var p = try parse(gpa, "{\"posture\":\"text\",\"context\":{\"repl.session\":\"*\"}}", "{\"label\":\"Send to REPL\"}");
+    defer p.deinit(gpa);
+    var store = facts.context.Store.init(gpa);
+    defer store.deinit();
+    const here: facts.Facts = .{ .posture = "text", .context = .{ .store = &store, .at = .{ .entry = 1 } } };
+    // No REPL: not offered — an unset key is not a wildcard.
+    try t.expect(!p.predicate.matches(here));
+    _ = try store.set("repl", .global, "repl.session", "*repl*");
+    try t.expect(p.predicate.matches(here));
+    try t.expectEqual(@as(u32, 2), p.predicate.specificity());
+    // The bytes the wasm door decodes carry the same leaf.
+    const ours = try facts.encode(gpa, p.predicate);
+    defer gpa.free(ours);
+    const decoded = try facts.decode(gpa, ours);
+    defer facts.free(gpa, decoded);
+    try t.expect(decoded.matches(here));
+    _ = try store.set("repl", .global, "repl.session", "");
+    try t.expect(!decoded.matches(here));
+
+    // A key no plugin could publish, an empty value, or a non-object: refused.
+    try t.expectError(error.BadContext, parse(gpa, "{\"context\":{\"repl\":\"*\"}}", ""));
+    try t.expectError(error.BadContext, parse(gpa, "{\"context\":{\"repl.session\":\"\"}}", ""));
+    try t.expectError(error.BadContext, parse(gpa, "{\"context\":\"repl.session\"}", ""));
 }
 
 test "provide: a fact config cannot name is refused, never widened" {

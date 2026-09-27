@@ -51,7 +51,7 @@ fn viewportRows(sc: *ScrollCtx) usize {
 /// Move the focused pane's viewport by `delta` rows, optionally carrying
 /// the cursor with it (vim C-d/C-u/C-f/C-b move the cursor; C-e/C-y do not).
 fn doScroll(ctx: *core.command.Context, sc: *ScrollCtx, delta: i64, move_cursor: bool) void {
-    if (ctx.head.semantic_focus.path()) |path| {
+    if (ctx.head.scene_selection.path()) |path| {
         const services = ctx.semantic orelse return;
         const instance = services.views.get(path.view) orelse return;
         if (instance.focus_order.len == 0) return;

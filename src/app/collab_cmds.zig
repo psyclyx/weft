@@ -232,19 +232,138 @@ pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, "fetching the whole document…");
 }
 
-/// `peer-files` opens the peer's published shared-root target through ordinary
-/// target resolution. The command does not select files or inspect a
-/// filesystem fact; whichever plugin claims the target owns the experience.
+/// `peer-files` opens the peer's shared tree — which is to say it runs `open`
+/// on the tree's designation, `weft://<fingerprint>/dir/`, and nothing else.
+/// There is one path to a peer's directory, whether a person asked for the
+/// root by this name or for `weft://<peer>/dir/src` by designation: the one
+/// `openPeer` routes, which presents it as every directory is presented.
 pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
     const target = sc.remote_fs_target orelse return ok_echo(ctx, "peer has no shared filesystem");
-    const semantic = ctx.semantic orelse return ok_echo(ctx, "semantic targets are unavailable");
-    return switch (try core.target_open.openLocated(semantic, ctx.head, ctx.gpa, target, null)) {
-        .opened => .nil,
-        .no_handler => ok_echo(ctx, "no plugin handles the peer filesystem target"),
-        .ambiguous => ok_echo(ctx, "multiple plugins claim the peer filesystem target"),
+    const router = ctx.filesystems orelse return ok_echo(ctx, "filesystems are unavailable");
+    const named = router.designationOf(target.target, target.revision) orelse
+        return ok_echo(ctx, "the peer's shared tree has no designation yet (no handshake)");
+    const text = try ctx.gpa.dupe(u8, named);
+    defer ctx.gpa.free(text);
+    return core.command.run(ctx.commands, ctx, "open", &.{.{ .string = text }});
+}
+
+// ── Peer designations (doc/model.md §2.1) ───────────────────────────
+
+/// `open`'s route for a peer authority (`buffers_cmds.PeerOpener`): the
+/// peer's shared tree and the directories below it (`dir`), and a document it
+/// shares (`doc`, by its minted id — stable across reconnects, where the wire
+/// base is not). A peer's FILE is refused by name: a file opens as an entry
+/// once the peer shares it as a document, and there is no remote file backing
+/// for it to open as otherwise.
+pub fn openPeer(raw: *anyopaque, ctx: *core.command.Context, d: core.designation.Designation) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(raw));
+    const fingerprint = switch (d.authority) {
+        .peer => |fp| fp,
+        else => return .{ .string = core.designation.refuse_unreachable },
     };
+    return switch (d.kind) {
+        .directory => openPeerDirectory(sc, ctx, fingerprint, d.ref),
+        .doc => openPeerDocument(sc, ctx, fingerprint, d.docId() orelse return .{ .string = core.designation.refuse_doc_gone }),
+        .file => openPeerFile(sc, ctx, fingerprint, d),
+        else => .{ .string = core.designation.refuse_unreachable },
+    };
+}
+
+/// The directory `path` names in the tree peer `fingerprint` shares with us,
+/// reached from the root by names in the provider's own listings — or null
+/// (with the refusal in `why`) when it is not the peer we are connected to,
+/// or it has no such directory.
+fn peerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8, why: *[]const u8) !?@import("weft_semantic").target.Located {
+    const root = sc.remote_fs_target orelse {
+        why.* = "open: that peer shares no filesystem with us";
+        return null;
+    };
+    const s = sc.session.* orelse {
+        why.* = core.designation.refuse_unreachable;
+        return null;
+    };
+    const connected = s.peerFingerprint() orelse {
+        why.* = core.designation.refuse_unreachable;
+        return null;
+    };
+    if (!std.mem.eql(u8, &connected, fingerprint)) {
+        why.* = "open: that peer is not the one we are connected to";
+        return null;
+    }
+    var at = root;
+    var names = std.mem.tokenizeScalar(u8, path, '/');
+    while (names.next()) |name| {
+        at = (try sc.remoteChild(ctx, at, name)) orelse {
+            why.* = "open: the peer has no such directory";
+            return null;
+        };
+    }
+    return at;
+}
+
+/// A peer's FILE, as a read-only entry holding what the peer has there now:
+/// read once through the peer's tree, named by its peer designation, and in
+/// the peer's place — so the editor is on the peer's tree while it shows it.
+/// Read-only because there is no remote file backing to write back through;
+/// editing a peer's file together is sharing it as a document (a `doc`).
+fn openPeerFile(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, d: core.designation.Designation) anyerror!core.command.Value {
+    const dir_path = std.fs.path.dirnamePosix(d.ref) orelse "/";
+    const leaf = std.fs.path.basenamePosix(d.ref);
+    if (leaf.len == 0) return .{ .string = "open: that names no file" };
+    var why: []const u8 = "";
+    const parent = (try peerDirectory(sc, ctx, fingerprint, dir_path, &why)) orelse return .{ .string = why };
+    const bytes = (try sc.readRemoteFile(ctx, parent, leaf)) orelse return .{ .string = "open: the peer has no such file" };
+    defer ctx.gpa.free(bytes);
+    const id = try ctx.buffers.create(ctx.gpa, leaf);
+    errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
+    const buf = ctx.buffers.get(id).?;
+    try buf.textEditor().?.doc.adoptContent(ctx.gpa, bytes);
+    buf.read_only = true;
+    var named: [core.designation.max_len]u8 = undefined;
+    try buf.setDesignation(ctx.gpa, try d.bare().render(&named));
+    if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+    return .{ .integer = @intCast(id) };
+}
+
+/// The directory `path` in the tree the peer `fingerprint` shares with us,
+/// presented as a listing. Reached from the tree's root by names, each one
+/// looked up in the provider's own listing of its parent
+/// (`publishChildByName`), so what opens is what the peer really has there.
+fn openPeerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8) anyerror!core.command.Value {
+    var why: []const u8 = "";
+    const at = (try peerDirectory(sc, ctx, fingerprint, path, &why)) orelse return .{ .string = why };
+    try @import("session.zig").presentDirectory(ctx, at);
+    // The listing is IN the peer's tree, wherever it was opened from.
+    if (sc.remotePlace()) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
+    return .nil;
+}
+
+/// The document with minted id `id` that peer `fingerprint` offers — opened
+/// into a fresh replica, or focused if an entry already holds it.
+fn openPeerDocument(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, id: core.Document.Id) anyerror!core.command.Value {
+    if (sc.conn.*) |*conn| if (conn.session.peerFingerprint()) |fp| if (std.mem.eql(u8, &fp, fingerprint)) {
+        if (conn.offerFor(id)) |index| return .{ .integer = @intCast(try openOffer(sc, ctx, .{ .conn = conn, .peer = null, .index = index }, &fp)) };
+    };
+    if (sc.hub.*) |*hub| for (hub.clients.items) |peer| {
+        const fp = peer.sess.peerFingerprint() orelse continue;
+        if (!std.mem.eql(u8, &fp, fingerprint)) continue;
+        if (peer.conn.offerFor(id)) |index| return .{ .integer = @intCast(try openOffer(sc, ctx, .{ .conn = &peer.conn, .peer = peer, .index = index }, &fp)) };
+    };
+    return .{ .string = "open: that peer offers no such document now" };
+}
+
+/// How a peer authority reads in a title (`designation.PeerNames`): the
+/// address the person connected out to, for the peer at the other end of
+/// that connection. Any other peer reads as its fingerprint.
+pub fn peerName(raw: *anyopaque, fingerprint: []const u8) ?[]const u8 {
+    const sc: *ShareCtx = @ptrCast(@alignCast(raw));
+    const label = sc.peer_label orelse return null;
+    const s = sc.session.* orelse return null;
+    const fp = s.peerFingerprint() orelse return null;
+    return if (std.mem.eql(u8, &fp, fingerprint)) label else null;
 }
 
 /// `share [preset]` — announce the active buffer to the peer(s): over the
@@ -389,7 +508,7 @@ fn resolveOfferOnConn(
         !std.mem.eql(u8, &incarnation, &target.incarnation) or
         !std.mem.eql(u8, &fingerprint, &target.fingerprint)) return null;
     for (conn.offers.items, 0..) |offer, i| {
-        if (offer.base == target.base and !offer.opened)
+        if (offer.base == target.base and !conn.isOpen(offer))
             return .{ .conn = conn, .peer = peer, .index = i };
     }
     return null;
@@ -419,7 +538,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
     if (sc.conn.*) |*c| {
         const fingerprint = c.session.peerFingerprint();
         for (c.offers.items) |o| {
-            if (!o.opened and fingerprint != null) try out.append(gpa, .{
+            if (!c.isOpen(o) and fingerprint != null) try out.append(gpa, .{
                 .conn = c,
                 .incarnation = c.session.incarnation(),
                 .fingerprint = fingerprint.?,
@@ -432,7 +551,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
         for (h.clients.items) |peer| {
             const fingerprint = peer.sess.peerFingerprint();
             for (peer.conn.offers.items) |o| {
-                if (!o.opened and fingerprint != null) try out.append(gpa, .{
+                if (!peer.conn.isOpen(o) and fingerprint != null) try out.append(gpa, .{
                     .conn = &peer.conn,
                     .incarnation = peer.sess.incarnation(),
                     .fingerprint = fingerprint.?,
@@ -497,24 +616,51 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core
     if (candidate.index >= state.targets.items.len) return;
     const target = state.targets.items[candidate.index];
     const ref = resolveOffer(state.sc, target) orelse return;
+    _ = try openOffer(state.sc, ctx, ref, &target.fingerprint);
+}
 
-    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{target.name});
+/// Open one live offer into a fresh replica entry and focus it. The entry
+/// represents `weft://<fingerprint>/doc/<id>` when the offer carried the
+/// document's minted id — the name that finds it again after a reconnect.
+/// From a sender that predates the id it is named by its own replica,
+/// which is all this side can honestly name.
+fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerprint: *const [24]u8) !core.Buffers.Id {
+    const offer = ref.conn.offers.items[ref.index];
+    // Bound already: the entry that holds the replica is the one to show —
+    // a share is bound once, never a second replica beside the first.
+    if (ref.conn.findBase(offer.base)) |bound| {
+        const shown = std.math.cast(core.Buffers.Id, bound.tag) orelse return error.AlreadyBound;
+        if (ctx.buffers.get(shown) == null) return error.AlreadyBound;
+        try ctx.buffers.switchTo(ctx.gpa, shown, ctx.head, ctx.keymap);
+        return shown;
+    }
+    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{offer.name});
     defer ctx.gpa.free(display);
     const id = try ctx.buffers.create(ctx.gpa, display);
     const buf = ctx.buffers.get(id).?;
     const doc = &buf.textEditor().?.doc;
+    if (offer.doc_id) |minted| {
+        const spelled = minted.text();
+        var named: [128]u8 = undefined;
+        const d = core.designation.Designation.ofDoc(.{ .peer = fingerprint }, &spelled);
+        try buf.setDesignation(ctx.gpa, try d.render(&named));
+    }
+    // A document the peer we share a tree with offers is in that tree's
+    // place; any other peer's is in no place of ours.
+    if (ref.peer == null) if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.
-        try wireHubShare(state.sc, peer, col, doc);
-        _ = state.sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
+        try wireHubShare(sc, peer, col, doc);
+        _ = sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
     } else {
         // Offered by the host we connected out to.
-        col.presence_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
-        col.import_diag_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
-        col.publish_presence = state.sc.publish_presence;
+        col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+        col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+        col.publish_presence = sc.publish_presence;
     }
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+    return id;
 }
 
 /// Bind every collaboration command against the shared state. Called after
@@ -663,9 +809,13 @@ test "open-shared resolves the snapshotted offer base after display reordering" 
     try std.testing.expectEqual(@as(usize, 2), resolved.index);
     try std.testing.expectEqual(@as(u64, 24), resolved.conn.offers.items[resolved.index].base);
 
-    // Once that same offer is consumed, acceptance degrades to a no-op rather
-    // than opening whichever row now occupies its old slot.
-    conn.offers.items[resolved.index].opened = true;
+    // Once that same offer is bound, acceptance degrades to a no-op rather
+    // than opening whichever row now occupies its old slot. (Open IS bound:
+    // a replica of the quad on this connection — only its base is read.)
+    var bound: core.session.Collab = undefined;
+    bound.base = 24;
+    try conn.collabs.append(gpa, &bound);
+    defer conn.collabs.deinit(gpa);
     try std.testing.expect(resolveOfferOnConn(target, conn, incarnation, fingerprint, null) == null);
 
     // A vanished offer follows the same safe path.

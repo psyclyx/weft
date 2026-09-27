@@ -1,10 +1,13 @@
 //! e2e test file — the adaptive toolbar and the context menu under
 //! config/ide.js (doc/configs.md §3.6.2-3).
 //!
-//! Both are plugins over doors the action system already had: the toolbar is
-//! the PRIMARY context's offers as a docked strip of action nodes, the menu
-//! the offers of the context under the pointer as a head-local interaction.
-//! These gates hold what that has to mean to a person clicking:
+//! Both are presentations of ONE projection (doc/model.md §2.4), and neither
+//! is a plugin that owns a viewport: the toolbar is a config viewport
+//! presenting `weft://here/offers/primary` as a strip of action nodes, the
+//! menu is mouse-3 presenting `offers/at-pointer` as a head-local
+//! interaction. These gates were the toolbar and contextmenu plugins'; they
+//! hold unchanged for the projection that replaced them — what it has to mean
+//! to a person clicking:
 //!
 //!   • the strip is one text row along the top from the first frame, and its
 //!     buttons are exactly the pinned entries plus what the editor offers,
@@ -43,7 +46,7 @@ fn toolbarPane(ed: *Editor) !*window_layout.Node {
 fn toolbarView(ed: *Editor) !*const view_runtime.view.Instance {
     const pane = try toolbarPane(ed);
     const entry = ed.buffers.get(pane.pane().buffer_id) orelse return error.NoToolbarEntry;
-    const ref = entry.semantic_focus.view orelse return error.ToolbarNotPresented;
+    const ref = entry.scene_selection.view orelse return error.ToolbarNotPresented;
     return ed.ctx.semantic.?.views.get(ref) orelse error.ToolbarViewGone;
 }
 
@@ -259,10 +262,11 @@ test "e2e/chrome: the toolbar adapts to the primary context — source, a files 
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
 
     // A files listing in the primary pane: the listing's own node actions,
-    // and ide.js's rename keyed on the files tool.
+    // and ide.js's rename keyed on the files tool. Nothing is drafted yet, so
+    // Apply draft is greyed.
     ed.runStr("open", ".");
     ed.applyWindow();
-    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Edit name | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft Revert draft");
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Edit name | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
     app.proj.shot(ed, "chrome-toolbar-files");
 
     // A git status buffer: git's verbs. Nothing durable to save here, so the
@@ -341,6 +345,40 @@ test "e2e/chrome: the toolbar redraws when the offers move, and only then" {
     try t.expectEqual(settled + 1, (try toolbarView(ed)).descriptor.revision);
 }
 
+test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, with no toolbar code involved" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "hello repl\n");
+    const source = ed.buffers.active_id;
+    ed.applyWindow();
+    // ide.js gates the provider on `{context: {"repl.session": "*"}}`, and
+    // nothing has published that key: not offered, so not shown.
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
+
+    // The repl plugin publishes `repl.session` on the place its interpreter
+    // runs in. Its own buffer takes the pane; come back to the source.
+    ed.runStr("repl-start", "cat");
+    ed.runStr("open", "a.txt");
+    try t.expectEqual(source, ed.buffers.active_id);
+    ed.applyWindow();
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line Send to REPL | Format Rename");
+    try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Send to REPL").?, "provider").?);
+
+    // The button acts on the editor it describes: the source's line goes to
+    // the live interpreter, which echoes it into its own buffer.
+    try clickButton(ed, "Send to REPL");
+    try t.expect(h.drainToolContains(ed, "*repl*", "hello repl"));
+    try t.expectEqual(source, ed.buffers.active_id);
+
+    // Quitting the last REPL retracts the key, and the strip drops the button.
+    ed.run("repl-quit");
+    ed.applyWindow();
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
+}
+
 // ── The context menu ─────────────────────────────────────────────────
 
 test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar row — and runs the choice" {
@@ -390,7 +428,7 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
     // No greyed words (a menu lists what can run here), and no rule around
     // a lone item.
-    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Save Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Apply draft Revert draft Use as working target");
+    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Save Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
     app.proj.shot(ed, "chrome-contextmenu-row");
 
     // Click Copy — drawn over the editor pane, past the sidebar's edge: the
@@ -447,7 +485,7 @@ fn hasGutter(ed: *Editor, node: *window_layout.Node) !bool {
     var arena = std.heap.ArenaAllocator.init(ed.gpa);
     defer arena.deinit();
     const entry = ed.buffers.get(node.pane().buffer_id) orelse return error.NoEntry;
-    const gf = try h.app.frame_builder.gutterFrame(arena.allocator(), &ed.application.driver.ctx, try chromeFacts(ed, node), entry.textEditor(), null, "");
+    const gf = try h.app.frame_builder.gutterFrame(arena.allocator(), &ed.application.driver.ctx, &ed.render.fb.answers, node.pane().id, entry, try chromeFacts(ed, node), null, "");
     return gf.bindings.len > 0;
 }
 

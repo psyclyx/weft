@@ -74,6 +74,11 @@ __attribute__((import_module("weft"), import_name("qjs_declare_command_doc")))
 extern void host_declare_command_doc(const char *name, int name_len,
                                      const char *params, int params_len,
                                      const char *summary, int summary_len);
+// How a declared command maps over several selections (`wl_declare_arity`,
+// same body): 0 each, 1 whole, 2 homogeneous.
+__attribute__((import_module("weft"), import_name("qjs_declare_arity")))
+extern void host_declare_arity(const char *name, int name_len, int code,
+                               const char *over, int over_len);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
@@ -153,6 +158,13 @@ __attribute__((import_module("weft"), import_name("qjs_clipboard_set")))
 extern int host_clipboard_set(const char *text, int len);
 __attribute__((import_module("weft"), import_name("qjs_clipboard_get")))
 extern int host_clipboard_get(char *out, int cap);
+// Context — wasm_host/context.zig's bodies. `set` answers 0, -1 (a key that
+// is not namespaced, an oversized value, a bad scope) or -2 (another plugin
+// holds the key there); `get` answers the FULL length, or -1 for no value.
+__attribute__((import_module("weft"), import_name("qjs_context_set")))
+extern int host_context_set(const char *key, int key_len, const char *value, int value_len, int scope, const char *place, int place_len);
+__attribute__((import_module("weft"), import_name("qjs_context_get")))
+extern int host_context_get(const char *key, int key_len, char *out, int cap);
 // The head's history — wasm_host/history.zig's bodies.
 __attribute__((import_module("weft"), import_name("qjs_jump_push")))
 extern void host_jump_push(void);
@@ -208,10 +220,13 @@ extern void host_viewport(const char *name, int name_len,
                           const char *edge, int edge_len,
                           int flags, int extent_permille);
 // weft.present(viewport, opts): stage "show this subject in that viewport".
+// `flags` bit 0: the subject is a context key; bit 1: so is the reveal.
 __attribute__((import_module("weft"), import_name("qjs_present")))
 extern void host_present(const char *viewport, int viewport_len,
                          const char *subject, int subject_len,
-                         const char *command, int command_len);
+                         const char *as, int as_len,
+                         const char *reveal, int reveal_len,
+                         int flags);
 
 #define WEFT_VP_CYCLES (1 << 0)
 #define WEFT_VP_PERSISTENT (1 << 1)
@@ -689,40 +704,68 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// One of `present`'s two bindable options: a designation string, or
+// `{context: "<key>"}` — the current value of ONE context key. No function,
+// no composition: anything else is refused. Sets *key when it is a key; the
+// string (owned by the caller) is NULL when the option is absent.
+static int present_binding(JSContext *ctx, JSValueConst opts, const char *prop,
+                           const char **out, size_t *len, int *key) {
+    JSValue v = JS_GetPropertyStr(ctx, opts, prop);
+    *out = NULL;
+    *len = 0;
+    *key = 0;
+    int ok = 1;
+    if (JS_IsString(v)) {
+        *out = JS_ToCStringLen(ctx, len, v);
+    } else if (JS_IsObject(v)) {
+        JSValue k = JS_GetPropertyStr(ctx, v, "context");
+        if (JS_IsString(k)) {
+            *out = JS_ToCStringLen(ctx, len, k);
+            *key = 1;
+        } else {
+            ok = 0;
+        }
+        JS_FreeValue(ctx, k);
+    } else if (!JS_IsUndefined(v)) {
+        ok = 0;
+    }
+    JS_FreeValue(ctx, v);
+    return ok;
+}
+
 // weft.present(viewport, opts) — "present resource R in viewport V" (§7) as
 // a declaration. Separate from `viewport` because presenting is an ordinary
 // operation on a live viewport, not part of what the viewport is.
-// `opts.subject` is opened with `open`; `opts.command` names another command
-// that presents (with `subject` as its argument when there is one) — how a
-// plugin's own entry, which has no path to open, reaches a viewport.
+// `opts.subject` is a designation or `{context: key}` (followed: presented
+// again when the key moves), `opts.as` the projection to show it as, and
+// `opts.reveal` a designation or `{context: key}` to highlight inside it.
 static JSValue js_present(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject | command})");
-    size_t vl, sl = 0, cl = 0;
+    if (argc < 2 || !JS_IsObject(argv[1]))
+        return JS_ThrowTypeError(ctx, "present(viewport, {subject, as, reveal})");
+    size_t vl, sl, al = 0, rl;
     const char *vp = JS_ToCStringLen(ctx, &vl, argv[0]);
     if (!vp) return JS_EXCEPTION;
-    const char *subject = NULL, *command = NULL;
-    JSValue jsubject = JS_UNDEFINED, jcommand = JS_UNDEFINED;
-    if (JS_IsObject(argv[1])) {
-        jsubject = JS_GetPropertyStr(ctx, argv[1], "subject");
-        if (JS_IsString(jsubject)) subject = JS_ToCStringLen(ctx, &sl, jsubject);
-        jcommand = JS_GetPropertyStr(ctx, argv[1], "command");
-        if (JS_IsString(jcommand)) command = JS_ToCStringLen(ctx, &cl, jcommand);
+    const char *subject, *reveal, *as = NULL;
+    int subject_key, reveal_key;
+    int ok = present_binding(ctx, argv[1], "subject", &subject, &sl, &subject_key);
+    ok = present_binding(ctx, argv[1], "reveal", &reveal, &rl, &reveal_key) && ok;
+    JSValue jas = JS_GetPropertyStr(ctx, argv[1], "as");
+    if (JS_IsString(jas)) as = JS_ToCStringLen(ctx, &al, jas);
+    else if (!JS_IsUndefined(jas)) ok = 0;
+    JSValue result = JS_UNDEFINED;
+    if (!ok || !subject) {
+        result = JS_ThrowTypeError(ctx, "present(viewport, {subject, as, reveal}): subject and reveal are a designation or {context: \"<key>\"}, and as a name");
+    } else {
+        host_present(vp, (int)vl, subject, (int)sl, as ? as : "", (int)al,
+                     reveal ? reveal : "", (int)rl, subject_key | (reveal_key << 1));
     }
-    if (!subject && !command) {
-        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject | command}): name what to show, or the command that shows it");
-        JS_FreeCString(ctx, vp);
-        JS_FreeValue(ctx, jsubject);
-        JS_FreeValue(ctx, jcommand);
-        return exc;
-    }
-    host_present(vp, (int)vl, subject ? subject : "", (int)sl, command ? command : "", (int)cl);
     JS_FreeCString(ctx, vp);
     if (subject) JS_FreeCString(ctx, subject);
-    if (command) JS_FreeCString(ctx, command);
-    JS_FreeValue(ctx, jsubject);
-    JS_FreeValue(ctx, jcommand);
-    return JS_UNDEFINED;
+    if (reveal) JS_FreeCString(ctx, reveal);
+    if (as) JS_FreeCString(ctx, as);
+    JS_FreeValue(ctx, jas);
+    return result;
 }
 
 // Install the `weft` global: the config surface config.js calls.
@@ -777,16 +820,28 @@ static JSValue g_on_exit; // handler (handle) => void for a proc-stream child ex
 static JSValue js_command(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]))
-        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params]])");
+        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params[, arity]]])");
     size_t nl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     if (!name) return JS_EXCEPTION;
-    size_t sl = 0, pl = 0;
-    const char *summary = argc >= 3 ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
-    const char *params = argc >= 4 ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
-    if (summary || params)
+    size_t sl = 0, pl = 0, al = 0;
+    const char *summary = argc >= 3 && !JS_IsUndefined(argv[2]) ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
+    const char *params = argc >= 4 && !JS_IsUndefined(argv[3]) ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
+    // `arity` — "each", "whole" or "homogeneous" — is how the command maps
+    // over several selections. Left out, it is undeclared, and dispatch
+    // refuses it on several selections rather than guess.
+    const char *arity = argc >= 5 && !JS_IsUndefined(argv[4]) ? JS_ToCStringLen(ctx, &al, argv[4]) : NULL;
+    if (summary || params || arity)
         host_declare_command_doc(name, (int)nl, params ? params : "", (int)pl,
                                  summary ? summary : "", (int)sl);
+    if (arity) {
+        int code = -1;
+        if (al == 4 && memcmp(arity, "each", 4) == 0) code = 0;
+        else if (al == 5 && memcmp(arity, "whole", 5) == 0) code = 1;
+        else if (al == 11 && memcmp(arity, "homogeneous", 11) == 0) code = 2;
+        if (code >= 0) host_declare_arity(name, (int)nl, code, "", 0);
+        JS_FreeCString(ctx, arity);
+    }
     if (summary) JS_FreeCString(ctx, summary);
     if (params) JS_FreeCString(ctx, params);
     int id = host_register(name, (int)nl);
@@ -1114,6 +1169,75 @@ static JSValue js_clipboard_get(JSContext *ctx, JSValueConst this_val,
     return v;
 }
 
+// weft.contextSet(key, value, scope[, place]) -> bool: publish `value` for
+// the namespaced `key` ("repl.session") at `scope` — "entry", "place" or
+// "global" — of the entry this call is about; at "place", an optional
+// `place` designation (`weft://here/dir/…`) names the place instead of the
+// calling entry's. An empty value retracts; so does unloading the plugin.
+// False when refused (a bad key, scope or place, or another plugin holds the
+// key there).
+static JSValue js_context_set(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_FALSE;
+    const char *scope = JS_ToCString(ctx, argv[2]);
+    if (!scope) return JS_EXCEPTION;
+    int kind = strcmp(scope, "entry") == 0 ? 0 : strcmp(scope, "place") == 0 ? 1 : strcmp(scope, "global") == 0 ? 2 : -1;
+    JS_FreeCString(ctx, scope);
+    if (kind < 0) return JS_FALSE;
+    size_t kl, vl, pl = 0;
+    const char *k = JS_ToCStringLen(ctx, &kl, argv[0]);
+    if (!k) return JS_EXCEPTION;
+    const char *v = JS_ToCStringLen(ctx, &vl, argv[1]);
+    if (!v) {
+        JS_FreeCString(ctx, k);
+        return JS_EXCEPTION;
+    }
+    const char *place = "";
+    if (argc > 3 && !JS_IsUndefined(argv[3])) {
+        place = JS_ToCStringLen(ctx, &pl, argv[3]);
+        if (!place) {
+            JS_FreeCString(ctx, k);
+            JS_FreeCString(ctx, v);
+            return JS_EXCEPTION;
+        }
+    }
+    int r = host_context_set(k, (int)kl, v, (int)vl, kind, place, (int)pl);
+    JS_FreeCString(ctx, k);
+    JS_FreeCString(ctx, v);
+    if (argc > 3 && !JS_IsUndefined(argv[3])) JS_FreeCString(ctx, place);
+    return JS_NewBool(ctx, r == 0);
+}
+
+// weft.contextGet(key) -> string | null: the PRIMARY context's value for any
+// key, builtin ("mode", "entry") or published ("repl.session").
+static JSValue js_context_get(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    size_t kl;
+    const char *k = JS_ToCStringLen(ctx, &kl, argv[0]);
+    if (!k) return JS_EXCEPTION;
+    int n = host_context_get(k, (int)kl, g_read_buf, (int)sizeof g_read_buf);
+    JSValue v;
+    if (n < 0) {
+        v = JS_NULL;
+    } else if ((size_t)n <= sizeof g_read_buf) {
+        v = JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+    } else {
+        char *big = js_malloc(ctx, (size_t)n);
+        if (!big) {
+            JS_FreeCString(ctx, k);
+            return JS_EXCEPTION;
+        }
+        int m = host_context_get(k, (int)kl, big, n);
+        v = m < 0 ? JS_NULL : JS_NewStringLen(ctx, big, (size_t)(m < n ? m : n));
+        js_free(ctx, big);
+    }
+    JS_FreeCString(ctx, k);
+    return v;
+}
+
 // weft.jumpPush(): remember the caret as a jump in the head's jumplist.
 static JSValue js_jump_push(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
@@ -1279,6 +1403,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "pointer", JS_NewCFunction(g_ctx, js_pointer, "pointer", 0));
     JS_SetPropertyStr(g_ctx, weft, "clipboardSet", JS_NewCFunction(g_ctx, js_clipboard_set, "clipboardSet", 1));
     JS_SetPropertyStr(g_ctx, weft, "clipboardGet", JS_NewCFunction(g_ctx, js_clipboard_get, "clipboardGet", 0));
+    JS_SetPropertyStr(g_ctx, weft, "contextSet", JS_NewCFunction(g_ctx, js_context_set, "contextSet", 3));
+    JS_SetPropertyStr(g_ctx, weft, "contextGet", JS_NewCFunction(g_ctx, js_context_get, "contextGet", 1));
     JS_SetPropertyStr(g_ctx, weft, "jumpPush", JS_NewCFunction(g_ctx, js_jump_push, "jumpPush", 0));
     JS_SetPropertyStr(g_ctx, weft, "macroRecording", JS_NewCFunction(g_ctx, js_macro_recording, "macroRecording", 0));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));

@@ -72,12 +72,12 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "notes-capture", .call = capture, .params = "text [file]", .summary = "append a line to the notes file" },
-    .{ .name = "notes-open", .call = open, .params = "[file]", .summary = "open the notes file itself" },
-    .{ .name = "notes-capture-here", .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
-    .{ .name = "notes-embeds", .call = embedsRefresh, .summary = "render this note's embeds live beside their own bytes" },
-    .{ .name = "notes-embeds-off", .call = embedsOff, .summary = "stop rendering this note's embeds" },
-    .{ .name = "notes-embed-activate", .call = embedActivate, .summary = "open what the embed on this line designates" },
+    .{ .name = "notes-capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "append a line to the notes file" },
+    .{ .name = "notes-open", .call = open, .arity = .whole, .params = "[file]", .summary = "open the notes file itself" },
+    .{ .name = "notes-capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
+    .{ .name = "notes-embeds", .call = embedsRefresh, .arity = .whole, .summary = "render this note's embeds live beside their own bytes" },
+    .{ .name = "notes-embeds-off", .call = embedsOff, .arity = .whole, .summary = "stop rendering this note's embeds" },
+    .{ .name = "notes-embed-activate", .arity = .one, .call = embedActivate, .summary = "open what the embed on this line designates" },
 };
 
 fn describeExtra() void {
@@ -110,23 +110,30 @@ fn capture() void {
 /// the real file, not a copy.
 fn open() void {
     const path = weft.argStr(0) orelse default_file;
-    weft.runStr("open", path);
+    // A notes file named relative to the project lives in the project — the
+    // place this dispatch is in — never in whatever directory the editor
+    // was launched from.
+    weft.openTyped(path);
 }
 
 // ── Capture: where I am, as a durable embed ─────────────────────────
 
 /// Append an embed line naming the focused entry and the cursor position to
-/// the notes file (arg0, or the default). What is stored is a designation, not
-/// a copy: reopening the note and activating the line lands back here.
+/// the notes file (arg0, or the default). What is stored is the entry's
+/// designation, not a copy and not a path: reopening the note and activating
+/// the line lands back here — a file, a scratch document, a peer's document
+/// alike.
 fn captureHere() void {
-    const path = weft.path() orelse return weft.echo("notes: this entry has no durable target");
-    const n = @min(path.len, line_buf.len);
-    @memcpy(line_buf[0..n], path[0..n]);
+    const here = weft.designation() orelse return weft.echo("notes: this entry has no durable target");
+    const named = durable.parse(here) orelse return weft.echo("notes: this entry has no durable target");
+    const n = @min(named.ref.len, line_buf.len);
+    @memcpy(line_buf[0..n], named.ref[0..n]);
     var params: [32]u8 = undefined;
     const at = std.fmt.bufPrint(&params, "at={d}", .{weft.cursor()}) catch return;
     var out: [1 << 10]u8 = undefined;
     const line = durable.renderEmbed(.{
-        .kind = .file,
+        .authority = named.authority,
+        .kind = named.kind,
         .ref = line_buf[0..n],
         .params = at,
     }, out[0 .. out.len - 1]) catch return weft.echo("notes: that target does not fit one line");
@@ -147,17 +154,11 @@ fn embedActivate() void {
     @memcpy(line_buf[0..n], text[0..n]);
     const d = durable.embedOf(line_buf[0..n]) orelse
         return weft.echo("notes: no embed on this line");
-    if (d.authority != .here) return weft.echo("notes: that locus is not reachable from here");
-    switch (d.kind) {
-        .file, .directory => {
-            weft.runStr("open", d.ref);
-            if (d.param("at")) |raw| {
-                const at = std.fmt.parseUnsigned(usize, raw, 10) catch return;
-                weft.jump(@min(at, weft.byteLen()));
-            }
-        },
-        else => weft.echo("notes: nothing here opens that kind"),
-    }
+    // The designation is the whole request — kind, authority, and the
+    // position in `?at=` — and `open` routes all of it; there is nothing for
+    // a note to interpret.
+    var spelled: [1 << 12]u8 = undefined;
+    weft.openDesignation(d.render(&spelled) catch return weft.echo("notes: that designation does not fit"));
 }
 
 /// Publish or withdraw this plugin's `std.target.activate` answer. Absence is
@@ -248,8 +249,8 @@ fn render(d: durable.Designation) []const u8 {
     return switch (d.kind) {
         .directory => renderDirectory(d),
         .file => renderFile(d),
-        .synthetic => |kind| reasonOf("no provider resolves ", kind),
-        .unknown => reason("that designation names no kind"),
+        .projection => |kind| reasonOf("no provider resolves ", kind),
+        .doc, .proc => reasonOf("an embed does not preview a ", d.kind.name()),
     };
 }
 

@@ -122,6 +122,7 @@ const locus_mod = @import("locus.zig");
 const action_mod = @import("action.zig");
 const Head = @import("Head.zig");
 const grants_mod = @import("grants.zig");
+const context_mod = @import("context.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Principal = authority.Principal;
@@ -313,15 +314,24 @@ pub const Ctx = struct {
         // `posture` is how the entry rests right now, so a provider can say
         // "in text" (`{posture: "text"}`) rather than name the modes that
         // happen to mean it.
-        self.scopes.append(.{ .kind = .buffer, .facts = .{
-            .path = buf.name,
-            .name = buf.name,
-            .lang = action_mod.langOfName(buf.name),
-            .tool = buf.tool,
-            .role = buf.focusedRole(),
-            .locality = localityOf(buf),
-            .posture = @tagName(buf.posture(ctx.head.semantic_focus.field != null)),
-        } });
+        self.scopes.append(.{
+            .kind = .buffer,
+            .facts = .{
+                .path = buf.name,
+                .designation = buf.designationText(),
+                .name = buf.name,
+                .lang = action_mod.langOfName(buf.name),
+                .tool = buf.tool,
+                .role = buf.focusedRole(),
+                .locality = localityOf(buf),
+                .posture = @tagName(buf.posture(ctx.head.scene_selection.field != null)),
+                // The open keys, read through the store: the stack's entry →
+                // place → global resolution happens INSIDE the reader, so this
+                // one scope carries all three levels and the reflective merge
+                // has nothing to combine.
+                .context = context_mod.openAt(ctx.context, buf),
+            },
+        });
         self.scopes.append(.{ .kind = .subbuffer });
         self.scopes.append(.{ .kind = .mode, .facts = .{ .mode = ctx.head.currentMode() } });
         // F3 (RESOLVED, task #19 item 2 + review send-back): the invariant

@@ -16,8 +16,8 @@ var out: [1 << 16]u8 = undefined;
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "trim-trailing-line", .call = trimLine, .summary = "strip trailing whitespace from this line" },
-    .{ .name = "trim-trailing-buffer", .call = trimBuffer, .summary = "strip trailing whitespace from every line" },
+    .{ .name = "trim-trailing-line", .call = trimLine, .arity = weft.Arity.each_extent, .summary = "strip trailing whitespace from this line" },
+    .{ .name = "trim-trailing-buffer", .call = trimBuffer, .arity = .whole, .summary = "strip trailing whitespace from every line" },
 };
 
 fn isBlank(b: u8) bool {

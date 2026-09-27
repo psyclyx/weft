@@ -285,6 +285,36 @@ fn cPointerFocusPoint(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Add what is under the pointer to the selection, keeping what is already
+/// there (C-click): a caret in text, the row in a scene — the same act on
+/// either kind of extent. The new one is the primary; a row already marked
+/// is not marked twice.
+fn cPointerAddSelection(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!focusHitPane(ctx)) return ok;
+    const hit = ctx.head.pointer.hit;
+    if (hit.node) |node| {
+        const scene = &ctx.head.scene_selection;
+        const same_view = if (scene.view) |v| v.eql(node.view) else false;
+        const kept = if (same_view) scene.primaryRows() else null;
+        try focusNode(ctx, node);
+        const now = scene.head() orelse return ok;
+        if (kept) |r| if (r.head != now or r.anchor != now) try scene.others.append(ctx.gpa, r);
+        scene.anchor = null;
+        // The row now focused is the primary; a mark it duplicates goes.
+        var i: usize = 0;
+        while (i < scene.others.items.len) {
+            const r = scene.others.items[i];
+            if (r.anchor == now and r.head == now) _ = scene.others.swapRemove(i) else i += 1;
+        }
+        return ok;
+    }
+    const off = hit.offset orelse return ok;
+    const ed = hitEditor(ctx) orelse return ok;
+    try ed.addSelection(ctx.gpa, .{ .anchor = off, .head = off });
+    return ok;
+}
+
 /// A click: focus the pane under the pointer, then act at the point — put
 /// the caret there in text, focus the node there in a scene, and activate
 /// it when the node is an action. Over a pane that takes no focus only an
@@ -295,6 +325,8 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
+        // A click is THE selection, as it is in text: marked rows go.
+        ctx.head.scene_selection.collapse();
         try focusNode(ctx, node);
         if (isActionNode(ctx, node)) _ = try activateActionNode(ctx);
         return ok;
@@ -464,6 +496,7 @@ pub const table = [_]command.Command{
     command.define("pointer-focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
     command.define("pointer-focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
     command.define("pointer-click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
+    command.define("pointer-add-selection", "Add a caret (in text) or the row (in a scene) under the pointer to the selection.", cPointerAddSelection),
     command.define("pointer-drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
     command.define("pointer-extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
     command.define("pointer-activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),

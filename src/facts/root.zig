@@ -42,6 +42,10 @@
 
 const std = @import("std");
 
+/// The open half of context: published keys, their store, and the reader a
+/// `Facts` carries into it (doc/model.md §2.5).
+pub const context = @import("context.zig");
+
 /// Where a buffer's bytes live.
 pub const Locality = enum { local, remote, tool, none };
 
@@ -54,6 +58,10 @@ pub const Facts = struct {
     locality: Locality = .none,
     path: ?[]const u8 = null,
     name: []const u8 = "",
+    /// The entry's designation (`weft://here/file/…`, `…/doc/<id>`,
+    /// doc/model.md §2.2) — the `entry` key. Empty when the caller does not
+    /// say, or the entry has none.
+    designation: []const u8 = "",
     first_line: []const u8 = "",
     tags: []const []const u8 = &.{},
     size: usize = 0,
@@ -86,10 +94,76 @@ pub const Facts = struct {
     /// this against a value it already validated through
     /// `window_layout.headFocus`, never against the bare default.
     pane: u32 = 0,
+    /// The OPEN keys: a reader into the published-context store at this
+    /// entry's coordinates (`context.zig`). The typed fields above are the
+    /// builtin keys; this is everything else a plugin said is true here.
+    /// Absent when the caller has no store (a path-only capability query),
+    /// and then every open key reads as unset.
+    context: context.Open = .{},
+
+    /// A digest of every fact, for a cache keyed by what was true when it was
+    /// filled (the frame's provider answers, `app/answers.zig`). EVERY field
+    /// is in it — walked at comptime, so a fact added later is folded in by
+    /// construction rather than by someone remembering to — and the open keys
+    /// through their reader's `Open.digest` (the store's revision and the
+    /// coordinates), never the store's address.
+    pub fn digest(self: Facts) u64 {
+        var h = std.hash.Wyhash.init(0);
+        inline for (@typeInfo(Facts).@"struct".fields) |f| {
+            const v = @field(self, f.name);
+            if (f.type == context.Open) {
+                h.update(std.mem.asBytes(&v.digest()));
+            } else {
+                std.hash.autoHashStrat(&h, v, .Deep);
+            }
+        }
+        return h.final();
+    }
 
     fn hasTag(self: Facts, tag: []const u8) bool {
         for (self.tags) |tg| if (std.mem.eql(u8, tg, tag)) return true;
         return false;
+    }
+
+    /// The value of context key `key` here, or null when nothing is true of
+    /// it. This is the one reader over the whole map: a builtin key answers
+    /// from its typed field — `Facts` IS the typed view of the builtins — and
+    /// any other key from the open store. Every answer is borrowed: `entry`
+    /// and `place` are designations, stored where they are named.
+    ///
+    /// `offers` answers nothing here: what a context offers is DERIVED from
+    /// its facts, so a fact about offers would be circular. It is a key of the
+    /// primary context (`on_context_changed`), not a predicate axis. Nor does
+    /// `places`: it is a revision of the workspace's places list
+    /// (`Context.places`), a key so a follower hears a place arrive that the
+    /// primary context is not in.
+    pub fn get(self: Facts, key: []const u8) ?[]const u8 {
+        const eql = std.mem.eql;
+        const v: []const u8 = if (eql(u8, key, "mode"))
+            self.mode
+        else if (eql(u8, key, "lang"))
+            self.lang
+        else if (eql(u8, key, "tool"))
+            self.tool
+        else if (eql(u8, key, "role"))
+            self.role
+        else if (eql(u8, key, "posture"))
+            self.posture
+        else if (eql(u8, key, "locality"))
+            (if (self.locality == .none) "" else @tagName(self.locality))
+        else if (eql(u8, key, "entry"))
+            // What the entry opens (doc/model.md §2.2), never the slot it
+            // is open in.
+            self.designation
+        else if (eql(u8, key, "place"))
+            // The place's container, by its designation — the same string a
+            // place-scoped publication is keyed on.
+            self.context.at.place
+        else if (eql(u8, key, "offers") or eql(u8, key, "places"))
+            ""
+        else
+            self.context.get(key) orelse "";
+        return if (v.len == 0) null else v;
     }
 
     /// Overlay `over` onto `base`: an inner scope's fact wins where it says
@@ -126,6 +200,9 @@ pub const Facts = struct {
             .optional => v != null,
             .pointer => |p| if (p.size == .slice) v.len != 0 else true,
             .int, .float, .bool, .@"enum" => v != comptime f.defaultValue().?,
+            // A composite answers for itself, or the build asks for a rule.
+            .@"struct" => if (@hasDecl(f.type, "present")) v.present() else @compileError("facts: no presence rule for field '" ++ f.name ++
+                "' of type " ++ @typeName(f.type)),
             else => @compileError("facts: no presence rule for field '" ++ f.name ++
                 "' of type " ++ @typeName(f.type)),
         };
@@ -158,6 +235,12 @@ pub const Predicate = union(enum) {
     role: []const u8,
     /// The entry's posture ("text", "structural", …) equals this string exactly.
     posture: []const u8,
+    /// Context key `key` has value `value` here — or, with `value = "*"`, has
+    /// any value at all. Any key: a builtin reads its typed field, anything
+    /// else the open store (`Facts.get`). A key nothing publishes here
+    /// matches NOTHING, never everything: a provider gated on a REPL is not
+    /// offered because the REPL plugin is missing.
+    context: Pair,
     /// Every child matches (a bare leaf is the same as `all` of one child;
     /// an empty slice is vacuously true — the "unconstrained" predicate).
     all: []const Predicate,
@@ -183,6 +266,10 @@ pub const Predicate = union(enum) {
             .tool => |tl| std.mem.eql(u8, tl, f.tool),
             .role => |r| std.mem.eql(u8, r, f.role),
             .posture => |r| std.mem.eql(u8, r, f.posture),
+            .context => |c| {
+                const v = f.get(c.key) orelse return false;
+                return c.isAny() or std.mem.eql(u8, c.value, v);
+            },
             .all => |kids| {
                 for (kids) |k| if (!k.matches(f)) return false;
                 return true;
@@ -212,6 +299,19 @@ pub const Predicate = union(enum) {
             },
             else => 1,
         };
+    }
+};
+
+/// A `context` leaf's operands.
+pub const Pair = struct {
+    key: []const u8,
+    /// A literal, or `any` ("*"): the key has some value here.
+    value: []const u8,
+
+    pub const any = "*";
+
+    pub fn isAny(self: Pair) bool {
+        return std.mem.eql(u8, self.value, any);
     }
 };
 
@@ -282,6 +382,10 @@ fn sameAxisDisjoint(a: Predicate, b: Predicate) bool {
         .role => |v| b == .role and !std.mem.eql(u8, v, b.role),
         .posture => |v| b == .posture and !std.mem.eql(u8, v, b.posture),
         .locus => |v| b == .locus and v != b.locus,
+        // Same key, two literals: one key has one value. `*` co-matches any
+        // literal, so it is never disjoint from one.
+        .context => |v| b == .context and std.mem.eql(u8, v.key, b.context.key) and
+            !v.isAny() and !b.context.isAny() and !std.mem.eql(u8, v.value, b.context.value),
         else => false,
     };
 }
@@ -320,6 +424,8 @@ pub const Tag = enum(u8) {
     locus = 10,
     role = 11,
     posture = 12,
+    /// Two strings: the key, then the value (`*` = any).
+    context = 13,
 };
 
 /// How deep a decoded predicate may nest. A guest supplies these bytes, and
@@ -376,6 +482,13 @@ fn encodeInto(out: *std.ArrayList(u8), gpa: std.mem.Allocator, pred: Predicate) 
             try out.append(gpa, @intFromEnum(Tag.locus));
             try out.append(gpa, @intFromEnum(l));
         },
+        .context => |c| {
+            try out.append(gpa, @intFromEnum(Tag.context));
+            for ([_][]const u8{ c.key, c.value }) |s| {
+                try putUv(out, gpa, s.len);
+                try out.appendSlice(gpa, s);
+            }
+        },
         inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s, kind| {
             try out.append(gpa, @intFromEnum(@field(Tag, @tagName(kind))));
             try putUv(out, gpa, s.len);
@@ -428,14 +541,23 @@ fn decodeOne(gpa: std.mem.Allocator, cur: *[]const u8, depth: usize) DecodeError
             cur.* = cur.*[1..];
             return .{ .locus = l };
         },
-        inline else => |kind| {
-            const n = try getUv(cur);
-            if (n > cur.len) return error.Malformed;
-            const owned = try gpa.dupe(u8, cur.*[0..n]);
-            cur.* = cur.*[n..];
-            return @unionInit(Predicate, @tagName(kind), owned);
+        .context => {
+            const key = try getString(gpa, cur);
+            errdefer gpa.free(key);
+            const value = try getString(gpa, cur);
+            return .{ .context = .{ .key = key, .value = value } };
         },
+        inline else => |kind| return @unionInit(Predicate, @tagName(kind), try getString(gpa, cur)),
     }
+}
+
+/// One length-prefixed string, copied out (the caller owns it).
+fn getString(gpa: std.mem.Allocator, cur: *[]const u8) DecodeError![]u8 {
+    const n = try getUv(cur);
+    if (n > cur.len) return error.Malformed;
+    const owned = try gpa.dupe(u8, cur.*[0..n]);
+    cur.* = cur.*[n..];
+    return owned;
 }
 
 /// Deep-copy a predicate so a registry can outlive the caller's stack. The
@@ -460,6 +582,11 @@ pub fn dupe(gpa: std.mem.Allocator, pred: Predicate) std.mem.Allocator.Error!Pre
             return .{ .not = owned };
         },
         .locus => |l| return .{ .locus = l },
+        .context => |c| {
+            const key = try gpa.dupe(u8, c.key);
+            errdefer gpa.free(key);
+            return .{ .context = .{ .key = key, .value = try gpa.dupe(u8, c.value) } };
+        },
         inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s, kind| {
             return @unionInit(Predicate, @tagName(kind), try gpa.dupe(u8, s));
         },
@@ -494,6 +621,10 @@ pub fn free(gpa: std.mem.Allocator, pred: Predicate) void {
             gpa.destroy(k);
         },
         .locus => {},
+        .context => |c| {
+            gpa.free(c.key);
+            gpa.free(c.value);
+        },
         inline .ext, .shebang, .glob, .tag, .mode, .lang, .tool, .role, .posture => |s| gpa.free(s),
     }
 }
@@ -528,6 +659,25 @@ pub fn globMatch(pattern: []const u8, text: []const u8) bool {
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "facts: the digest moves with every fact, the open keys included" {
+    const base: Facts = .{ .mode = "normal", .path = "a.zig", .tags = &.{"x"} };
+    try std.testing.expectEqual(base.digest(), (Facts{ .mode = "normal", .path = "a.zig", .tags = &.{"x"} }).digest());
+    var moved = base;
+    moved.pane = 2;
+    try std.testing.expect(moved.digest() != base.digest());
+    moved = base;
+    moved.tags = &.{"y"};
+    try std.testing.expect(moved.digest() != base.digest());
+
+    var store = context.Store.init(std.testing.allocator);
+    defer store.deinit();
+    var open = base;
+    open.context = .{ .store = &store, .at = .{ .entry = 1, .place = "weft://here/dir/p1" } };
+    const before = open.digest();
+    _ = try store.set("repl", .global, "repl.session", "weft://here/proc/1");
+    try std.testing.expect(open.digest() != before);
+}
 
 test "facts: predicates match merged buffer + interaction facts" {
     const f: Facts = .{
@@ -593,6 +743,53 @@ test "facts: posture narrows by how an entry rests, on the wire and in disjointn
     try t.expect(!back.matches(.{ .posture = "structural", .tool = "git" }));
     try t.expect(!back.matches(.{})); // a caller that did not say is not text
     try t.expect(disjoint(.{ .posture = "text" }, .{ .posture = "structural" }));
+}
+
+test "facts: a context leaf tests any key — open or builtin — and an unset key matches nothing" {
+    const gpa = t.allocator;
+    var store = context.Store.init(gpa);
+    defer store.deinit();
+    const here: Facts = .{ .mode = "normal", .context = .{ .store = &store, .at = .{ .entry = 5, .place = "weft://here/dir/p2" } } };
+    const any: Predicate = .{ .context = .{ .key = "repl.session", .value = Pair.any } };
+    const named: Predicate = .{ .context = .{ .key = "repl.session", .value = "*repl*" } };
+
+    // Nothing published: neither matches — never "everything".
+    try t.expect(!any.matches(here));
+    try t.expect(!named.matches(here));
+    // Nor does a Facts with no store at all.
+    try t.expect(!any.matches(.{}));
+
+    _ = try store.set("repl", .{ .place = "weft://here/dir/p2" }, "repl.session", "*repl*");
+    try t.expect(any.matches(here));
+    try t.expect(named.matches(here));
+    try t.expect(!(Predicate{ .context = .{ .key = "repl.session", .value = "*repl:2*" } }).matches(here));
+    // Another place does not see it.
+    var elsewhere = here;
+    elsewhere.context.at.place = "weft://here/dir/p3";
+    try t.expect(!any.matches(elsewhere));
+
+    // A builtin key reads the typed field: the leaf is a view, not a copy.
+    try t.expect((Predicate{ .context = .{ .key = "mode", .value = "normal" } }).matches(here));
+    try t.expect((Predicate{ .context = .{ .key = "mode", .value = "*" } }).matches(here));
+    try t.expect(!(Predicate{ .context = .{ .key = "lang", .value = "*" } }).matches(here));
+    // `offers` is derived from facts, so it is no fact.
+    try t.expect(!(Predicate{ .context = .{ .key = "offers", .value = "*" } }).matches(here));
+
+    // The wire carries it whole.
+    const bytes = try encode(gpa, .{ .all = &.{ named, .{ .mode = "normal" } } });
+    defer gpa.free(bytes);
+    const back = try decode(gpa, bytes);
+    defer free(gpa, back);
+    try t.expect(back.matches(here));
+    try t.expect(!back.matches(elsewhere));
+    const copy = try dupe(gpa, back);
+    defer free(gpa, copy);
+    try t.expectEqualStrings("*repl*", copy.all[0].context.value);
+
+    // One key has one value; `*` co-matches every literal.
+    try t.expect(disjoint(named, .{ .context = .{ .key = "repl.session", .value = "other" } }));
+    try t.expect(!disjoint(named, any));
+    try t.expect(!disjoint(named, .{ .context = .{ .key = "terminal.session", .value = "other" } }));
 }
 
 test "facts: a predicate survives the wire whole, combinators included" {
@@ -744,10 +941,13 @@ test "facts: merge carries EVERY field — the class, not one field" {
     // nothing was dropped. `role` was dropped for exactly as long as the merge
     // was a hand-written list, and no test noticed because the tests were
     // written per-field too.
+    var store = context.Store.init(t.allocator);
+    defer store.deinit();
     const over: Facts = .{
         .locality = .local,
         .path = "/p",
         .name = "n",
+        .designation = "weft://here/file/p",
         .first_line = "#!x",
         .tags = &.{"tg"},
         .size = 7,
@@ -757,6 +957,7 @@ test "facts: merge carries EVERY field — the class, not one field" {
         .role = "git.file.unstaged",
         .posture = "text",
         .pane = 3,
+        .context = .{ .store = &store, .at = .{ .entry = 1 } },
     };
     inline for (@typeInfo(Facts).@"struct".fields) |f| {
         // Every field of the overlay above must actually BE an overlay,

@@ -21,6 +21,7 @@ const position = @import("position.zig");
 const grants_mod = @import("grants.zig");
 const undo_mod = @import("undo.zig");
 const status_feed = @import("status_feed.zig");
+const selection = @import("selection.zig");
 const semantic_model = @import("weft_semantic");
 
 pub const Principal = authority.Principal;
@@ -155,6 +156,11 @@ pub const Context = struct {
     /// embeddings that expose only the concrete command surface; dispatch
     /// then treats an intention binding as unresolvable and says so.
     intent: ?*@import("intent.zig").Plane = null,
+    /// The system's context (`context.zig`): the keys plugins published, and
+    /// the primary context's last delivered fingerprints. `null` in bare
+    /// embeddings; every open key then reads as unset and `contextSet` is
+    /// refused rather than stored nowhere.
+    context: ?*@import("context.zig").Context = null,
     /// Authority-routed filesystem services. Providers are installed by the
     /// embedding app (Linux today, Darwin/remote/synthetic independently);
     /// commands and plugins see only this platform-neutral router.
@@ -169,6 +175,13 @@ pub const Context = struct {
     /// declaration is then reported as dropped rather than silently staged
     /// against nothing.
     viewports: ?*@import("viewport.zig").Registry = null,
+    /// Who re-runs each projection kind (`designation.Openers`): what `open`
+    /// of a `weft://here/<kind>/…` with no live entry asks. `null` in
+    /// embeddings with no producers, where such a designation is refused.
+    designations: ?*@import("designation.zig").Openers = null,
+    /// Who turns a peer authority into a name a person reads (titles, the
+    /// jumplist). Installed by the shell that knows who it connected to.
+    peer_names: ?@import("designation.zig").PeerNames = null,
     /// The entry an ASYNC delivery captured at spawn, bound for the duration
     /// of its callback (`wasm_host/proc.zig`). While set, `buffer`/
     /// `textEditor`/`document` mean THAT entry rather than whatever is active,
@@ -177,6 +190,16 @@ pub const Context = struct {
     /// generation-checked: an entry closed mid-callback resolves to nothing
     /// and the text doors refuse rather than fall through to the active one.
     bound_entry: ?Buffers.Ref = null,
+    /// The run of a selection mapping in flight (`selection.Visit`), or null.
+    /// Set by `run` around each run of an `.each` command over several
+    /// extents: nested dispatches map nothing, the register and flash doors
+    /// file under the visited extent, and nothing edits while targets are
+    /// found. A bracket like `principal`, never set by a caller.
+    visit: ?*selection.Visit = null,
+    /// A `.whole` or `.homogeneous` command admitted on several extents is
+    /// running: it declared that it reads the set, so a range it hands a
+    /// nested dispatch is its own choice among them. Set by `run` alone.
+    reading_set: bool = false,
 
     /// Bind (or clear, with `null`) the async-delivery entry, returning the
     /// previous binding for the caller to restore.
@@ -202,7 +225,7 @@ pub const Context = struct {
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
         const mode = self.head.currentMode();
-        if (self.head.semantic_focus.path() != null) {
+        if (self.head.scene_selection.path() != null) {
             if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
         }
         return self.buffers.active().bindingMode(self.keymap, mode);
@@ -282,7 +305,7 @@ pub const Context = struct {
         const b = self.buffer();
         // A focused semantic FIELD, or point inside a projection row.s editable
         // span — the same question asked of either plane.
-        return b.posture(self.head.semantic_focus.field != null or b.fieldAtPoint());
+        return b.posture(self.head.scene_selection.field != null or b.fieldAtPoint());
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the
@@ -446,6 +469,7 @@ pub const Context = struct {
     /// PRODUCTION (a re-render from a model), not a principal editing text
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
+        if (self.targeting()) return self.refuse("a target is being found: nothing edits");
         if (self.buffer().read_only) return self.refuse("read-only buffer");
         if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
@@ -465,6 +489,7 @@ pub const Context = struct {
     pub fn editEach(self: *Context, ranges: []const Document.Range, bytes: []const u8) EditError!void {
         if (ranges.len == 1) return self.edit(ranges[0], bytes);
         if (ranges.len == 0) return;
+        if (self.targeting()) return self.refuse("a target is being found: nothing edits");
         if (self.buffer().read_only) return self.refuse("read-only buffer");
         for (ranges) |r| {
             if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
@@ -526,6 +551,13 @@ pub const Context = struct {
 
     /// The visibility half of a refusal, for the callers that own the error
     /// value themselves.
+    /// Whether a mapping is finding its targets — the phase that must see the
+    /// untouched text, so no edit lands in it.
+    fn targeting(self: *const Context) bool {
+        const v = self.visit orelse return false;
+        return v.targeting;
+    }
+
     fn noteRefusal(self: *Context, why: []const u8) void {
         self.head.echo.clearRetainingCapacity();
         self.head.echo.appendSlice(self.gpa, why) catch {};
@@ -765,6 +797,33 @@ pub const Command = struct {
     /// commands; a VM trampoline for scripted ones).
     handler: *const fn (ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value,
     data: ?*anyopaque = null,
+    /// How it maps over a selection of several extents (`selection.Arity`):
+    /// once per extent, once over the whole set, or once over a set of one
+    /// kind. Null is UNDECLARED, and dispatch refuses an undeclared command
+    /// on several extents rather than let it act on the primary alone.
+    ///
+    /// The field's default is CORE's declaration, not a fallback: core's
+    /// command tables are audited, every builtin that reads or writes the
+    /// selection says `.each` at its definition (`maps`), and the rest never
+    /// read it, so running once is their mapping. A GUEST command's arity is
+    /// always what its plugin declared (`declare_arity`) — null when it said
+    /// nothing — never this default.
+    arity: ?selection.Arity = .whole,
+    /// Told, exactly once, that a MAPPING of this command ended
+    /// (`selection.run`): after its last run, after a refusal found while
+    /// mapping, and when there was nothing to run at all. What a per-command
+    /// epilogue (a guest clearing its typed count or register) waits on — a
+    /// run cannot know it is the last, because an earlier run may merge the
+    /// extents still to come. Not called for a dispatch that maps nothing
+    /// (one extent, `.whole`): the handler's return is its end.
+    ended: ?*const fn (ctx: *Context, data: ?*anyopaque) void = null,
+
+    /// This command, declaring `arity`.
+    pub fn maps(self: Command, arity: ?selection.Arity) Command {
+        var c = self;
+        c.arity = arity;
+        return c;
+    }
 };
 
 pub const Commands = registry.Registry(Command);
@@ -787,7 +846,9 @@ pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []c
     defer if (outermost) {
         ctx.dispatch_place = null;
     };
-    return cmd.handler(ctx, cmd.data, args);
+    // The selection mapping the command declared (`selection.zig`): once, once
+    // per extent inside one undo unit, or a refusal said out loud.
+    return selection.run(ctx, &cmd, args);
 }
 
 /// How many of `args` a caller MUST supply. Optional arguments trail, so this
@@ -871,6 +932,10 @@ fn refusal(buf: []u8, commands: *const Commands, name: []const u8, args: []const
             }) catch sig;
         }
         return std.fmt.bufPrint(buf, "{s} takes no arguments, given {d}", .{ name, args.len }) catch name;
+    }
+    if (selection.asRefusal(err)) |r| {
+        const why = selection.reason(r);
+        return std.fmt.bufPrint(buf, "{s}: {s}", .{ name, why.message }) catch name;
     }
     return std.fmt.bufPrint(buf, "{s} failed: {t}", .{ name, err }) catch name;
 }

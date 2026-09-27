@@ -43,6 +43,7 @@ const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
 const pointer_doors = @import("wasm_host/pointer.zig");
 const clipboard_doors = @import("wasm_host/clipboard.zig");
+const context_doors = @import("wasm_host/context.zig");
 const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
@@ -228,6 +229,7 @@ pub const plugin_handlers = .{
     // one of its commands that a `.wasm` plugin cannot, or the reverse.
     .{ .name = "qjs_declare_command", .handler = cDeclareCommand },
     .{ .name = "qjs_declare_command_doc", .handler = cDeclareCommandDoc },
+    .{ .name = "qjs_declare_arity", .handler = cDeclareArity },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
@@ -260,6 +262,8 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_clipboard_get", .handler = cClipboardGet },
     .{ .name = "qjs_jump_push", .handler = cJumpPush },
     .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
+    .{ .name = "qjs_context_set", .handler = cContextSet },
+    .{ .name = "qjs_context_get", .handler = cContextGet },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -689,6 +693,9 @@ pub const JsPlugin = struct {
 
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
+        // What it published leaves with it, exactly as for a `.wasm` plugin —
+        // and before `name`, which the owner key borrows, is freed.
+        if (self.activeCtx().context) |context| _ = context.store.retractOwner(self.resources.name);
         gpa.free(self.name);
         self.resources.deinit(); // kill + join every live child
         self.exits_reported.deinit(gpa);
@@ -750,6 +757,7 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
 
 const cDeclareCommand = jsDoor(declare_doors.declareBody, null);
 const cDeclareCommandDoc = jsDoor(declare_doors.declareDocBody, null);
+const cDeclareArity = jsDoor(declare_doors.declareArityBody, null);
 
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
@@ -773,6 +781,10 @@ pub const cPointer = jsDoor(pointer_doors.pointerBody, null);
 /// config-only grant (a denial answers `denied`, thrown in JS).
 pub const cClipboardSet = jsDoor(clipboard_doors.setBody, .clipboard);
 pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
+/// Context — `wl_context_set`'s and `wl_context_get`'s bodies: publish a key
+/// at a scope as this plugin, read the primary context.
+pub const cContextSet = jsDoor(context_doors.setBody, null);
+pub const cContextGet = jsDoor(context_doors.getBody, null);
 /// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
 pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
 pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
@@ -1427,6 +1439,7 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         // A `.js` plugin owns its commands exactly as a `.wasm` one does.
         .owner = self.name,
         .handler = jsCmdTramp,
+        .arity = if (decl) |d| d.arity else null,
         .data = c,
     }) catch {
         results[0] = -1;
@@ -1830,8 +1843,11 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
 }
 
-/// `weft.present(viewport, {subject, command})` — stage what a declared
-/// viewport shows (§7), and optionally the command that presents it.
+/// `weft.present(viewport, {subject, as, reveal})` — stage what a declared
+/// viewport shows (§7): a designation, or ONE context key whose value is one
+/// (`{context: "place"}`, doc/model.md §2.5); the projection to show it as;
+/// and what to highlight inside it. `flags` says which of subject and reveal
+/// are keys (bit 0, bit 1), because the import ABI carries i32s only.
 fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1840,10 +1856,29 @@ fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(name);
     const subject = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(subject);
-    const presenter = readStr(br, caller, args[4], args[5]) orelse return;
-    defer gpa.free(presenter);
+    const as = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(as);
+    const reveal = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(reveal);
+    const p: viewport_mod.Presentation = .{
+        .subject = .{ .text = subject, .key = args[8] & 1 != 0 },
+        .as = as,
+        .reveal = .{ .text = reveal, .key = args[8] & 2 != 0 },
+    };
+    // A subject names what the viewport shows wherever it is read, so it is
+    // a designation, an absolute path, or a key — refused here, where it is
+    // written, rather than resolved later against the directory the process
+    // was launched in (doc/model.md §2.1).
+    viewport_mod.validate(p) catch |err| return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\", as: \"{s}\", reveal: \"{s}\"}}): {s}", .{ name, subject, as, reveal, switch (err) {
+        error.RelativeSubject => "a relative path names nothing — give a weft:// designation, an absolute path, or {context: key}",
+        error.MalformedSubject => "not a designation (weft://<authority>/<kind>/<ref>)",
+        error.MalformedKey => "a context key is one word (\"place\", \"repl.session\")",
+        error.MalformedProjection => "`as` is a lowercase projection name (\"strip\", \"symbols\")",
+        error.PathWithProjection => "a bare path has no kind to project — give its weft:// designation",
+        else => "refused",
+    } });
     if (br.manifest) |m| {
-        m.addPresent(name, subject, presenter) catch {};
+        m.addPresent(name, p) catch {};
         return;
     }
     std.log.warn("weft.present: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});

@@ -9,6 +9,7 @@
 //! `*console:2*`, …), so two of them keep separate logs. A send appends to the
 //! focused console, else to the most recent one — echoing which.
 
+const std = @import("std");
 const weft = @import("weft");
 
 /// Each open console, keyed by the log buffer it appends to; a console holds
@@ -27,8 +28,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "console-open", .call = open, .summary = "open a command console of its own" },
-    .{ .name = "console-send", .call = send, .summary = "run the current line in this console" },
+    .{ .name = "console-open", .call = open, .arity = .whole, .summary = "open a command console of its own" },
+    .{ .name = "console-send", .arity = .one, .call = send, .summary = "run the current line in this console" },
 };
 
 fn describeExtra() void {
@@ -38,7 +39,17 @@ fn describeExtra() void {
 
 /// Open a console of its own.
 fn open() void {
-    _ = consoles.open("console") orelse weft.echo("console: out of memory — could not open another console");
+    const slot = consoles.open("console") orelse return weft.echo("console: out of memory — could not open another console");
+    // `open` created and focused the console's buffer. It is a live resource
+    // (doc/model.md §2.1) — `weft://here/proc/console`, `…/console.2` — that
+    // designates something only while this plugin runs it.
+    const bare = std.mem.trim(u8, slot.name(), "*");
+    var id: [64]u8 = undefined;
+    if (bare.len == 0 or bare.len > id.len) return;
+    @memcpy(id[0..bare.len], bare);
+    std.mem.replaceScalar(u8, id[0..bare.len], ':', '.');
+    var named: [96]u8 = undefined;
+    _ = weft.designate(std.fmt.bufPrint(&named, "weft://here/proc/{s}", .{id[0..bare.len]}) catch return);
 }
 
 /// Run the current line as a command; its output appends to that console.

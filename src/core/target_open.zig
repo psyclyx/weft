@@ -187,7 +187,7 @@ test "generic target opening distinguishes none, ambiguity, and focus" {
     const opened = try openAndFocus(&services, &head, std.testing.allocator, target);
     try std.testing.expectEqual(view, opened.opened.view);
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(1)), opened.opened.node);
-    try std.testing.expectEqual(view, head.semantic_focus.path().?.view);
+    try std.testing.expectEqual(view, head.scene_selection.path().?.view);
 
     var second: Handler = .{ .view = view };
     _ = try services.registerTargetHandler(std.testing.allocator, owner, "second", .init(&second));

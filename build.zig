@@ -52,8 +52,7 @@ const Guest = struct {
 /// motions, text objects and C-d all ask, and `search` the query → matches
 /// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
 /// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
-/// draw over the visible text, and `put` the one-write-per-selection edit
-/// (one undo unit) helix's verbs and ide's transfer and line keys share.
+/// draw over the visible text.
 const Library = enum {
     prompt,
     invoke,
@@ -69,8 +68,8 @@ const Library = enum {
     search,
     labels,
     affordances,
+    offers,
     statusline,
-    put,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -90,8 +89,8 @@ const Library = enum {
             .search => "weft_search",
             .labels => "weft_labels",
             .affordances => "weft_affordances",
+            .offers => "weft_offers",
             .statusline => "weft_statusline",
-            .put => "weft_put",
         };
     }
 
@@ -106,11 +105,12 @@ const Library = enum {
             .rowkey, .jsonrpc, .sessions, .regex, .affordances => .protocol_data,
             // `search` is pure data too, but it sits on `regex`, so it
             // takes the tier above.
-            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels => .service_presentation,
+            // `offers` is the one READING of a context's offers (pinned
+            // first, then arranged by `affordances`) that the offers
+            // projection and the palette share.
+            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
             .invoke => .interaction_orchestration,
-            // `put` edits a document on a grammar's behalf, as `ex` runs
-            // its commands: the top of the stack, depending on nothing.
-            .ex, .put => .editor_composition,
+            .ex => .editor_composition,
         };
     }
 
@@ -124,6 +124,7 @@ const Library = enum {
             .invoke => &.{.prompt},
             .ex => &.{ .prompt, .invoke },
             .search => &.{.regex},
+            .offers => &.{.affordances},
             else => &.{},
         };
     }
@@ -443,7 +444,7 @@ const guests = [_]Guest{
     .{ .name = "edit", .import = "guest_edit_wasm", .install = true },
     .{ .name = "complete", .import = "guest_complete_wasm", .install = true },
     .{ .name = "project", .import = "guest_project_wasm", .install = true },
-    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{.invoke} },
+    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{ .invoke, .offers } },
     .{ .name = "structural", .import = "guest_structural_wasm", .install = true },
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
@@ -482,10 +483,10 @@ const guests = [_]Guest{
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
     .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
-    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels, .put } },
+    .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).
-    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{ .regex, .put } },
+    .{ .name = "ide", .import = "guest_ide_wasm", .install = true, .libraries = &.{.regex} },
     .{ .name = "debug", .import = "guest_debug_wasm", .install = true },
     // Line numbers: binds `ui/gutter-segment` for text entries and answers a
     // window of cells per round (absolute or caret-relative). No commands.
@@ -494,11 +495,12 @@ const guests = [_]Guest{
     .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
-    // The adaptive toolbar and the context menu (doc/configs.md §3.6): the
-    // primary context's offers as a docked strip of action nodes, and the
-    // offers under the pointer as a menu — both arranged by one library.
-    .{ .name = "toolbar", .import = "guest_toolbar_wasm", .install = true, .libraries = &.{.affordances} },
-    .{ .name = "contextmenu", .import = "guest_contextmenu_wasm", .install = true, .libraries = &.{.affordances} },
+    // The offers projection (doc/model.md §2.4): what a context offers, as a
+    // strip a toolbar viewport presents, a list, or a menu at the pointer.
+    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{.offers} },
+    // The symbols projection: an entry's outline as a tree of rows — what an
+    // outline viewport presents `as: "symbols"` (config/outline.js).
+    .{ .name = "symbols", .import = "guest_symbols_wasm", .install = true },
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
@@ -989,6 +991,7 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         architecture.wire,
         architecture.schema,
+        architecture.facts,
         architecture.membrane,
         architecture.semantic,
         architecture.scene_codec,

@@ -106,6 +106,12 @@ pub const RenderState = struct {
         return self.fb.buildFrame(fx, act);
     }
 
+    /// Ask the plugins what the last frame had no answer to (delegates to the
+    /// shared `FrameBuilder`); true when answers landed for the next frame.
+    pub fn answerRequests(self: *RenderState, fx: *const FrameCtx) !bool {
+        return self.fb.answerRequests(fx);
+    }
+
     /// Rasterize the built panes with Skia into the staging buffer. Runs only on
     /// rebuilt frames; the buffer persists so clean frames re-present it.
     fn rasterize(self: *RenderState, ctx: anytype) !void {

@@ -214,7 +214,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try t.expectEqualStrings("typed through text buffer", text);
 
     // And the listing is exactly as it was.
-    const after = try ed.semanticText(ed.buffers.get(listing_id).?.semantic_focus.view.?);
+    const after = try ed.semanticText(ed.buffers.get(listing_id).?.scene_selection.view.?);
     defer gpa.free(after);
     try t.expectEqualStrings(before, after);
 }

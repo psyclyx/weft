@@ -23,6 +23,9 @@ pub const semantic_model = weft.semantic_model;
 pub const view_runtime = weft.view_runtime;
 pub const target_runtime = weft.target_runtime;
 pub const fs = weft.fs;
+pub const fs_runtime = weft.fs_runtime;
+pub const fs_platform = weft.fs_platform;
+pub const fs_remote = weft.fs_remote;
 const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
@@ -256,6 +259,7 @@ pub const Editor = struct {
             },
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
+        self.session.file_opener = self.buffer_commands.fileOpener();
     }
 
     pub fn deinit(self: *Editor) void {
@@ -355,6 +359,8 @@ pub const Editor = struct {
             .known = &self.frame_known_peers,
         };
         try app_collab_cmds.registerCommands(self.gpa, self.commands, &self.share_ctx, &self.frame_known_peers);
+        self.buffer_commands.peers = .{ .context = &self.share_ctx, .open = app_collab_cmds.openPeer };
+        self.ctx.peer_names = .{ .context = &self.share_ctx, .name = app_collab_cmds.peerName };
     }
 
     /// Set a plugin's config value (`weft.set("<plugin>", key, value)`), for
@@ -487,9 +493,27 @@ pub const Editor = struct {
 
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
-        _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
+        var at_shell: [std.fs.max_path_bytes]u8 = undefined;
+        const value = if (std.mem.eql(u8, cmd, "open")) asTyped(arg, &at_shell) else arg;
+        _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = value }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    /// A test names a file the way a person at a shell does: relative to the
+    /// project it runs in, which is the process directory while a `Project`
+    /// lives. `open` refuses a relative path — it could only mean the launch
+    /// directory (doc/model.md §2.1) — so the harness resolves it here, at its
+    /// boundary, exactly as `main.zig` resolves the command line's file. A
+    /// designation, an absolute path and `host:path` pass through as typed.
+    pub fn asTyped(arg: []const u8, buf: *[std.fs.max_path_bytes]u8) []const u8 {
+        if (core.designation.durable.Spec.of(arg) != .relative) return arg;
+        if (std.mem.indexOfScalar(u8, arg, ':')) |colon|
+            if (colon > 0 and std.mem.indexOfScalar(u8, arg[0..colon], '/') == null) return arg;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = core.file.processDirectory(&cwd_buf) orelse return arg;
+        var fba: std.heap.FixedBufferAllocator = .init(buf);
+        return std.fs.path.resolve(fba.allocator(), &.{ cwd, arg }) catch arg;
     }
 
     // ── The pointer ──
@@ -695,7 +719,7 @@ pub const Editor = struct {
 
     /// WHICH VIEW IS SHOWING HERE — from whichever plane is live.
     ///
-    /// These tests used to read `head.semantic_focus.path().?.view`, which was
+    /// These tests used to read `head.scene_selection.path().?.view`, which was
     /// only ever a PROXY for "the tool view this buffer is showing". Now that a
     /// listing is an ordinary text buffer, it has no semantic focus at all and
     /// the proxy panics. The entry says it directly.
@@ -703,7 +727,7 @@ pub const Editor = struct {
         // An explicit focus wins, for the same reason it does in
         // `subjectHere`: a head that focused a view is looking at THAT,
         // whatever buffer is underneath.
-        if (self.head.semantic_focus.path()) |path| return path.view;
+        if (self.head.scene_selection.path()) |path| return path.view;
         return self.buffers.active().tool_view;
     }
 
@@ -714,7 +738,7 @@ pub const Editor = struct {
         // AN EXPLICIT FOCUS WINS. A head that focused a scene is pointing at
         // it, whatever buffer happens to be underneath; only when nothing is
         // focused does the question fall to what point is on.
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             if (path.leaf()) |leaf| return leaf;
         }
         const entry = self.buffers.active();
@@ -727,7 +751,7 @@ pub const Editor = struct {
                 }
             }
         }
-        return (self.head.semantic_focus.path() orelse return null).leaf();
+        return (self.head.scene_selection.path() orelse return null).leaf();
     }
 
     /// WHAT THE ROW UNDER POINT SAYS NOW — its editable region, read live out
@@ -738,7 +762,7 @@ pub const Editor = struct {
     /// republishing anything. The anchors bracketing the editable span are what
     /// survive the typing, which is exactly how the row ferry reads it back.
     pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             const provider = self.session.system.semantic.fields.get(path.field orelse return gpa.dupe(u8, "")) orelse return error.StaleField;
             var field_snapshot = try provider.snapshot(gpa);
             defer field_snapshot.deinit();
@@ -823,7 +847,7 @@ pub const Editor = struct {
     /// projection puts point on the ROW, whose name field is a child. Same
     /// question, asked of the row.
     pub fn fieldHere(self: *Editor) ?semantic_model.scene.FieldRef {
-        if (self.head.semantic_focus.path()) |path| {
+        if (self.head.scene_selection.path()) |path| {
             if (path.field) |ref| return ref;
         }
         const instance = self.session.system.semantic.views.get(self.toolView() orelse return null) orelse return null;
@@ -1053,7 +1077,6 @@ pub const SecondHead = struct {
             ed.keymap,
             ed.application.last_frame_rect,
             &ed.session.system.placement,
-            &ed.session.system.focus,
         );
     }
 
@@ -2197,8 +2220,8 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "linenumbers", @embedFile("guest_linenumbers_wasm") },
     .{ "snipe", @embedFile("guest_snipe_wasm") },
     .{ "find", @embedFile("guest_find_wasm") },
-    .{ "toolbar", @embedFile("guest_toolbar_wasm") },
-    .{ "contextmenu", @embedFile("guest_contextmenu_wasm") },
+    .{ "offers", @embedFile("guest_offers_wasm") },
+    .{ "symbols", @embedFile("guest_symbols_wasm") },
     .{ "panel", @embedFile("guest_panel_wasm") },
     .{ "problems", @embedFile("guest_problems_wasm") },
     .{ "terminal", @embedFile("guest_terminal_wasm") },

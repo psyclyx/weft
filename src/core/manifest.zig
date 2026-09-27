@@ -269,16 +269,27 @@ pub const ViewportDecl = struct {
     hidden: bool = false,
 };
 
-/// `weft.present(viewport, {subject})` (doc/configuration.md §5.2) — which
-/// resource a declared viewport shows. Separate from `ViewportDecl` because
-/// presenting is an ordinary operation on a live viewport (§7), not part of
-/// what the viewport IS: the same verb re-presents at runtime, and a
-/// follow-focus consumer calls exactly it.
+/// `weft.present(viewport, {subject, as, reveal})` (doc/configuration.md
+/// §5.2, doc/model.md §2.5) — which resource a declared viewport shows, as
+/// which projection, and what to highlight inside it. Separate from
+/// `ViewportDecl` because presenting is an ordinary operation on a live
+/// viewport (§7), not part of what the viewport IS.
 pub const PresentDecl = struct {
     viewport: []u8,
+    /// A designation, or (`subject_key`) the context key whose value is one.
     subject: []u8,
-    /// The presenting command (`{command}`), or `""` for `open`.
-    command: []u8,
+    subject_key: bool,
+    as: []u8,
+    reveal: []u8,
+    reveal_key: bool,
+
+    pub fn presentation(self: PresentDecl) viewport_mod.Presentation {
+        return .{
+            .subject = .{ .text = self.subject, .key = self.subject_key },
+            .as = self.as,
+            .reveal = .{ .text = self.reveal, .key = self.reveal_key },
+        };
+    }
 };
 
 pub const SlotDeclDecl = struct {
@@ -474,7 +485,8 @@ pub const Manifest = struct {
         for (self.presents.items) |d| {
             gpa.free(d.viewport);
             gpa.free(d.subject);
-            gpa.free(d.command);
+            gpa.free(d.as);
+            gpa.free(d.reveal);
         }
         self.presents.deinit(gpa);
         gpa.destroy(self);
@@ -620,17 +632,22 @@ pub const Manifest = struct {
             .hidden = hidden,
         });
     }
-    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8, presenter: []const u8) !void {
+    pub fn addPresent(self: *Manifest, name: []const u8, p: viewport_mod.Presentation) !void {
         const owned = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned);
-        const owned_subject = try self.gpa.dupe(u8, subject);
-        errdefer self.gpa.free(owned_subject);
-        const owned_presenter = try self.gpa.dupe(u8, presenter);
-        errdefer self.gpa.free(owned_presenter);
+        const subject = try self.gpa.dupe(u8, p.subject.text);
+        errdefer self.gpa.free(subject);
+        const as = try self.gpa.dupe(u8, p.as);
+        errdefer self.gpa.free(as);
+        const reveal = try self.gpa.dupe(u8, p.reveal.text);
+        errdefer self.gpa.free(reveal);
         try self.presents.append(self.gpa, .{
             .viewport = owned,
-            .subject = owned_subject,
-            .command = owned_presenter,
+            .subject = subject,
+            .subject_key = p.subject.key,
+            .as = as,
+            .reveal = reveal,
+            .reveal_key = p.reveal.key,
         });
     }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
@@ -768,7 +785,10 @@ pub const Manifest = struct {
         for (self.presents.items) |d| {
             hStr(h, d.viewport);
             hStr(h, d.subject);
-            hStr(h, d.command);
+            h.update(&.{@intFromBool(d.subject_key)});
+            hStr(h, d.as);
+            hStr(h, d.reveal);
+            h.update(&.{@intFromBool(d.reveal_key)});
         }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
@@ -978,7 +998,7 @@ pub const Manifest = struct {
         if (actx.ctx.viewports) |registry| {
             for (self.viewports.items) |d|
                 registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
-            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject, d.command) catch |e|
+            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.presentation()) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
             std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});

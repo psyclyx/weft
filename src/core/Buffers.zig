@@ -29,6 +29,7 @@ const BindingFacet = @import("weft_input").BindingFacet;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const jumplist = @import("jumplist.zig");
+const Document = @import("Document.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
@@ -63,6 +64,26 @@ posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
 /// are announced on — this system's, beside its entries, so a second system
 /// in the process never shows this one's chip.
 status: @import("status_feed.zig").Feed = .{},
+/// Documents whose entries closed, newest last (doc/model.md §2.2). An entry
+/// is a local OPENING of a designation, so closing the entry is not deleting
+/// what it opened: a scratch document — which has no file to be reopened
+/// from — is parked here, whole, so `weft://here/doc/<id>` (a jumplist entry,
+/// an embed, a viewport's subject) can open it again. Bounded: past
+/// `parked_cap` the oldest is released for good, and a designation naming
+/// it is refused as gone rather than answered with something else.
+parked: std.ArrayList(*Buffer) = .empty,
+/// The plugin whose code is running right now, or empty for the user and
+/// core: what a new entry's `creator` is stamped with. A bracket the plugin
+/// host sets around every call into a guest (`actAs`), so an entry a guest
+/// makes — by `buffer-create`, `open`, a door that spawns — is that guest's,
+/// however it came to be made. Borrowed for the bracket's duration.
+acting: []const u8 = "",
+/// Generations of entries closed since the last `drainClosed` — what the
+/// context store retracts entry-scoped values by (`core/context.zig`).
+/// Buffers knows nothing of the store; it only says who is gone.
+closed: std.ArrayList(u64) = .empty,
+
+pub const parked_cap = 16;
 
 pub const Id = u32;
 
@@ -83,11 +104,29 @@ pub const Buffer = struct {
     editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
+    /// The designation this entry's producer DECLARED (doc/model.md §2.2),
+    /// owned, or empty — in which case it is derived (`designation.zig`): a
+    /// file-backed entry is named by its file, a scratch entry by its
+    /// document's minted id, a view by the target it presents. Only what a
+    /// producer alone knows is declared here: a projection kind and its
+    /// arguments, a live process, a peer's document. Set through
+    /// `setDesignation`, whose callers check who may say what.
+    designation: []u8 = &.{},
+    /// Where `designationText` spells this entry's designation, so a reader
+    /// that must not allocate (a fact builder) can borrow it for as long as
+    /// the entry lives. Re-spelled on every ask, from the entry as it is.
+    spelled: [designation_cap]u8 = undefined,
     /// The plugin projection this entry represents (`files`, `files`), or
     /// empty. An ambient fact providers scope on — a projection registers its
     /// `save` under `When{ .tool = … }` so it wins in its own entry, in any
     /// mode — and independent of whether the entry stores text.
     tool: []u8 = &.{},
+    /// The plugin that made this entry (`Buffers.acting` when it was
+    /// inserted), owned; empty for the user's and core's own. What says who
+    /// may declare what the entry IS (`tool`, `designation`): only its
+    /// maker, so no plugin can turn the user's scratch into a process whose
+    /// close destroys text, or strip another plugin's entry of its name.
+    creator: []u8 = &.{},
     /// Keymap mode restored when this buffer takes focus. Empty =
     /// never visited — inherits whatever mode is current.
     mode: []u8 = &.{},
@@ -111,7 +150,7 @@ pub const Buffer = struct {
 
     /// The buffer-local semantic cursor, restored when the buffer is selected
     /// again.
-    semantic_focus: Head.SemanticFocus = .empty,
+    scene_selection: Head.SceneSelection = .empty,
     /// Navigation within one semantic entry retains a cursor per visited view.
     view_cursors: std.ArrayList(struct { view: semantic.view.Ref, node: semantic.scene.NodeId }) = .empty,
 
@@ -125,7 +164,7 @@ pub const Buffer = struct {
     /// to take the derivation. Set through `declarePosture`.
     declared_posture: ?Posture = null,
     /// WHERE this entry's effects run (`doc/place.md`). Buffer-local for the
-    /// same reason `mode` and `semantic_focus` are, and for the reason Emacs
+    /// same reason `mode` and `scene_selection` are, and for the reason Emacs
     /// makes `default-directory` buffer-local: a tool entry produced inside a
     /// project belongs to that project for its whole life, not to whatever the
     /// user happens to be looking at when its output lands.
@@ -146,7 +185,7 @@ pub const Buffer = struct {
     /// why capture can never be a one-way door.
     pre_capture: ?Posture = null,
 
-    pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SemanticFocus) Allocator.Error!void {
+    pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SceneSelection) Allocator.Error!void {
         const path = focus.path() orelse return;
         const node = path.leaf() orelse return;
         for (self.view_cursors.items) |*saved| {
@@ -284,9 +323,37 @@ pub const Buffer = struct {
         gpa.free(self.tool);
         self.tool = owned;
     }
+
+    /// Declare the designation this entry represents (see `designation`).
+    /// Mechanism only: the door a guest reaches this through decides which
+    /// kinds it may declare. Empty returns the entry to derivation.
+    pub fn setDesignation(self: *Buffer, gpa: Allocator, text: []const u8) Error!void {
+        const owned = try gpa.dupe(u8, text);
+        gpa.free(self.designation);
+        self.designation = owned;
+    }
+
+    /// This entry's designation (`designation.of`), spelled into the entry's
+    /// own storage — borrowed until the entry closes, and re-spelled by the
+    /// next ask. Empty when it has none.
+    pub fn designationText(self: *Buffer) []const u8 {
+        return @import("designation.zig").of(self, &self.spelled) orelse "";
+    }
+
+    /// Whether this entry is a DOCUMENT and nothing else — scratch text with
+    /// no file, no producer, and no declared name. Such an entry is named by
+    /// its document's minted id, and its document outlives it (`park`).
+    pub fn isBareDocument(self: *Buffer) bool {
+        const ed = self.textEditor() orelse return false;
+        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and !self.read_only;
+    }
 };
 
 pub const Error = Allocator.Error;
+
+/// Room for any designation an entry is named by (`designation.max_len`): a
+/// path at the OS limit plus scheme, authority and kind.
+pub const designation_cap = std.fs.max_path_bytes + 96;
 
 /// Starts with one active scratch buffer (id 0).
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Error!Buffers {
@@ -304,10 +371,21 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
         if (slot) |b| self.destroyBuffer(gpa, b);
     }
     self.slots.deinit(gpa);
+    for (self.parked.items) |b| self.destroyBuffer(gpa, b);
+    self.parked.deinit(gpa);
+    self.closed.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
     for (&self.posture_modes.values) |mode| gpa.free(mode);
     self.* = undefined;
+}
+
+/// The generations closed since the last drain, handed over and forgotten.
+/// Borrowed until the next `close`.
+pub fn drainClosed(self: *Buffers) []const u64 {
+    const gone = self.closed.items;
+    self.closed.items.len = 0;
+    return gone;
 }
 
 /// Set the base mode fresh buffers start in (the config's editing mode).
@@ -351,10 +429,12 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         view.deinit();
         gpa.destroy(view);
     }
-    b.semantic_focus.deinit(gpa);
+    b.scene_selection.deinit(gpa);
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);
+    gpa.free(b.creator);
+    gpa.free(b.designation);
     gpa.free(b.mode);
     gpa.destroy(b);
 }
@@ -412,6 +492,14 @@ pub const Iterator = struct {
     }
 };
 
+/// Run the code of plugin `name` (a bracket: entries created meanwhile are
+/// its). Answers what was acting, for the caller to put back with `actAs`.
+pub fn actAs(self: *Buffers, name: []const u8) []const u8 {
+    const was = self.acting;
+    self.acting = name;
+    return was;
+}
+
 /// Create a text buffer (no backing yet — callers open/adopt on its editor,
 /// or leave it scratch). Does not focus it.
 pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
@@ -433,18 +521,11 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
     errdefer gpa.free(owned_name);
     const owned_tool = try gpa.dupe(u8, tool);
     errdefer gpa.free(owned_tool);
+    const owned_creator = try gpa.dupe(u8, self.acting);
+    errdefer gpa.free(owned_creator);
 
-    // Reuse the lowest free slot, else append.
-    const id: Id = blk: {
-        for (self.slots.items, 0..) |slot, i| {
-            if (slot == null) break :blk @intCast(i);
-        }
-        try self.slots.append(gpa, null);
-        break :blk @intCast(self.slots.items.len - 1);
-    };
-    const generation = self.next_generation;
-    self.next_generation +%= 1;
-    if (self.next_generation == 0) self.next_generation = 1;
+    const id = try self.freeSlot(gpa);
+    const generation = self.mintGeneration();
     // A new entry starts where the entry that produced it is (`doc/place.md`
     // §2.1) — so `*grep*` belongs to the project grep was run in, and keeps
     // belonging to it after focus moves on.
@@ -467,10 +548,78 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
         .editor = editor,
         .name = owned_name,
         .tool = owned_tool,
+        .creator = owned_creator,
         .place = inherited,
     };
     self.slots.items[id] = b;
     return id;
+}
+
+/// The lowest free slot, else a new one at the end (left null for the caller
+/// to fill before anything else runs).
+fn freeSlot(self: *Buffers, gpa: Allocator) Error!Id {
+    for (self.slots.items, 0..) |slot, i| {
+        if (slot == null) return @intCast(i);
+    }
+    try self.slots.append(gpa, null);
+    return @intCast(self.slots.items.len - 1);
+}
+
+fn mintGeneration(self: *Buffers) u64 {
+    const generation = self.next_generation;
+    self.next_generation +%= 1;
+    if (self.next_generation == 0) self.next_generation = 1;
+    return generation;
+}
+
+/// Keep a closing entry's document (see `parked`). The entry is gone — its
+/// slot is free and every `Ref` to it is dead — but the `Buffer` holding the
+/// document is kept whole, so its anchors (a jumplist's remembered spots)
+/// still resolve when it is reopened.
+fn park(self: *Buffers, gpa: Allocator, b: *Buffer) Error!void {
+    try self.parked.ensureUnusedCapacity(gpa, 1);
+    if (self.parked.items.len >= parked_cap) self.destroyBuffer(gpa, self.parked.orderedRemove(0));
+    self.parked.appendAssumeCapacity(b);
+}
+
+/// Open the parked document `doc` again as a live entry, under a fresh
+/// identity (a new slot and generation: nothing that held the closed entry
+/// resolves to this one). Does not focus it. Null when no parked document is
+/// that one — never released, or released past the bound.
+pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
+    for (self.parked.items, 0..) |b, i| {
+        const ed = b.textEditor() orelse continue;
+        if (!ed.doc.id.eql(doc)) continue;
+        const id = try self.freeSlot(gpa);
+        _ = self.parked.orderedRemove(i);
+        b.id = id;
+        b.generation = self.mintGeneration();
+        self.slots.items[id] = b;
+        return id;
+    }
+    return null;
+}
+
+/// Document `doc` wherever it is held — a live entry or the parked store —
+/// or null once it has been released. What an anchor into a document needs:
+/// the document, not whether anything has it open right now.
+pub fn documentById(self: *const Buffers, doc: Document.Id) ?*Document {
+    if (self.findByDocument(doc)) |id| return &self.get(id).?.textEditor().?.doc;
+    for (self.parked.items) |b| {
+        const ed = b.textEditor() orelse continue;
+        if (ed.doc.id.eql(doc)) return &ed.doc;
+    }
+    return null;
+}
+
+/// The live entry holding document `doc`, if any.
+pub fn findByDocument(self: *const Buffers, doc: Document.Id) ?Id {
+    var it = self.iterator();
+    while (it.next()) |b| {
+        const ed = b.textEditor() orelse continue;
+        if (ed.doc.id.eql(doc)) return b.id;
+    }
+    return null;
 }
 
 /// The buffer already backed by `path`, if any (dedupe on open).
@@ -527,12 +676,12 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // one: remember where this head was (`jumplist.zig`). Travel along the
     // list itself, and a borrow that puts the head back (`withEntry`,
     // `quietly`), is muted there.
-    try jumplist.push(&head.jumps, gpa, self, jumplist.here(self));
+    try jumplist.pushHere(&head.jumps, gpa, self);
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
     // guarantees a text buffer never inherits a tool's editable field.
-    try old.semantic_focus.copyFrom(gpa, &head.semantic_focus);
-    try head.semantic_focus.copyFrom(gpa, &target.semantic_focus);
+    try old.scene_selection.copyFrom(gpa, &head.scene_selection);
+    try head.scene_selection.copyFrom(gpa, &target.scene_selection);
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
     // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
@@ -550,7 +699,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         const resting = if (!keymap.anyModeHasTag("resting") or keymap.modeHasTag(base, "resting"))
             base
         else
-            self.restingModeFor(old.posture(old.semantic_focus.field != null));
+            self.restingModeFor(old.posture(old.scene_selection.field != null));
         const held = try gpa.dupe(u8, resting);
         gpa.free(old.mode);
         old.mode = held;
@@ -583,7 +732,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         // declared what that posture means, so a structural entry can never
         // be stamped with the text editing base. This is the mode-leak
         // class's remaining half — the founding bug's mirror image.
-        const resting = self.restingModeFor(target.posture(head.semantic_focus.field != null));
+        const resting = self.restingModeFor(target.posture(head.scene_selection.field != null));
         if (resting.len > 0) {
             try head.setModeRaw(gpa, resting);
             target.mode = try gpa.dupe(u8, resting);
@@ -648,11 +797,11 @@ pub fn attachFocusedSemanticView(
     name: []const u8,
     tool: []const u8,
 ) Error!Id {
-    const view = head.semantic_focus.view orelse return self.active_id;
+    const view = head.scene_selection.view orelse return self.active_id;
     var id: ?Id = null;
     var it = self.iterator();
     while (it.next()) |buffer| {
-        if (buffer.semantic_focus.view) |candidate| if (candidate.eql(view)) {
+        if (buffer.scene_selection.view) |candidate| if (candidate.eql(view)) {
             id = buffer.id;
             break;
         };
@@ -672,11 +821,13 @@ pub fn attachFocusedSemanticView(
         target.name = renamed;
     }
     // Capture the just-opened path on its destination before switchTo saves
-    // the outgoing buffer. Then clear the head so the outgoing buffer records
-    // no foreign semantic cursor.
-    try target.semantic_focus.copyFrom(gpa, &head.semantic_focus);
+    // the outgoing buffer. Then give the head back the outgoing buffer's own
+    // selection, so what switchTo saves there is neither a foreign cursor nor
+    // nothing: a listing another listing was opened from still knows which
+    // view it shows (and whether that view holds a draft).
+    try target.scene_selection.copyFrom(gpa, &head.scene_selection);
     if (target_id == self.active_id) return target_id;
-    head.semantic_focus.clear();
+    try head.scene_selection.copyFrom(gpa, &self.active().scene_selection);
     try self.switchTo(gpa, target_id, head, keymap);
     return target_id;
 }
@@ -719,8 +870,13 @@ pub fn prevId(self: *const Buffers) Id {
 
 /// Close a buffer. Closing the active buffer focuses the next one;
 /// closing the last replaces it with a fresh scratch. Dirty checks are
-/// the caller's policy. Leaving an entry that is about to die is no jump: a
-/// position in it could never be returned to.
+/// the caller's policy. Leaving an entry that is about to die is not
+/// recorded as a jump from here: the entry's own jumps already name its
+/// designation, which is what a return goes back to.
+///
+/// A bare document with anything in it is parked rather than destroyed (see
+/// `parked`); every other entry's document dies with it, and `head`'s jumps
+/// into it keep their offsets for when its designation is opened afresh.
 pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const b = self.get(id) orelse return;
     if (self.count() == 1) {
@@ -730,6 +886,14 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const
         try self.switchQuietly(gpa, self.nextId(), head, keymap);
     }
     self.slots.items[id] = null;
+    // Best effort: a generation missed here is never read again anyway
+    // (generations are not reused); it only lingers until the store goes.
+    self.closed.append(gpa, b.generation) catch {};
+    if (b.isBareDocument() and b.textEditor().?.doc.commitCount() > 0) {
+        self.park(gpa, b) catch self.destroyBuffer(gpa, b);
+        return;
+    }
+    if (b.textEditor()) |ed| jumplist.settle(&head.jumps, &ed.doc);
     self.destroyBuffer(gpa, b);
 }
 
@@ -806,7 +970,7 @@ test "buffers: attaching a focused view makes an entry with no editor" {
     defer head.deinit(gpa);
 
     const view: semantic.view.Ref = .{ .authority = .here, .slot = 1, .generation = 7 };
-    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    try head.scene_selection.set(gpa, .{ .view = view, .nodes = &.{} });
     const id = try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files");
 
     const entry = bufs.get(id).?;
@@ -816,7 +980,7 @@ test "buffers: attaching a focused view makes an entry with no editor" {
     try t.expect(bufs.get(0).?.textEditor() != null);
 
     // Re-attaching the same view reuses the entry rather than opening a second.
-    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    try head.scene_selection.set(gpa, .{ .view = view, .nodes = &.{} });
     try t.expectEqual(id, try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files"));
 }
 

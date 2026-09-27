@@ -55,6 +55,59 @@ pub const Entry = struct {
     /// `describeCommand`, so the palette can ask for the arguments.
     params: []const u8 = "",
     summary: []const u8 = "",
+    /// How it maps over several selections — REQUIRED, so no command reaches
+    /// the host without its author having looked at it. There is no
+    /// table-wide default: a default is a guess about commands nobody looked
+    /// at, and every plugin that had one ran some of them on the primary
+    /// alone.
+    arity: Arity,
+};
+
+/// How a command maps over a selection of several extents (doc/model.md
+/// §2.6; core's `selection.Arity`, which dispatch maps by):
+///
+///   - `.one` — acts on one selection: refused on several, which is how the
+///     host reads a command that declares nothing. A command that reads THE
+///     caret or row once and has no per-extent reading — an interactive
+///     search, a row's own action, a jump to a picked place — says this.
+///   - `.each` — once per extent, last first, one undo unit; each run sees
+///     its extent as THE selection, so the handler is a one-selection program.
+///     `.over` names a range command that maps each extent to its target
+///     first (identical targets run once); the handler then gets the target
+///     as its range argument (`argRange(0)`). `.merge` unions overlapping
+///     targets (lines) instead of refusing them.
+///   - `.whole` — once; the handler reads the whole set, or its subject is
+///     not the selection at all (a picker, a window, a process, its own
+///     argument). A command that only runs another says `.whole`: the one it
+///     runs maps, or refuses, by its own declaration.
+///   - `.homogeneous` — once, refused when the extents differ in kind.
+pub const Arity = union(enum) {
+    one,
+    each: Each,
+    whole,
+    homogeneous,
+
+    pub const Each = struct { over: ?[]const u8 = null, merge: bool = false };
+    /// The plain per-extent mapping.
+    pub const each_extent: Arity = .{ .each = .{} };
+
+    /// The wire code `declare_arity` carries; null for `.one`, which is
+    /// declared by declaring nothing.
+    pub fn code(self: Arity) ?u32 {
+        return switch (self) {
+            .one => null,
+            .each => |e| if (e.over == null) 0 else if (e.merge) 4 else 3,
+            .whole => 1,
+            .homogeneous => 2,
+        };
+    }
+
+    pub fn over(self: Arity) []const u8 {
+        return switch (self) {
+            .each => |e| e.over orelse "",
+            .one, .whole, .homogeneous => "",
+        };
+    }
 };
 
 /// What a plugin still says for itself. Everything here is optional; a plugin
@@ -119,6 +172,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                     weft.describeCommand(c.name, c.params, c.summary)
                 else
                     weft.declareCommand(c.name);
+                weft.declareArity(c.name, c.arity);
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);
@@ -130,13 +184,31 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             if (hooks.init) |f| f();
         }
 
+        /// How deep in this plugin's own dispatches the current one is: a
+        /// command that runs another of this plugin's commands re-enters here.
+        var depth: u32 = 0;
+
         fn onCommand(id: u32) callconv(.c) void {
             const index = indexOf(id) orelse return;
             if (hooks.before) |f| {
                 if (!f(index)) return;
             }
+            depth += 1;
             cmds[index].call();
-            if (hooks.after) |f| f(index);
+            depth -= 1;
+            // The epilogue ends the COMMAND, so it runs once: not after a
+            // command this one ran, and not after any run of a mapping — a
+            // typed count read by the first run is still due to the rest, and
+            // the host says when the mapping is over (`onMappingEnd`).
+            if (hooks.after) |f| if (depth == 0 and weft.visitsLeft() == null) f(index);
+        }
+
+        /// A mapping of command `id` ended: its epilogue, exactly once however
+        /// many runs there were (none, or fewer than scheduled because runs
+        /// merged extents).
+        fn onMappingEnd(id: u32) callconv(.c) void {
+            const index = indexOf(id) orelse return;
+            if (hooks.after) |f| if (depth == 0) f(index);
         }
 
         /// The table index for a host id. Linear over a table this small, and
@@ -170,6 +242,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             exportCallback("init", &initFn);
             exportCallback("on_command", &onCommand);
             exportCallback("on_exec", &onExec);
+            if (hooks.after != null) exportCallback("on_mapping_end", &onMappingEnd);
             exportCallback("on_pick_accept", &onPickAccept);
         }
 

@@ -15,6 +15,7 @@ const weft = @import("weft");
 const cmds = [_]weft.CommandEntry{
     .{
         .name = "insert-shell",
+        .arity = .one,
         .call = weft.thunk(insertShell),
         .params = "command",
         .summary = "run a shell command and insert its output at the cursor",

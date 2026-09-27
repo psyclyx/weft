@@ -30,16 +30,21 @@ const Activation = struct {
     arg: []const u8,
 };
 
+/// The projection kind the dashboard is, and its one designation
+/// (doc/model.md §2.1): opening it with no entry showing it re-runs `dashboard`.
+const kind = "dashboard";
+const designation = "weft://here/dashboard/main";
+
 var arena: std.heap.ArenaAllocator = undefined;
 var view_ref: ?weft.semantic.view.Ref = null;
 var revision: u32 = 0;
 var activations: std.ArrayList(Activation) = .empty;
 
 const commands = [_]weft.CommandEntry{
-    .{ .name = "dashboard", .call = openDashboard, .summary = "open the welcome dashboard" },
-    .{ .name = "dashboard-activate", .call = activate, .summary = "activate the selected dashboard item" },
-    .{ .name = "dashboard-open-file", .call = openFile, .summary = "find a file to edit" },
-    .{ .name = "dashboard-new", .call = newBuffer, .summary = "create a new buffer" },
+    .{ .name = "dashboard", .arity = .whole, .call = openDashboard, .summary = "open the welcome dashboard" },
+    .{ .name = "dashboard-activate", .arity = .one, .call = activate, .summary = "activate the selected dashboard item" },
+    .{ .name = "dashboard-open-file", .arity = .whole, .call = openFile, .summary = "find a file to edit" },
+    .{ .name = "dashboard-new", .arity = .whole, .call = newBuffer, .summary = "create a new buffer" },
 };
 
 comptime {
@@ -50,6 +55,7 @@ comptime {
 fn init() void {
     arena = std.heap.ArenaAllocator.init(weft.allocator);
     _ = weft.semanticActionProvider();
+    _ = weft.designationOpener(kind, "dashboard");
     weft.restingMode("dashboard");
     // The dashboard only specializes its small local vocabulary below. Keep
     // the ordinary workspace chords available for everything it does not
@@ -124,6 +130,8 @@ fn appendAction(a: std.mem.Allocator, nodes: *std.ArrayList(Node), next_id: *u64
 fn openDashboard() void {
     weft.focusOrCreateBuffer(name);
     weft.toolBacking("dashboard");
+    // The entry IS the dashboard: re-run by name, never remembered by slot.
+    _ = weft.designate(designation);
     weft.setMode("dashboard");
 
     arena.deinit();
@@ -189,7 +197,7 @@ fn onSemanticAction() callconv(.c) void {
 }
 
 fn openFile() void {
-    weft.openFilePick("Open file", ".", file_pick);
+    weft.openFilePick("Open file", file_pick);
 }
 
 fn newBuffer() void {
@@ -205,5 +213,5 @@ fn onPick(id: u32) void {
         .input => |input| input,
         .cancelled => return,
     };
-    if (path.len > 0) weft.runStr("open", path);
+    if (path.len > 0) weft.openTyped(path);
 }

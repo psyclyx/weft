@@ -362,95 +362,101 @@ fn chooseRegister(comptime index: u8) fn () void {
 }
 
 // ── The static command table (registration order == on_command id) ────
+/// A vim verb is a one-cursor program: dispatch runs it once per selection.
+const each = weft.Arity.each_extent;
 const static_cmds = [_]weft.CommandEntry{
-    .{ .name = "vim-insert", .call = insert },
-    .{ .name = "vim-append", .call = append },
-    .{ .name = "vim-open-below", .call = openBelow },
-    .{ .name = "vim-open-above", .call = openAbove },
-    .{ .name = "vim-visual", .call = visual },
-    .{ .name = "vim-visual-delete", .call = visualDelete },
-    .{ .name = "vim-visual-yank", .call = visualYank },
-    .{ .name = "vim-visual-change", .call = visualChange },
-    .{ .name = "vim-visual-comment", .call = visualOp("op.comment") },
-    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase") },
-    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase") },
-    .{ .name = "vim-visual-indent", .call = visualOp("op.indent") },
-    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent") },
-    .{ .name = "enter-op-upcase", .call = enterOpUpcase },
-    .{ .name = "enter-op-lowercase", .call = enterOpLowercase },
-    .{ .name = "enter-op-indent", .call = enterOpIndent },
-    .{ .name = "enter-op-dedent", .call = enterOpDedent },
-    .{ .name = "vim-visual-line", .call = visualLine },
-    .{ .name = "vim-normal", .call = normal },
-    .{ .name = "vim-append-line", .call = appendLine },
-    .{ .name = "vim-insert-line", .call = insertLine },
-    .{ .name = "vim-delete-eol", .call = deleteEol },
-    .{ .name = "vim-change-eol", .call = changeEol },
-    .{ .name = "vim-change-line", .call = changeLine },
-    .{ .name = "yank-line", .call = yankLine },
-    .{ .name = "paste", .call = paste },
-    .{ .name = "paste-before", .call = pasteBefore },
-    .{ .name = "vim-open-focused", .call = openFocused },
-    .{ .name = "vim-open-container", .call = openContainer },
-    .{ .name = "join-lines", .call = joinLines },
-    .{ .name = "enter-op-delete", .call = enterOpDelete },
-    .{ .name = "enter-op-change", .call = enterOpChange },
-    .{ .name = "enter-op-yank", .call = enterOpYank },
-    .{ .name = "enter-op-comment", .call = enterOpComment },
-    .{ .name = "op-cancel", .call = opCancel },
-    .{ .name = "vim-operate", .call = operate },
-    .{ .name = "op-line", .call = opLine },
-    .{ .name = "enter-op-inner", .call = enterOpInner },
-    .{ .name = "enter-op-around", .call = enterOpAround },
-    .{ .name = "enter-register", .call = enterRegister },
-    .{ .name = "vim-register-plus", .call = chooseClipboard },
-    .{ .name = "vim-register-star", .call = chooseClipboard },
-    .{ .name = "vim-macro-q", .call = macroQ },
-    .{ .name = "vim-macro-at", .call = macroAt },
-    .{ .name = "vim-macro-play-last", .call = macroPlay(0) },
+    .{ .name = "vim-insert", .call = insert, .arity = each },
+    .{ .name = "vim-append", .call = append, .arity = each },
+    .{ .name = "vim-open-below", .call = openBelow, .arity = each },
+    .{ .name = "vim-open-above", .call = openAbove, .arity = each },
+    .{ .name = "vim-visual", .call = visual, .arity = each },
+    .{ .name = "vim-visual-delete", .call = visualDelete, .arity = each },
+    .{ .name = "vim-visual-yank", .call = visualYank, .arity = each },
+    .{ .name = "vim-visual-change", .call = visualChange, .arity = each },
+    .{ .name = "vim-visual-comment", .call = visualOp("op.comment"), .arity = each },
+    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase"), .arity = each },
+    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase"), .arity = each },
+    .{ .name = "vim-visual-indent", .call = visualOp("op.indent"), .arity = each },
+    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent"), .arity = each },
+    .{ .name = "enter-op-upcase", .call = enterOpUpcase, .arity = .whole },
+    .{ .name = "enter-op-lowercase", .call = enterOpLowercase, .arity = .whole },
+    .{ .name = "enter-op-indent", .call = enterOpIndent, .arity = .whole },
+    .{ .name = "enter-op-dedent", .call = enterOpDedent, .arity = .whole },
+    .{ .name = "vim-visual-line", .call = visualLine, .arity = each },
+    .{ .name = "vim-normal", .call = normal, .arity = .whole },
+    .{ .name = "vim-append-line", .call = appendLine, .arity = each },
+    .{ .name = "vim-insert-line", .call = insertLine, .arity = each },
+    .{ .name = "vim-delete-eol", .call = deleteEol, .arity = each },
+    .{ .name = "vim-change-eol", .call = changeEol, .arity = each },
+    .{ .name = "vim-change-line", .call = changeLine, .arity = each },
+    .{ .name = "yank-line", .call = yankLine, .arity = .whole },
+    .{ .name = "vim-yank-line-text", .call = yankLineText, .arity = each },
+    .{ .name = "paste", .call = paste, .arity = .whole },
+    .{ .name = "vim-paste-text", .call = pasteText(true), .arity = each },
+    .{ .name = "paste-before", .call = pasteBefore, .arity = .whole },
+    .{ .name = "vim-paste-before-text", .call = pasteText(false), .arity = each },
+    .{ .name = "vim-open-focused", .call = openFocused, .arity = .whole },
+    .{ .name = "vim-open-container", .call = openContainer, .arity = .whole },
+    .{ .name = "join-lines", .call = joinLines, .arity = each },
+    .{ .name = "enter-op-delete", .call = enterOpDelete, .arity = .whole },
+    .{ .name = "enter-op-change", .call = enterOpChange, .arity = .whole },
+    .{ .name = "enter-op-yank", .call = enterOpYank, .arity = .whole },
+    .{ .name = "enter-op-comment", .call = enterOpComment, .arity = .whole },
+    .{ .name = "op-cancel", .call = opCancel, .arity = .whole },
+    .{ .name = "vim-operate", .call = operate, .arity = each },
+    .{ .name = "op-line", .call = opLine, .arity = .whole },
+    .{ .name = "vim-op-line-text", .call = opLineText, .arity = each },
+    .{ .name = "enter-op-inner", .call = enterOpInner, .arity = .whole },
+    .{ .name = "enter-op-around", .call = enterOpAround, .arity = .whole },
+    .{ .name = "enter-register", .call = enterRegister, .arity = .whole },
+    .{ .name = "vim-register-plus", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim-register-star", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim-macro-q", .call = macroQ, .arity = .whole },
+    .{ .name = "vim-macro-at", .call = macroAt, .arity = .whole },
+    .{ .name = "vim-macro-play-last", .call = macroPlay(0), .arity = .whole },
     // `"/`: the search register, the last pattern any grammar searched for.
-    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search) },
-    .{ .name = "find-file", .call = findFile },
+    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search), .arity = .whole },
+    .{ .name = "find-file", .call = findFile, .arity = .whole },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
     // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
-    .{ .name = "leader-cancel", .call = leaderCancel },
-    .{ .name = "vim-find-file", .call = vimFindFile },
-    .{ .name = "vim-share", .call = vimShare },
-    .{ .name = "vim-palette", .call = vimPalette },
-    .{ .name = "vim-split", .call = vimSplit },
-    .{ .name = "vim-vsplit", .call = vimVsplit },
-    .{ .name = "vim-focus-other", .call = vimFocusOther },
-    .{ .name = "vim-unsplit", .call = vimUnsplit },
-    .{ .name = "vim-win-left", .call = vimWinLeft },
-    .{ .name = "vim-win-right", .call = vimWinRight },
-    .{ .name = "vim-win-up", .call = vimWinUp },
-    .{ .name = "vim-win-down", .call = vimWinDown },
-    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft },
-    .{ .name = "vim-win-move-right", .call = vimWinMoveRight },
-    .{ .name = "vim-win-move-up", .call = vimWinMoveUp },
-    .{ .name = "vim-win-move-down", .call = vimWinMoveDown },
-    .{ .name = "vim-goto-top", .call = vimGotoTop },
-    .{ .name = "vim-center", .call = vimCenter },
-    .{ .name = "find-f", .call = enterFindF },
-    .{ .name = "find-F", .call = enterFindBigF },
-    .{ .name = "find-t", .call = enterFindT },
-    .{ .name = "find-T", .call = enterFindBigT },
-    .{ .name = "vim-repeat-find", .call = repeatFind },
-    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev },
-    .{ .name = "vim-replace-char", .call = enterReplaceChar },
-    .{ .name = "do-replace-char", .call = doReplaceChar },
-    .{ .name = "vim-tilde", .call = tildeCase },
-    .{ .name = "do-find-f", .call = doFindF },
-    .{ .name = "do-find-F", .call = doFindBigF },
-    .{ .name = "do-find-t", .call = doFindT },
-    .{ .name = "do-find-T", .call = doFindBigT },
+    .{ .name = "leader-cancel", .call = leaderCancel, .arity = .whole },
+    .{ .name = "vim-find-file", .call = vimFindFile, .arity = .whole },
+    .{ .name = "vim-share", .call = vimShare, .arity = .whole },
+    .{ .name = "vim-palette", .call = vimPalette, .arity = .whole },
+    .{ .name = "vim-split", .call = vimSplit, .arity = .whole },
+    .{ .name = "vim-vsplit", .call = vimVsplit, .arity = .whole },
+    .{ .name = "vim-focus-other", .call = vimFocusOther, .arity = .whole },
+    .{ .name = "vim-unsplit", .call = vimUnsplit, .arity = .whole },
+    .{ .name = "vim-win-left", .call = vimWinLeft, .arity = .whole },
+    .{ .name = "vim-win-right", .call = vimWinRight, .arity = .whole },
+    .{ .name = "vim-win-up", .call = vimWinUp, .arity = .whole },
+    .{ .name = "vim-win-down", .call = vimWinDown, .arity = .whole },
+    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft, .arity = .whole },
+    .{ .name = "vim-win-move-right", .call = vimWinMoveRight, .arity = .whole },
+    .{ .name = "vim-win-move-up", .call = vimWinMoveUp, .arity = .whole },
+    .{ .name = "vim-win-move-down", .call = vimWinMoveDown, .arity = .whole },
+    .{ .name = "vim-goto-top", .call = vimGotoTop, .arity = each },
+    .{ .name = "vim-center", .call = vimCenter, .arity = .whole },
+    .{ .name = "find-f", .call = enterFindF, .arity = .whole },
+    .{ .name = "find-F", .call = enterFindBigF, .arity = .whole },
+    .{ .name = "find-t", .call = enterFindT, .arity = .whole },
+    .{ .name = "find-T", .call = enterFindBigT, .arity = .whole },
+    .{ .name = "vim-repeat-find", .call = repeatFind, .arity = each },
+    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev, .arity = each },
+    .{ .name = "vim-replace-char", .call = enterReplaceChar, .arity = .whole },
+    .{ .name = "do-replace-char", .call = doReplaceChar, .arity = each },
+    .{ .name = "vim-tilde", .call = tildeCase, .arity = each },
+    .{ .name = "do-find-f", .call = doFindF, .arity = each },
+    .{ .name = "do-find-F", .call = doFindBigF, .arity = each },
+    .{ .name = "do-find-t", .call = doFindT, .arity = each },
+    .{ .name = "do-find-T", .call = doFindBigT, .arity = each },
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
-    .{ .name = "vim-zero", .call = zeroKey },
-    .{ .name = "vim-delete-char", .call = deleteCharFwd },
+    .{ .name = "vim-zero", .call = zeroKey, .arity = each },
+    .{ .name = "vim-delete-char", .call = deleteCharFwd, .arity = each },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
-    .{ .name = "vim-ex", .call = ex.enter },
+    .{ .name = "vim-ex", .call = ex.enter, .arity = .whole },
 };
 
 /// The `:` line's own editing commands, from the shared `prompt` library —
@@ -458,7 +464,7 @@ const static_cmds = [_]weft.CommandEntry{
 /// vim's `Cmd` so `on_command`'s id indexing stays one flat table.
 const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
     var arr: [ex.commands.len]weft.CommandEntry = undefined;
-    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    for (ex.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
     break :blk arr;
 };
 
@@ -476,15 +482,15 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
     var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump) };
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump), .arity = each };
         i += 1;
         if (m.in_op) {
-            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion) };
+            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion), .arity = each };
             i += 1;
         }
     }
     for (to_objs) |obj| {
-        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj) };
+        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj), .arity = each };
         i += 1;
     }
     break :blk arr;
@@ -494,6 +500,7 @@ const register_cmds: [26]weft.CommandEntry = blk: {
     for (0..26) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
         .call = chooseRegister(@intCast(i + 1)),
+        .arity = .whole,
     };
     break :blk arr;
 };
@@ -503,6 +510,7 @@ const count_cmds: [9]weft.CommandEntry = blk: {
     for (0..9) |i| arr[i] = .{
         .name = std.fmt.comptimePrint("vim-count-{d}", .{i + 1}),
         .call = countDigit(@intCast(i + 1)),
+        .arity = .whole,
     };
     break :blk arr;
 };
@@ -511,8 +519,8 @@ const macro_cmds: [52]weft.CommandEntry = blk: {
     var arr: [52]weft.CommandEntry = undefined;
     for (0..26) |i| {
         const c: u8 = 'a' + @as(u8, @intCast(i));
-        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c) };
-        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c) };
+        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c), .arity = .whole };
+        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c), .arity = .whole };
     }
     break :blk arr;
 };
@@ -549,6 +557,8 @@ const preserve_register = blk: {
 comptime {
     // `.clipboard` is declared for the approval surface to show; it confers
     // nothing — only the config's `weft.grant("vim", "clipboard")` does.
+    // Every entry says its arity: a verb is `each`; what only enters a mode,
+    // picks a register or opens a window says `.whole`.
     weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
 }
 
@@ -915,10 +925,30 @@ fn visual() void { // v — charwise
 }
 fn visualLine() void { // V — linewise
     visual_linewise = true;
-    weft.run("set-mark");
+    // Over a listing's rows a line IS a row: the range is rows, whatever
+    // part of the row is focused.
+    weft.run(if (weft.posture() == .text) "set-mark" else "mark-rows");
     weft.setMode("visual");
 }
+/// Whether the selection is a range of more than one row of a scene.
+fn rowRange() bool {
+    const set = weft.selections();
+    if (set.items.len == 0) return false;
+    const s = set.items[set.primary];
+    return s.kind == .rows and s.anchor != s.head;
+}
+
 fn visualDelete() void {
+    if (visual_linewise and rowRange()) {
+        // `V j d` over rows: the rows selected are the view's to delete — a
+        // range of them is one request (the files listing flags each). One
+        // row goes the transfer's way, below: yanked, then flagged.
+        weft.run("selection-delete");
+        weft.run("clear-selection");
+        visual_linewise = false;
+        weft.exitToResting();
+        return;
+    }
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
@@ -1111,23 +1141,37 @@ fn openContainer() void {
     weft.jump(if (first_range.end == after_up) first_range.start else first_range.end);
 }
 
+// A transfer key is two verbs with two mappings. Over rows the view's
+// transfer is ONE request for every selected row — run per row, each run
+// would replace the one captured value. Over text it is one yank or put per
+// caret. So the key's command is `.whole` and only ROUTES: to the view's
+// transfer when something offers it, else to its text half, a command of
+// its own that maps `each`.
 fn yankLine() void {
     if (transferred(std_yank, semantic_action.copy)) return;
+    weft.run("vim-yank-line-text");
+}
+fn yankLineText() void {
     const l = weft.lineAt(weft.cursor());
     yankCurrent(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
-    if (clip_register) return pasteClipboard(true);
-    if (transferred(std_paste, semantic_action.paste_after)) return;
-    const slot = consumeRegister();
-    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), true, slot);
+    if (!clip_register and transferred(std_paste, semantic_action.paste_after)) return;
+    weft.run("vim-paste-text");
 }
 fn pasteBefore() void {
-    if (clip_register) return pasteClipboard(false);
-    if (transferred(std_paste, semantic_action.paste_before)) return;
-    const slot = consumeRegister();
-    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), false, slot);
+    if (!clip_register and transferred(std_paste, semantic_action.paste_before)) return;
+    weft.run("vim-paste-before-text");
+}
+fn pasteText(comptime after: bool) fn () void {
+    return struct {
+        fn h() void {
+            if (clip_register) return pasteClipboard(after);
+            const slot = consumeRegister();
+            put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), after, slot);
+        }
+    }.h;
 }
 
 /// `"+p`/`"+P`: paste the desktop clipboard. When it still holds what vim
@@ -1267,6 +1311,10 @@ fn opLine() void {
         enterAfterOp();
         return;
     }
+    // The text half, per caret (see `yankLine`).
+    weft.run("vim-op-line-text");
+}
+fn opLineText() void {
     const l = weft.lineAt(weft.cursor());
     if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
@@ -1300,11 +1348,11 @@ fn opLine() void {
 // ── Files ──────────────────────────────────────────────────────────────
 fn findFile() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", file_pick);
 }
 fn openChosen(choice: []const u8) void {
     if (choice.len == 0) return;
-    weft.runStr("open", choice);
+    weft.openTyped(choice);
 }
 
 // ── Leader / prefix chords (bound as mode-preserving SEQUENCES) ──

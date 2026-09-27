@@ -16,7 +16,7 @@ const WasmPlugin = shared.WasmPlugin;
 pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
     p.cur_activate_path = path;
     defer p.cur_activate_path = &.{};
-    contract.callOptionalExport("on_activate", &p.instance, .{}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_activate", p, .{}) catch {}; // MissingExport → skip
 }
 
 /// Service a plugin's async proc I/O — but only when there's something to do.
@@ -29,7 +29,7 @@ pub fn notifyPollIfReady(p: *WasmPlugin) bool {
         if (maybe) |s| if (s.pending() > 0) break true;
     } else false;
     if (!ready) return false;
-    contract.callOptionalExport("on_poll", &p.instance, .{}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_poll", p, .{}) catch {}; // MissingExport → skip
     return true;
 }
 
@@ -120,7 +120,7 @@ pub fn deliverSignals(gpa: std.mem.Allocator, plugins: []const *WasmPlugin) bool
         for (plugins) |p| {
             for (p.signal_subscriptions.items, 0..) |known, id| {
                 if (!std.mem.eql(u8, known, name)) continue;
-                contract.callOptionalExport("on_signal", &p.instance, .{@as(i32, @intCast(id))}) catch continue;
+                contract.callOptionalExport("on_signal", p, .{@as(i32, @intCast(id))}) catch continue;
                 ran = true;
             }
         }

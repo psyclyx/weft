@@ -37,6 +37,8 @@ pub const register = @import("register.zig");
 /// "unwanted" are different claims and only the author can make the second.
 pub const watch = @import("watch.zig");
 pub const Editor = @import("Editor.zig");
+/// A text entry as a frame reads it, at one revision (doc/model.md §2.7).
+pub const TextSnapshot = @import("TextSnapshot.zig");
 pub const Buffers = @import("Buffers.zig");
 /// The compact editor environment core's own tests run against. Exported
 /// because a cross-layer test — one that drives core's membrane through app's
@@ -72,6 +74,9 @@ pub const facts = @import("weft_facts");
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
+/// The schema-directed slot host every plugin exchange (gutter, status line,
+/// badges) is fired through.
+pub const slot = @import("slot.zig");
 /// The gutter's plugin exchange: the `ui/gutter-segment` slot's name and schema.
 pub const gutter = @import("gutter.zig");
 /// The status line's plugin exchange: the `ui/statusline-seg` slot's name
@@ -83,11 +88,15 @@ pub const flash = @import("flash.zig");
 /// A head's position history and its travel (C-o/C-i), anchored so entries
 /// survive edits.
 pub const jumplist = @import("jumplist.zig");
+pub const designation = @import("designation.zig");
 /// A head's system clipboard: an in-memory store, or the platform's once the
 /// shell installs a backend.
 pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
+/// The one selection model: extents of text or rows, and how a command maps
+/// over them (doc/model.md §2.6).
+pub const selection = @import("selection.zig");
 pub const intent = @import("intent.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");
@@ -97,7 +106,7 @@ pub const capability = @import("capability.zig");
 pub const Caps = capability.Caps;
 pub const status_feed = @import("status_feed.zig");
 pub const viewport = @import("viewport.zig");
-pub const focus_feed = @import("focus_feed.zig");
+pub const context = @import("context.zig");
 pub const placement = @import("placement.zig");
 pub const complete_ui = @import("complete_ui.zig");
 // nav_ui (hover/definition/symbols consumers) removed — moved to the `lsp` plugin.
@@ -131,6 +140,7 @@ test {
     // in src/weft.zig's test block while core was compiled into that module.
     // Core is its own module now, and a module owns its tests.
     _ = @import("target_open.zig");
+    _ = @import("TextSnapshot.zig");
     _ = @import("intentions.zig");
     _ = @import("tests.zig");
     _ = @import("markdown.zig");

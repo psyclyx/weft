@@ -144,7 +144,18 @@ guessed. `present=0` removes a previously published cursor, including when the
 sender cannot name an interior compacted position safely.
 
 A buffer is shared with an op-class `share` frame (kind 2) on channel
-0: payload = `uv base | uv name_len | name`. Base allocation is
+0: payload = `uv base | uv name_len | name | u8 kind | [16]u8 doc_id`,
+where the last two are additive trailers. `kind` is `0` text, `1` graph;
+absent means text, and an unrecognized kind skips the whole offer (a
+surface this build cannot render fails closed). `doc_id` (text shares
+only) is the document's minted identity (doc/model.md §2.1): 128 random
+bits given when the document was created, never derived from content. It
+is what lets a peer designate the document as `weft://<peer>/doc/<id>`
+across reconnects, where `base` is re-allocated; the joined replica
+adopts it. A sender that predates it sends no id and its offer still
+opens — only its durable name degrades to the receiver's own replica.
+A receiver that predates it reads the kind byte and stops, so the id is
+invisible to it; the wire version is unchanged. Base allocation is
 role-split so both sides can share concurrently without coordination:
 servers allocate 16, 24, 32, …; clients 20, 28, 36, …. The receiver
 records the offer; opening it is local (bind a Collab at that base and

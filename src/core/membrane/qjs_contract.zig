@@ -125,12 +125,13 @@ pub const imports = [_]Entry{
     e("qjs_status_segment", 7, 0, .config, "weft.statusSegment(text, role, priority, command): stage a static ui/statusline-seg segment onto the manifest; a click on it runs `command` (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
     e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent | {rows}, cycles, persistent, followFocus, takesFocus, statusLine, shown}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),
-    e("qjs_present", 6, 0, .config, "weft.present(viewport, {subject, command}): stage \"show this subject in that viewport\", opened by `open` or by the named command (doc/contextual-workspace-architecture.md §7)"),
+    e("qjs_present", 9, 0, .config, "weft.present(viewport, {subject, as, reveal}): stage \"show this subject in that viewport\" — a designation or ONE context key (flags bit 0), as a projection, revealing a designation or key (bit 1) inside it (doc/model.md §2.5)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
     e("qjs_declare_command", 2, 0, .plugin, "declare a command name — the twin of wl_declare_command, same body"),
     e("qjs_declare_command_doc", 6, 0, .plugin, "declare a command with its parameter list and one-line summary — the twin of wl_declare_command_doc, same body"),
+    e("qjs_declare_arity", 5, 0, .plugin, "say how a declared command maps over several selections — the twin of wl_declare_arity, same body"),
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
@@ -177,6 +178,10 @@ pub const imports = [_]Entry{
     e("qjs_clipboard_get", 2, 1, .plugin, "weft.clipboardGet(): the system clipboard's text (grant: clipboard)"),
     e("qjs_jump_push", 0, 0, .plugin, "weft.jumpPush(): remember the caret as a jump in the head's jumplist"),
     e("qjs_macro_recording", 0, 1, .plugin, "weft.macroRecording(): the register a macro is recording into, or null"),
+    // Context, running `wasm_host/context.zig`'s bodies — the ones
+    // `wl_context_set`/`wl_context_get` run.
+    e("qjs_context_set", 7, 1, .plugin, "weft.contextSet(key, value, scope[, place]): publish a key under the plugin's own name at entry/place/global — at a place a designation names, when given; empty retracts"),
+    e("qjs_context_get", 4, 1, .plugin, "weft.contextGet(key): the primary context's value for any key, or null"),
 };
 
 // ── Parity with the wasm plane ───────────────────────────────────────
@@ -232,6 +237,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .pointer, .state = .shared, .note = "wl_pointer and qjs_pointer run wasm_host/pointer.zig's one body: a config's command bound to `mouse-1` reads where the click was exactly as a wasm plugin's does" },
     .{ .group = .clipboard, .state = .shared, .note = "wl_clipboard_* and qjs_clipboard_* run wasm_host/clipboard.zig's bodies behind the same config-only grant: a JS grammar mirrors a register into the desktop clipboard exactly as a wasm one does" },
     .{ .group = .history, .state = .shared, .note = "wl_jump_push/wl_macro_recording and their qjs_* twins run wasm_host/history.zig's bodies: a JS grammar decides what a jump is and shows a recording chip through the same door" },
+    .{ .group = .context, .state = .shared, .note = "wl_context_set/get and their qjs_* twins run wasm_host/context.zig's bodies: a JS plugin publishes `acp.session` exactly as the repl publishes `repl.session`. `wl_context_changed` is wasm-only until the JS plane has an `on_context_changed` to read it in" },
     .{ .group = .surface, .state = .absent, .note = "no retained overlay: acp.js and dap.js have a status chip and a buffer, and cannot paint the corner surface which_key and git use. Same shape as .edit — shared bodies plus C shim" },
     .{ .group = .slot, .state = .absent, .note = "a JS plugin can neither provide nor consume a typed capability, so it cannot participate in the D2 mesh at all — the biggest single second-classness left" },
     .{ .group = .intent, .state = .absent, .note = "cannot publish offers, so a JS-owned buffer answers no standard intention and its keys must all be bound by hand" },
@@ -245,7 +251,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .capability, .state = .absent, .note = "the completion provider surface (wl_caps_*)" },
     .{ .group = .syntax, .state = .absent, .note = "tree-sitter reads: no caller yet" },
     .{ .group = .activation, .state = .absent, .note = "on_activate has no JS export twin" },
-    .{ .group = .tool, .state = .absent, .note = "tool-backing declaration" },
+    .{ .group = .tool, .state = .absent, .note = "tool-backing and designation doors (wl_entry_designation/designate, wl_designation_opener): a JS-owned entry is named by what core derives — its document — and a JS plugin cannot claim a projection kind or reattach a process" },
     .{ .group = .register, .state = .absent, .note = "the shared kill/yank ring" },
     .{ .group = .sessions, .state = .absent, .note = "repl/net sessions; the JS plane has raw proc, which is the transport underneath them" },
 };
@@ -255,7 +261,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 48;
+const expected_count = 51;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -326,7 +332,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 16), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 32), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 35), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -353,13 +359,13 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     }
     // A `.shared` claim is a claim about BODIES, and `e2e/demolition_test.zig`
     // checks those by function pointer. What this asserts is that nobody
-    // relabelled a gap as shared without one: today five groups have earned
-    // it — proc, edit, pointer, clipboard and history.
+    // relabelled a gap as shared without one: today six groups have earned
+    // it — proc, edit, pointer, clipboard, history and context.
     var shared: usize = 0;
     for (parity) |p| {
         if (p.state == .shared) shared += 1;
     }
-    try t.expectEqual(@as(usize, 5), shared);
+    try t.expectEqual(@as(usize, 6), shared);
 
     // And the honest headline: how many doors a JS plugin reaches, against
     // the wasm plane's `weft_membrane.imports.len` (which the census in
@@ -380,7 +386,10 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     //
     // 44 → 48 with the clipboard pair and the history pair (jump push, macro
     // recording state): shared from birth, one body each.
-    try t.expectEqual(@as(usize, 48), imports.len);
+    //
+    // 48 → 50 with the context pair (publish a key, read the primary
+    // context), shared from birth.
+    try t.expectEqual(@as(usize, 51), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

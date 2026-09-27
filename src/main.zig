@@ -124,7 +124,18 @@ pub fn main(init: std.process.Init) !void {
     try session.init(gpa, pool, args.user, &providers_state.grammars);
     defer session.deinit(gpa);
     const buffers = &session.system.buffers;
-    if (args.file) |path| {
+    // The command line is the one place a relative path means what the person
+    // typed: relative to the directory they launched from. It is made absolute
+    // HERE, once, so everything downstream holds a name (doc/model.md §2.1)
+    // rather than a path relative to a directory it cannot see.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const launch_dir = core.file.processDirectory(&cwd_buf) orelse "/";
+    const cli_file: ?[]u8 = if (args.file) |raw|
+        (if (args.connect != null) try gpa.dupe(u8, raw) else try std.fs.path.resolve(gpa, &.{ launch_dir, raw }))
+    else
+        null;
+    defer if (cli_file) |p| gpa.free(p);
+    if (cli_file) |path| {
         const b0 = buffers.active();
         const ed = b0.textEditor().?;
         gpa.free(b0.name);
@@ -341,6 +352,7 @@ pub fn main(init: std.process.Init) !void {
         },
     };
     try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);
+    session.file_opener = buffer_command_context.fileOpener();
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     // `Collab` owns the whole connection cluster (outbound conn/session/partial,
@@ -377,6 +389,10 @@ pub fn main(init: std.process.Init) !void {
     // the share surface).
     attach_deps.share = &collab_state.share_ctx;
     try collab_cmds.registerCommands(gpa, &session.system.commands, &collab_state.share_ctx, &known_peers);
+    // A peer designation opens through the connection that reaches it, and
+    // reads by the name the person connected to it by.
+    buffer_command_context.peers = .{ .context = &collab_state.share_ctx, .open = collab_cmds.openPeer };
+    session.cmd_ctx.peer_names = .{ .context = &collab_state.share_ctx, .name = collab_cmds.peerName };
     // `system-swap`'s live-collab refusal (task #19 item 2) — wired NOW that
     // `collab_state` exists at a stable address; `swap_data` was bound onto
     // every hosted system's commands earlier with this predicate unset
@@ -655,6 +671,10 @@ pub fn main(init: std.process.Init) !void {
     var present_pending = false;
     var present_retry_ctx: loop_sources.PresentRetryCtx = .{ .pending = &present_pending, .swapchain_stale = &whead.ctx.swapchain_stale };
     _ = try sched.addTimer(&present_retry_ctx, loop_sources.presentRetryDue, "present_retry");
+    // Provider answers a frame asked for landed after it (doc/model.md §2.7):
+    // the frame that draws them is due without further input.
+    var redraw_due = false;
+    _ = try sched.addTimer(&redraw_due, loop_sources.redrawDue, "answers_landed");
 
     // The outbound session's wake-fd (§6 W2a-3 item 3) exists for the whole
     // run regardless of whether a session is bound to it yet (`Collab`
@@ -735,6 +755,7 @@ pub fn main(init: std.process.Init) !void {
             .frame_start = frame_start,
             .fb = fb,
         });
+        redraw_due = advanced.redraw;
         // The hub's wake-fd source tracks the Hub struct's own lifetime
         // (listen/stop-listen, connect/disconnect are all funneled through
         // `applyIntents`/`tickCollab` above) — reconcile once per wake.

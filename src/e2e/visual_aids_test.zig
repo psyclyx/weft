@@ -17,8 +17,9 @@ const ui_mesh = h.view.ui_mesh;
 
 /// The gutter cells the active entry's pane shows for `line`, joined — read
 /// through the SAME resolution a frame uses (`frame_builder.gutterFrame`:
-/// the eligible providers for this entry's facts, and a plugin's window
-/// round), not a reimplementation of it. "" when no provider answers.
+/// the eligible providers for this entry's facts, and the plugin answers the
+/// pane has, which the wake that drew the last frame asked for), not a
+/// reimplementation of it. "" when no provider answers.
 fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(ed.gpa);
     defer arena.deinit();
@@ -26,7 +27,8 @@ fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     const buf = ed.buffers.active();
     const text_ed = buf.textEditor();
     const fx = &ed.application.driver.ctx;
-    const gf = try h.app.frame_builder.gutterFrame(a, fx, h.app.frame_builder.paneFacts(fx, buf, ed.head.focused_pane), text_ed, null, "");
+    const pane = ed.head.focused_pane;
+    const gf = try h.app.frame_builder.gutterFrame(a, fx, &ed.render.fb.answers, pane, buf, h.app.frame_builder.paneFacts(fx, buf, pane), null, "");
     var args: ui_mesh.GutterLineArgs = .{
         .line = line,
         .row = if (text_ed) |e| e.text().lineRange(line) else .{ .start = 0, .end = 0 },
@@ -42,6 +44,16 @@ fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
         n += s.text.len;
     }
     return out[0..n];
+}
+
+/// When the focused pane's newest gutter answer was stored — unchanged
+/// means nobody was asked again.
+fn gutterStamp(ed: *Editor) u64 {
+    var newest: u64 = 0;
+    for (ed.render.fb.answers.entries.items) |e| {
+        if (e.pane == ed.head.focused_pane and e.answer == .gutter) newest = @max(newest, e.stamp);
+    }
+    return newest;
 }
 
 fn cursor(ed: *Editor) usize {
@@ -85,6 +97,21 @@ test "e2e/visual-aids: config.js numbers text entries relative to the caret, and
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[0].stops[0].x, 0.01);
     try t.expectApproxEqAbs(view.origin_x + 3 * view.cell_w, lines[5].stops[0].x, 0.01);
     app.proj.shot(ed, "visual-linenumbers");
+
+    // The column follows the caret on the frame it moves. The answer is a
+    // formula the renderer evaluates against the snapshot it draws, so the
+    // move asks the provider nothing — no new answer, none pending — and the
+    // very next frame is already renumbered from the new caret line.
+    const answered = gutterStamp(ed);
+    try t.expect(answered != 0);
+    ed.press("j", ""); // the caret on line 4 (index 3)
+    const moved = try ed.renderComposite();
+    gpa.free(moved);
+    try t.expectEqualStrings(" 4 ", try gutterText(ed, 3, &buf));
+    try t.expectEqualStrings(" 1 ", try gutterText(ed, 2, &buf));
+    try t.expectEqualStrings(" 3 ", try gutterText(ed, 0, &buf));
+    try t.expectEqual(answered, gutterStamp(ed));
+    for (ed.render.fb.answers.pending.items) |p| try t.expect(p.ask != .gutter);
 
     // A git status is a projection, not a file: the provider's predicate
     // (text posture, no tool) is evaluated by the host, so it is never asked
@@ -243,4 +270,30 @@ test "e2e/visual-aids: snipe — one hit jumps, several are labelled, and d comp
     const after = try ed.textAlloc();
     defer gpa.free(after);
     try t.expectEqualStrings("psilon\n", after);
+}
+
+test "e2e/visual-aids: `d f` over two carets is refused, never a delete at the primary alone" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "twice.txt", "ab x\ncd x\n");
+    ed.chord("g g");
+    const text_ed = ed.buffers.active().textEditor().?;
+    try text_ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 5, .head = 5 } }, 1);
+
+    // The labelled search is ONE interaction from one caret — "the label
+    // you pick" has no per-caret reading — so snipe's operator says nothing
+    // about several selections and is refused.
+    ed.press("d", "");
+    ed.press("f", "");
+    try t.expectEqualStrings("snipe-op-f: acts on one selection; several are selected", ed.echoText());
+    try t.expect(!std.mem.eql(u8, "snipe-char", ed.mode()));
+    ed.press("Escape", "");
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("ab x\ncd x\n", text);
+    try t.expectEqual(@as(usize, 2), text_ed.selectionCount());
 }

@@ -61,6 +61,8 @@ const Env = struct {
     /// loaded here adopts its authority exactly the way production does
     /// (`grant` below stands in for the config plane's `weft.grant`).
     grants: grants_mod.HandleTable,
+    /// The published-context store (`weft.contextSet` lands here).
+    context: @import("../context.zig").Context,
     ctx: command.Context,
 
     fn init(gpa: Allocator, self: *Env) !void {
@@ -75,6 +77,7 @@ const Env = struct {
         self.semantic = @import("../semantic.zig").Services.init(.here);
         self.quit = false;
         self.grants = grants_mod.HandleTable.init(gpa);
+        self.context = .init(gpa);
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
@@ -86,6 +89,7 @@ const Env = struct {
             .quit = &self.quit,
             .head = &self.head,
             .grant_table = &self.grants,
+            .context = &self.context,
         };
     }
 
@@ -98,6 +102,7 @@ const Env = struct {
 
     fn deinit(self: *Env, gpa: Allocator) void {
         self.grants.deinit();
+        self.context.deinit();
         self.actions.deinit();
         self.semantic.deinit(gpa);
         self.caps.deinit();
@@ -354,6 +359,48 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     try t.expect(env.commands.resolve("greet") != null);
     _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
     try t.expectEqualStrings("hi from js", env.head.echo.items);
+}
+
+test "quickjs: a JS plugin publishes context through the wasm door's body, config gates on it, unloading retracts it" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const intent = @import("../intent.zig");
+
+    // Config: a provider offered only where an agent session is live.
+    try evalConfig(&engine, &env.ctx, null, null, null,
+        \\weft.action("plugin.chat.send");
+        \\weft.provide("plugin.chat.send", { context: { "chat.session": "*" } }, "chat-send");
+    );
+    const src =
+        \\weft.command("go", () => weft.echo(String(weft.contextSet("chat.session", "*acp*", "place"))));
+        \\weft.command("read", () => weft.echo(String(weft.contextGet("chat.session"))));
+        \\weft.command("bad", () => weft.echo(String(weft.contextSet("mode", "x", "global"))));
+        \\weft.command("stop", () => weft.contextSet("chat.session", "", "place"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "chat", null, src);
+    var loaded = true;
+    defer if (loaded) plugin.deinit();
+
+    try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("plugin.chat.send", intent.factsFor(&env.ctx)));
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    try t.expectEqualStrings("true", env.head.echo.items);
+    try t.expectEqualStrings("chat-send", env.actions.resolveFacts("plugin.chat.send", intent.factsFor(&env.ctx)).?);
+    // A builtin is not a plugin's to publish, on this plane either.
+    _ = try command.run(&env.commands, &env.ctx, "bad", &.{});
+    try t.expectEqualStrings("false", env.head.echo.items);
+    // Reading answers the PRIMARY context, and there is none without a
+    // layout: honest absence, not the active entry passed off as primary.
+    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    try t.expectEqualStrings("null", env.head.echo.items);
+
+    // Unloading retracts what it published, with no `stop` ever run.
+    plugin.deinit();
+    loaded = false;
+    try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("plugin.chat.send", intent.factsFor(&env.ctx)));
 }
 
 test "quickjs: weft.pick delivers structured acceptance and cancellation" {

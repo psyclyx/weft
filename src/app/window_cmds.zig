@@ -7,6 +7,7 @@ const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
 const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
+const semantic_model = @import("weft_semantic");
 const ok_echo = @import("handler.zig").ok_echo;
 
 /// Window-layout intents; applied in the frame loop (which owns the pane
@@ -120,7 +121,8 @@ pub fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
 /// This is also where the workspace enforces the two viewport attributes the
 /// pane tree cannot (`core/viewport.zig`): `persistent` decides which way the
 /// focused-pane/active-entry mirror runs, and `focus_source` decides whether
-/// a focus change is published on `focus`.
+/// a focus change moves the head's primary focus — the one input the primary
+/// context (`core/context.zig`) reads focus from.
 pub fn applyIntents(
     win_ctx: *WindowCtx,
     win_layout: *window_layout.Layout,
@@ -131,7 +133,6 @@ pub fn applyIntents(
     keymap: *const core.Keymap,
     last_frame_rect: region.Rect,
     policy: *const core.placement.Policy,
-    focus: *core.focus_feed.Feed,
 ) bool {
     var dirty = false;
     if (win_ctx.split) |axis| {
@@ -211,7 +212,7 @@ pub fn applyIntents(
             }
         }.visit);
     }
-    publishFocus(win_layout, head, focus);
+    recordPrimaryFocus(win_layout, head);
     return dirty;
 }
 
@@ -271,7 +272,9 @@ fn applyPlacement(
 /// sealed and must not touch a workspace. Each declaration is materialized
 /// once — the registry remembers the pane — so this is a cheap scan on every
 /// later frame, and a config reload re-presenting a new subject picks it up
-/// without re-docking anything.
+/// without re-docking anything. A subject bound to a context key is presented
+/// again when the frame boundary reports that key moved
+/// (`Registry.follow`), which runs this again; a reveal likewise.
 ///
 /// Only docked viewports are realized today: a tiled declaration has no
 /// stated position to place it at, which is the `ui/layout` slot's business,
@@ -303,44 +306,330 @@ pub fn materializeViewports(
             continue;
         }
         // A pending take, only while its entry is still open.
-        const take: ?core.Buffers.Id = if (decl.take) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
-        decl.take = null;
+        const take: ?core.Buffers.Id = if (decl.take) |held| (if (core.designation.findText(buffers, held)) |b| b.id else null) else null;
+        core.viewport.Registry.hold(gpa, &decl.take, null) catch {};
+        // Docking again after a hide: show what it showed last. That is a
+        // designation, so it is whichever entry opens it now — or, when that
+        // entry has closed since, the designation opened again below; never
+        // the stranger that took the closed entry's slot.
+        var kept: ?core.Buffers.Id = null;
+        var docked = false;
         if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
+            kept = if (decl.entry) |held| (if (core.designation.findText(buffers, held)) |b| b.id else null) else null;
             // Dock showing what it showed last (or is being handed), never a
             // second view of the active document when there is one.
-            const kept: ?core.Buffers.Id = if (decl.entry) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
             const first = take orelse kept orelse buffers.active_id;
             const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
             decl.pane = panel.leaf.id;
             // Something to show already: an entry kept across a hide stays
             // what it was, rather than being re-presented over.
             decl.presented = kept != null and take == null;
+            docked = true;
             dirty = true;
         }
         const node = win_layout.paneById(decl.pane.?) orelse continue;
         if (take) |id| {
             takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
-            decl.entry = heldRef(buffers, id);
+            hold(gpa, buffers, decl, id);
             decl.presented = true; // what was taken replaces what was declared
             dirty = true;
             continue;
         }
-        if (decl.presented or !decl.hasPresentation()) {
-            if (decl.entry == null) decl.entry = heldRef(buffers, node.pane().buffer_id);
-            continue;
+        if (docked and kept == null) if (decl.entry) |held| {
+            const again = gpa.dupe(u8, held) catch continue;
+            defer gpa.free(again);
+            if (core.Buffers.quietly(head, reopenInto, .{ ctx, buffers, gpa, head, keymap, node, again })) {
+                decl.presented = true;
+                continue;
+            }
+            // Gone for good (a process that exited): forget it, and present
+            // what the viewport declares instead.
+            core.viewport.Registry.hold(gpa, &decl.entry, null) catch {};
+            decl.presented = false;
+        };
+        // Shown again after a hide: a subject bound to a key that moved
+        // while the viewport was away presents afresh; one that did not keeps
+        // what it showed.
+        if (docked and decl.presented and decl.subject.key) {
+            var probe: [core.designation.max_len + 64]u8 = undefined;
+            const now = subjectNow(ctx, decl, &probe) orelse "";
+            if (decl.resolved) |was| if (!std.mem.eql(u8, was, now)) {
+                decl.presented = false;
+            };
         }
-        decl.presented = true;
-        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
-        decl.entry = heldRef(buffers, node.pane().buffer_id);
-        dirty = true;
+        if (!decl.presented and decl.hasPresentation()) {
+            decl.presented = true;
+            if (presentDeclared(ctx, win_layout, buffers, gpa, head, keymap, registry, decl, node)) dirty = true;
+        }
+        // A new reveal replaces one still waiting; a waiting one is asked
+        // again once its view has republished (the provider read what it
+        // needed off the frame path), never before.
+        if (decl.reveal_due or revealAnswerDue(ctx, decl)) {
+            decl.reveal_due = false;
+            decl.reveal_waits = null;
+            if (revealIn(ctx, buffers, head, decl, node)) dirty = true;
+        }
+        // What it holds follows what it shows: navigating inside a listing
+        // moves the listing's designation, and that is what showing it again
+        // must bring back.
+        hold(gpa, buffers, decl, node.pane().buffer_id);
     }
     return dirty;
 }
 
-/// What a viewport remembers of the entry it shows: its generation-checked
-/// ref, so a slot reused after that entry closes is never taken for it.
-fn heldRef(buffers: *core.Buffers, id: core.Buffers.Id) ?core.Buffers.Ref {
-    return (buffers.get(id) orelse return null).ref();
+/// Room for a subject's designation with its projection parameter added.
+const subject_cap = core.designation.max_len + 64;
+
+/// What `decl`'s subject names right now, `as` included, into `out`: the
+/// literal designation, or the current value of its key in the PRIMARY
+/// context (`intent.primaryScopeOf` — the one context everything that
+/// follows the editor reads). Null when the key has no value there, or the
+/// value cannot carry the projection asked for.
+fn subjectNow(ctx: *core.command.Context, decl: *const core.viewport.Declaration, out: []u8) ?[]const u8 {
+    const value: []const u8 = if (!decl.subject.key) decl.subject.text else blk: {
+        const scope = core.intent.primaryScopeOf(ctx) orelse return null;
+        break :blk core.intent.factsIn(scope).get(decl.subject.text) orelse return null;
+    };
+    return withProjection(out, value, decl.as);
+}
+
+/// `value` with the projection `as` added as its `as` view parameter
+/// (`designation.as_param`), which is where `open`'s routing reads it. A
+/// bare path has no kind to project, so it carries no `as`.
+fn withProjection(out: []u8, value: []const u8, as: []const u8) ?[]const u8 {
+    if (as.len == 0) return std.fmt.bufPrint(out, "{s}", .{value}) catch null;
+    const d = core.designation.durable.parse(value) orelse return null;
+    if (d.param(core.designation.as_param) != null) return null;
+    return std.fmt.bufPrint(out, "{s}{s}{s}={s}", .{ value, if (d.params.len == 0) "?" else "&", core.designation.as_param, as }) catch null;
+}
+
+/// Present what `decl` declares into `node`. A keyed subject whose key reads
+/// the same as when it was last presented keeps what the pane shows — the
+/// key changing is what re-presents, not the frame boundary having asked —
+/// so a persistent viewport keeps whatever the user navigated to inside it.
+/// A key with no value presents the explicit empty state, never the stale
+/// subject. The entry the previous presentation MADE (it did not exist
+/// before) is closed when nothing shows it any more, so following a key
+/// does not leave a trail of listings behind as tabs — by the ordinary,
+/// refusing close: an entry holding unsaved work (a draft rename in a
+/// listing) is never discarded by following, and stays as a tab, no longer
+/// the viewport's. True when the pane changed.
+fn presentDeclared(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+    node: *window_layout.Node,
+) bool {
+    var buf: [subject_cap]u8 = undefined;
+    const target = subjectNow(ctx, decl, &buf);
+    const now = target orelse "";
+    if (decl.subject.key) if (decl.resolved) |was| {
+        if (std.mem.eql(u8, was, now) and buffers.get(node.pane().buffer_id) != null) return false;
+    };
+    core.viewport.Registry.hold(gpa, &decl.resolved, now) catch {};
+    decl.reveal_due = decl.reveal.isSet();
+    const before = if (buffers.get(node.pane().buffer_id)) |b| b.ref() else null;
+    const born = buffers.next_generation;
+    if (target) |t| {
+        const owned = gpa.dupe(u8, t) catch return false;
+        defer gpa.free(owned);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, "open", owned);
+    } else presentEmpty(ctx, buffers, gpa, registry, decl, node);
+    const shown = buffers.get(node.pane().buffer_id);
+    // What the previous presentation made, and nothing shows any more.
+    if (decl.made) |made| if (buffers.resolve(made)) |old| {
+        // Through the shell's own close, borrowed for the one call, so the
+        // entry's providers go with it.
+        if (shown != old and old.id != buffers.active_id and !paneShows(win_layout, old.id))
+            _ = buffers.withEntry(gpa, old.id, head, keymap, closeEntry, .{ctx}) catch {};
+    };
+    // The empty state is the viewport's own: it goes once something real is
+    // shown, rather than lingering as a tab.
+    const own = if (decl.empty) |e| if (shown) |b| b.generation == e.entry_generation else false else false;
+    if (!own) retireEmpty(ctx, win_layout, buffers, gpa, head, keymap, registry, decl);
+    decl.made = if (shown) |b| (if (b.generation >= born and !own) b.ref() else null) else null;
+    const after = if (shown) |b| b.ref() else null;
+    return !std.meta.eql(before, after);
+}
+
+/// Close `decl`'s empty-state entry and its view, if it has one nothing else
+/// shows.
+fn retireEmpty(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+) void {
+    const empty = decl.empty orelse return;
+    var it = buffers.iterator();
+    const entry = while (it.next()) |b| {
+        if (b.generation == empty.entry_generation) break b;
+    } else null;
+    if (entry) |b| {
+        if (b.id == buffers.active_id or paneShows(win_layout, b.id)) return;
+        _ = buffers.withEntry(gpa, b.id, head, keymap, closeEntry, .{ctx}) catch {};
+    }
+    if (ctx.semantic) |services| if (registry.owner) |owner| {
+        _ = services.closeView(gpa, owner, empty.view);
+    };
+    decl.empty = null;
+}
+
+/// The shell's refusing close: a viewport retiring what it made never
+/// discards work the user did in it (`buffer-close` refuses a dirty file or
+/// an unapplied draft, and the entry stays).
+fn closeEntry(ctx: *core.command.Context) void {
+    _ = core.command.run(ctx.commands, ctx, "buffer-close", &.{}) catch {};
+}
+
+fn paneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
+    const Probe = struct { id: core.Buffers.Id, found: bool = false };
+    var probe: Probe = .{ .id = id };
+    win_layout.eachPane(&probe, struct {
+        fn visit(p: *Probe, pane: *window_layout.Pane) void {
+            if (pane.buffer_id == p.id) p.found = true;
+        }
+    }.visit);
+    return probe.found;
+}
+
+/// The explicit empty state: `decl`'s subject key has no value in the
+/// primary context, so the viewport says so rather than showing whatever it
+/// showed before. One entry per viewport, made on first need and reused: a
+/// view (core's own) with one line naming the key.
+fn presentEmpty(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+    node: *window_layout.Node,
+) void {
+    const services = ctx.semantic orelse return;
+    if (decl.empty) |empty| {
+        var it = buffers.iterator();
+        while (it.next()) |b| if (b.generation == empty.entry_generation) {
+            node.pane().buffer_id = b.id;
+            node.pane().top_row = 0;
+            return;
+        };
+        _ = services.closeView(gpa, registry.owner orelse return, empty.view);
+        decl.empty = null;
+    }
+    const owner = registry.owner orelse (services.acquireOwner() catch return);
+    registry.owner = owner;
+    var line: [256]u8 = undefined;
+    const label = std.fmt.bufPrint(&line, "Nothing to show: no {s} here", .{decl.subject.text}) catch "Nothing to show";
+    const children = [_]semantic_model.scene.Node{.{ .id = @enumFromInt(2), .role = "muted", .content = .{ .label = label } }};
+    const root: semantic_model.scene.Node = .{ .id = @enumFromInt(1), .role = "viewport.empty", .content = .{ .container = .{ .children = &children } } };
+    const view_ref = services.publishView(gpa, owner, null, 1, root) catch return;
+    const id = buffers.createView(gpa, decl.name, "viewport.empty") catch {
+        _ = services.closeView(gpa, owner, view_ref);
+        return;
+    };
+    const entry = buffers.get(id).?;
+    entry.tool_view = view_ref;
+    const instance = services.views.get(view_ref) orelse return;
+    var storage: [4]semantic_model.scene.NodeId = undefined;
+    if (instance.focusPath(root.id, &storage) catch null) |path| entry.scene_selection.set(gpa, path) catch {};
+    decl.empty = .{ .entry_generation = entry.generation, .view = view_ref };
+    node.pane().buffer_id = id;
+    node.pane().top_row = 0;
+}
+
+/// Highlight `decl`'s reveal inside what `node` shows, without taking focus
+/// (`Services.reveal`): the provider expands to it and names the node, and
+/// that node becomes the VIEW's revealed highlight. Neither the head's nor
+/// the entry's selection is handed over, so neither can move. A provider
+/// that must read first answers later: the reveal then waits on the view's
+/// next revision (`reveal_waits`). True when the highlight changed.
+fn revealIn(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    head: *const core.Head,
+    decl: *core.viewport.Declaration,
+    node: *window_layout.Node,
+) bool {
+    const services = ctx.semantic orelse return false;
+    const entry = buffers.get(node.pane().buffer_id) orelse return false;
+    var buf: [subject_cap]u8 = undefined;
+    const wanted: []const u8 = if (!decl.reveal.key) decl.reveal.text else blk: {
+        const scope = core.intent.primaryScopeOf(ctx) orelse return false;
+        const value = core.intent.factsIn(scope).get(decl.reveal.text) orelse return false;
+        break :blk std.fmt.bufPrint(&buf, "{s}", .{value}) catch return false;
+    };
+    const shown = if (entry.id == buffers.active_id) head.scene_selection.view else entry.scene_selection.view;
+    const view_ref = shown orelse entry.tool_view orelse return false;
+    switch (services.reveal(view_ref, wanted)) {
+        .revealed, .declined => {},
+        .pending => decl.reveal_waits = .{
+            .view = view_ref,
+            .revision = (services.views.get(view_ref) orelse return true).descriptor.revision,
+        },
+    }
+    return true;
+}
+
+/// Whether `decl`'s waiting reveal can be answered now: its view published
+/// a revision past the one the provider accepted it at. A view that closed
+/// meanwhile ends the wait unasked.
+fn revealAnswerDue(ctx: *core.command.Context, decl: *core.viewport.Declaration) bool {
+    const wait = decl.reveal_waits orelse return false;
+    const services = ctx.semantic orelse return false;
+    const instance = services.views.get(wait.view) orelse {
+        decl.reveal_waits = null;
+        return false;
+    };
+    return instance.descriptor.revision != wait.revision;
+}
+
+/// Open `designation` again and show it in `node` — a viewport's closed
+/// entry coming back. Unlike `presentBy`, the pane changes only when the
+/// designation really opened: a process that has exited is refused, and the
+/// pane must not be handed whatever happened to be active instead. The head
+/// goes back where it was either way.
+fn reopenInto(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: anytype,
+    designation: []const u8,
+) bool {
+    const restore = buffers.active_id;
+    const prev = buffers.prev_id;
+    defer if (buffers.active_id != restore and buffers.get(restore) != null) {
+        buffers.switchTo(gpa, restore, head, keymap) catch {};
+        buffers.prev_id = prev;
+    };
+    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = designation }}) catch return false;
+    const opened = core.designation.findText(buffers, designation) orelse return false;
+    node.pane().buffer_id = opened.id;
+    node.pane().top_row = 0;
+    return true;
+}
+
+/// What a viewport remembers of the entry it shows: that entry's
+/// designation, so a slot reused after the entry closes is never taken for
+/// it, and a closed entry is opened again instead of lost. An entry with no
+/// designation leaves nothing to remember.
+fn hold(gpa: std.mem.Allocator, buffers: *core.Buffers, decl: *core.viewport.Declaration, id: core.Buffers.Id) void {
+    var buf: [core.designation.max_len]u8 = undefined;
+    const held = if (buffers.get(id)) |b| core.designation.of(b, &buf) else null;
+    // Asked every frame for a shown viewport: unchanged is the common case,
+    // and costs no allocation.
+    if (held) |text| if (decl.entry) |old| if (std.mem.eql(u8, old, text)) return;
+    core.viewport.Registry.hold(gpa, &decl.entry, held) catch {};
 }
 
 /// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`
@@ -375,10 +664,9 @@ fn takeInto(
 /// hands the resulting entry to `pane`, and puts the acting head back on the
 /// entry it was already looking at.
 ///
-/// This is the retarget half of the follow-focus pair
-/// (`core/focus_feed.zig`'s `Companion` is the other): a companion that
-/// follows the focus feed calls exactly this, which is why following needs no
-/// binding language.
+/// This is the retarget half of following: a companion that hears the
+/// primary context's `entry` move (`core/context.zig`) calls exactly this,
+/// which is why following needs no binding language.
 pub fn presentIn(
     ctx: *core.command.Context,
     win_layout: *window_layout.Layout,
@@ -411,7 +699,8 @@ pub fn presentBy(
     const node = win_layout.paneById(pane) orelse return;
     // The head goes and comes back: a presentation, not navigation, so
     // neither switch is a jump (nor is `buffer-back`'s entry disturbed).
-    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject });
+    const here = window_layout.headFocus(win_layout, head) == node;
+    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject, here });
 }
 
 fn presentRoundTrip(
@@ -423,29 +712,33 @@ fn presentRoundTrip(
     node: anytype,
     command: []const u8,
     subject: []const u8,
+    /// The head is IN this pane: what it now shows is what the head is on,
+    /// so the head does not go back.
+    here: bool,
 ) void {
     const restore = buffers.active_id;
     const prev = buffers.prev_id;
+    // A presentation is not an activation: an `open` run while a tool entry
+    // is active asks placement for the editing pane (`buffers_cmds`), which
+    // here would carry what the viewport presents off into the primary pane.
+    const placement = head.placement;
+    defer head.placement = placement;
     const arg = [_]core.command.Value{.{ .string = subject }};
     _ = core.command.run(ctx.commands, ctx, command, if (subject.len > 0) &arg else &.{}) catch return;
     node.pane().buffer_id = buffers.active_id;
     node.pane().top_row = 0;
-    if (buffers.active_id == restore) return;
+    if (here or buffers.active_id == restore) return;
     buffers.switchTo(gpa, restore, head, keymap) catch return;
     buffers.prev_id = prev;
 }
 
-/// Publish this head's focused viewport on the primary-focus feed (§7). The
-/// feed is idempotent, so calling it every layout phase costs one comparison
-/// on a quiet frame; every event carries the source viewport's attributes, so
-/// a companion consumer can tell primary focus from companion focus without
-/// the workspace deciding for it.
-fn publishFocus(win_layout: *window_layout.Layout, head: *core.Head, focus: *core.focus_feed.Feed) void {
+/// Record this head's PRIMARY focus (§7): the focused pane, when its viewport
+/// is a `focus_source`. Cheap enough for every layout phase. This record is
+/// the only thing the primary context reads focus from, so "what a toolbar
+/// describes" and "what an outline follows" cannot disagree about which pane
+/// is primary — and a companion taking focus moves neither.
+fn recordPrimaryFocus(win_layout: *window_layout.Layout, head: *core.Head) void {
     const pane = window_layout.headFocus(win_layout, head).pane();
-    focus.publish(.{ .viewport = pane.id, .entry = pane.buffer_id, .attrs = pane.attrs });
-    // The head's own record of its primary focus, by the SAME attribute the
-    // feed's companions filter on — so "what a toolbar describes" and "what
-    // an outline follows" cannot disagree about which pane is primary.
     if (pane.attrs.focus_source) {
         head.primary_focus = .{ .pane = pane.id, .entry = pane.buffer_id };
     } else if (head.primary_focus) |*p| {

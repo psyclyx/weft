@@ -251,7 +251,7 @@ test "e2e/pointer: a scene action node runs its action by click and by key, thro
     ed.click(ed.pointAtNode(ping) orelse return error.ActionNodeNotDrawn);
     try t.expectEqual(@as(usize, 1), provider.count);
     try t.expectEqual(@as(?semantic_model.scene.NodeId, ping), provider.subject);
-    try t.expectEqual(ping, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(ping, ed.head.scene_selection.path().?.leaf().?);
 
     // Key: the focused action node offers `std.target.activate`, routed to
     // the same action. The key names only the intention.
@@ -262,5 +262,5 @@ test "e2e/pointer: a scene action node runs its action by click and by key, thro
     // A click on a node that is not an action only focuses it.
     ed.click(ed.pointAtNode(@enumFromInt(4)) orelse return error.RowNotDrawn);
     try t.expectEqual(@as(usize, 2), provider.count);
-    try t.expectEqual(@as(semantic_model.scene.NodeId, @enumFromInt(4)), ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(@as(semantic_model.scene.NodeId, @enumFromInt(4)), ed.head.scene_selection.path().?.leaf().?);
 }

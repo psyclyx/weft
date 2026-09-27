@@ -65,7 +65,7 @@ test "e2e/panels: a tab click shows its file, a middle click and the close glyph
     const ids = ed.tabEntries(&ids_buf);
     const listing = ed.win_layout.dockedPanel(.left).?.pane().buffer_id;
     try t.expect(std.mem.indexOfScalar(u32, ids, listing) == null);
-    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(ed.buffers.get(id).?.ref()));
+    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(ed.buffers.get(id).?.designationText()));
     for ([_]u32{ a, b, c }) |want| try t.expect(std.mem.indexOfScalar(u32, ids, want) != null);
 
     // A click on a's tab puts a in front.
@@ -118,15 +118,22 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
         try t.expect(std.mem.indexOf(u8, text, "p.zig") != null);
         try t.expect(std.mem.indexOf(u8, text, "2:7  error  bee is unused") != null);
     }
+    // The list is a projection: THIS place's diagnostics, by designation
+    // (doc/model.md §2.4) — what reopens it, and what the panel holds.
+    var want_buf: [4096]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "weft://here/diagnostics/{s}", .{app.proj.root[1..]});
+    try t.expectEqualStrings(want, shown.designationText());
 
     // The source changes and says so; the open list follows at the next
-    // frame boundary, with nothing re-run by hand.
-    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n");
+    // frame boundary, with nothing re-run by hand. A row from outside the
+    // place is not this place's.
+    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
     ed.applyWindow();
     {
         const text = try ed.semanticText(view);
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "1:7  warning  a is shadowed") != null);
+        try t.expect(std.mem.indexOf(u8, text, "foreign") == null);
     }
 
     // Down to the second row, Return: p.zig opens in the EDITOR pane with the
@@ -138,6 +145,64 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     try t.expectEqual(p.id, ed.win_layout.primaryPane().?.pane().buffer_id);
     try t.expectEqual(@as(usize, "const a = 1;\n".len + 6), p.textEditor().?.cursorOffset());
     try t.expectEqualStrings("*problems*", panelEntry(ed).?.name);
+}
+
+test "e2e/panels: two viewports on two places' diagnostics each keep their own list, and neither re-runs the other" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "q.txt", "one\ntwo\n");
+    try h.loadDiagfeed(ed);
+    try ed.setConfig("problems", "source", "diagfeed-list");
+    const rows = try std.fmt.allocPrint(gpa, "{s}/p.zig\t1\t1\terror\tin the project\n{s}/other/x.zig\t1\t1\terror\tin other\n", .{ app.proj.root, app.proj.root });
+    defer gpa.free(rows);
+    ed.runStr("diagfeed-set", rows);
+
+    var a_buf: [4096]u8 = undefined;
+    var b_buf: [4096]u8 = undefined;
+    const a = try std.fmt.bufPrint(&a_buf, "weft://here/diagnostics/{s}", .{app.proj.root[1..]});
+    const b = try std.fmt.bufPrint(&b_buf, "weft://here/diagnostics/{s}/other", .{app.proj.root[1..]});
+    const viewports = &ed.session.system.viewports;
+    try viewports.declare(gpa, "diag-a", .{ .dock = .top, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 6 });
+    try viewports.declare(gpa, "diag-b", .{ .dock = .right, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 30 });
+    try viewports.present(gpa, "diag-a", .{ .subject = .{ .text = a } });
+    try viewports.present(gpa, "diag-b", .{ .subject = .{ .text = b } });
+    ed.runStr("open", "q.txt");
+    ed.applyWindow();
+    ed.applyWindow();
+
+    const pane_a = ed.win_layout.dockedPanel(.top) orelse return error.NoPaneA;
+    const pane_b = ed.win_layout.dockedPanel(.right) orelse return error.NoPaneB;
+    const entry_a = ed.buffers.get(pane_a.pane().buffer_id) orelse return error.NoEntryA;
+    const entry_b = ed.buffers.get(pane_b.pane().buffer_id) orelse return error.NoEntryB;
+    // One entry per place: each designated by what its viewport presents.
+    try t.expect(entry_a.id != entry_b.id);
+    try t.expectEqualStrings(a, entry_a.designationText());
+    try t.expectEqualStrings(b, entry_b.designationText());
+    {
+        const text = try ed.semanticText(entry_b.scene_selection.view orelse return error.NoViewB);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "in other") != null);
+        try t.expect(std.mem.indexOf(u8, text, "in the project") == null);
+    }
+    {
+        const text = try ed.semanticText(entry_a.scene_selection.view orelse return error.NoViewA);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "in the project") != null);
+    }
+
+    // The signal refreshes both, and another frame presents neither again.
+    const ids = .{ entry_a.id, entry_b.id };
+    ed.runStr("diagfeed-set", rows);
+    ed.applyWindow();
+    ed.applyWindow();
+    try t.expectEqual(ids[0], pane_a.pane().buffer_id);
+    try t.expectEqual(ids[1], pane_b.pane().buffer_id);
+    try t.expectEqualStrings(a, ed.buffers.get(ids[0]).?.designationText());
+    try t.expectEqualStrings(b, ed.buffers.get(ids[1]).?.designationText());
 }
 
 test "e2e/panels: C-` runs a line-mode shell in the panel, with its controls stripped, and C-j hides and shows it" {
@@ -241,31 +306,66 @@ test "e2e/panels: a shell that exits says so, and C-` starts a fresh one" {
     try t.expect(h.drainToolContains(ed, "*terminal*", "echo again\nagain\n"));
 }
 
+/// The prompt the startup files `hermeticShellHome` writes set. A prompt the
+/// test names, rather than "a line ending in a space": startup output reaches
+/// the buffer in whatever pieces the pipe was read in, and a piece ending in a
+/// space (`stty: `, `… Inappropriate `) is not a prompt.
+const test_prompt = "weft-e2e> ";
+
+/// Give the shell the terminal starts here a home of its own: startup files
+/// that set `test_prompt` and nothing else, found through `HOME` (bash),
+/// `ZDOTDIR` (zsh) and `ENV` (sh), published as the environment of the place
+/// the terminal runs in. The user's own rc files — which may take seconds,
+/// print, run `stty` on a pipe or emit terminal reports — are not read, and
+/// zsh skips the system-wide ones too (`no_global_rcs`: a distribution's
+/// /etc/zshrc can run compinit, seconds under load) and marks no partial
+/// line before the prompt (`no_prompt_sp`).
+fn hermeticShellHome(app: *IdeApp) !void {
+    const gpa = app.ed.gpa;
+    const out = try app.proj.oracle("mkdir -p home && " ++
+        "printf \"PS1='" ++ test_prompt ++ "'\\n\" > home/.bashrc && " ++
+        "printf 'setopt no_global_rcs\\n' > home/.zshenv && " ++
+        "printf \"unsetopt prompt_sp\\nPROMPT='" ++ test_prompt ++ "'\\n\" > home/.zshrc && " ++
+        "cp home/.bashrc home/.shrc");
+    gpa.free(out);
+    const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00", .{app.proj.root});
+    defer gpa.free(vars);
+    const system = app.ed.session.system;
+    _ = try system.environments.publish(system.buffers.active().place, "e2e", vars);
+}
+
 /// Run `echo $((6*7)) >&2` in the terminal started by `shell` (null: the
 /// default, `$SHELL`) and say how many times the typed line shows. The answer
 /// goes to stderr — the stream a line editor echoes on — so it cannot
 /// overtake an echo of the line from the other pipe. Null when that shell is
 /// not installed (it exits 127 before answering).
-fn typedLineShows(ed: *Editor, shell: ?[]const u8) !?usize {
+///
+/// Each phase has its own deadline and its own failure: a shell slow to
+/// start cannot spend the answer's time, nor fail as though it never
+/// answered.
+fn typedLineShows(app: *IdeApp, shell: ?[]const u8) !?usize {
+    const ed = &app.ed;
     try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(app);
     if (shell) |s| try ed.setConfig("terminal", "shell", s);
     ed.press("C-grave", "");
-    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     // Type at the prompt, as a person does: what the shell prints while it
-    // starts would otherwise land in the middle of the echoed line. A prompt
-    // is the last line, unfinished, ending in a space (`bash-5.3$ `, `% `).
-    while (core.task.nowNs() < deadline) {
+    // starts would otherwise land in the middle of the echoed line.
+    const prompted = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (true) {
+        if (core.task.nowNs() >= prompted) return terminalFailed(ed, error.PromptNeverShown);
         ed.settle(1);
         const text = h.toolText(ed, "*terminal*") orelse continue;
         defer ed.gpa.free(text);
         if (std.mem.indexOf(u8, text, "[process exited 127]") != null) return null;
-        if (text.len > 0 and text[text.len - 1] == ' ') break;
+        if (std.mem.endsWith(u8, text, test_prompt)) break;
         // A shell that is not there reports its exit on the next C-`.
         ed.press("C-grave", "");
     }
     ed.typeText("echo $((6*7)) >&2");
     ed.press("Return", "");
-    while (core.task.nowNs() < deadline) {
+    const answered = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < answered) {
         // C-` again each round: a shell that is not there reports its exit.
         ed.press("C-grave", "");
         ed.settle(1);
@@ -277,21 +377,31 @@ fn typedLineShows(ed: *Editor, shell: ?[]const u8) !?usize {
         if (shows != 1) std.debug.print("[e2e/panels] the terminal reads:\n{s}\n", .{text});
         return shows;
     }
+    return terminalFailed(ed, error.TerminalNeverAnswered);
+}
+
+/// Say what the terminal reads, then fail with `err`.
+fn terminalFailed(ed: *Editor, err: anyerror) anyerror {
     if (h.toolText(ed, "*terminal*")) |text| {
         defer ed.gpa.free(text);
-        std.debug.print("[e2e/panels] no answer; the terminal reads:\n{s}\n", .{text});
+        std.debug.print("[e2e/panels] {t}; the terminal reads:\n{s}\n", .{ err, text });
     }
-    return error.TerminalNeverAnswered;
+    return err;
 }
 
 test "e2e/panels: the default shell does not echo a typed line a second time" {
     const gpa = t.allocator;
+    // Only a shell `hermeticShellHome` can give its prompt to.
+    const shell = std.fs.path.basename(std.mem.span(std.c.getenv("SHELL") orelse return error.SkipZigTest));
+    for ([_][]const u8{ "bash", "zsh", "sh" }) |known| {
+        if (std.mem.eql(u8, shell, known)) break;
+    } else return error.SkipZigTest;
     var app: IdeApp = undefined;
     try app.init(gpa);
     defer app.deinit();
     // `$SHELL` interactive, as ide.js runs it: the plugin echoes the line,
     // so the shell's own line editor must not echo it again.
-    const shows = (try typedLineShows(&app.ed, null)) orelse return error.SkipZigTest;
+    const shows = (try typedLineShows(&app, null)) orelse return error.SkipZigTest;
     try t.expectEqual(@as(usize, 1), shows);
 }
 
@@ -301,7 +411,7 @@ test "e2e/panels: bash and zsh started by name edit no line of their own" {
         var app: IdeApp = undefined;
         try app.init(gpa);
         defer app.deinit();
-        const shows = (try typedLineShows(&app.ed, shell)) orelse continue; // not installed
+        const shows = (try typedLineShows(&app, shell)) orelse continue; // not installed
         errdefer std.debug.print("[e2e/panels] {s} showed the typed line {d} times\n", .{ shell, shows });
         try t.expectEqual(@as(usize, 1), shows);
     }

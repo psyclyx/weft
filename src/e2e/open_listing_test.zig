@@ -79,7 +79,7 @@ const ide_keys: Keys = .{ .down = "Down", .up = "Up", .step_out = null };
 
 /// Whether the focused row of the focused listing is named `want`.
 fn onRow(ed: *Editor, want: []const u8) bool {
-    if (ed.head.semantic_focus.field == null) return false;
+    if (ed.head.scene_selection.field == null) return false;
     const name = ed.draftHere(ed.gpa) catch return false;
     defer ed.gpa.free(name);
     return std.mem.eql(u8, name, want);
@@ -273,4 +273,100 @@ test "e2e/sidebar: ide.js — a double click opens a sidebar row: a file in the 
     ed.clickAgain(at);
     try expectPrimaryText(ed, "INNER\n");
     try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
+}
+
+/// How many rows of the focused listing are flagged for removal.
+fn rowsFlaggedDeleted(ed: *Editor) usize {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return 0) orelse return 0;
+    var n: usize = 0;
+    for (instance.scene.content.container.children) |row| for (row.facts) |fact| {
+        if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete")) n += 1;
+    };
+    return n;
+}
+
+test "e2e/files: a row whose file was swapped for a link after listing opens what was listed, never the link's target" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytesMakingDirs(gpa, "private", "private/secret.txt", "SECRET\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+    // Between the listing and the activation, the leaf becomes a link to a
+    // file the listing never showed. The directory is the same directory.
+    _ = try app.proj.oracle("rm alpha.txt && ln -s -- private/secret.txt alpha.txt");
+    ed.press("Return", "");
+    ed.applyWindow();
+    var it = ed.buffers.iterator();
+    while (it.next()) |b| if (b.textEditor()) |text_editor| {
+        const text = try text_editor.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        try t.expect(!std.mem.eql(u8, text, "SECRET\n"));
+    };
+}
+
+test "e2e/files: config.js — V j d over rows removes every row of the range, and nothing past it" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    // `V` anchors a range of rows at the focused one; `j` grows it.
+    ed.press("V", "");
+    ed.press("j", "");
+    const range = ed.head.scene_selection.primaryRows().?;
+    try t.expect(range.anchor != range.head);
+    // `d` hands the view the range as one request: both rows go.
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+    // …and the range is spent: one row again, back in the resting mode.
+    try t.expect(ed.head.scene_selection.anchor == null);
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
+}
+
+/// The primary row's place in the focused listing's focus order.
+fn primaryRowIndex(ed: *Editor) !u64 {
+    const set = try core.selection.read(ed.ctx, ed.gpa);
+    defer ed.gpa.free(set.extents);
+    return set.extents[set.primary].head;
+}
+
+test "e2e/files: config.js — `yy` over two marked rows copies both, as one transfer, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+    const alpha = try primaryRowIndex(ed);
+    try goToRow(ed, vim_keys, "gamma.txt");
+    const gamma = try primaryRowIndex(ed);
+    // Two rows marked, two extents — what a C-click gives a vim user too.
+    try t.expect(try core.selection.write(ed.ctx, gpa, &.{
+        .{ .kind = .rows, .anchor = alpha, .head = alpha },
+        .{ .kind = .rows, .anchor = gamma, .head = gamma },
+    }, 1));
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+
+    // `yy` is a transfer over rows: ONE copy of the set. Mapped per row,
+    // each run replaced the one captured value and a paste landed one row.
+    ed.press("y", "");
+    ed.press("y", "");
+    try t.expect(try core.selection.write(ed.ctx, gpa, &.{.{ .kind = .rows, .anchor = alpha, .head = alpha }}, 0));
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt gamma.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
 }

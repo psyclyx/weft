@@ -25,6 +25,9 @@ pub const TargetBinding = struct {
     owner: semantic.owner.Id,
     revision: u64,
     directory: fs.target.Directory,
+    /// The durable name of what this binding designates, owned, or empty.
+    /// See `Router.designate` for why it lives here.
+    designation: []u8 = &.{},
 };
 
 pub const EntryBinding = struct {
@@ -35,9 +38,12 @@ pub const EntryBinding = struct {
     /// keeping the two together makes the borrowed provider observation safe
     /// after a listing/codec arena is released.
     revision_token: []u8,
+    /// As `TargetBinding.designation`.
+    designation: []u8 = &.{},
 
     fn deinit(self: *EntryBinding, allocator: std.mem.Allocator) void {
         allocator.free(self.revision_token);
+        allocator.free(self.designation);
         self.* = undefined;
     }
 };
@@ -62,6 +68,8 @@ pub const Router = struct {
     pub fn deinit(self: *Router) void {
         var entry_bindings = self.entry_bindings.valueIterator();
         while (entry_bindings.next()) |binding| binding.deinit(self.allocator);
+        var target_bindings = self.target_bindings.valueIterator();
+        while (target_bindings.next()) |binding| self.allocator.free(binding.designation);
         self.providers.deinit();
         self.retired.deinit();
         self.target_bindings.deinit();
@@ -102,7 +110,7 @@ pub const Router = struct {
         // route and its bindings remain intact.
         try self.retired.put(authority, {});
         _ = self.providers.remove(authority);
-        for (stale.items) |key| _ = self.target_bindings.remove(key);
+        for (stale.items) |key| _ = self.removeTargetBinding(key);
         for (stale.items) |key| _ = self.removeEntryBinding(key);
     }
 
@@ -133,7 +141,7 @@ pub const Router = struct {
 
     pub fn unbindTarget(self: *Router, target: semantic.target.Ref) bool {
         const key = targetKey(target);
-        const removed_directory = self.target_bindings.remove(key);
+        const removed_directory = self.removeTargetBinding(key);
         const removed_entry = self.removeEntryBinding(key);
         return removed_directory or removed_entry;
     }
@@ -150,7 +158,7 @@ pub const Router = struct {
         const key = targetKey(target);
         if (self.target_bindings.get(key)) |binding| {
             if (binding.owner != owner or binding.revision != revision) return false;
-            return self.target_bindings.remove(key);
+            return self.removeTargetBinding(key);
         }
         if (self.entry_bindings.get(key)) |binding| {
             if (binding.owner != owner or binding.revision != revision) return false;
@@ -199,6 +207,58 @@ pub const Router = struct {
         var binding: EntryBinding = .{ .owner = owner, .revision = revision, .entry = entry, .revision_token = revision_token };
         binding.entry.revision.token = revision_token;
         try self.entry_bindings.put(key, binding);
+    }
+
+    fn removeTargetBinding(self: *Router, key: u128) bool {
+        const removed = self.target_bindings.fetchRemove(key) orelse return false;
+        self.allocator.free(removed.value.designation);
+        return true;
+    }
+
+    /// Name the thing one exact binding designates: the durable
+    /// `weft://<authority>/file|dir/<path>` (doc/model.md §2.1) its publisher
+    /// observed it under.
+    ///
+    /// Held beside the binding, not in the target's descriptor, because a
+    /// descriptor is public and any plugin can publish one: a designation a
+    /// guest could write would let it name any path it liked and have the
+    /// shell open that. Only a trusted publisher mints a binding
+    /// (`publication.zig`), so only a trusted publisher can name one. The
+    /// router still interprets nothing: the bytes are opaque here, stored,
+    /// handed back, and retired with the binding they describe.
+    pub fn designate(self: *Router, target: semantic.target.Ref, revision: u64, designation: []const u8) Error!void {
+        const key = targetKey(target);
+        const slot: *[]u8 = if (self.target_bindings.getPtr(key)) |binding| blk: {
+            if (binding.revision != revision) return error.StaleTarget;
+            break :blk &binding.designation;
+        } else if (self.entry_bindings.getPtr(key)) |binding| blk: {
+            if (binding.revision != revision) return error.StaleTarget;
+            break :blk &binding.designation;
+        } else return error.TargetUnbound;
+        const owned = try self.allocator.dupe(u8, designation);
+        self.allocator.free(slot.*);
+        slot.* = owned;
+    }
+
+    /// The designation of one exact binding, or null when it has none or is
+    /// not bound at that revision. Borrowed until the binding changes.
+    pub fn designationOf(self: *const Router, target: semantic.target.Ref, revision: u64) ?[]const u8 {
+        const key = targetKey(target);
+        const designation = if (self.target_bindings.get(key)) |binding|
+            (if (binding.revision == revision) binding.designation else return null)
+        else if (self.entry_bindings.get(key)) |binding|
+            (if (binding.revision == revision) binding.designation else return null)
+        else
+            return null;
+        return if (designation.len == 0) null else designation;
+    }
+
+    /// Every directory binding's designation, in no particular order —
+    /// borrowed for the call. What "which trees are reachable from here"
+    /// is read from (the `places` a workspace works in).
+    pub fn eachDirectoryDesignation(self: *const Router, context: anytype, comptime visit: fn (@TypeOf(context), []const u8) void) void {
+        var it = self.target_bindings.valueIterator();
+        while (it.next()) |binding| if (binding.designation.len != 0) visit(context, binding.designation);
     }
 
     fn removeEntryBinding(self: *Router, key: u128) bool {
@@ -617,7 +677,13 @@ test "target bindings are explicit, revision-stamped, and retired with their aut
     try std.testing.expectEqual(directory, try router.authorizedDirectory(target, 1));
     try std.testing.expectError(error.InvalidHandle, router.bindTarget(owner, target, 0, directory));
     try std.testing.expectError(error.TargetAlreadyBound, router.bindTarget(owner, target, 1, directory));
+    try std.testing.expect(router.designationOf(target, 1) == null);
+    try router.designate(target, 1, "weft://here/dir/srv");
+    try std.testing.expectEqualStrings("weft://here/dir/srv", router.designationOf(target, 1).?);
+    try std.testing.expect(router.designationOf(target, 2) == null);
+    try std.testing.expectError(error.StaleTarget, router.designate(target, 2, "weft://here/dir/x"));
     try std.testing.expect(router.unbindTarget(target));
+    try std.testing.expect(router.designationOf(target, 1) == null);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
     try router.bindTarget(owner, target, 1, directory);
     try router.unregister(.here);
@@ -648,7 +714,10 @@ test "ordinary file bindings preserve provider entry identity and revision" {
     try std.testing.expect(!router.unbindTargetOwned(@enumFromInt(2), target, 7));
     try std.testing.expect(!router.unbindTargetOwned(owner, target, 8));
     _ = try router.authorizedEntry(target, 7);
+    try router.designate(target, 7, "weft://here/file/srv/a");
+    try std.testing.expectEqualStrings("weft://here/file/srv/a", router.designationOf(target, 7).?);
     try std.testing.expect(router.unbindTarget(target));
+    try std.testing.expect(router.designationOf(target, 7) == null);
     try std.testing.expectError(error.TargetUnbound, router.authorizedEntry(target, 7));
 }
 

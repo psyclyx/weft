@@ -12,9 +12,9 @@ const weft = @import("weft");
 var xform: [1 << 16]u8 = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "op.delete", .call = delete },
-    .{ .name = "op.upcase", .call = upcase },
-    .{ .name = "op.lowercase", .call = lowercase },
+    .{ .name = "op.delete", .arity = weft.Arity.each_extent, .call = delete },
+    .{ .name = "op.upcase", .arity = weft.Arity.each_extent, .call = upcase },
+    .{ .name = "op.lowercase", .arity = weft.Arity.each_extent, .call = lowercase },
 };
 
 /// Delete the awaited range (the edit door, grade-gated + CRDT-anchored).

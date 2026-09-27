@@ -49,6 +49,12 @@ pub const RenderState = struct {
         try self.fb.buildFrame(fx, active);
     }
 
+    /// Ask the plugins what the last frame had no answer to; true when
+    /// answers landed for the next frame.
+    pub fn answerRequests(self: *RenderState, fx: *const frame.FrameCtx) !bool {
+        return self.fb.answerRequests(fx);
+    }
+
     /// Materialize the last production build as one complete RGBA8 frame.
     /// A clean editor reuses its previous pixels, exactly as a window backend
     /// re-presents its previous swapchain/staging contents.

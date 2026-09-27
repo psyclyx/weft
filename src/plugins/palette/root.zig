@@ -23,6 +23,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const invoke = @import("weft_invoke");
+const offers_lib = @import("weft_offers");
 
 var id_palette: u32 = 0;
 var id_help: u32 = 0;
@@ -79,16 +80,17 @@ const pick_buffers = 1;
 const asker = invoke.Invoker(.{ .name = "palette-arg" });
 
 const own_cmds = [_]weft.CommandEntry{
-    .{ .name = "pick-commands", .call = palette, .summary = "run a command by name" },
-    .{ .name = "help", .call = palette, .summary = "browse every command with its summary" },
-    .{ .name = "buffers", .call = buffers, .summary = "switch to another open buffer" },
-    .{ .name = "status", .call = status, .summary = "say what the status line is showing" },
+    .{ .name = "pick-commands", .arity = .whole, .call = palette, .summary = "run a command by name" },
+    .{ .name = "help", .arity = .whole, .call = palette, .summary = "browse every command with its summary" },
+    .{ .name = "buffers", .arity = .whole, .call = buffers, .summary = "switch to another open buffer" },
+    .{ .name = "status", .arity = .whole, .call = status, .summary = "say what the status line is showing" },
 };
 /// The argument prompt's five editing commands, spliced into this plugin's
 /// one flat table so `on_command`'s id indexing stays a single array.
 const arg_cmds: [asker.commands.len]weft.CommandEntry = blk: {
     var arr: [asker.commands.len]weft.CommandEntry = undefined;
-    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    // Editing the prompt's own line: never the selection.
+    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
     break :blk arr;
 };
 const cmds = own_cmds ++ arg_cmds;
@@ -282,20 +284,23 @@ fn rowDoc(i: usize) []const u8 {
 }
 
 /// The focused context's live offers, listed ahead of the raw commands and
-/// told apart by their dotted intention names. A disabled offer is listed
-/// WITH its reason rather than hidden: absence already means nonapplicable,
-/// so hiding one would say something false about it.
+/// told apart by their dotted intention names — read through `weft_offers`,
+/// the same reading the offers projection's strip, list and menu are, so the
+/// palette, the toolbar and the context menu cannot disagree about what a
+/// context offers or in what order. Every word is listed (the grammar's own
+/// included: a palette is where you look one up), and a disabled offer WITH
+/// its reason rather than hidden: absence already means nonapplicable, so
+/// hiding one would say something false about it.
 fn offers() void {
-    const n = weft.offerCount();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const provider = weft.offerProvider(i) orelse continue;
-        const doc = if (weft.offerReason(i)) |why|
-            std.fmt.bufPrint(&label_buf, "offer · {s} · {s}", .{ provider, why }) catch continue
+    var arena = std.heap.ArenaAllocator.init(weft.allocator);
+    defer arena.deinit();
+    const items = offers_lib.collect(arena.allocator(), .{ .where = .active, .grammar_words = true }) catch return;
+    for (items) |item| {
+        const doc = if (!item.enabled())
+            std.fmt.bufPrint(&label_buf, "offer · {s} · {s}", .{ item.provider, item.reason }) catch continue
         else
-            std.fmt.bufPrint(&label_buf, "offer · {s}", .{provider}) catch continue;
-        const name = weft.offerName(i) orelse continue;
-        weft.pickAdd(name, doc);
+            std.fmt.bufPrint(&label_buf, "offer · {s}", .{item.provider}) catch continue;
+        weft.pickAdd(item.name, doc);
     }
 }
 

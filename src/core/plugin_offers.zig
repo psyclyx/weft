@@ -30,6 +30,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const catalog = @import("catalog.zig");
 const command = @import("command.zig");
+const selection = @import("selection.zig");
 const facts = @import("weft_facts");
 const intent = @import("intent.zig");
 
@@ -44,6 +45,8 @@ const Row = struct {
     intention: catalog.IntentionId,
     command: []u8,
     reason: []u8,
+    /// How `command` maps over several selections (its `Command.arity`).
+    arity: ?selection.Arity,
 };
 
 /// One plugin's provider slot, the offer storage behind it, and the invoker
@@ -115,6 +118,7 @@ pub const Publisher = struct {
         intention: []const u8,
         cmd: []const u8,
         reason: []const u8,
+        arity: ?selection.Arity,
     ) Error!void {
         if (!self.open) return error.NotStaging;
         const id = try self.plane.catalog.intention(intention);
@@ -122,7 +126,7 @@ pub const Publisher = struct {
         errdefer gpa.free(owned_cmd);
         const owned_reason = try gpa.dupe(u8, reason);
         errdefer gpa.free(owned_reason);
-        try self.staged.append(gpa, .{ .intention = id, .command = owned_cmd, .reason = owned_reason });
+        try self.staged.append(gpa, .{ .intention = id, .command = owned_cmd, .reason = owned_reason, .arity = arity });
     }
 
     /// Publish the staged table as this provider's whole set. The new
@@ -146,6 +150,7 @@ pub const Publisher = struct {
                 .message = disabled_message,
             } },
             .predicate = if (scope.len == 0) .{ .all = &.{} } else .{ .tool = scope },
+            .arity = row.arity,
         };
 
         _ = try self.plane.catalog.publish(.{
@@ -228,8 +233,8 @@ test "plugin offers: a row resolves to its command, scoped to the plugin's own t
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 7);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "");
-    try fixture.publisher.add(t.allocator, "plugin.git.unstage", "git-unstage", "not-staged");
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.unstage", "git-unstage", "not-staged", .whole);
     try fixture.publisher.commit(t.allocator);
 
     const inside: catalog.Context = .{ .key = 1, .revision = 1, .facts = .{ .tool = "git" } };
@@ -256,14 +261,14 @@ test "plugin offers: republishing replaces the table whole, and retracting says 
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 1);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "");
-    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "");
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "", .whole);
     try fixture.publisher.commit(t.allocator);
 
     // The next model ordinal publishes a SMALLER table: the dropped row is
     // gone from the catalog, and the endpoint it minted no longer resolves.
     try fixture.publisher.begin(t.allocator, "git", 2);
-    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "");
+    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "", .whole);
     try fixture.publisher.commit(t.allocator);
 
     const ctx: catalog.Context = .{ .key = 1, .revision = 1, .facts = .{ .tool = "git" } };
@@ -288,7 +293,7 @@ test "plugin offers: an endpoint outliving its table is refused, never run" {
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 1);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "");
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
     try fixture.publisher.commit(t.allocator);
     const token = fixture.publisher.handle.endpoint(0);
 

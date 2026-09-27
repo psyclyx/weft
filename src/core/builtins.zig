@@ -17,6 +17,7 @@ const target_open = @import("target_open.zig");
 const semantic_model = @import("weft_semantic");
 const placement = @import("placement.zig");
 const action_here = @import("action_here.zig");
+const designation = @import("designation.zig");
 
 const ok: Value = .nil;
 
@@ -61,9 +62,9 @@ fn dropFocusIfShownAsBuffer(ctx: *Context) void {
     // showing, which is wrong the moment the two differ: a handler that opens
     // some OTHER view and focuses it had that focus thrown away because a
     // listing happened to be the active buffer.
-    const path = ctx.head.semantic_focus.path() orelse return;
+    const path = ctx.head.scene_selection.path() orelse return;
     if (!path.view.eql(tool)) return;
-    ctx.head.semantic_focus.clear();
+    ctx.head.scene_selection.clear();
 }
 
 /// The typed target the ROW UNDER POINT links to, when the active entry is a
@@ -107,7 +108,24 @@ pub fn registerSemanticAction(
         .args = &.{},
         .handler = semanticActionTrampoline,
         .data = target,
+        .arity = semanticArity(name),
     });
+}
+
+/// How an open semantic action maps over several selected rows. The standard
+/// vocabulary says: a transfer (copy, cut, paste) reads the whole selection as
+/// one request, since it makes or consumes ONE value; any other `selection.*`
+/// action and `target.open` act on each row; a `view.*` action acts on the
+/// view once. Any other name says nothing, so it is refused on several rows
+/// rather than run on the focused one alone.
+fn semanticArity(name: []const u8) ?@import("selection.zig").Arity {
+    const standard = semantic_model.action.standard;
+    for ([_][]const u8{ standard.copy, standard.cut, standard.paste_before, standard.paste_after }) |transfer|
+        if (std.mem.eql(u8, name, transfer)) return .whole;
+    if (std.mem.startsWith(u8, name, "selection.") or std.mem.eql(u8, name, standard.open))
+        return .each_extent;
+    if (std.mem.startsWith(u8, name, "view.")) return .whole;
+    return null;
 }
 
 fn semanticActionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
@@ -432,9 +450,33 @@ fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// The scene selection the dispatching head holds, when the entry this call
+/// is about is a scene (no text of its own).
+fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
+    const entry = ctx.entry() orelse return null;
+    if (entry.textEditor() != null) return null;
+    const scene = &ctx.head.scene_selection;
+    return if (scene.head() != null) scene else null;
+}
+
+/// `mark-rows`: anchor a range of ROWS at the focused one, whatever part of
+/// the row is focused — a listing focuses a row's name field, where
+/// `set-mark` selects text in the field (vim's `v`); a linewise mark over
+/// rows (vim's `V`) is this. The next move grows the range.
+fn cMarkRows(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const scene = sceneRows(ctx) orelse return ok;
+    scene.anchor = scene.head();
+    return ok;
+}
+
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    // In a scene: drop the row range this extent was growing — and any text
+    // selected in the field it focuses.
+    if (sceneRows(ctx)) |scene| scene.anchor = null;
     if (try semanticFieldInput(ctx, .clear_selection)) return ok;
+    if (sceneRows(ctx) != null) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.clearSelection();
     return ok;
@@ -580,7 +622,40 @@ fn cBufferCloseForce(ctx: *Context, args: struct {}) anyerror!Value {
 /// Open a local file in a buffer (existing buffer wins — dedupe by
 /// path). The graphical shell rebinds this with a provider-aware,
 /// remote-capable version; this core one keeps headless hosts honest.
+/// `open <designation>` — the kernel's own: a local file (a designation, or
+/// an absolute path standing in for one), and whatever core alone can answer
+/// (`designation.openHeld`: documents, processes, projections). A shell
+/// shadows this with one that also reaches directories, shells and peers,
+/// and routes the same way. A relative path resolves against the place the
+/// command runs in (`designation.resolveRelative`).
 fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
+    switch (designation.durable.Spec.of(args.path)) {
+        .relative => {
+            const abs = try designation.resolveRelative(ctx, ctx.gpa, args.path) orelse
+                return .{ .string = "open: " ++ designation.refuse_relative_elsewhere };
+            defer ctx.gpa.free(abs);
+            return openFilePath(ctx, abs);
+        },
+        .malformed => return .{ .string = "open: " ++ designation.durable.Spec.malformed_refusal },
+        .path => |path| return openFilePath(ctx, path),
+        .designation => |d| {
+            if (try designation.openHeld(ctx, d, args.path)) |outcome| switch (outcome) {
+                .opened => |id| {
+                    designation.applyPosition(ctx, d);
+                    return .{ .integer = @intCast(id) };
+                },
+                .refused => |why| return .{ .string = why },
+            };
+            if (d.authority != .here or d.kind != .file) return .{ .string = designation.refuse_unreachable };
+            const opened = try openFilePath(ctx, d.ref);
+            designation.applyPosition(ctx, d);
+            return opened;
+        },
+    }
+}
+
+fn openFilePath(ctx: *Context, path: []const u8) anyerror!Value {
+    const args = .{ .path = path };
     if (ctx.buffers.findByPath(args.path)) |id| {
         try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
@@ -692,7 +767,14 @@ fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Va
 /// what it showed; the layout phase realizes the move.
 fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
-    registry.takeEntry(args.name, ctx.buffers.active().ref()) catch return .{ .string = "no viewport by that name" };
+    // A viewport holds WHAT it shows, never the slot it was shown from.
+    var buf: [designation.max_len]u8 = undefined;
+    const held = designation.of(ctx.buffers.active(), &buf) orelse
+        return .{ .string = "this entry has no designation for a viewport to hold" };
+    registry.takeEntry(ctx.gpa, args.name, held) catch |err| return switch (err) {
+        error.UnknownViewport => .{ .string = "no viewport by that name" },
+        else => err,
+    };
     return ok;
 }
 
@@ -756,17 +838,25 @@ const table = [_]command.Command{
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
     command.define("open-relative", "Open a raw name below the semantic working target.", cOpenRelative),
-    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy),
-    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut),
-    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete),
-    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore),
-    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter),
-    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused),
-    command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded),
-    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut),
-    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore),
-    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter),
-    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit),
+    // A transfer is ONE value: copy and cut send every selected row as one
+    // request and get one transfer (a set) back — per extent, each run would
+    // overwrite the last. Paste reads the whole selection the same way (a
+    // provider refuses a paste beside several rows as ambiguous).
+    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy).maps(.whole),
+    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut).maps(.whole),
+    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete).maps(.each_extent),
+    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore).maps(.whole),
+    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.whole),
+    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused).maps(.each_extent),
+    command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded).maps(.each_extent),
+    // One row's verbs: a name edited, a row inserted beside it, its container
+    // stepped out to. On several marked rows none has a meaning (which name?
+    // beside which row?), so they are refused there rather than acting on the
+    // focused row alone.
+    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut).maps(null),
+    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore).maps(null),
+    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter).maps(null),
+    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit).maps(null),
     command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
@@ -788,14 +878,15 @@ const table = [_]command.Command{
     command.define("field-line-start", "Move the focused field to the line-start boundary.", fieldMotion(.line_start)),
     command.define("field-line-end", "Move the focused field to the line-end boundary.", fieldMotion(.line_end)),
     command.define("field-first-non-blank", "Move the focused field to the first-non-blank boundary.", fieldMotion(.first_non_blank)),
-    command.define("cursor-left", "Move the cursor one character left.", cCursorLeft),
-    command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
-    command.define("cursor-up", "Move the cursor up one line.", cCursorUp),
-    command.define("cursor-down", "Move the cursor down one line.", cCursorDown),
+    command.define("cursor-left", "Move the cursor one character left.", cCursorLeft).maps(.each_extent),
+    command.define("cursor-right", "Move the cursor one character right.", cCursorRight).maps(.each_extent),
+    command.define("cursor-up", "Move the cursor up one line.", cCursorUp).maps(.each_extent),
+    command.define("cursor-down", "Move the cursor down one line.", cCursorDown).maps(.each_extent),
     command.define("row-down", "Move to the next projection row, on its actionable part.", cRowDown),
     command.define("row-up", "Move to the previous projection row, on its actionable part.", cRowUp),
-    command.define("set-mark", "Start a selection at the cursor.", cSetMark),
-    command.define("clear-selection", "Drop the selection.", cClearSelection),
+    command.define("set-mark", "Start a selection at the cursor.", cSetMark).maps(.each_extent),
+    command.define("mark-rows", "Start a range of rows at the focused row of a scene.", cMarkRows).maps(.each_extent),
+    command.define("clear-selection", "Drop the selection.", cClearSelection).maps(.each_extent),
     command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),
     command.define("posture-break-out", "Leave a capture posture for the one it displaced.", cPostureBreakOut),

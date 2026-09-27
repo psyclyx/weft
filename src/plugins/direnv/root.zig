@@ -17,10 +17,10 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "direnv-status", .call = status, .summary = "say what direnv makes of this directory" },
-    .{ .name = "direnv-allow", .call = allow, .summary = "allow this directory's .envrc" },
-    .{ .name = "direnv-reload", .call = reload, .summary = "re-read the environment" },
-    .{ .name = "direnv-apply", .call = apply, .summary = "apply this directory's environment" },
+    .{ .name = "direnv-status", .arity = .whole, .call = status, .summary = "say what direnv makes of this directory" },
+    .{ .name = "direnv-allow", .arity = .whole, .call = allow, .summary = "allow this directory's .envrc" },
+    .{ .name = "direnv-reload", .arity = .whole, .call = reload, .summary = "re-read the environment" },
+    .{ .name = "direnv-apply", .arity = .whole, .call = apply, .summary = "apply this directory's environment" },
 };
 
 /// The fill token `direnv-apply` waits on. Any other fill in this buffer (a

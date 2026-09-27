@@ -4223,6 +4223,81 @@ test "publication: a surface the descriptor does not export is dropped, while th
     try t.expectEqual(@as(usize, 0), bcol.presence.items.len);
 }
 
+test "collab: a peer that binds after the sharer's cursor went out is sent it again — state feeds reach a joiner" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "notes\n");
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    const acol = try ca.shareExports(&a_notes, "notes", 1, .legacy);
+    var emitted: QuadEmissions = .{ .base = acol.base };
+    sa.tap = emitted.tap();
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 1), cb.offers.items.len);
+    try t.expectEqual(@as(usize, 0), emitted.presence);
+    acol.publish_presence = true;
+    acol.cursor_offset = 3;
+    acol.selection_anchor = 3;
+    // Alice's cursor goes out while bob has an offer and no replica, and
+    // reaches bob's side before he binds: a feed for a quad nobody there has
+    // bound reaches nothing (drained here exactly as `Conn.tick` would drop
+    // it, so the order is the test's, not the scheduler's).
+    var dropped = false;
+    const drop_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (!dropped and task.nowNs() < drop_deadline) {
+        _ = try ca.tick();
+        var frames: std.ArrayList(wire.Decoder.Decoded) = .empty;
+        defer frames.deinit(gpa);
+        try sb.drain(gpa, &frames);
+        for (frames.items) |frame| {
+            defer gpa.free(frame.payload);
+            if (frame.class == .feed and frame.channel == acol.base + 1) dropped = true;
+        }
+        if (!dropped) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(dropped);
+    try t.expectEqual(@as(usize, 1), emitted.presence);
+
+    // Bob joins. Alice has not moved — and still her cursor reaches him,
+    // because his joining is when her state is sent again.
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const bcol = try cb.openOffer(0, &b_notes, 2);
+    bcol.presence_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var landed = false;
+    while (!landed and task.nowNs() < deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        landed = bcol.presence_layer.?.spanCount() > 0;
+        if (!landed) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(emitted.presence >= 2);
+    try t.expect(landed);
+    try t.expectEqualStrings("alice", bcol.presence_layer.?.resolvedSpan(0).message);
+}
+
 test "publication: unpublish advances the epoch, marks the quad stale, and invalidates translated references" {
     const gpa = t.allocator;
     const fds = try socketPair();
@@ -5416,4 +5491,132 @@ test "lsp export: a definition outside the granted document set is withheld owne
     defer gpa.free(outside);
     try t.expectEqual(peer_lsp.Status.out_of_scope, peer_lsp.decodeReply(outside).?.status);
     try t.expectEqual(before, service.asked);
+}
+
+test "conn: a share carries its document's minted id, a reconnect re-announces the same id, and a pre-id announce still opens" {
+    const gpa = t.allocator;
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared scratch\n");
+    // Two documents with the same bytes are two documents.
+    var twin = try Document.init(gpa, "alice");
+    defer twin.deinit(gpa);
+    try twin.insert(gpa, 0, "shared scratch\n");
+    try t.expect(!doc_a.id.eql(twin.id));
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    _ = try ca.share(&doc_a, "notes", 1);
+    // A sender that predates the id: base, name and the kind byte only.
+    const legacy = try craftAnnounce(gpa, 64, "legacy-doc", &.{0});
+    defer gpa.free(legacy);
+    try sa.post(.op, @intFromEnum(wire.OpKind.share), 0, legacy);
+
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline and cb.offers.items.len < 2) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 2), cb.offers.items.len);
+    var legacy_index: ?usize = null;
+    for (cb.offers.items, 0..) |o, i| {
+        if (std.mem.eql(u8, o.name, "legacy-doc")) {
+            // Version skew narrows the durable name, never the offer.
+            try t.expect(o.doc_id == null);
+            legacy_index = i;
+        } else {
+            try t.expect(o.doc_id.?.eql(doc_a.id));
+        }
+    }
+    try t.expect(cb.offerFor(doc_a.id) != null);
+    var old_replica = try Document.init(gpa, "bob");
+    defer old_replica.deinit(gpa);
+    _ = try cb.openOffer(legacy_index.?, &old_replica, 3);
+    try t.expect(!old_replica.id.eql(doc_a.id));
+    cb.deinit();
+    sb.destroy();
+    sa.destroy();
+
+    // Reconnect: a fresh link and a fresh peer connection. The base is the
+    // connection's to allocate; the id is the document's.
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    sa = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb2 = try Session.create(gpa, lb2.link(), .client, "tok", .own, null);
+    defer sb2.destroy();
+    try ca.rebind(sa);
+    var cb2 = try Conn.init(gpa, sb2, "bob", .client);
+    defer cb2.deinit();
+    const again = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < again and cb2.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb2.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const index = cb2.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+    var replica = try Document.init(gpa, "bob");
+    defer replica.deinit(gpa);
+    const minted_locally = replica.id;
+    _ = try cb2.openOffer(index, &replica, 2);
+    // The replica IS the shared document, so it answers to the sharer's id.
+    try t.expect(replica.id.eql(doc_a.id));
+    try t.expect(!replica.id.eql(minted_locally));
+}
+
+test "conn: closing a peer document's replica and opening it again binds it once more — never twice at once, never an assert" {
+    const gpa = t.allocator;
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared scratch\n");
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+    _ = try ca.share(&doc_a, "notes", 1);
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const index = cb.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+
+    // `open weft://<alice>/doc/<id>`: a replica bound under entry 2.
+    var first = try Document.init(gpa, "bob");
+    defer first.deinit(gpa);
+    _ = try cb.openOffer(index, &first, 2);
+    try t.expect(cb.findBase(cb.offers.items[index].base) != null);
+
+    // The entry closes: its replica is unbound, and the share is open to
+    // opening again — the same document, found by the same id, bound once.
+    cb.unbindTag(2);
+    try t.expect(cb.findBase(cb.offers.items[index].base) == null);
+    const again = cb.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+    var second = try Document.init(gpa, "bob");
+    defer second.deinit(gpa);
+    _ = try cb.openOffer(again, &second, 3);
+    try t.expect(second.id.eql(doc_a.id));
+    try t.expectEqual(@as(usize, 1), cb.collabs.items.len);
+
+    // While it is bound, a second bind of the same share is refused.
+    var dup = try Document.init(gpa, "bob");
+    defer dup.deinit(gpa);
+    try t.expectError(error.AlreadyBound, cb.openOffer(again, &dup, 5));
 }

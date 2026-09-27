@@ -13,10 +13,11 @@ const weft = @import("weft");
 const output = @import("weft_output");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "make-build", .call = makeBuild, .summary = "build this project" },
-    .{ .name = "make-test", .call = makeTest, .summary = "run this project's tests" },
-    .{ .name = "make-run", .call = makeRun, .summary = "run this project" },
-    .{ .name = "make-visit", .call = output.visit, .summary = "open the location the focused build row names" },
+    .{ .name = "make-build", .arity = .whole, .call = makeBuild, .summary = "build this project" },
+    .{ .name = "make-test", .arity = .whole, .call = makeTest, .summary = "run this project's tests" },
+    .{ .name = "make-run", .arity = .whole, .call = makeRun, .summary = "run this project" },
+    .{ .name = "make-visit", .arity = .one, .call = output.visit, .summary = "open the location the focused build row names" },
+    .{ .name = "make-open", .arity = .whole, .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
 };
 
 fn describeExtra() void {
@@ -26,7 +27,13 @@ fn describeExtra() void {
 fn initExtra() void {
     // Return jumps to the compiler error the focused row points at.
     output.installMode("build", "make-visit");
+    // A build is a projection this plugin re-runs by designation.
+    _ = weft.designationOpener(kind, "make-open");
 }
+
+/// The projection kind a build is (doc/model.md §2.1):
+/// `weft://here/make/<place>?run=build|test|make`.
+const kind = "make";
 
 // A build says what went wrong on STDERR, which is the whole reason to have a
 // navigable build buffer — and which the stdout-only fill door dropped on the
@@ -34,12 +41,24 @@ fn initExtra() void {
 // errors rather than an empty window.
 fn makeBuild() void {
     output.show(&.{ "zig", "build" }, "*build*", "build", .{ .want_err = true });
+    output.designate(kind, "run=build");
 }
 fn makeTest() void {
     output.show(&.{ "zig", "build", "test" }, "*test*", "build", .{ .want_err = true });
+    output.designate(kind, "run=test");
 }
 fn makeRun() void {
     output.show(&.{"make"}, "*build*", "build", .{ .want_err = true });
+    output.designate(kind, "run=make");
+}
+
+/// The opener for `weft://here/make/<place>?run=…`: that run again, here.
+fn reopen() void {
+    const d = output.reopening(kind) orelse return;
+    const run = d.param("run") orelse "build";
+    if (std.mem.eql(u8, run, "test")) return makeTest();
+    if (std.mem.eql(u8, run, "make")) return makeRun();
+    makeBuild();
 }
 
 comptime {

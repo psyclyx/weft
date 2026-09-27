@@ -1406,7 +1406,8 @@ test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop t
     const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
     defer gpa.free(mock);
     try ed.setConfig("dap", "cmd", mock);
-    try ed.setConfig("dap", "program", "prog.py"); // matches the buffer path we marked
+    var prog_at: [std.fs.max_path_bytes]u8 = undefined;
+    try ed.setConfig("dap", "program", h.Editor.asTyped("prog.py", &prog_at)); // matches the buffer path we marked — absolute, as every open is
     try ed.setConfig("dap", "line", "9");
 
     const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
@@ -2457,7 +2458,8 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
     const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
     defer gpa.free(mock);
     try ed.setConfig("dap", "cmd", mock);
-    try ed.setConfig("dap", "program", "prog.py");
+    var prog_at: [std.fs.max_path_bytes]u8 = undefined;
+    try ed.setConfig("dap", "program", h.Editor.asTyped("prog.py", &prog_at));
     try ed.setConfig("dap", "line", "9"); // a fallback we never want to see
 
     const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});

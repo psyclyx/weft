@@ -27,6 +27,8 @@ pub const session = @import("session.zig");
 /// Frame driving and the prepared-frame builder.
 pub const frame = @import("frame.zig");
 pub const frame_builder = @import("frame_builder.zig");
+/// Plugin answers about a pane's chrome, cached per version (doc/model.md §2.7).
+pub const answers = @import("answers.zig");
 
 /// Command surfaces the app installs.
 pub const window_cmds = @import("window_cmds.zig");
@@ -65,6 +67,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = frame; // which-key menu-overlay timing
     _ = frame_builder; // rendering P2: caret-surface auto-expiry
+    _ = answers; // snapshot frames: the per-version answer cache
     _ = render_memory;
     _ = collab_presets; // §13.6: echo derives from bundle values only
     _ = config_load; // W4 slice 4: the production plugin/grant-table loader

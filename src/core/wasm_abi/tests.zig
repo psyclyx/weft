@@ -107,7 +107,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqualStrings("renamed", snapshot.value.bytes);
     try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
     const child_id: @import("weft_semantic").scene.NodeId = @enumFromInt(0x1_0000_0002);
-    try t.expectEqual(child_id, env.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqual(child_id, env.head.scene_selection.path().?.leaf().?);
     try t.expect((try semantic.actions.invoke(&semantic.views, .{
         .action = "fixture.open",
         .view = view_ref,
@@ -735,7 +735,7 @@ const OpenCommandProbe = struct {
     }
 };
 
-test "files wasm launcher: delegates to the ordinary open command at cwd" {
+test "files wasm launcher: delegates to the ordinary open command with the place's designation" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -766,7 +766,10 @@ test "files wasm launcher: delegates to the ordinary open command at cwd" {
     var cwd_buf: [4096]u8 = undefined;
     const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd;
     const cwd = std.mem.sliceTo(cwd_ptr, 0);
-    try t.expectEqualStrings(cwd, open_probe.target.?);
+    // The place, by its designation — never "." and never a bare path.
+    const want = try std.fmt.allocPrint(gpa, "weft://here/dir{s}", .{cwd});
+    defer gpa.free(want);
+    try t.expectEqualStrings(want, open_probe.target.?);
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {
@@ -999,7 +1002,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     // `on_poll` attempts `weft.setMode("polled")` then `weft.echo("polled")`.
     // `requireDispatch` (wasm_host/plugin.zig) traps on the FIRST one — the
     // guest call unwinds right there, so the echo never runs either.
-    try t.expectError(error.Trap, contract.callOptionalExport("on_poll", &plugin.instance, .{}));
+    try t.expectError(error.Trap, contract.callOptionalExport("on_poll", plugin, .{}));
     try t.expectEqualStrings("start", env.head.currentMode()); // untouched
     try t.expectEqual(@as(usize, 0), env.head.echo.items.len); // untouched
 }
@@ -2396,7 +2399,14 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     };
     try t.expect(scratch == null);
 
-    const id = env.buffers.findByPath(tmp) orelse return error.TestExpectedNotesFileOpen;
+    // Opened where the place is — the absolute path the relative name has
+    // in it — never as a path relative to wherever the process stands.
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.mem.sliceTo(std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd, 0);
+    const abs = try std.fs.path.join(gpa, &.{ cwd, tmp });
+    defer gpa.free(abs);
+    try t.expect(env.buffers.findByPath(tmp) == null);
+    const id = env.buffers.findByPath(abs) orelse return error.TestExpectedNotesFileOpen;
     const buf = env.buffers.get(id).?;
     const s = try buf.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -4073,7 +4083,7 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     try t.expectEqual(primary_at, ed.cursorOffset());
 }
 
-test "wasm plugin: a provider answering a round cannot act — every door but the reads traps mid-answer" {
+test "wasm plugin: a provider answering a round may act — its edit is just the next version" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -4088,19 +4098,15 @@ test "wasm plugin: a provider answering a round cannot act — every door but th
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "abc");
     const flashes = env.caps.flash.gen;
-    // A gutter or status round fires during layout. The provider tries to
-    // edit, to flash, to run a command: each traps before it lands, and the
-    // answer it would have pushed after never arrives.
-    for ([_][]const u8{ "act-edit", "act-flash", "act-run" }) |req| {
-        const id = try env.slot_host.fire("ui/badge", .{}, "v", .{ .request = req });
-        if (id) |s| try t.expectEqual(@as(usize, 0), env.slot_host.session(s).?.all().len);
-    }
-    try expectDoc(gpa, ed, "abc");
-    try t.expectEqual(flashes, env.caps.flash.gen);
-    try t.expectEqual(@as(u32, 0), plugin.answering);
-    // A provider that only reads and answers is untouched by the policy.
-    const ok_id = (try env.slot_host.fire("ui/badge", .{}, "v", .{})).?;
-    try t.expectEqual(@as(usize, 1), env.slot_host.session(ok_id).?.all().len);
+    // No round fires while a frame is drawn (doc/model.md §2.7), so nothing
+    // refuses a provider that acts while answering: its edit and its flash
+    // land, and its answer still arrives.
+    const edited = (try env.slot_host.fire("ui/badge", .{}, "v", .{ .request = "act-edit", .ctx = &env.ctx })).?;
+    try t.expectEqual(@as(usize, 1), env.slot_host.session(edited).?.all().len);
+    try expectDoc(gpa, ed, "ACTEDabc");
+    const flashed = (try env.slot_host.fire("ui/badge", .{}, "v", .{ .request = "act-flash", .ctx = &env.ctx })).?;
+    try t.expectEqual(@as(usize, 1), env.slot_host.session(flashed).?.all().len);
+    try t.expect(env.caps.flash.gen != flashes);
 }
 
 test "wasm plugin: an undo unit a guest leaves open ends with its dispatch, and a close reaches only its own" {
@@ -4166,4 +4172,158 @@ test "wasm plugin: multiple selections — a per-selection yank distributes acro
     try ed.setSelections(gpa, &.{.{ .anchor = 0, .head = 0 }}, 0);
     _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
     try expectDoc(gpa, ed, "one\ntwooneone two|two");
+}
+
+test "wasm plugin: a command that declares no mapping is refused on several selections, and says why" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "abc");
+    // One selection is the degenerate case: an undeclared command runs.
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-undeclared", &.{});
+    try expectDoc(gpa, ed, "?abc");
+
+    // Two: it would act on one of them, so it does not run at all — and the
+    // door a person reaches it through says why.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
+    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "ms-undeclared", &.{}));
+    try expectDoc(gpa, ed, "?abc");
+    command.invoke(&env.commands, &env.ctx, "ms-undeclared", &.{});
+    try t.expectEqualStrings("ms-undeclared: acts on one selection; several are selected", env.head.echo.items);
+    try expectDoc(gpa, ed, "?abc");
+    // Both selections survive the refusal.
+    try t.expectEqual(@as(usize, 2), ed.selectionCount());
+}
+
+test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge extents away, and when nothing runs" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "one two\nthree\n");
+    const Count = struct {
+        fn of(e: *Env) !i64 {
+            return (try command.run(&e.commands, &e.ctx, "ms-epilogues", &.{})).integer;
+        }
+    };
+    // Each read runs the epilogue once itself (ms-epilogues is a command).
+    const start = try Count.of(&env);
+
+    // Two carets on one line: the first run selects the line, merging the
+    // other caret into it, so fewer runs happen than were scheduled.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 5, .head = 5 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(start + 2, try Count.of(&env));
+
+    // Two carets, neither with a target: no run at all, one epilogue.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 10, .head = 10 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-op-none", &.{});
+    try t.expectEqual(start + 4, try Count.of(&env));
+
+    // Two carets on two lines: two runs, still one epilogue.
+    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    try t.expectEqual(start + 6, try Count.of(&env));
+}
+
+test "context: a wasm plugin publishes at a scope, a predicate reads it, and unloading retracts it" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
+    var loaded = true;
+    defer if (loaded) plugin.deinit();
+    const intent_mod = @import("../intent.zig");
+    const facts = @import("weft_facts");
+
+    const S = struct {
+        fn set(e: *Env, key: []const u8, value: []const u8, scope: []const u8) ![]const u8 {
+            const v = try command.run(&e.commands, &e.ctx, "ow-context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
+            return v.string;
+        }
+    };
+    const gated: facts.Predicate = .{ .context = .{ .key = "offerwatch.session", .value = "*" } };
+    try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
+
+    // Published at the place of the entry the command ran in: this entry and
+    // anything else in the same place now satisfy a predicate on the key.
+    try t.expectEqualStrings("ok", try S.set(&env, "offerwatch.session", "weft://here/proc/7", "place"));
+    try t.expect(gated.matches(intent_mod.factsFor(&env.ctx)));
+    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("offerwatch.session").?);
+    // An entry-scoped value is more specific than the place's.
+    try t.expectEqualStrings("ok", try S.set(&env, "offerwatch.session", "mine", "entry"));
+    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("offerwatch.session").?);
+
+    // A builtin, or a key with no namespace, is refused at the door.
+    try t.expectEqualStrings("refused", try S.set(&env, "mode", "normal", "global"));
+    try t.expectEqualStrings("refused", try S.set(&env, "session", "x", "global"));
+    // A key is its namespace's: another plugin's is refused whether or not
+    // its owner has published it yet — first come is not first served.
+    try t.expectEqualStrings("refused", try S.set(&env, "demo.session", "mine", "global"));
+    _ = try env.context.store.set("someone-else", .global, "someone-else.other", "x");
+    try t.expectEqualStrings("refused", try S.set(&env, "someone-else.other", "y", "global"));
+
+    // Unloading the plugin retracts everything it published — and nothing else.
+    plugin.deinit();
+    loaded = false;
+    try t.expect(!gated.matches(intent_mod.factsFor(&env.ctx)));
+    try t.expectEqualStrings("x", env.context.store.get(.{}, "someone-else.other").?);
+}
+
+test "designation: a kind is its producer's by name or by manifest — a plugin claiming another's fails its load" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var openers: @import("../designation.zig").Openers = .empty;
+    defer openers.deinit(gpa);
+    env.ctx.designations = &openers;
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // The grep producer claims `grep` in its init: under any other name it
+    // is claiming someone else's kind, and does not load.
+    try t.expectError(error.DesignationKindRefused, loadPlugin(&engine, &env.ctx, "impostor", @embedFile("guest_grep_wasm"), .{}));
+    try t.expect(openers.find("grep") == null);
+    // Under its own name it loads and owns it — whatever loaded before.
+    const grep = try loadPlugin(&engine, &env.ctx, "grep", @embedFile("guest_grep_wasm"), .{});
+    try t.expectEqualStrings("grep", openers.find("grep").?.owner);
+    // A kind a manifest declares (`designation/diagnostics`) is the
+    // declarer's, though it is not its name.
+    const problems = try loadPlugin(&engine, &env.ctx, "problems", @embedFile("guest_problems_wasm"), .{});
+    try t.expectEqualStrings("problems", openers.find("diagnostics").?.owner);
+    problems.deinit();
+    // Unloaded: the kind is not answered, and says why.
+    try t.expect(openers.find("diagnostics") == null);
+    try t.expect(openers.wasReleased("diagnostics"));
+
+    // At run time a foreign claim is refused (-3), and the plugin stays.
+    const ow = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
+    defer ow.deinit();
+    const claim = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "stranger" }, .{ .string = "ow-probe" } });
+    try t.expectEqualStrings("refused", claim.string);
+    const own = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow-probe" } });
+    try t.expectEqualStrings("ok", own.string);
+    grep.deinit();
 }

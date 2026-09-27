@@ -212,7 +212,7 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     // describe handshake and enforces a different rule over the same store —
     // which is the point: the RULE is per-plane, what a declaration IS is not.
     p.resources.accepting_declarations = true;
-    contract.callOptionalExport("describe", &p.instance, .{}) catch |e| {
+    contract.callOptionalExport("describe", p, .{}) catch |e| {
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
@@ -223,7 +223,7 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     // calls already go through the revocable handle path (see
     // `wasm_host/plugin.zig`'s `mintGrantHandles`/`hasPerm`).
     if (p.grant_table) |table| wasm_host.mintGrantHandles(table, p.name, p.perms, &p.grant_handles);
-    contract.callRequiredExport("init", &p.instance, .{}) catch |e| return failLoad(p, e);
+    contract.callRequiredExport("init", p, .{}) catch |e| return failLoad(p, e);
     p.loading = false;
     if (p.load_error) |e| return failLoad(p, e);
     return p;

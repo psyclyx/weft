@@ -1,10 +1,12 @@
-//! The selection set, and every verb that reshapes it without editing.
+//! The selection, and every verb that reshapes it without editing.
 //!
-//! Helix works on SEVERAL selections at once. Core holds them (doc/configs.md
-//! §0.1) and answers one record of `{anchor, head}` pairs; every verb here
-//! reads that set, computes the next one, and hands it back in one
-//! `setSelections`. None of them loops over "the cursor": a verb that works on
-//! one selection is the one-iteration case of the same loop.
+//! Helix works on SEVERAL selections at once, and none of that is this
+//! file's business: each verb here DECLARES how it maps over the set
+//! (doc/model.md §2.6) and dispatch runs it once per selection. A verb reads
+//! THE selection — during its run, the one dispatch is visiting — computes
+//! the next one, and writes it back (`get`/`put`). The few verbs whose answer
+//! depends on the whole set — `%`, `,`, `(`, `C`, the tree-sitter trail —
+//! declare `.whole` and read the set (`load`).
 
 const std = @import("std");
 const weft = @import("weft");
@@ -13,7 +15,32 @@ const text = @import("text.zig");
 pub const Sel = weft.Selection;
 pub const max = weft.max_selections;
 
-/// The set this command works on, copied out of the SDK's scratch (which
+/// The one selection a run is about: the visited one in an `.each` verb, the
+/// primary otherwise. Starts the text reader afresh — an earlier run may
+/// have edited.
+pub fn get() Sel {
+    text.begin();
+    const set = weft.selections();
+    if (set.items.len == 0) return caret(0);
+    return set.items[set.primary];
+}
+
+/// Replace the selection a run is about (in a `.whole` verb: the set, with
+/// this one selection).
+pub fn put(s: Sel) void {
+    _ = weft.setSelections(&.{s}, 0);
+}
+
+/// Replace it with several (a split); the first stays the one the run is
+/// about.
+pub fn putMany(pieces: []const Sel) void {
+    if (pieces.len == 0) return;
+    _ = weft.setSelections(pieces, 0);
+}
+
+// ── The whole set, for the verbs that need it ───────────────────────────
+
+/// The set a `.whole` verb works on, copied out of the SDK's scratch (which
 /// `addSelection` and friends reuse under us).
 pub var items: [max]Sel = undefined;
 pub var n: usize = 0;
@@ -44,10 +71,6 @@ pub fn span(s: Sel) weft.Range {
     return .{ .start = r.start, .end = @min(r.start + 1, text.len()) };
 }
 
-pub fn primarySpan() weft.Range {
-    return span(items[@min(primary, n -| 1)]);
-}
-
 /// Whether `r` is whole lines: from a line start through a line's newline
 /// (or the end of the buffer).
 pub fn isLinewise(r: weft.Range) bool {
@@ -61,17 +84,15 @@ pub fn caret(off: usize) Sel {
     return .{ .anchor = off, .head = off };
 }
 
-/// Briefly mark what an operation produced or acted on: every selection, as
-/// one flash (doc/configs.md §0.4). Reads the set afresh — after an edit the
-/// selections are wherever core's anchors carried them.
-pub fn flashAll() void {
-    if (!load()) return;
-    var ranges: [max]weft.Range = undefined;
-    for (items[0..n], ranges[0..n]) |s, *r| r.* = span(s);
-    weft.flashRanges(ranges[0..n]);
+/// Briefly mark what a verb produced or acted on — in a mapping, every run's
+/// flash joins one (doc/configs.md §0.4). Reads the selection afresh: after
+/// an edit it is wherever core's anchors carried it.
+pub fn flash() void {
+    const r = span(get());
+    weft.flash(r.start, r.end);
 }
 
-// ── Motions over every selection ────────────────────────────────────────
+// ── Motions ─────────────────────────────────────────────────────────────
 
 /// A motion: the next selection from this one, or null where it cannot move.
 pub const Motion = *const fn (s: Sel) ?Sel;
@@ -80,23 +101,19 @@ pub const Motion = *const fn (s: Sel) ?Sel;
 /// head follows the motion) — helix's normal and select modes.
 pub const Mode = enum { move, extend };
 
-/// Apply `m` to every selection, `count` times.
+/// Apply `m` to the selection, `count` times.
 pub fn applyMotion(m: Motion, mode: Mode, count: u32) void {
-    if (!load()) return;
-    for (items[0..n]) |*s| {
-        const anchor = s.anchor;
-        var cur = s.*;
-        var k = count;
-        while (k > 0) : (k -= 1) {
-            const next = m(cur) orelse break;
-            cur = switch (mode) {
-                .move => next,
-                .extend => .{ .anchor = anchor, .head = next.head },
-            };
-        }
-        s.* = cur;
+    const s = get();
+    var cur = s;
+    var k = count;
+    while (k > 0) : (k -= 1) {
+        const next = m(cur) orelse break;
+        cur = switch (mode) {
+            .move => next,
+            .extend => .{ .anchor = s.anchor, .head = next.head },
+        };
     }
-    store();
+    put(cur);
 }
 
 /// A point motion: a caret at `target(head)`.
@@ -108,105 +125,77 @@ pub fn point(comptime target: fn (usize) ?usize) Motion {
     }.m;
 }
 
-/// Run a range-returning command once per selection (a motion, a text object,
-/// a tree node) and set each selection to what it answered — `move` to the
-/// range itself, `extend` to the old anchor and the range's far end. A
-/// selection the command answered nothing for stays as it was.
+/// Run a range-returning command (a text object, a tree node) and set the
+/// selection to what it answered — `move` to the range itself, `extend` to
+/// the old anchor and the range's far end. A selection it answered nothing
+/// for stays as it was.
 pub fn applyRangeCommand(cmd: []const u8, mode: Mode) void {
-    if (!load()) return;
-    var handles: [max]?u32 = undefined;
-    const hs = weft.runRangeEach(cmd, &handles);
-    for (hs, 0..) |h, i| {
-        if (i >= n) break;
-        const r = weft.rangeEnds(h orelse continue) orelse continue;
-        items[i] = switch (mode) {
-            .move => .{ .anchor = r.start, .head = r.end },
-            .extend => .{ .anchor = items[i].anchor, .head = if (r.end > items[i].anchor) r.end else r.start },
-        };
-    }
-    store();
+    const s = get();
+    const r = weft.rangeEnds(weft.runRange(cmd) orelse return) orelse return;
+    put(switch (mode) {
+        .move => .{ .anchor = r.start, .head = r.end },
+        .extend => .{ .anchor = s.anchor, .head = if (r.end > s.anchor) r.end else r.start },
+    });
 }
 
 /// Run a cursor-anchored motion (`[cursor, target]`, the `motions` plugin's
-/// shape) once per selection and move each head to its target.
+/// shape) and move the head to its target.
 pub fn applyCursorMotion(cmd: []const u8, mode: Mode) void {
-    if (!load()) return;
-    var handles: [max]?u32 = undefined;
-    const hs = weft.runRangeEach(cmd, &handles);
-    for (hs, 0..) |h, i| {
-        if (i >= n) break;
-        const r = weft.rangeEnds(h orelse continue) orelse continue;
-        const target = if (r.start == items[i].head) r.end else r.start;
-        items[i] = switch (mode) {
-            .move => caret(target),
-            .extend => .{ .anchor = items[i].anchor, .head = target },
-        };
-    }
-    store();
+    const s = get();
+    const r = weft.rangeEnds(weft.runRange(cmd) orelse return) orelse return;
+    const target = if (r.start == s.head) r.end else r.start;
+    put(switch (mode) {
+        .move => caret(target),
+        .extend => .{ .anchor = s.anchor, .head = target },
+    });
 }
 
-// ── Reshaping the set ───────────────────────────────────────────────────
+// ── Reshaping the selection ─────────────────────────────────────────────
 
-/// `x`: select each selection's lines, newline included; on a selection that
+/// `x`: select the selection's lines, newline included; on a selection that
 /// is already whole lines, take the next line too — so `x x d` takes two.
 /// A count takes that many lines.
 pub fn selectLines(count: u32) void {
-    if (!load()) return;
-    for (items[0..n]) |*s| {
-        var k = count;
-        while (k > 0) : (k -= 1) {
-            const r = span(s.*);
-            const grow = isLinewise(r) and r.end < text.len();
-            const first = weft.lineAt(r.start).start;
-            const last = weft.lineAt(if (grow) r.end else @max(r.start, r.end -| 1));
-            s.* = .{ .anchor = first, .head = @min(last.end + 1, text.len()) };
-        }
+    var s = get();
+    var k = count;
+    while (k > 0) : (k -= 1) {
+        const r = span(s);
+        const grow = isLinewise(r) and r.end < text.len();
+        const first = weft.lineAt(r.start).start;
+        const last = weft.lineAt(if (grow) r.end else @max(r.start, r.end -| 1));
+        s = .{ .anchor = first, .head = @min(last.end + 1, text.len()) };
     }
-    store();
+    put(s);
 }
 
-/// `X`: stretch each selection to its line bounds, without growing past them.
+/// `X`: stretch the selection to its line bounds, without growing past them.
 pub fn toLineBounds() void {
-    if (!load()) return;
-    for (items[0..n]) |*s| {
-        const r = span(s.*);
-        const first = weft.lineAt(r.start).start;
-        const last = weft.lineAt(@max(r.start, r.end -| 1));
-        s.* = .{ .anchor = first, .head = @min(last.end + 1, text.len()) };
-    }
-    store();
+    const r = span(get());
+    const first = weft.lineAt(r.start).start;
+    const last = weft.lineAt(@max(r.start, r.end -| 1));
+    put(.{ .anchor = first, .head = @min(last.end + 1, text.len()) });
 }
 
 /// `%`: one selection over the whole document.
 pub fn selectAll() void {
-    if (!load()) return;
-    items[0] = .{ .anchor = 0, .head = text.len() };
-    n = 1;
-    primary = 0;
-    store();
+    put(.{ .anchor = 0, .head = weft.byteLen() });
 }
 
-/// `;`: collapse every selection onto its head.
+/// `;`: collapse the selection onto its head.
 pub fn collapse() void {
-    if (!load()) return;
-    for (items[0..n]) |*s| s.* = caret(s.head);
-    store();
+    put(caret(get().head));
 }
 
-/// `A-;`: swap each selection's anchor and head.
+/// `A-;`: swap the selection's anchor and head.
 pub fn flip() void {
-    if (!load()) return;
-    for (items[0..n]) |*s| s.* = .{ .anchor = s.head, .head = s.anchor };
-    store();
+    const s = get();
+    put(.{ .anchor = s.head, .head = s.anchor });
 }
 
-/// `A-:`: point every selection forward (head after anchor).
+/// `A-:`: point the selection forward (head after anchor).
 pub fn ensureForward() void {
-    if (!load()) return;
-    for (items[0..n]) |*s| if (s.head < s.anchor) {
-        s.* = .{ .anchor = s.head, .head = s.anchor };
-    };
-    store();
+    const s = get();
+    if (s.head < s.anchor) put(.{ .anchor = s.head, .head = s.anchor });
 }
 
 /// `,`: keep only the primary.
@@ -297,63 +286,46 @@ fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
-/// `_`: trim blanks off both ends of every selection; a selection that is all
-/// blanks goes away (unless it is the last one).
+/// `_`: trim blanks off both ends of the selection; one that is all blanks
+/// becomes a caret where it started.
 pub fn trim() void {
-    if (!load()) return;
-    var kept: usize = 0;
-    var new_primary: usize = 0;
-    for (items[0..n], 0..) |s, i| {
-        const r = s.range();
-        var a = r.start;
-        var b = r.end;
-        while (a < b and isSpace(text.at(a).?)) a += 1;
-        while (b > a and isSpace(text.at(b - 1).?)) b -= 1;
-        if (a == b and r.end > r.start) continue;
-        if (i == primary) new_primary = kept;
-        items[kept] = if (s.head >= s.anchor) .{ .anchor = a, .head = b } else .{ .anchor = b, .head = a };
-        kept += 1;
-    }
-    if (kept == 0) return;
-    n = kept;
-    primary = new_primary;
-    store();
+    const s = get();
+    const r = s.range();
+    var a = r.start;
+    var b = r.end;
+    while (a < b and isSpace(text.at(a).?)) a += 1;
+    while (b > a and isSpace(text.at(b - 1).?)) b -= 1;
+    if (a == b) return put(caret(r.start));
+    put(if (s.head >= s.anchor) .{ .anchor = a, .head = b } else .{ .anchor = b, .head = a });
 }
 
-/// `A-s`: split every selection into one selection per line it covers.
+/// `A-s`: split the selection into one selection per line it covers.
 pub fn splitLines() void {
-    if (!load()) return;
+    const r = get().range();
     var out: [max]Sel = undefined;
     var m: usize = 0;
-    var new_primary: usize = 0;
-    for (items[0..n], 0..) |s, i| {
-        const r = s.range();
-        if (i == primary) new_primary = m;
-        var l = weft.lineAt(r.start);
-        var from = r.start;
-        while (m < max) {
-            const to = @min(r.end, l.end);
-            if (to > from or r.end == r.start) {
-                out[m] = .{ .anchor = from, .head = to };
-                m += 1;
-            }
-            if (l.end >= r.end or l.end >= text.len()) break;
-            l = weft.lineAt(l.end + 1);
-            from = l.start;
+    var l = weft.lineAt(r.start);
+    var from = r.start;
+    while (m < max) {
+        const to = @min(r.end, l.end);
+        if (to > from or r.end == r.start) {
+            out[m] = .{ .anchor = from, .head = to };
+            m += 1;
         }
+        if (l.end >= r.end or l.end >= text.len()) break;
+        l = weft.lineAt(l.end + 1);
+        from = l.start;
     }
-    if (m == 0) return;
-    @memcpy(items[0..m], out[0..m]);
-    n = m;
-    primary = new_primary;
-    store();
+    putMany(out[0..m]);
 }
 
 // ── Tree-sitter selection history ───────────────────────────────────────
 // `A-o` grows every selection a node; `A-i` walks back down the way it came
 // (the sets `A-o` replaced), and only once that trail is spent asks the tree
-// for a child. The trail is only valid while the set is still exactly what
-// the last `A-o` left: any other change breaks it.
+// for a child. The trail is a fact about the WHOLE set — only valid while
+// the set is still exactly what the last `A-o` left — so these two verbs are
+// `.whole`, and the per-selection step they take is `hx-ts-expand` /
+// `hx-ts-shrink`, which dispatch maps.
 
 const trail_depth = 8;
 const Snapshot = struct { n: usize, primary: usize, items: [max]Sel };
@@ -381,7 +353,7 @@ pub fn expand() void {
     slot.primary = primary;
     @memcpy(slot.items[0..n], items[0..n]);
     trail_len += 1;
-    applyRangeCommand("ts.expand", .move);
+    weft.run("hx-ts-expand");
     _ = load();
     trail_mark = fingerprint();
 }
@@ -401,5 +373,13 @@ pub fn shrink() void {
         return;
     }
     trail_len = 0;
+    weft.run("hx-ts-shrink");
+}
+
+/// `hx-ts-expand` / `hx-ts-shrink`: one selection a node out, or in.
+pub fn tsExpand() void {
+    applyRangeCommand("ts.expand", .move);
+}
+pub fn tsShrink() void {
     applyRangeCommand("ts.shrink", .move);
 }

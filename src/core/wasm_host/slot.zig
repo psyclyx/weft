@@ -152,24 +152,22 @@ pub fn hSlotBind(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 ///     the save/restore it would push through whichever head this plugin
 ///     last ran under. Same three lines `wpPickAccept` uses.
 ///   - Leaving `in_dispatch` FALSE keeps the head-gated doors
-///     (`requireDispatch`) shut: no mode, pick or echo from inside a fire.
-///     But those are a handful of doors, and a gutter or status round fires
-///     DURING LAYOUT — an edit, a run, a selection or a flash from there
-///     changes what the frame is drawing. So the fire also marks the guest
-///     as ANSWERING (`WasmPlugin.answering`), and every door but the reads
-///     `contract.render_safe` names traps while it is (`plugin.answerGate`,
-///     applied once where the doors are bound). Answering a question conveys
-///     no authority — the guarantee `wasm_host/annotate.zig` makes for
-///     decorators, now held for every door rather than the head-gated few.
+///     (`requireDispatch`) shut: no mode, pick or echo from inside a fire —
+///     a fire is not a keystroke, and head state answers to dispatch.
+///
+/// Every other door is open to an answering provider, as to any background
+/// entry. No fire happens while a frame is drawn: the gutter and status
+/// questions are asked between frames (doc/model.md §2.7), so an edit, a
+/// run or a flash made while answering is the next version, drawn by the
+/// next frame — never a change to the one being drawn. That is what retired
+/// the draw-time door allowlist that used to trap them.
 fn wpSlotProvider(data: ?*anyopaque, host: *slot_mod.SlotHost, req: *const slot_mod.Request) anyerror!void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const handle: i32 = @bitCast(@as(u32, @truncate(req.session)));
     const saved_ctx = p.active_ctx;
     if (req.ctx) |c| p.active_ctx = @ptrCast(@alignCast(c));
     defer p.active_ctx = saved_ctx;
-    p.answering += 1;
-    defer p.answering -= 1;
-    contract.callOptionalExport("on_slot_fire", &p.instance, .{handle}) catch {
+    contract.callOptionalExport("on_slot_fire", p, .{handle}) catch {
         host.decline(req.session);
     };
 }

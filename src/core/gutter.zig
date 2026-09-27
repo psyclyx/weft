@@ -2,12 +2,24 @@
 //! schema, and the encode/decode either side of it needs.
 //!
 //! **What core knows about the gutter is in this file, and it is one string
-//! and one shape.** An `ask` names a window of lines plus the two facts a
-//! column needs to lay itself out (the caret line and the line count); a
-//! `tell` answers with one cell per line of that window. Core does not know
-//! what a line number is, whether it counts from the caret, or which entries
+//! and one shape.** An `ask` names a window of lines plus the line count (a
+//! fixed-width column pads to it); a `tell` answers with one cell per line of
+//! that window. Core does not know what a line number is, or which entries
 //! deserve one. That is the same line `pick/annotate.zig` draws for pick
 //! rows: core owns the exchange, a provider owns the answer.
+//!
+//! **An answer can be a formula over the frame's snapshot** (`rule`), for a
+//! column whose cells depend on something that moves every frame. A caret
+//! move is such a thing, and an answer asked between frames (doc/model.md
+//! §2.7) is a frame late for it: cells computed against the caret the
+//! provider was asked with would show the previous caret's numbering on the
+//! frame the caret moved. So the caret is NOT in the question. A provider
+//! that numbers relative to it says so declaratively — "the distance from the
+//! caret line, `width` digits" — and the renderer evaluates that against the
+//! snapshot it is drawing, so the column is right on the frame the caret
+//! moves, and a caret move asks no provider anything. `Formula` is the whole
+//! vocabulary, and deliberately small: a line's own number, or its distance
+//! from the caret line.
 //!
 //! **One round per WINDOW, not per row.** A guest call per visible row would
 //! be a membrane crossing per row per frame; a window costs one crossing for
@@ -41,7 +53,6 @@ const u32_ty: Schema = .{ .scalar = .u32 };
 const ask_fields = [_]Schema.Field{
     .{ .name = "first", .ty = &u32_ty },
     .{ .name = "count", .ty = &u32_ty },
-    .{ .name = "caret", .ty = &u32_ty },
     .{ .name = "lines", .ty = &u32_ty },
 };
 const ask_ty: Schema = .{ .@"struct" = &ask_fields };
@@ -59,16 +70,27 @@ const tell_fields = [_]Schema.Field{
     .{ .name = "cells", .ty = &cells_ty },
 };
 const tell_ty: Schema = .{ .@"struct" = &tell_fields };
+/// A column as a formula (`Rule`): which one, the digits it pads to, and the
+/// `surface.Role` of every other line and of the caret line.
+const rule_fields = [_]Schema.Field{
+    .{ .name = "formula", .ty = &u32_ty },
+    .{ .name = "width", .ty = &u32_ty },
+    .{ .name = "role", .ty = &u32_ty },
+    .{ .name = "caret_role", .ty = &u32_ty },
+};
+const rule_ty: Schema = .{ .@"struct" = &rule_fields };
 
 const cases = [_]Schema.Case{
     .{ .name = "ask", .ty = &ask_ty },
     .{ .name = "tell", .ty = &tell_ty },
+    .{ .name = "rule", .ty = &rule_ty },
 };
 
 pub const schema: Schema = .{ .variant = &cases };
 
 const tag_ask = 0;
 const tag_tell = 1;
+const tag_rule = 2;
 
 /// Declare the slot on `container`, WITH its schema. Idempotent (the first
 /// declaration wins), so the System and the UI mesh may both call it.
@@ -83,13 +105,49 @@ pub fn declare(container: *container_mod.Container) Allocator.Error!void {
     });
 }
 
-/// The question: lines `[first, first + count)`, where the caret is, and how
-/// many lines the entry has (a fixed-width column pads to that).
+/// The question: lines `[first, first + count)`, and how many lines the
+/// entry has (a fixed-width column pads to that). No caret: see `Rule`.
 pub const Ask = struct {
     first: u32,
     count: u32,
-    caret: u32,
     lines: u32,
+};
+
+/// What a `rule` computes for a line, from the frame's snapshot.
+pub const Formula = enum(u32) {
+    /// The line's own number, from 1.
+    number = 0,
+    /// The line's distance from the caret line; the caret line shows its
+    /// own number (a bare 0 there would say nothing).
+    caret_distance = 1,
+    _,
+};
+
+/// A column answered as a formula: every line's cell is `formula`'s number,
+/// right-aligned in `width` digits and followed by one blank column, colored
+/// `caret_role` on the caret line and `role` elsewhere.
+pub const Rule = struct {
+    formula: Formula,
+    width: u32,
+    role: u32,
+    caret_role: u32,
+
+    /// The number `line` (0-based) shows with the caret on `caret_line`.
+    pub fn number(self: Rule, line: usize, caret_line: usize) usize {
+        return switch (self.formula) {
+            .caret_distance => if (line == caret_line) line + 1 else if (line > caret_line) line - caret_line else caret_line - line,
+            else => line + 1,
+        };
+    }
+
+    /// Whether this build evaluates the rule's formula; an unknown one is a
+    /// provider that said nothing.
+    pub fn known(self: Rule) bool {
+        return switch (self.formula) {
+            .number, .caret_distance => true,
+            _ => false,
+        };
+    }
 };
 
 /// Encode an `ask`. Caller owns the bytes.
@@ -97,7 +155,6 @@ pub fn encodeAsk(gpa: Allocator, ask: Ask) ![]u8 {
     const values = [_]schema_mod.Value{
         .{ .scalar = .{ .u32 = ask.first } },
         .{ .scalar = .{ .u32 = ask.count } },
-        .{ .scalar = .{ .u32 = ask.caret } },
         .{ .scalar = .{ .u32 = ask.lines } },
     };
     const payload: schema_mod.Value = .{ .@"struct" = &values };
@@ -144,6 +201,39 @@ pub fn encodeTell(gpa: Allocator, first: u32, cells: []const Cell) ![]u8 {
     return schema_mod.encode(gpa, &schema, .{ .variant = .{ .tag = tag_tell, .payload = &payload } });
 }
 
+/// Encode a `rule`. Caller owns the bytes.
+pub fn encodeRule(gpa: Allocator, rule: Rule) ![]u8 {
+    const values = [_]schema_mod.Value{
+        .{ .scalar = .{ .u32 = @intFromEnum(rule.formula) } },
+        .{ .scalar = .{ .u32 = rule.width } },
+        .{ .scalar = .{ .u32 = rule.role } },
+        .{ .scalar = .{ .u32 = rule.caret_role } },
+    };
+    const payload: schema_mod.Value = .{ .@"struct" = &values };
+    return schema_mod.encode(gpa, &schema, .{ .variant = .{ .tag = tag_rule, .payload = &payload } });
+}
+
+/// Decode a `rule`, or null for anything that is not one (a `tell`, an
+/// unknown formula, a malformed answer).
+pub fn decodeRule(bytes: []const u8) ?Rule {
+    const cur = schema_mod.decodeCursor(&schema, bytes);
+    const variant = cur.enterVariant() catch return null;
+    if (variant.tag != tag_rule) return null;
+    const s = variant.selected().enterStruct() catch return null;
+    const rule: Rule = .{
+        .formula = @enumFromInt(ruleField(s, "formula") orelse return null),
+        .width = ruleField(s, "width") orelse return null,
+        .role = ruleField(s, "role") orelse return null,
+        .caret_role = ruleField(s, "caret_role") orelse return null,
+    };
+    return if (rule.known()) rule else null;
+}
+
+fn ruleField(s: anytype, name: []const u8) ?u32 {
+    const c = (s.field(name) catch return null) orelse return null;
+    return c.asU32() catch null;
+}
+
 /// Decode a `tell`, or null for anything that is not one. A malformed answer
 /// is a provider that said nothing — normal for a raced slot.
 pub fn decodeTell(bytes: []const u8) ?Tell {
@@ -165,13 +255,12 @@ const t = std.testing;
 
 test "gutter: ask/tell round-trip through the one shared schema" {
     const gpa = t.allocator;
-    const asked = try encodeAsk(gpa, .{ .first = 10, .count = 3, .caret = 11, .lines = 120 });
+    const asked = try encodeAsk(gpa, .{ .first = 10, .count = 3, .lines = 120 });
     defer gpa.free(asked);
     const cur = schema_mod.decodeCursor(&schema, asked);
     const variant = try cur.enterVariant();
     try t.expectEqualStrings("ask", variant.caseName());
     const s = try variant.selected().enterStruct();
-    try t.expectEqual(@as(u32, 11), try (try s.field("caret")).?.asU32());
     try t.expectEqual(@as(u32, 120), try (try s.field("lines")).?.asU32());
 
     const cell_vals = [_]schema_mod.Value{ .{ .str = "  1 " }, .{ .scalar = .{ .u32 = 6 } } };
@@ -191,4 +280,28 @@ test "gutter: ask/tell round-trip through the one shared schema" {
     // An ask is well-formed and still not an answer.
     try t.expect(decodeTell(asked) == null);
     try t.expect(decodeTell(&.{}) == null);
+    try t.expect(decodeRule(asked) == null);
+    try t.expect(decodeRule(answered) == null);
+}
+
+test "gutter: a rule round-trips, and numbers lines from the caret the frame draws" {
+    const gpa = t.allocator;
+    const bytes = try encodeRule(gpa, .{ .formula = .caret_distance, .width = 2, .role = 6, .caret_role = 0 });
+    defer gpa.free(bytes);
+    const rule = decodeRule(bytes).?;
+    try t.expectEqual(Formula.caret_distance, rule.formula);
+    try t.expectEqual(@as(u32, 2), rule.width);
+    try t.expect(decodeTell(bytes) == null);
+    // The caret line shows its own number; every other line its distance.
+    try t.expectEqual(@as(usize, 3), rule.number(2, 2));
+    try t.expectEqual(@as(usize, 2), rule.number(0, 2));
+    try t.expectEqual(@as(usize, 8), rule.number(10, 2));
+    // The same answer a caret later: no new answer needed.
+    try t.expectEqual(@as(usize, 1), rule.number(2, 3));
+    const absolute: Rule = .{ .formula = .number, .width = 3, .role = 6, .caret_role = 0 };
+    try t.expectEqual(@as(usize, 11), absolute.number(10, 2));
+    // A formula this build does not know is a provider that said nothing.
+    const unknown = try encodeRule(gpa, .{ .formula = @enumFromInt(9), .width = 1, .role = 0, .caret_role = 0 });
+    defer gpa.free(unknown);
+    try t.expect(decodeRule(unknown) == null);
 }

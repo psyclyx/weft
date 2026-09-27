@@ -86,7 +86,7 @@ fn authorTree(ed: *h.Editor) !void {
 }
 
 fn focusedView(ed: *h.Editor) ?*const h.view_runtime.view.Instance {
-    const path = ed.head.semantic_focus.path() orelse return null;
+    const path = ed.head.scene_selection.path() orelse return null;
     return ed.session.system.semantic.views.get(path.view);
 }
 

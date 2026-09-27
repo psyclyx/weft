@@ -127,12 +127,12 @@ test "app/window: a further split tiles three panes and still composites" {
 // What each primitive has to do for this to work: the pane tree docks a leaf
 // and refuses to restructure it (D1); the layout phase routes the
 // activation's open by POLICY rather than by whoever opened it (D3); and the
-// focus feed marks this viewport's focus as companion focus, so nothing
+// primary context never moves on this viewport's focus, so nothing
 // follows it (D2).
 
 /// The current name field in the focused semantic entry.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
-    if (ed.head.semantic_focus.field == null) return null;
+    if (ed.head.scene_selection.field == null) return null;
     return try ed.draftHere(gpa);
 }
 
@@ -241,20 +241,10 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
         try t.expectEqualStrings("alpha.txt", still);
     }
 
-    // And the companion's own focus is not a primary-focus change: the feed's
-    // last event carries the sidebar's attributes, so a follower built on the
-    // shipped helper ignores it rather than retargeting to itself.
-    const last = ed.session.system.focus.last orelse return error.NoFocusEvent;
-    try t.expect(!last.attrs.focus_source);
-    const follower: core.focus_feed.Companion = .{
-        .viewport = 999,
-        .retarget = struct {
-            fn never(_: ?*anyopaque, _: core.focus_feed.Event) void {
-                unreachable;
-            }
-        }.never,
-    };
-    try t.expect(!follower.follows(last));
+    // And the companion's own focus is not a primary-focus change: the head's
+    // primary focus still names the editor pane, and that record is the only
+    // thing the primary context — all a follower hears — reads focus from.
+    try t.expectEqual(primary.pane().id, ed.head.primary_focus.?.pane);
     ed.run("window-focus-right");
     ed.applyWindow();
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
@@ -266,30 +256,37 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
 
 // ── GATE: following is a consumer of two primitives, not a DSL ──
 //
-// doc/cwa-config-decisions.md D2: "primary-focus-change as a subscribable
-// feed, plus viewport retarget as a protocol op, plus a CONSUMER doing the
-// following". `Outline` below is that consumer written out in full — the
-// shipped helper (`core.focus_feed.Companion`) plus one call to the retarget
-// op (`window_cmds.presentIn`). It is short enough to live in a config file,
-// which is the point: no reactive binding grammar was needed to write it.
+// doc/cwa-config-decisions.md D2, as revisited by doc/model.md §2.5: "one
+// observable context, plus viewport retarget as a protocol op, plus a
+// CONSUMER doing the following". `Outline` below is that consumer written out
+// in full — a listener on the primary context's one event plus one call to
+// the retarget op (`window_cmds.presentIn`). It is short enough to live in a
+// config file, which is the point: no reactive binding grammar was needed.
 //
 // The bug this kills structurally is the outline retargeting to ITSELF (and
-// to any other companion): the helper filters on the event's attributes
-// before the consumer runs, so a follower cannot see companion focus at all.
+// to any other companion). There is no filter for a follower to forget: the
+// primary context reads focus only from `Head.primary_focus`, which a
+// companion taking focus never moves, so the event does not fire at all.
 
 const Outline = struct {
     ed: *Editor,
     subject: []const u8,
+    viewport: u32 = 0,
+    /// Every delivery heard, and the ones that moved `entry` (a retarget).
+    heard: usize = 0,
     retargets: usize = 0,
-    companion: core.focus_feed.Companion = undefined,
 
     fn follow(self: *Outline, viewport: u32) !void {
-        self.companion = .{ .viewport = viewport, .context = self, .retarget = onPrimaryFocus };
-        try self.companion.subscribe(self.ed.gpa, &self.ed.session.system.focus);
+        self.viewport = viewport;
+        try self.ed.session.system.context.subscribe(.{ .context = self, .notify = onContext });
     }
 
-    fn onPrimaryFocus(raw: ?*anyopaque, _: core.focus_feed.Event) void {
+    fn onContext(raw: ?*anyopaque, keys: []const []const u8) void {
         const self: *Outline = @ptrCast(@alignCast(raw.?));
+        self.heard += 1;
+        for (keys) |k| {
+            if (std.mem.eql(u8, k, "entry")) break;
+        } else return;
         self.retargets += 1;
         window_cmds.presentIn(
             self.ed.ctx,
@@ -298,7 +295,7 @@ const Outline = struct {
             self.ed.gpa,
             self.ed.head,
             self.ed.keymap,
-            self.companion.viewport,
+            self.viewport,
             self.subject,
         );
     }
@@ -320,15 +317,16 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
 
     var outline: Outline = .{ .ed = ed, .subject = "sub" };
     try outline.follow(panel.pane().id);
-    defer ed.session.system.focus.unsubscribe(&outline.companion);
+    defer ed.session.system.context.unsubscribe(&outline);
     const root_listing = panel.pane().buffer_id;
 
-    // Split the editor pane and move between the halves: ordinary panes are
-    // focus sources, so each move is a primary-focus change the companion
-    // retargets on.
+    // Split the editor pane and open another file in the right half: ordinary
+    // panes are focus sources, so the entry the primary context names moves,
+    // and the companion retargets on it.
     ed.run("window-vsplit");
     ed.applyWindow();
     ed.run("window-focus-right");
+    ed.runStr("open", "sub/inner.txt");
     ed.applyWindow();
     try t.expect(outline.retargets > 0);
     const followed = outline.retargets;
@@ -338,18 +336,27 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
     try t.expect(panel.pane().buffer_id != root_listing);
     try t.expectEqual(ed.buffers.active_id, window_layout.headFocus(ed.win_layout, ed.head).pane().buffer_id);
 
-    // Back to the left half — another ordinary pane, so another retarget.
+    // Back to the left half — another ordinary pane on another entry, so
+    // another retarget.
     ed.run("window-focus-left");
     ed.applyWindow();
     try t.expect(outline.retargets > followed);
     const before_companion = outline.retargets;
+    const heard = outline.heard;
+
+    // A caret move in text moves no key: nothing is delivered at all.
+    ed.press("End", "");
+    ed.applyWindow();
+    try t.expectEqual(heard, outline.heard);
 
     // Now focus the COMPANION itself. That is not a primary-focus change, so
-    // the follower never runs — it cannot chase its own subject.
+    // no key of the primary context moved and the follower is never even
+    // told — it cannot chase its own subject.
     ed.run("window-focus-left");
     ed.applyWindow();
     try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expectEqual(before_companion, outline.retargets);
+    try t.expectEqual(heard, outline.heard);
 }
 
 // A semantic entry occupies a viewport without allocating a text document.

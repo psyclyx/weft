@@ -36,6 +36,7 @@ const contract_data = @import("weft_membrane");
 pub extern "weft:abi/1" fn wl_log(level: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command_doc(ptr: u32, len: u32, params: u32, params_len: u32, summary: u32, summary_len: u32) void;
+pub extern "weft:abi/1" fn wl_declare_arity(ptr: u32, len: u32, code: u32, over: u32, over_len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_capability(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_request_perm(perm: u32) void;
 pub extern "weft:abi/1" fn wl_cursor() u32;
@@ -87,9 +88,8 @@ pub extern "weft:abi/1" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
 // per-selection motion/operator pair runs a command once per selection.
 pub extern "weft:abi/1" fn wl_selections_get(out_ptr: u32, cap: u32) u32;
 pub extern "weft:abi/1" fn wl_selections_set(ptr: u32, n: u32) i32;
-pub extern "weft:abi/1" fn wl_run_range_each(ptr: u32, len: u32, out_ptr: u32, cap: u32) i32;
-pub extern "weft:abi/1" fn wl_run_range_arg_each(ptr: u32, len: u32, handles_ptr: u32, n: u32) void;
 pub extern "weft:abi/1" fn wl_undo_unit(open: u32) i32;
+pub extern "weft:abi/1" fn wl_visit() i32;
 pub extern "weft:abi/1" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
 pub extern "weft:abi/1" fn wl_echo(ptr: u32, len: u32) void;
@@ -129,10 +129,6 @@ pub extern "weft:abi/1" fn wl_command_arity(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
 // The focused context's live offers, and the door one is accepted through.
-pub extern "weft:abi/1" fn wl_offer_count() u32;
-pub extern "weft:abi/1" fn wl_offer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
-pub extern "weft:abi/1" fn wl_offer_provider(i: u32, out_ptr: u32, out_cap: u32) i32;
-pub extern "weft:abi/1" fn wl_offer_reason(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;
 pub extern "weft:abi/1" fn wl_offer(i: u32, il: u32, c: u32, cl: u32, r: u32, rl: u32) u32;
@@ -162,7 +158,7 @@ pub extern "weft:abi/1" fn wl_pick_category(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 pub extern "weft:abi/1" fn wl_pick_end() void;
-pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
+pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
 pub extern "weft:abi/1" fn wl_pick_outcome_kind() i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;
@@ -201,6 +197,9 @@ pub extern "weft:abi/1" fn wl_signal_emit(name_ptr: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 pub extern "weft:abi/1" fn wl_tool_backing(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_entry_designation(out: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_entry_designate(ptr: u32, len: u32) i32;
+pub extern "weft:abi/1" fn wl_designation_opener(kind_ptr: u32, kind_len: u32, cmd_ptr: u32, cmd_len: u32) i32;
 // Register/kill service (core, shared by every editor): yank snapshots text +
 // any overlapping subbuffer facts; paste re-stamps them over inserted text.
 pub extern "weft:abi/1" fn wl_yank_range(start: u32, end: u32, linewise: u32, name: u32) void;
@@ -209,13 +208,16 @@ pub extern "weft:abi/1" fn wl_register_linewise(name: u32) u32;
 pub extern "weft:abi/1" fn wl_paste_at(base: u32, name: u32) void;
 // One value per selection: yank n ranges; read/restamp what selection
 // `index` of `count` pastes under the core distribution rule.
-pub extern "weft:abi/1" fn wl_yank_each(ptr: u32, n: u32, linewise: u32, name: u32) void;
-pub extern "weft:abi/1" fn wl_register_paste_value(index: u32, count: u32, out_ptr: u32, out_cap: u32, name: u32) u32;
-pub extern "weft:abi/1" fn wl_paste_value_at(base: u32, index: u32, count: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_clipboard_set(ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_clipboard_get(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_jump_push() void;
 pub extern "weft:abi/1" fn wl_macro_recording() u32;
+// Context (doc/model.md §2.5): publish a key at a scope (0 entry, 1 place,
+// 2 global), read the primary context, list the keys a delivery moved.
+pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scope: u32, place: u32, place_len: u32) i32;
+pub extern "weft:abi/1" fn wl_context_get(k: u32, kl: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_context_changed(out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_places(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;

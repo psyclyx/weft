@@ -181,7 +181,9 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
     if (eqAny(kw, &.{ "e", "ed", "edit", "o", "op", "open" })) {
         _ = bang;
         if (args.len > 0) {
-            weft.runStr("open", args);
+            // A name typed here is relative to the project this entry is in —
+            // its place — never to the directory the editor was launched from.
+            weft.openTyped(args);
             return true;
         }
         // Revert is ASKED FOR, never tested for: whatever holds the focus

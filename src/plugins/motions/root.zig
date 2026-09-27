@@ -14,22 +14,22 @@ const regex = @import("weft_regex");
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "motion.left", .call = left },
-    .{ .name = "motion.right", .call = right },
-    .{ .name = "motion.up", .call = up },
-    .{ .name = "motion.down", .call = down },
-    .{ .name = "motion.word-fwd", .call = wordFwd },
-    .{ .name = "motion.word-back", .call = wordBack },
-    .{ .name = "motion.word-end", .call = wordEnd },
-    .{ .name = "motion.WORD-fwd", .call = wordFwdBig },
-    .{ .name = "motion.WORD-back", .call = wordBackBig },
-    .{ .name = "motion.WORD-end", .call = wordEndBig },
-    .{ .name = "motion.line-start", .call = lineStart },
-    .{ .name = "motion.line-end", .call = lineEnd },
-    .{ .name = "motion.first-non-blank", .call = firstNonBlank },
-    .{ .name = "motion.doc-start", .call = docStart },
-    .{ .name = "motion.doc-end", .call = docEnd },
-    .{ .name = "motion.match-pair", .call = matchPair },
+    .{ .name = "motion.left", .arity = weft.Arity.each_extent, .call = left },
+    .{ .name = "motion.right", .arity = weft.Arity.each_extent, .call = right },
+    .{ .name = "motion.up", .arity = weft.Arity.each_extent, .call = up },
+    .{ .name = "motion.down", .arity = weft.Arity.each_extent, .call = down },
+    .{ .name = "motion.word-fwd", .arity = weft.Arity.each_extent, .call = wordFwd },
+    .{ .name = "motion.word-back", .arity = weft.Arity.each_extent, .call = wordBack },
+    .{ .name = "motion.word-end", .arity = weft.Arity.each_extent, .call = wordEnd },
+    .{ .name = "motion.WORD-fwd", .arity = weft.Arity.each_extent, .call = wordFwdBig },
+    .{ .name = "motion.WORD-back", .arity = weft.Arity.each_extent, .call = wordBackBig },
+    .{ .name = "motion.WORD-end", .arity = weft.Arity.each_extent, .call = wordEndBig },
+    .{ .name = "motion.line-start", .arity = weft.Arity.each_extent, .call = lineStart },
+    .{ .name = "motion.line-end", .arity = weft.Arity.each_extent, .call = lineEnd },
+    .{ .name = "motion.first-non-blank", .arity = weft.Arity.each_extent, .call = firstNonBlank },
+    .{ .name = "motion.doc-start", .arity = weft.Arity.each_extent, .call = docStart },
+    .{ .name = "motion.doc-end", .arity = weft.Arity.each_extent, .call = docEnd },
+    .{ .name = "motion.match-pair", .arity = weft.Arity.each_extent, .call = matchPair },
 };
 
 /// Return the range `[cursor, target]` as this motion's result. The cursor is

@@ -68,6 +68,9 @@ pub const Publisher = struct {
         lang: u64,
         posture: u64,
         locality: facts_mod.Locality,
+        /// The open keys (`Open.digest`): a plugin publishing
+        /// `repl.session` makes a provider gated on it eligible.
+        context: u64,
     };
 
     fn hash(s: []const u8) u64 {
@@ -83,6 +86,7 @@ pub const Publisher = struct {
             .lang = hash(f.lang),
             .posture = hash(f.posture),
             .locality = f.locality,
+            .context = f.context.digest(),
         };
     }
 
@@ -113,6 +117,7 @@ pub const Publisher = struct {
         gpa: Allocator,
         cat: *catalog.Catalog,
         f: facts_mod.Facts,
+        commands: *const command.Commands,
     ) (catalog.NameError || Allocator.Error)!bool {
         const next = self.signatureOf(f);
         if (self.signature) |current| if (std.meta.eql(current, next)) return false;
@@ -149,6 +154,8 @@ pub const Publisher = struct {
                 // …and it is PRESENTED as its winner asked: the label a
                 // provider declared travels with the row that provider won.
                 .affordance = self.actions.affordanceOf(name, winner),
+                // …and it maps over a selection as the winner's command does.
+                .arity = if (commands.resolve(winner.provider.command)) |c| c.arity else null,
             });
         }
 

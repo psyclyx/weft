@@ -7,8 +7,8 @@
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "node-kind", .call = nodeKind, .summary = "say what syntax node the cursor is in" },
-    .{ .name = "delete-node", .call = deleteNode, .summary = "delete the syntax node under the cursor" },
+    .{ .name = "node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
+    .{ .name = "delete-node", .call = deleteNode, .arity = weft.Arity.each_extent, .summary = "delete the syntax node under the cursor" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

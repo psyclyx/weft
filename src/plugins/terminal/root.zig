@@ -19,12 +19,19 @@
 //! The `terminal` mode commits typed text into the input line and falls back
 //! to `default`, so every workspace key the config binds globally still
 //! reaches it. Return sends, BackSpace edits, C-u clears.
+//!
+//! While a shell runs, context key `terminal.session` holds the terminal's
+//! designation, `weft://here/proc/terminal`, on the place it runs in
+//! (doc/model.md §2.5) — the `repl` plugin's `repl.session`, for the same
+//! reason: a config can offer an action only where there is a live shell to
+//! take it. It is retracted on that place, named, wherever the shell ends.
 
 const std = @import("std");
 const weft = @import("weft");
 
 const buffer_name = "*terminal*";
 const mode = "terminal";
+const session_key = "terminal.session";
 
 /// The shell's session handle, while it runs.
 var session: ?u32 = null;
@@ -44,6 +51,9 @@ fn describeExtra() void {
 }
 
 fn init() void {
+    // `weft://here/proc/terminal` is this plugin's: opening it with no entry
+    // showing it brings the terminal back (and a shell with it).
+    _ = weft.designationOpener("proc.terminal", "terminal");
     weft.textInput(mode, "terminal-type");
     weft.setFallback(mode, "default");
     const keys = [_][2][]const u8{
@@ -92,6 +102,7 @@ fn shell() ?u32 {
         // Reap it and free its slot; the handle stays dead.
         weft.replQuit(h);
         session = null;
+        publish("");
     }
     input_len = 0;
     weft.toolBacking("terminal");
@@ -99,7 +110,41 @@ fn shell() ?u32 {
         weft.echo("terminal: could not start the shell");
         return null;
     };
+    // The entry is a live resource (doc/model.md §2.1): it designates the
+    // shell while one runs here, and a jump back to it once the buffer is
+    // closed is refused rather than answered with a new shell.
+    _ = weft.designate(designation);
+    publish(designation);
     return session;
+}
+
+/// What the terminal's entry is.
+const designation = "weft://here/proc/terminal";
+
+/// The place `terminal.session` was last published on, by its designation —
+/// where it is retracted, wherever the user is when the shell ends.
+var published_buf: [1024]u8 = undefined;
+var published_len: usize = 0;
+
+/// Say whether a shell is live (`value`), or that none is (empty). A shell
+/// is published on the place it starts in; its end is said on that same
+/// place, named, so quitting from another project cannot strand the key.
+fn publish(value: []const u8) void {
+    if (value.len != 0) {
+        var here_buf: [1024]u8 = undefined;
+        const place = weft.placeDesignation(&here_buf) orelse return;
+        const was = published_buf[0..published_len];
+        // Moved: what was said about the old place is no longer true there.
+        if (was.len != 0 and !std.mem.eql(u8, was, place)) weft.contextSetAt(session_key, "", was) catch {};
+        @memcpy(published_buf[0..place.len], place);
+        published_len = place.len;
+    }
+    if (published_len == 0) return;
+    weft.contextSetAt(session_key, value, published_buf[0..published_len]) catch |err| {
+        var buf: [96]u8 = undefined;
+        weft.echo(std.fmt.bufPrint(&buf, "terminal: could not publish {s}: {t}", .{ session_key, err }) catch session_key);
+    };
+    if (value.len == 0) published_len = 0;
 }
 
 /// `terminal`: the shell in the panel, focused; started on first use, and
@@ -169,15 +214,16 @@ fn quit() void {
     weft.replQuit(handle);
     session = null;
     input_len = 0;
+    publish("");
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "terminal", .call = open, .summary = "open the shell in the panel (line-mode: no terminal emulation)" },
-    .{ .name = "terminal-type", .call = typeText, .params = "text", .summary = "add typed text to the terminal's input line" },
-    .{ .name = "terminal-send", .call = send, .summary = "send the terminal's input line to the shell" },
-    .{ .name = "terminal-backspace", .call = backspace, .summary = "delete the last character of the input line" },
-    .{ .name = "terminal-clear", .call = clearLine, .summary = "clear the input line" },
-    .{ .name = "terminal-quit", .call = quit, .summary = "stop the terminal's shell" },
+    .{ .name = "terminal", .arity = .whole, .call = open, .summary = "open the shell in the panel (line-mode: no terminal emulation)" },
+    .{ .name = "terminal-type", .arity = .whole, .call = typeText, .params = "text", .summary = "add typed text to the terminal's input line" },
+    .{ .name = "terminal-send", .arity = .whole, .call = send, .summary = "send the terminal's input line to the shell" },
+    .{ .name = "terminal-backspace", .arity = .whole, .call = backspace, .summary = "delete the last character of the input line" },
+    .{ .name = "terminal-clear", .arity = .whole, .call = clearLine, .summary = "clear the input line" },
+    .{ .name = "terminal-quit", .arity = .whole, .call = quit, .summary = "stop the terminal's shell" },
 };
 
 comptime {

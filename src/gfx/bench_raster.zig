@@ -88,6 +88,8 @@ pub fn main() !void {
             .h = @floatFromInt(case.h),
         };
 
+        var snap_ns = try gpa.alloc(u64, iters);
+        defer gpa.free(snap_ns);
         var build_ns = try gpa.alloc(u64, iters);
         defer gpa.free(build_ns);
         var draw_ns = try gpa.alloc(u64, iters);
@@ -109,8 +111,14 @@ pub fn main() !void {
             view.resetFrame();
             var top_row: usize = 0;
 
+            // The frame's input — what `View.build` reads — is taken first.
             var t0 = nowNs();
-            var built = try view.build(arena.allocator(), &ed, .{ .mode = "normal" }, &top_row, frame_rect, .{}, w2p);
+            var snap = try core.TextSnapshot.of(&ed, arena.allocator());
+            snap_ns[i] = nowNs() - t0;
+            defer snap.release(gpa);
+
+            t0 = nowNs();
+            var built = try view.build(arena.allocator(), &snap, .{ .mode = "normal" }, &top_row, frame_rect, .{}, w2p);
             build_ns[i] = nowNs() - t0;
             defer built.deinit(gpa);
 
@@ -141,11 +149,13 @@ pub fn main() !void {
             hash = h;
         }
 
+        const s = median(snap_ns);
         const b = median(build_ns);
         const d = median(draw_ns);
         const e = median(end_ns);
         std.debug.print(
             \\{s}  ({d} items, {d} glyphs)
+            \\  snapshot     {d:.4} ms
             \\  View.build   {d:.3} ms
             \\  drawItems    {d:.3} ms
             \\  end          {d:.3} ms
@@ -157,6 +167,7 @@ pub fn main() !void {
             case.name,
             items,
             glyphs,
+            @as(f64, @floatFromInt(s)) / 1e6,
             @as(f64, @floatFromInt(b)) / 1e6,
             @as(f64, @floatFromInt(d)) / 1e6,
             @as(f64, @floatFromInt(e)) / 1e6,

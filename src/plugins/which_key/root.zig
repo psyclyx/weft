@@ -36,8 +36,8 @@ const PAGE_STEP: usize = 12;
 var scroll_off: usize = 0;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "which-key-page-down", .call = pageDown },
-    .{ .name = "which-key-page-up", .call = pageUp },
+    .{ .name = "which-key-page-down", .arity = .whole, .call = pageDown },
+    .{ .name = "which-key-page-up", .arity = .whole, .call = pageUp },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

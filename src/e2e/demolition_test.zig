@@ -58,6 +58,17 @@ const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8
     .{ .spelling = "weft.cwd(", .reason = "the process-directory guest shim is retired — use weft.placeRoot() (doc/place.md)" },
 };
 
+/// Guest-side resolution of a typed name, retired into core (doc/model.md
+/// §2.1, §4). `openUnder(weft.placeRoot(), name)` joined a relative name
+/// onto the place's directory in the guest, beside core's
+/// `designation.resolveRelative` — a second resolver with its own rules
+/// (`host:path` read as a local file, a place with no directory said in its
+/// own words). A plugin hands the typed name to `open` (`weft.openTyped`), and a
+/// file picker lists the dispatch's place with no directory named at all.
+const retired_guest_resolvers = [_]struct { spelling: []const u8, reason: []const u8 }{
+    .{ .spelling = "openUnder(", .reason = "a plugin resolving a typed name itself — hand it to `open` (weft.open); core resolves it once (doc/model.md §2.1)" },
+};
+
 /// Doors that were DECLARED AND NEVER CALLED — by any plugin, any shared
 /// library, any fixture, the config plane, or the JS plane. Twelve of them,
 /// found by a census rather than by suspicion.
@@ -216,6 +227,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
         }
 
         for (retired_process_cwd) |gone| {
+            if (std.mem.indexOf(u8, line, gone.spelling) != null)
+                try scan.record(rel_path, line_no, gone.reason);
+        }
+
+        for (retired_guest_resolvers) |gone| {
             if (std.mem.indexOf(u8, line, gone.spelling) != null)
                 try scan.record(rel_path, line_no, gone.reason);
         }
@@ -591,6 +607,33 @@ test "demolition: the clipboard and history doors are ONE body reached two ways"
         .{ "clipboard_get", clip.hClipboardGet, quickjs.jsDoor(clip.getBody, .clipboard) },
         .{ "jump_push", hist.hJumpPush, quickjs.jsDoor(hist.jumpPushBody, null) },
         .{ "macro_recording", hist.hMacroRecording, quickjs.jsDoor(hist.macroRecordingBody, null) },
+    };
+    inline for (cases) |c| {
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ c[0])) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[1]), wl_handler);
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ c[0])) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[2]), qjs_handler);
+    }
+}
+
+// The context doors: publishing a key and reading the primary context run one
+// body each on both planes, ungated on both. A JS plugin that could publish
+// what a wasm one cannot (or read more) would be a second definition of
+// context, and the pointers stop matching here.
+test "demolition: the context doors are ONE body reached two ways" {
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const ctx = h.core.wasm_host.context_doors;
+    const HostFn = @TypeOf(ctx.hContextSet);
+    const cases = .{
+        .{ "context_set", ctx.hContextSet, quickjs.jsDoor(ctx.setBody, null) },
+        .{ "context_get", ctx.hContextGet, quickjs.jsDoor(ctx.getBody, null) },
     };
     inline for (cases) |c| {
         var wl_handler: ?HostFn = null;

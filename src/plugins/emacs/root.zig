@@ -89,26 +89,26 @@ fn yank() void {
 // ── find-file (like vim's: this editor owns the file picker) ──
 fn findFile() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", file_pick);
 }
 fn openChosen(choice: []const u8) void {
     if (choice.len == 0) return;
-    weft.runStr("open", choice);
+    weft.openTyped(choice);
 }
 
 // ── Command table (registration order == on_command id) ──
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "find-file", .call = findFile },
-    .{ .name = "beginning-of-line", .call = beginningOfLine },
-    .{ .name = "end-of-line", .call = endOfLine },
-    .{ .name = "beginning-of-buffer", .call = beginningOfBuffer },
-    .{ .name = "end-of-buffer", .call = endOfBuffer },
-    .{ .name = "forward-word", .call = moveByMotion("motion.word-fwd") },
-    .{ .name = "backward-word", .call = moveByMotion("motion.word-back") },
-    .{ .name = "kill-line", .call = killLine },
-    .{ .name = "kill-region", .call = killRegion },
-    .{ .name = "copy-region", .call = copyRegion },
-    .{ .name = "yank", .call = yank },
+    .{ .name = "find-file", .call = findFile, .arity = .whole },
+    .{ .name = "beginning-of-line", .arity = weft.Arity.each_extent, .call = beginningOfLine },
+    .{ .name = "end-of-line", .arity = weft.Arity.each_extent, .call = endOfLine },
+    .{ .name = "beginning-of-buffer", .arity = weft.Arity.each_extent, .call = beginningOfBuffer },
+    .{ .name = "end-of-buffer", .arity = weft.Arity.each_extent, .call = endOfBuffer },
+    .{ .name = "forward-word", .arity = weft.Arity.each_extent, .call = moveByMotion("motion.word-fwd") },
+    .{ .name = "backward-word", .arity = weft.Arity.each_extent, .call = moveByMotion("motion.word-back") },
+    .{ .name = "kill-line", .arity = weft.Arity.each_extent, .call = killLine },
+    .{ .name = "kill-region", .arity = weft.Arity.each_extent, .call = killRegion },
+    .{ .name = "copy-region", .arity = weft.Arity.each_extent, .call = copyRegion },
+    .{ .name = "yank", .arity = weft.Arity.each_extent, .call = yank },
 };
 
 fn onPickAccept(pick_id: u32) void {
@@ -194,5 +194,7 @@ fn initExtra() void {
 }
 
 comptime {
+    // Every emacs verb is a one-point program (the point, the region); each
+    // runs once per selection. `find-file` alone never reads one.
     weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
 }

@@ -148,11 +148,9 @@ pub const FrameCtx = struct {
     /// System-scoped semantic registries. Views and fields live with the
     /// system; only focus and interaction stacks live on the head above.
     semantic: *core.semantic.Services,
-    /// Where an "open a workspace entry" outcome lands (§9.4) and the feed
-    /// primary-focus changes are published on (§7). System-scoped, like the
-    /// pane tree they act on.
+    /// Where an "open a workspace entry" outcome lands (§9.4). System-scoped,
+    /// like the pane tree it acts on.
     placement: *core.placement.Policy,
-    focus_feed: *core.focus_feed.Feed,
     /// The viewports this system's manifest declares; the layout phase
     /// realizes them into the pane tree.
     viewports: *core.viewport.Registry,
@@ -272,7 +270,6 @@ pub const Driver = struct {
             self.ctx.keymap,
             self.ctx.last_frame_rect.*,
             self.ctx.placement,
-            self.ctx.focus_feed,
         )) changed = true;
         if (changed) self.ctx.view_dirty.* = true;
         return changed;

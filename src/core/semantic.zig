@@ -546,9 +546,52 @@ pub const Services = struct {
             instance.reconcileFocus(null) orelse instance.descriptor.root;
         var storage: [1026]semantic.scene.NodeId = undefined;
         const path = (try instance.focusPath(selected, &storage)) orelse return error.StaleView;
-        try head.semantic_focus.set(gpa, path);
+        try head.scene_selection.set(gpa, path);
         return selected;
     }
+
+    /// Ask view `ref`'s provider to expand to and highlight `designation`
+    /// (`standard.reveal`), and mark the node it answers with as the view's
+    /// REVEALED node (`view.Registry.reveal`) — a highlight the renderer
+    /// draws beside the selection. It takes no selection to write: no head's
+    /// focus and no entry's rows move, so revealing is never navigating, and
+    /// the rows a person marked stay marked. The answer is read, not
+    /// absorbed: a reveal can only ever name a node, so a provider answering
+    /// it with a transfer, a dialog or an open does nothing.
+    ///
+    /// A provider that must read first (folders to open) answers `.handled`:
+    /// accepted, `pending`. It reads off the frame path and republishes, and
+    /// the caller asks again then. Until a node is named the view reveals
+    /// nothing — never a row that no longer stands for what is revealed.
+    pub fn reveal(self: *Services, ref: semantic.view.Ref, designation: []const u8) Reveal {
+        const root = (self.views.get(ref) orelse return .declined).descriptor.root;
+        const outcome = self.actions.ask(&self.views, .{
+            .action = semantic.action.standard.reveal,
+            .view = ref,
+            .subject = root,
+            .argument = designation,
+        }) catch .declined;
+        // The provider may have republished while answering: the registry
+        // checks the node against the view as it is now.
+        return switch (outcome) {
+            .focus => |node| if (self.views.reveal(ref, node)) .revealed else .declined,
+            .handled => if (self.views.reveal(ref, null)) .pending else .declined,
+            else => blk: {
+                _ = self.views.reveal(ref, null);
+                break :blk .declined;
+            },
+        };
+    }
+
+    /// What asking a view to reveal something came to.
+    pub const Reveal = enum {
+        /// A node of the view is revealed.
+        revealed,
+        /// Accepted; the provider answers when it has read what it needs.
+        pending,
+        /// Not in this view: nothing is revealed.
+        declined,
+    };
 
     /// Return the closest target link on one head's retained focus path. The
     /// value is borrowed only for synchronous dispatch; the view registry owns
@@ -558,9 +601,9 @@ pub const Services = struct {
         self: *const Services,
         head: *Head,
     ) FocusedTargetError!?semantic.target.Located {
-        const path = head.semantic_focus.path() orelse return null;
+        const path = head.scene_selection.path() orelse return null;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return error.StaleView;
         };
         var index = path.nodes.len;
@@ -750,7 +793,7 @@ pub const Services = struct {
         const action = active.actionForInput(key) orelse return null;
         const interaction_ref = active.descriptor.ref;
         const disposition = action.disposition;
-        const prior_focus = head.semantic_focus.path();
+        const prior_focus = head.scene_selection.path();
         const effect = self.invokeInteractionAction(stack, gpa, .{
             .action = action.id,
             .view = active.descriptor.view,
@@ -806,39 +849,91 @@ pub const Services = struct {
         action: []const u8,
         register: u8,
     ) InvokeActionError!?ActionEffect {
-        const path = head.semantic_focus.path() orelse return null;
+        const path = head.scene_selection.path() orelse return null;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return null;
         };
         // Only a selection this head is making (`set-mark`, i.e. visual mode
         // or C-space) turns a transfer into a text transfer. A provider's
         // resting field selection must not capture node-level actions such
         // as `SPC v y` on the focused row.
-        if (path.field != null and head.semantic_focus.selection_mark and
+        if (path.field != null and head.scene_selection.selection_mark and
             (std.mem.eql(u8, action, semantic.action.standard.copy) or
                 std.mem.eql(u8, action, semantic.action.standard.cut) or
                 std.mem.eql(u8, action, semantic.action.standard.delete)))
         {
             if (try self.invokeFocusedFieldTransfer(stack, head, gpa, path, action, register)) |effect| return effect;
         }
-        var index = path.nodes.len;
+        const subject = actingNode(instance, path.nodes, action) orelse return error.ActionUnavailable;
+        // The request names every row the selection holds that answers the
+        // action — a RANGE (`V j`) is one extent of several rows, marked rows
+        // (C-click) are more extents — the focused one its subject. Inside a
+        // mapping's run the visited extent is the whole selection (no marks
+        // beside it), so an `.each` command sends its extent's rows; a
+        // `.whole` one (copy, cut) sends the set as ONE request.
+        var rows: std.ArrayList(semantic.scene.NodeId) = .empty;
+        defer rows.deinit(gpa);
+        var extents: std.ArrayList(Head.SceneSelection.Rows) = .empty;
+        defer extents.deinit(gpa);
+        if (head.scene_selection.primaryRows()) |primary| try extents.append(gpa, primary);
+        try extents.appendSlice(gpa, head.scene_selection.others.items);
+        try selectionActors(gpa, instance, extents.items, action, &rows);
+        const prior_focus = head.scene_selection.path();
+        const effect = try self.invokeActionInRegister(stack, gpa, .{
+            .action = action,
+            .view = path.view,
+            .subject = subject,
+            .selection = if (rows.items.len > 1) .{ .nodes = rows.items } else .none,
+        }, register);
+        try self.applyActionFocus(head, gpa, prior_focus, effect);
+        return effect;
+    }
+
+    /// The deepest node on `nodes` (a focus path) that advertises `action`.
+    fn actingNode(instance: *const view_runtime.view.Instance, nodes: []const semantic.scene.NodeId, action: []const u8) ?semantic.scene.NodeId {
+        var index = nodes.len;
         while (index > 0) {
             index -= 1;
-            const node = instance.node(path.nodes[index]) orelse continue;
+            const node = instance.node(nodes[index]) orelse continue;
             for (node.actions) |candidate| {
-                if (!std.mem.eql(u8, candidate.id, action)) continue;
-                const prior_focus = head.semantic_focus.path();
-                const effect = try self.invokeActionInRegister(stack, gpa, .{
-                    .action = action,
-                    .view = path.view,
-                    .subject = node.id,
-                }, register);
-                try self.applyActionFocus(head, gpa, prior_focus, effect);
-                return effect;
+                if (std.mem.eql(u8, candidate.id, action)) return node.id;
             }
         }
-        return error.ActionUnavailable;
+        return null;
+    }
+
+    /// Every distinct node answering `action` for the rows of `extents`
+    /// (each from its anchor to its head, either order), in the view's focus
+    /// order — so a set is named, and transferred, in the order it is seen.
+    fn selectionActors(
+        gpa: std.mem.Allocator,
+        instance: *const view_runtime.view.Instance,
+        extents: []const Head.SceneSelection.Rows,
+        action: []const u8,
+        out: *std.ArrayList(semantic.scene.NodeId),
+    ) !void {
+        const order = instance.focus_order;
+        // Each extent as its span of places in the focus order.
+        const spans = try gpa.alloc([2]usize, extents.len);
+        defer gpa.free(spans);
+        var n: usize = 0;
+        for (extents) |extent| {
+            const ia = std.mem.indexOfScalar(semantic.scene.NodeId, order, extent.anchor) orelse continue;
+            const ib = std.mem.indexOfScalar(semantic.scene.NodeId, order, extent.head) orelse continue;
+            spans[n] = .{ @min(ia, ib), @max(ia, ib) };
+            n += 1;
+        }
+        var storage: [1026]semantic.scene.NodeId = undefined;
+        for (order, 0..) |leaf, at| {
+            const inside = for (spans[0..n]) |span| {
+                if (at >= span[0] and at <= span[1]) break true;
+            } else false;
+            if (!inside) continue;
+            const p = (try instance.focusPath(leaf, &storage)) orelse continue;
+            const actor = actingNode(instance, p.nodes, action) orelse continue;
+            if (std.mem.indexOfScalar(semantic.scene.NodeId, out.items, actor) == null) try out.append(gpa, actor);
+        }
     }
 
     /// Activate the focused node when it is an `action` node: invoke the
@@ -854,9 +949,9 @@ pub const Services = struct {
         head: *Head,
         gpa: std.mem.Allocator,
     ) InvokeActionError!?ActionEffect {
-        const path = head.semantic_focus.path() orelse return null;
+        const path = head.scene_selection.path() orelse return null;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return null;
         };
         const leaf = path.leaf() orelse return null;
@@ -902,7 +997,7 @@ pub const Services = struct {
             .view = ref,
             .subject = id,
         }, 0);
-        try self.applyActionFocus(head, gpa, head.semantic_focus.path(), effect);
+        try self.applyActionFocus(head, gpa, head.scene_selection.path(), effect);
         return effect;
     }
 
@@ -955,21 +1050,34 @@ pub const Services = struct {
             .focus_requested => |focus| {
                 const anchor = if (prior_focus) |path|
                     if (path.view.eql(focus.view))
-                        head.semantic_focus.navigation_anchor orelse path.leaf()
+                        head.scene_selection.navigation_anchor orelse path.leaf()
                     else
                         null
                 else
                     null;
                 _ = try self.focusView(head, gpa, focus.view, focus.node);
-                if (anchor) |node| head.semantic_focus.setNavigationAnchor(node);
+                if (anchor) |node| head.scene_selection.setNavigationAnchor(node);
             },
             .working_target_requested => |target| head.working_target = target,
             else => {},
         }
     }
 
+    /// Whether `ref` holds a draft its provider has not applied: the view's
+    /// root offers `view.apply`, enabled. The provider says so in the scene
+    /// it publishes (an editable projection disables apply while there is
+    /// nothing to apply), so what a draft IS stays the provider's; core only
+    /// reads the offer, the way a toolbar greys it.
+    pub fn holdsDraft(self: *const Services, ref: semantic.view.Ref) bool {
+        const instance = self.views.get(ref) orelse return false;
+        for (instance.scene.actions) |a| {
+            if (a.enabled and std.mem.eql(u8, a.id, semantic.action.standard.apply)) return true;
+        }
+        return false;
+    }
+
     pub fn hasActiveView(self: *const Services, head: *const Head) bool {
-        const path = head.semantic_focus.path() orelse return false;
+        const path = head.scene_selection.path() orelse return false;
         const instance = self.views.get(path.view) orelse return false;
         const leaf = path.leaf() orelse return false;
         return instance.node(leaf) != null;
@@ -1012,20 +1120,20 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         movement: semantic.focus.Movement,
     ) FocusError!bool {
-        const path = head.semantic_focus.path() orelse return false;
+        const path = head.scene_selection.path() orelse return false;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return false;
         };
-        const current = head.semantic_focus.navigation_anchor orelse path.leaf();
+        const current = head.scene_selection.navigation_anchor orelse path.leaf();
         // The anchor is a one-shot override for this movement intent. A
         // failed edge movement must not make later movement reinterpret the
         // still-focused secondary node as the row anchor.
-        head.semantic_focus.setNavigationAnchor(null);
+        head.scene_selection.setNavigationAnchor(null);
         const next = instance.move(current, movement) orelse return true;
         var storage: [1026]semantic.scene.NodeId = undefined;
         const next_path = (try instance.focusPath(next, &storage)) orelse return true;
-        try head.semantic_focus.set(gpa, next_path);
+        try head.scene_selection.set(gpa, next_path);
         return true;
     }
 
@@ -1040,9 +1148,9 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         field_input: FieldInput,
     ) FieldInputError!bool {
-        const path = head.semantic_focus.path() orelse return false;
+        const path = head.scene_selection.path() orelse return false;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return false;
         };
         const field_ref = path.field orelse return true;
@@ -1091,22 +1199,22 @@ pub const Services = struct {
                 };
             },
             .move_previous => blk: {
-                const offset = if (head.semantic_focus.selection_mark) previousFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, caret);
-                break :blk fieldMovement(offset, value.selection, head.semantic_focus.selection_mark);
+                const offset = if (head.scene_selection.selection_mark) previousFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_start else previousFieldBoundary(value.bytes, caret);
+                break :blk fieldMovement(offset, value.selection, head.scene_selection.selection_mark);
             },
             .move_next => blk: {
-                const offset = if (head.semantic_focus.selection_mark) nextFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, caret);
-                break :blk fieldMovement(offset, value.selection, head.semantic_focus.selection_mark);
+                const offset = if (head.scene_selection.selection_mark) nextFieldBoundary(value.bytes, caret) else if (selection_start != selection_end) selection_end else nextFieldBoundary(value.bytes, caret);
+                break :blk fieldMovement(offset, value.selection, head.scene_selection.selection_mark);
             },
-            .motion => |movement| fieldMovement(@import("field_motion.zig").destination(value.bytes, caret, movement), value.selection, head.semantic_focus.selection_mark),
-            .jump => |position| fieldMovement(@min(position, value.bytes.len), value.selection, head.semantic_focus.selection_mark),
+            .motion => |movement| fieldMovement(@import("field_motion.zig").destination(value.bytes, caret, movement), value.selection, head.scene_selection.selection_mark),
+            .jump => |position| fieldMovement(@min(position, value.bytes.len), value.selection, head.scene_selection.selection_mark),
             .set_mark, .clear_selection => .{ .start = caret, .end = caret, .replacement = &.{}, .selection_after = collapsed(caret) },
             .delete_selection => .{ .start = selection_start, .end = selection_end, .replacement = &.{}, .selection_after = collapsed(selection_start) },
         };
         try provider.edit(value.revision, edit);
         switch (field_input) {
-            .set_mark => head.semantic_focus.selection_mark = true,
-            .clear_selection, .delete_selection, .commit, .delete_previous, .delete_next => head.semantic_focus.selection_mark = false,
+            .set_mark => head.scene_selection.selection_mark = true,
+            .clear_selection, .delete_selection, .commit, .delete_previous, .delete_next => head.scene_selection.selection_mark = false,
             else => {},
         }
         return true;
@@ -1128,9 +1236,9 @@ pub const Services = struct {
         head: *Head,
         gpa: std.mem.Allocator,
     ) FieldInputError!bool {
-        const path = head.semantic_focus.path() orelse return false;
+        const path = head.scene_selection.path() orelse return false;
         const instance = self.views.get(path.view) orelse {
-            head.semantic_focus.clear();
+            head.scene_selection.clear();
             return false;
         };
         const field_ref = path.field orelse return false;
@@ -1367,19 +1475,19 @@ test "semantic action focus stays inside its retained view" {
 
     const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "field.secondary")).?;
     try std.testing.expect(effect == .focus_requested);
-    try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
-    try std.testing.expect(head.semantic_focus.path().?.field.?.eql(field_ref));
+    try std.testing.expectEqual(secondary.id, head.scene_selection.path().?.leaf().?);
+    try std.testing.expect(head.scene_selection.path().?.field.?.eql(field_ref));
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqual(@as(usize, 1), field.edits);
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
-    try std.testing.expectEqual(last.id, head.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(last.id, head.scene_selection.path().?.leaf().?);
 
     // Re-enter the secondary field from the middle row and move backwards:
     // the one-shot anchor is the row, not the non-focusable field node.
     _ = try services.focusView(&head, std.testing.allocator, view_ref, row.id);
     _ = try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "field.secondary");
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .previous));
-    try std.testing.expectEqual(first.id, head.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(first.id, head.scene_selection.path().?.leaf().?);
 
     provider.target = @enumFromInt(99);
     try std.testing.expectError(error.UnknownFocusTarget, services.invokeAction(&head.interactions, std.testing.allocator, .{
@@ -1387,7 +1495,7 @@ test "semantic action focus stays inside its retained view" {
         .view = view_ref,
         .subject = row.id,
     }));
-    try std.testing.expectEqual(first.id, head.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(first.id, head.scene_selection.path().?.leaf().?);
 }
 
 test "semantic target relations resolve, stay absent, and reject stale or ambiguous edges" {
@@ -1580,7 +1688,7 @@ test "semantic relation action resolves through independent provider and handler
     const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open-parent")).?;
     try std.testing.expectEqual(destination_view, effect.relation_opened);
     try std.testing.expectEqual(@as(usize, 1), handler.opened);
-    try std.testing.expectEqual(destination_view, head.semantic_focus.path().?.view);
+    try std.testing.expectEqual(destination_view, head.scene_selection.path().?.view);
 
     // The source revision is part of the request, so replacement cannot make
     // the same provider response silently open a newer target.
@@ -1805,7 +1913,7 @@ test "semantic open-target actions use the nearest subject and preserve fallback
     try std.testing.expectEqual(@as(usize, 1), action_provider.calls);
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), action_provider.last_subject);
     try std.testing.expectEqual(opened_view, effect.target_opened);
-    try std.testing.expectEqual(opened_view, head.semantic_focus.path().?.view);
+    try std.testing.expectEqual(opened_view, head.scene_selection.path().?.view);
     // Re-select the source view for the following requests: opening is a
     // head-local admission plus focus operation, so the new view is now the
     // active subject just as it would be for an ordinary user action.
@@ -1941,18 +2049,18 @@ test "semantic view focus is head-scoped with preferred and root fallback" {
     defer head_b.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), try services.focusView(&head_a, std.testing.allocator, view_ref, @enumFromInt(3)));
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head_a.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head_a.scene_selection.path().?.leaf().?);
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), try services.focusView(&head_b, std.testing.allocator, view_ref, null));
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_b.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_b.scene_selection.path().?.leaf().?);
     // An unknown preference recovers without disturbing the other head.
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), try services.focusView(&head_a, std.testing.allocator, view_ref, @enumFromInt(99)));
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_a.semantic_focus.path().?.leaf().?);
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_b.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_a.scene_selection.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_b.scene_selection.path().?.leaf().?);
 
     var foreign = view_ref;
     foreign.authority = @enumFromInt(42);
     try std.testing.expectError(error.StaleView, services.focusView(&head_a, std.testing.allocator, foreign, null));
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_a.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), head_a.scene_selection.path().?.leaf().?);
     try std.testing.expect(services.closeView(std.testing.allocator, owner, view_ref));
     try std.testing.expectError(error.StaleView, services.focusView(&head_b, std.testing.allocator, view_ref, null));
 
@@ -1961,7 +2069,7 @@ test "semantic view focus is head-scoped with preferred and root fallback" {
         .content = .{ .label = "root" },
     });
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(10)), try services.focusView(&head_b, std.testing.allocator, root_only, null));
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(10)), head_b.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(10)), head_b.scene_selection.path().?.leaf().?);
 }
 
 test "interaction-local input invokes semantic action and closes explicitly" {
@@ -2070,7 +2178,7 @@ test "interaction-local target opens focus the admitted view on its head" {
     defer head.deinit(std.testing.allocator);
     const effect = (try services.invokeInteractionInput(&interactions, &head, std.testing.allocator, "y")).?;
     try std.testing.expectEqual(opened_view, effect.target_opened);
-    try std.testing.expectEqual(opened_view, head.semantic_focus.path().?.view);
+    try std.testing.expectEqual(opened_view, head.scene_selection.path().?.view);
     try std.testing.expect(interactions.active() == null);
 }
 
@@ -2184,7 +2292,7 @@ test "ordinary editor input targets semantic fields and focus order" {
     try services.registerActionProvider(std.testing.allocator, owner, .init(&actions));
     var head: Head = .empty;
     defer head.deinit(std.testing.allocator);
-    try head.semantic_focus.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
+    try head.scene_selection.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
 
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqualStrings("new", first.bytes.items);
@@ -2198,13 +2306,13 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expectEqual(@as(u64, 0), first.selection.anchor);
     try std.testing.expectEqual(@as(u64, 3), first.selection.caret);
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .clear_selection));
-    try std.testing.expect(!head.semantic_focus.selection_mark);
+    try std.testing.expect(!head.scene_selection.selection_mark);
     try std.testing.expectEqual(first.selection.anchor, first.selection.caret);
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .set_mark));
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
-    try std.testing.expect(!head.semantic_focus.selection_mark);
-    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
-    try std.testing.expect(head.semantic_focus.path().?.field.?.eql(second_ref));
+    try std.testing.expect(!head.scene_selection.selection_mark);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.scene_selection.path().?.leaf().?);
+    try std.testing.expect(head.scene_selection.path().?.field.?.eql(second_ref));
     try std.testing.expect(try services.requestFocusedFieldEdit(&head, std.testing.allocator));
     try std.testing.expectEqual(@as(u64, 1), second.revision); // request is mode- and mutation-free
     try std.testing.expect((try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, semantic.action.standard.copy)).? == .handled);
@@ -2219,5 +2327,5 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expect(released.action_provider);
     try std.testing.expect(services.fields.get(first_ref) == null);
     try std.testing.expect(!try services.moveHeadFocus(&head, std.testing.allocator, .next));
-    try std.testing.expect(head.semantic_focus.path() == null);
+    try std.testing.expect(head.scene_selection.path() == null);
 }

@@ -235,6 +235,15 @@ pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Erro
     assert(self.backing == .none);
     const bytes = try file.readAlloc(gpa, path);
     defer gpa.free(bytes);
+    try self.openFileContent(gpa, path, bytes);
+}
+
+/// `openFile` with the file's bytes already read — by a caller that read them
+/// through something stronger than the path (a filesystem provider, relative
+/// to a directory handle it checked), so what the entry shows is exactly
+/// what was authorized, and the path is only where a save goes.
+pub fn openFileContent(self: *Editor, gpa: Allocator, path: []const u8, bytes: []const u8) (Allocator.Error || Document.AddPeerError)!void {
+    assert(self.backing == .none);
     const token = backing_mod.localToken(bytes);
     try self.doc.adoptContent(gpa, bytes);
     var sync = try backing_mod.Sync.init(gpa, &self.doc);
@@ -496,8 +505,30 @@ pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8)
 /// than by grouping several commits. One item is exactly the single-cursor
 /// edit, byte for byte.
 pub fn applyUserEdits(self: *Editor, gpa: Allocator, items: []const Document.Replacement) Allocator.Error!void {
+    // A selection the edit REPLACES (typing or pasting over it) is spent: it
+    // becomes a caret after what was written. A selection an edit merely
+    // touches (an indent at its first line's start, a pair wrapped around
+    // it) keeps its range, carried by its anchors.
+    const replaced = try gpa.alloc(bool, self.selections.items.len);
+    defer gpa.free(replaced);
+    for (self.selections.items, replaced) |sel, *r| {
+        const span = self.spanOf(sel);
+        r.* = false;
+        if (sel.anchor == null or span.isEmpty()) continue;
+        for (items) |it| if (it.range.start == span.start and it.range.end == span.end) {
+            r.* = true;
+        };
+    }
     try self.doc.replaceAll(gpa, items);
-    self.liftAnchors();
+    for (self.selections.items, replaced) |*sel, r| {
+        const a = sel.anchor orelse continue;
+        // A selection an edit emptied is a caret, not an anchor waiting to
+        // grow one on the next motion.
+        if (r or self.doc.anchorOffset(a) == self.doc.anchorOffset(sel.head)) {
+            self.doc.removeAnchor(a);
+            sel.anchor = null;
+        }
+    }
     self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
     // Two carets can land on one offset (backspace from both sides of a
@@ -537,7 +568,10 @@ pub fn editRangeOf(self: *const Editor, sel: Selection, target: EditTarget) ?Ran
 pub fn editRanges(self: *const Editor, gpa: Allocator, target: EditTarget) Allocator.Error![]Range {
     var out: std.ArrayList(Range) = .empty;
     errdefer out.deinit(gpa);
-    for (self.selections.items) |sel| {
+    // Inside a visit the visited selection is the only one: a mapping runs
+    // the edit once per selection itself.
+    const all = self.selections.items;
+    for (if (self.visiting > 0) all[self.primary..][0..1] else all) |sel| {
         if (self.editRangeOf(sel, target)) |r| try out.append(gpa, r);
     }
     sortRanges(out.items);
@@ -687,17 +721,6 @@ pub fn selectRange(self: *Editor, gpa: Allocator, anchor: usize, head: usize) Al
     self.placeCursor(head);
 }
 
-/// Lift every selection's anchor, keeping every caret — what an edit at every
-/// selection leaves behind. Internal: the public verb is one selection's.
-fn liftAnchors(self: *Editor) void {
-    for (self.selections.items) |*sel| {
-        if (sel.anchor) |m| {
-            self.doc.removeAnchor(m);
-            sel.anchor = null;
-        }
-    }
-}
-
 /// The primary selection's text range, or null when it is a caret.
 pub fn selectedRange(self: *const Editor) ?Range {
     return self.rangeOf(self.primarySelection());
@@ -713,8 +736,8 @@ pub fn rangeOf(self: *const Editor, sel: Selection) ?Range {
     return .{ .start = @min(a, b), .end = @max(a, b) };
 }
 
-// ── Visiting: the per-selection runners' primitive ──────────────────
-// `wl_run_range_each` and `wl_run_range_arg_each` run a command once per
+// ── Visiting: the selection mapping's primitive ─────────────────────
+// A selection mapping (`selection.zig`) runs a command once per
 // selection, and that command speaks the single-selection API. Inside a visit
 // that API addresses the visited selection alone: the one context where "the
 // selection" is one of several on purpose.
@@ -781,6 +804,48 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
     self.normalize();
     self.clearGoal();
     self.history.barrier(); // a selection change is a motion
+}
+
+/// Inside a visit: replace the VISITED selection with `ends` (at least one),
+/// the first of them becoming the one the visit addresses; its siblings stay.
+/// How a run splits its extent (`s`), or reshapes it. The visited selection
+/// keeps its head HANDLE — re-pointed, not replaced — because a mapping names
+/// its extents by those handles while it runs. Allocates first: on failure
+/// the set is untouched.
+pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocator.Error!void {
+    assert(self.visiting > 0 and ends.len > 0);
+    const len = self.text().byteLen();
+    try self.selections.ensureUnusedCapacity(gpa, ends.len - 1);
+    const fresh = try gpa.alloc(Selection, ends.len - 1);
+    defer gpa.free(fresh);
+    var made: usize = 0;
+    errdefer for (fresh[0..made]) |sel| self.releaseSelection(sel);
+    for (ends[1..], fresh) |e, *slot| {
+        const head_off = @min(e.head, len);
+        const anchor_off = @min(e.anchor, len);
+        const head = try self.doc.addAnchor(gpa, head_off, .right);
+        errdefer self.doc.removeAnchor(head);
+        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        slot.* = .{ .head = head, .anchor = anchor };
+        made += 1;
+    }
+    const first = ends[0];
+    const head_off = @min(first.head, len);
+    const anchor_off = @min(first.anchor, len);
+    const visited = &self.selections.items[self.primary];
+    if (anchor_off != head_off and visited.anchor == null)
+        visited.anchor = try self.doc.addAnchor(gpa, anchor_off, .left);
+    self.doc.anchors.set(visited.head, .{ .offset = head_off, .bias = .right });
+    if (visited.anchor) |a| {
+        if (anchor_off == head_off) {
+            self.doc.removeAnchor(a);
+            visited.anchor = null;
+        } else self.doc.anchors.set(a, .{ .offset = anchor_off, .bias = .left });
+    }
+    self.selections.appendSliceAssumeCapacity(fresh);
+    self.normalize(); // the visited one stays primary wherever it lands
+    self.clearGoal();
+    self.history.barrier();
 }
 
 /// Add one selection and make it primary (helix `C`, ide's add-next-match).
@@ -928,7 +993,7 @@ pub fn moveTo(self: *Editor, offset: usize) void {
 
 /// Both vertical goals reset together: any horizontal or edit motion
 /// abandons the column/x the user was aiming for.
-fn clearGoal(self: *Editor) void {
+pub fn clearGoal(self: *Editor) void {
     self.goal_col = null;
     self.goal_x = null;
 }

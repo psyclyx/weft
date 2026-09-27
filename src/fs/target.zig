@@ -9,6 +9,11 @@ const std = @import("std");
 const contract = @import("contract.zig");
 
 pub const fact_name = "weft.fs.directory.v1";
+/// The designation a trusted publisher bound a target under (`Router.
+/// designate`), stated on its descriptor so a handler presenting the target
+/// can say where inside it something is (`view.reveal`) without asking the
+/// router. Descriptive, like every fact: authority is still the router's.
+pub const designation_fact_name = "weft.designation";
 pub const entry_fact_name = "weft.fs.entry.v1";
 
 pub const Directory = struct {

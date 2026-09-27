@@ -125,7 +125,7 @@ fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
-const Scenario = enum { open, page_down, jump_bottom, jump_top, type_bottom };
+const Scenario = enum { open, page_down, jump_bottom, jump_top, type_bottom, redraw };
 
 fn report(name: []const u8, samples: []Sample) void {
     var ns_buf: [64]u64 = undefined;
@@ -239,7 +239,7 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
     }
 
     // ── Scenarios, through the real app ──
-    var results: [5][64]Sample = undefined;
+    var results: [@typeInfo(Scenario).@"enum".fields.len][64]Sample = undefined;
     // How long to keep waking before calling a frame "never highlighted". The
     // initial parse is the slowest honest wait (tens of ms); this is well past it.
     // WEFT_BENCH_BUDGET_MS shortens it, so a profile of the bench is a profile
@@ -251,7 +251,8 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
     for (0..iters) |i| {
         // Open: a fresh buffer each time, so the initial parse is paid again.
         var t0 = nowNs();
-        command(ed, "open", &.{.{ .string = "bench.js" }});
+        var bench_at: [std.fs.max_path_bytes]u8 = undefined;
+        command(ed, "open", &.{.{ .string = h.Editor.asTyped("bench.js", &bench_at) }});
         results[@intFromEnum(Scenario.open)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
         const syn = lang.attachedSyntax(ed) orelse return error.SyntaxDidNotAttach;
         const te = ed.buffers.active().textEditor().?;
@@ -285,10 +286,23 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
         try te.insertText(gpa, "x");
         results[@intFromEnum(Scenario.type_bottom)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
 
+        // A frame that changes nothing the text shows (a caret blink, a chip):
+        // the tree, the scroll and the window are as the last frame left them,
+        // so whatever it recomputes is pure overhead.
+        ed.applyWindow();
+        t0 = nowNs();
+        results[@intFromEnum(Scenario.redraw)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
+
         command(ed, "buffer-close-force", &.{});
         ed.application.noteInput();
         ed.applyWindow();
     }
     std.debug.print("scenarios (real app wake; input -> first highlighted frame | input -> first frame):\n", .{});
     inline for (@typeInfo(Scenario).@"enum".fields) |f| report(f.name, results[f.value][0..iters]);
+    // What every frame above paid to be a function of a version: the text
+    // and layer snapshots its panes drew from (doc/model.md §2.7).
+    const snaps = &ed.render.fb.stats.snapshot;
+    std.debug.print("frame input snapshot (every pane, text + layers): p50 {d:.4} ms p99 {d:.4} ms over {d} frames\n", .{
+        ms(snaps.percentileNs(50)), ms(snaps.percentileNs(99)), snaps.len,
+    });
 }

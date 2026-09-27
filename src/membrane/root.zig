@@ -89,6 +89,10 @@ pub const Group = enum {
     /// `wasm_host/history.zig` — the dispatching head's jumplist and macro
     /// recorder: push a jump, ask whether a macro is recording.
     history,
+    /// `wasm_host/context.zig` — context as an open keyed map (doc/model.md
+    /// §2.5): publish a namespaced key at a scope, read the primary context,
+    /// and list the keys an `on_context_changed` delivery reports as moved.
+    context,
     semantic,
     proc,
     sessions,
@@ -176,6 +180,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_log", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "write a guest log line at `level`" },
     .{ .name = "wl_declare_command", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command name (id assigned on first declare)" },
     .{ .name = "wl_declare_command_doc", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare a command with its parameter list and one-line summary" },
+    .{ .name = "wl_declare_arity", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: say how a declared command maps over a selection of several extents (0 each, 1 whole, 2 homogeneous, 3 each over a target command, 4 the same merging overlaps)" },
     .{ .name = "wl_declare_capability", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare an abstract capability name this plugin provides" },
     .{ .name = "wl_request_perm", .params = &.{.u32}, .results = &.{}, .group = .declare, .doc = "describe-phase: request a permission bit (fs_read/fs_write/net/proc/timer)" },
 
@@ -205,11 +210,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing an anchored live range as its single borrowed argument" },
     .{ .name = "wl_arg_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "import a borrowed live-range command arg into this plugin's anchored range table" },
     .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over an anchored live-range handle through the gated edit door" },
-    .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{anchor,head}` pairs (document order); returns the selection count" },
-    .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
-    .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
-    .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
+    .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{kind,anchor,head}` extents (document order; kind 0 text offsets, 1 rows by focus order) — the visited extent alone inside a mapping run; returns the extent count" },
+    .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace the selection from a `{primary, n × {kind,anchor,head}}` record (text normalized: sorted, overlaps merged; rows must exist) — the visited extent alone inside a mapping run; 0 on success, -1 on a wrong kind or bad record" },
     .{ .name = "wl_undo_unit", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "open (1) or close (0) an undo unit on the addressed entry; nests (the outermost owns the unit), scoped to the dispatch that opened it; 0 on success" },
+    .{ .name = "wl_visit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "whether this dispatch is one run of a selection mapping: the runs still scheduled after it (an earlier run may merge some away: the mapping's end is `on_mapping_end`), or -1 outside a mapping" },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .params = &.{.u32}, .results = &.{.u32}, .group = .pointer, .doc = "write the pointer gesture being dispatched (kind, button, clicks, mods, offset and scene node under the pointer) as eight u32 words; 0 when there is none" },
@@ -281,10 +285,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
 
     // ── intent.zig — the focused context's live offers ──────────────────
-    .{ .name = "wl_offer_count", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "the number of intentions offered in the focused context" },
-    .{ .name = "wl_offer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offered intention's name, into guest memory" },
-    .{ .name = "wl_offer_provider", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offer's winning provider name, into guest memory" },
-    .{ .name = "wl_offer_reason", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "why the `i`-th offer cannot run (0 = it can), into guest memory" },
     .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
     .{ .name = "wl_offers_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "start this plugin's offer table for a tool identity, stamped with its model ordinal" },
     .{ .name = "wl_offer", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "stage one offer row: an intention, one of this plugin's own commands, and the reason it cannot run (empty = enabled)" },
@@ -315,7 +315,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
-    .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
+    .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick over the directory of the place this dispatch runs in (core resolves it; a place with none is refused)" },
     .{ .name = "wl_pick_outcome_kind", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "callback-scoped pick outcome: 0 cancelled, 1 input, 2 candidate, -1 outside callback" },
     .{ .name = "wl_pick_outcome_text", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact callback-scoped accepted text; cap=0 reports length, short destinations return -2" },
     .{ .name = "wl_pick_outcome_query", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact accepted-candidate query; cap=0 reports length, short destinations return -2" },
@@ -365,15 +365,15 @@ pub const imports = [_]Entry{
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
+    .{ .name = "wl_entry_designation", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "the designation (`weft://…`) of the entry this call is about into guest memory, or -1 when it has none" },
+    .{ .name = "wl_entry_designate", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "declare the designation the entry this call is about represents: `proc`, or a projection kind this plugin claimed, on an entry this plugin made; 0 ok, negative refused" },
+    .{ .name = "wl_designation_opener", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "claim projection kind `kind` for this plugin, re-run by `command` given the designation; 0 ok, -1 not a projection kind, -2 claimed by another" },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────
     .{ .name = "wl_yank_range", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture `[start,end)` into an explicit register slot" },
     .{ .name = "wl_register_text", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "read an explicit register slot's bytes into guest memory" },
     .{ .name = "wl_register_linewise", .params = &.{.u32}, .results = &.{.u32}, .group = .register, .doc = "whether an explicit register slot holds a linewise yank" },
     .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
-    .{ .name = "wl_yank_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture n `[start,end)` ranges as one value each (one per selection) into an explicit register slot" },
-    .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
-    .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
     .{ .name = "wl_register_set", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "put typed bytes in an explicit register slot as one value, leaving unnamed alone (the `/` search register)" },
 
     // ── clipboard.zig — the dispatching head's system clipboard ───────────
@@ -383,6 +383,10 @@ pub const imports = [_]Entry{
     // ── history.zig — the dispatching head's jumplist and macro recorder ──
     .{ .name = "wl_jump_push", .params = &.{}, .results = &.{}, .group = .history, .doc = "remember the caret as a jump in the head's jumplist (a grammar decides what a jump is)" },
     .{ .name = "wl_macro_recording", .params = &.{}, .results = &.{.u32}, .group = .history, .doc = "the register a macro is recording into (its byte), or 0 when none is" },
+    .{ .name = "wl_context_set", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "publish (key, value) at a scope (0 entry, 1 place, 2 global) of the entry this call is about — or, at the place scope, of the place a `dir` designation names; an empty value retracts; 0 done, -1 refused (key not under this plugin's own name, value too long, bad scope), -2 another plugin holds the key there" },
+    .{ .name = "wl_context_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the primary context's value for any key (builtin or published) into guest memory (clamped); returns the full length, -1 when unset" },
+    .{ .name = "wl_context_changed", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the keys the on_context_changed being delivered reports as moved, one per line (clamped); returns the full length" },
+    .{ .name = "wl_places", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the places the workspace is working in — every open entry's place, then every tree a peer shares — one designation per line (clamped); returns the full length" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
@@ -550,13 +554,14 @@ pub const exports = [_]Export{
     .{ .name = "init", .params = &.{}, .results = &.{}, .required = true, .doc = "register commands/keymap/etc, cross-checked against describe()'s declarations" },
     .{ .name = "run", .params = &.{}, .results = &.{}, .required = true, .transport = .run_guest, .doc = "the milestone-2 minimal-ABI entrypoint (runGuest's one-shot guest, not the full plugin lifecycle)" },
     .{ .name = "on_command", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "dispatch a registered command by id; args/result cross via wl_arg_*/wl_set_result_*" },
+    .{ .name = "on_mapping_end", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a selection mapping of the command with this id ended (after its last run, a refusal met while mapping, or no run at all); exactly once per mapping, under the same dispatch — where a per-command epilogue runs" },
     .{ .name = "on_complete", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a completion session (handle); missing/trapped -> the host declines it" },
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
-    .{ .name = "on_offers_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "what the head's primary context offers moved (focus, mode, entry, provider set, availability); at most once per frame, at the frame boundary, never inside a dispatch" },
+    .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     .{ .name = "on_exec", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the `wl_exec` with this token finished; `wl_exec_status`/`wl_exec_read` answer for the duration of this call and no longer" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
@@ -597,8 +602,8 @@ pub const legacy_callback_names = [_][]const u8{
 };
 
 const max_import_count: usize = 256;
-const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 276;
+const max_export_count: usize = 21;
+const max_semantic_operation_count: usize = 277;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -726,7 +731,7 @@ test "membrane contract data: every export entry is well-formed, documented, and
     try t.expectEqual(@as(usize, max_export_count), census.exports);
 }
 
-test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini callback" {
+test "membrane contract data: ABI v1 owns twenty full callbacks and one mini callback" {
     try t.expectEqualStrings("1", abi_major);
     try t.expectEqualStrings("weft:abi/1", abi_namespace);
     try t.expectEqualStrings("weft:abi/1/", export_prefix);
@@ -742,7 +747,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
             try t.expectEqualStrings("run", entry.name);
         },
     };
-    try t.expectEqual(@as(usize, 19), full);
+    try t.expectEqual(@as(usize, 20), full);
     try t.expectEqual(@as(usize, 1), mini);
     try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
     for (legacy_callback_names, 0..) |name, i| {
@@ -754,6 +759,6 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
     try t.expectEqual(@as(usize, 256), census.imports);
-    try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 276), census.semantic_operations);
+    try t.expectEqual(@as(usize, 21), census.exports);
+    try t.expectEqual(@as(usize, 277), census.semantic_operations);
 }

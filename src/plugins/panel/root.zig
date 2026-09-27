@@ -15,7 +15,7 @@ fn toggle() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "panel-toggle", .call = toggle, .summary = "show or hide the bottom panel" },
+    .{ .name = "panel-toggle", .arity = .whole, .call = toggle, .summary = "show or hide the bottom panel" },
 };
 
 comptime {

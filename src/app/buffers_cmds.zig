@@ -1,14 +1,16 @@
 //! Buffer open/close/browse commands — the graphical shell's versions that
-//! know about providers and remote shells (they shadow the core versions;
-//! registry last-wins). `open` dedupes by path and opens `host:path` over a
-//! persistent ssh shell; `browse-remote` lists a remote directory over that
-//! shell; `buffer-close` unbinds shares and detaches providers before the
-//! document dies.
+//! know about providers, remote shells and peers (they shadow the core
+//! versions; registry last-wins). `open` takes a designation (doc/model.md
+//! §2.1) — or an absolute path standing in for one, or `host:path` over a
+//! persistent ssh shell — and routes it by kind and authority; `browse-remote`
+//! lists a remote directory over that shell; `buffer-close` unbinds shares and
+//! detaches providers before the document dies.
 
 const std = @import("std");
 const core = @import("weft_core");
 const providers = @import("providers.zig");
 const AttachDeps = providers.AttachDeps;
+const durable = core.designation.durable;
 
 /// Optional target-producing behavior supplied by the app shell. This is a
 /// generic composition point: buffer commands do not know which tool, if any,
@@ -26,18 +28,45 @@ pub const DirectoryOpener = struct {
     place_for: *const fn (*anyopaque, *core.command.Context, []const u8) ?core.Place,
 };
 
+/// Opens what a PEER authority designates — its shared tree (`dir`), a
+/// document it shares (`doc`). Supplied by the collaboration shell, which
+/// holds the connections; absent, a peer designation is refused by name.
+/// Answers the command's result: an entry opened, or a refusal in words.
+pub const PeerOpener = struct {
+    context: *anyopaque,
+    open: *const fn (*anyopaque, *core.command.Context, durable.Designation) anyerror!core.command.Value,
+};
+
 pub const Context = struct {
     attachments: *AttachDeps,
     directories: ?DirectoryOpener = null,
+    peers: ?PeerOpener = null,
+
+    /// This shell's way to open a file from bytes already read (`FileOpener`).
+    pub fn fileOpener(self: *Context) FileOpener {
+        return .{ .context = self };
+    }
 };
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
 
-/// `open <path>` — dedupe by path; `host:path` opens over a persistent
-/// ssh shell (the coreutils tier); providers attach either way.
+/// `open <designation>` — the one door content is opened through, routed by
+/// what the designation names:
+///
+/// - `weft://here/file|dir/<path>` (or the bare absolute path): the local
+///   file, deduped by path, or the directory's listing;
+/// - `weft://shell:<host>/file/<path>` (or `host:path`): over that shell;
+/// - `weft://<peer>/…`: to the peer (its shared tree, a document it shares);
+/// - a document, a process, a projection: as core answers them
+///   (`designation.openHeld`) — a live entry, a parked document, a producer
+///   re-run.
+///
+/// A relative path is resolved once, here, against the place the command runs
+/// in (`designation.resolveRelative`) — never against the directory the
+/// process was launched in — and refused where that place has no local
+/// directory. A position locator (`?at=`) lands the caret.
 pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const command_context: *Context = @ptrCast(@alignCast(data.?));
-    const deps = command_context.attachments;
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const spec = args[0].string;
     // AN OPEN FROM A TOOL ENTRY IS AN ACTIVATION (§9.4).
@@ -53,60 +82,148 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     // placement means it.
     if (ctx.head.placement == null and ctx.buffers.active().tool.len > 0)
         ctx.head.placement = .{ .hint = .primary, .kind = .unknown };
+
+    return switch (durable.Spec.of(spec)) {
+        .path => |path| openLocal(ctx, command_context, path),
+        .designation => |d| openDesignation(ctx, command_context, d, spec),
+        .malformed => .{ .string = "open: " ++ durable.Spec.malformed_refusal },
+        // `host:path` names its locus, so it is not relative to anything
+        // here. Any other bare name is relative to the place the command runs
+        // in, and is made absolute once, here.
+        .relative => if (scpSpec(spec)) |r|
+            openShell(ctx, command_context, r.host, r.path)
+        else if (try core.designation.resolveRelative(ctx, ctx.gpa, spec)) |abs| blk: {
+            defer ctx.gpa.free(abs);
+            break :blk openLocal(ctx, command_context, abs);
+        } else .{ .string = "open: " ++ core.designation.refuse_relative_elsewhere },
+    };
+}
+
+fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: durable.Designation, text: []const u8) anyerror!core.command.Value {
+    const opened: core.command.Value = if (try core.designation.openHeld(ctx, d, text)) |outcome| switch (outcome) {
+        .opened => |id| blk: {
+            // A document reopened from the parked store comes back without
+            // the providers its close detached.
+            if (ctx.buffers.get(id)) |b| try attachProviders(command_context.attachments, b);
+            break :blk .{ .integer = @intCast(id) };
+        },
+        .refused => |why| return .{ .string = why },
+    } else switch (d.authority) {
+        .here => switch (d.kind) {
+            .file => try openLocal(ctx, command_context, d.ref),
+            .directory => blk: {
+                const directories = command_context.directories orelse
+                    return .{ .string = "open: this shell lists no directories" };
+                if (!try directories.open(directories.context, ctx, d.ref))
+                    return .{ .string = "open: no such directory here" };
+                break :blk .nil;
+            },
+            else => unreachable, // `openHeld` answers every other kind here
+        },
+        .shell => |host| switch (d.kind) {
+            .file => try openShell(ctx, command_context, host, d.ref),
+            else => return .{ .string = "open: a shell locus holds only files" },
+        },
+        .peer => blk: {
+            const peers = command_context.peers orelse return .{ .string = core.designation.refuse_unreachable };
+            const result = try peers.open(peers.context, ctx, d);
+            if (result == .string) return result;
+            break :blk result;
+        },
+    };
+    core.designation.applyPosition(ctx, d);
+    return opened;
+}
+
+/// A local path — absolute by the time it gets here — as a file entry, or as
+/// the directory's listing.
+fn openLocal(ctx: *core.command.Context, command_context: *Context, raw: []const u8) anyerror!core.command.Value {
+    return openLocalWith(ctx, command_context, raw, null);
+}
+
+/// How a caller that has READ a local file through something stronger than
+/// its path opens it: the same entry `open` makes (deduped, placed, with its
+/// providers), showing those bytes (`Editor.openFileContent`). The session
+/// opens a listing's file row this way, from bytes read relative to the
+/// directory handle it checked, so no swap of the path between the check
+/// and the read can change what opens.
+pub const FileOpener = struct {
+    context: *Context,
+
+    pub fn open(self: FileOpener, ctx: *core.command.Context, path: []const u8, bytes: []const u8) anyerror!void {
+        _ = try openLocalWith(ctx, self.context, path, bytes);
+    }
+};
+
+/// `openLocal`, with the file's bytes when the caller already has them.
+fn openLocalWith(ctx: *core.command.Context, command_context: *Context, raw: []const u8, content: ?[]const u8) anyerror!core.command.Value {
+    const deps = command_context.attachments;
+    // One spelling per file: `a/../b` and `b` are one entry.
+    const spec = try std.fs.path.resolve(ctx.gpa, &.{raw});
+    defer ctx.gpa.free(spec);
     if (ctx.buffers.findByPath(spec)) |id| {
         try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
     }
-
-    // scp-style remote: host:path (no '/' before the first ':').
-    const remote: ?struct { host: []const u8, path: []const u8 } = blk: {
-        const colon = std.mem.indexOfScalar(u8, spec, ':') orelse break :blk null;
-        if (std.mem.indexOfScalar(u8, spec[0..colon], '/') != null) break :blk null;
-        if (colon == 0 or colon + 1 >= spec.len) break :blk null;
-        break :blk .{ .host = spec[0..colon], .path = spec[colon + 1 ..] };
-    };
-
-    if (remote) |r| {
-        // Dedupe remote opens by (shell, remote path).
-        const fs0 = deps.shells.get(r.host);
-        var rit = ctx.buffers.iterator();
-        while (rit.next()) |b| {
-            switch ((b.textEditor() orelse continue).backing) {
-                .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, r.path)) {
-                    try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
-                    return .{ .integer = @intCast(b.id) };
-                },
-                else => {},
-            }
-        }
-    }
-
-    if (remote == null) {
-        if (command_context.directories) |directories|
-            if (try directories.open(directories.context, ctx, spec)) return .nil;
-    }
+    if (content == null) if (command_context.directories) |directories|
+        if (try directories.open(directories.context, ctx, spec)) return .nil;
 
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
     errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
     const buf = ctx.buffers.get(id).?;
     const editor = buf.textEditor().?;
-    if (remote) |r| {
-        const fs = try deps.shellFor(r.host);
-        try editor.openShell(ctx.gpa, fs, r.path);
-    } else {
-        editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
-            error.FileNotFound => try editor.adoptPath(ctx.gpa, spec),
-            else => |e| return e,
-        };
-        // A file's place comes from its OWN path, never from whatever was
-        // focused when it was opened (`doc/place.md` §2.1). This is where the
-        // creation-time inheritance every entry starts with is replaced by the
-        // real answer — and why opening a file from project A's tool buffer
-        // still lands the file in project B if that is where it lives.
-        if (command_context.directories) |directories| {
-            if (directories.place_for(directories.context, ctx, spec)) |p|
-                ctx.buffers.setPlace(id, p);
+    if (content) |bytes| try editor.openFileContent(ctx.gpa, spec, bytes) else editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
+        error.FileNotFound => try editor.adoptPath(ctx.gpa, spec),
+        else => |e| return e,
+    };
+    // A file's place comes from its OWN path, never from whatever was
+    // focused when it was opened (`doc/place.md` §2.1). This is where the
+    // creation-time inheritance every entry starts with is replaced by the
+    // real answer — and why opening a file from project A's tool buffer
+    // still lands the file in project B if that is where it lives.
+    if (command_context.directories) |directories| {
+        if (directories.place_for(directories.context, ctx, spec)) |p|
+            ctx.buffers.setPlace(id, p);
+    }
+    try attachProviders(deps, buf);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+    return .{ .integer = @intCast(id) };
+}
+
+/// scp-style `host:path` — no `/` before the first `:`.
+fn scpSpec(spec: []const u8) ?struct { host: []const u8, path: []const u8 } {
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return null;
+    if (std.mem.indexOfScalar(u8, spec[0..colon], '/') != null) return null;
+    if (colon == 0 or colon + 1 >= spec.len) return null;
+    return .{ .host = spec[0..colon], .path = spec[colon + 1 ..] };
+}
+
+/// A file over `host`'s persistent shell, deduped by (shell, remote path).
+/// The entry is named `weft://shell:<host>/file/<path>` when the path is
+/// absolute; a home-relative one names nothing durable, and the entry is its
+/// document.
+fn openShell(ctx: *core.command.Context, command_context: *Context, host: []const u8, path: []const u8) anyerror!core.command.Value {
+    const deps = command_context.attachments;
+    const fs0 = deps.shells.get(host);
+    var rit = ctx.buffers.iterator();
+    while (rit.next()) |b| {
+        switch ((b.textEditor() orelse continue).backing) {
+            .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, path)) {
+                try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
+                return .{ .integer = @intCast(b.id) };
+            },
+            else => {},
         }
+    }
+    const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(path));
+    errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
+    const buf = ctx.buffers.get(id).?;
+    const fs = try deps.shellFor(host);
+    try buf.textEditor().?.openShell(ctx.gpa, fs, path);
+    if (std.fs.path.isAbsolutePosix(path)) {
+        var named: [core.designation.max_len]u8 = undefined;
+        const d: durable.Designation = .{ .authority = .{ .shell = host }, .kind = .file, .ref = path };
+        if (d.render(&named)) |text| try buf.setDesignation(ctx.gpa, text) else |_| {}
     }
     try attachProviders(deps, buf);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
@@ -206,8 +323,22 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
 
 pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     if (args.len != 0) return error.ArityMismatch;
-    if (ctx.buffers.active().hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
+    if (holdsUnsavedWork(ctx, ctx.buffers.active())) return .{ .string = "dirty" };
     return closeActive(ctx, data);
+}
+
+/// Whether closing `b` would lose work: edits its file never received, or a
+/// draft one of its views holds that its provider has not applied (a renamed
+/// row in a listing). A listing keeps a view per directory it visited, so
+/// every one of them is asked, not only the one it shows.
+pub fn holdsUnsavedWork(ctx: *core.command.Context, b: *core.Buffers.Buffer) bool {
+    if (b.hasUnsavedFile(ctx.gpa) catch true) return true;
+    const services = ctx.semantic orelse return false;
+    const focus = if (b.id == ctx.buffers.active_id) &ctx.head.scene_selection else &b.scene_selection;
+    if (focus.view) |v| if (services.holdsDraft(v)) return true;
+    if (b.tool_view) |v| if (services.holdsDraft(v)) return true;
+    for (b.view_cursors.items) |saved| if (services.holdsDraft(saved.view)) return true;
+    return false;
 }
 
 /// `buffer-close-force`: the same close, minus the dirty check. It has to be
@@ -249,7 +380,7 @@ fn closeActive(ctx: *core.command.Context, data: ?*anyopaque) anyerror!core.comm
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, context: *Context) !void {
     _ = try commands.bind(gpa, "open", .{
         .name = "open",
-        .summary = "Open a local file or host:path over a shell, with providers.",
+        .summary = "Open a designation (weft://…), an absolute path, or host:path over a shell.",
         .args = &.{.{ .name = "path", .type = .string }},
         .handler = openBufferHandler,
         .data = context,

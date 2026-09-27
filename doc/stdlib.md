@@ -320,7 +320,8 @@ against actual signatures, most of those are different operations that share a
 word:
 
 - **`count` (6) does not unify.** `wl_arg_count`, `wl_command_count`,
-  `wl_buffer_count`, `wl_offer_count` are all `() -> u32` but ask different
+  `wl_buffer_count` (and `wl_offer_count`, since deleted with the other
+  index-addressed offer doors, doc/model.md phase 3) are all `() -> u32` but ask different
   questions about different collections. Merging them needs a "what am I
   counting" parameter — the kind moved from the name into an argument, which is
   not a win.

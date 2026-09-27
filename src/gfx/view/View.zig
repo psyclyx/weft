@@ -87,7 +87,7 @@ pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 /// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
 /// head, or — `inside`, on a forward selection — the start of the last
 /// character it covers.
-pub fn caretDrawOffset(ed: *const core.Editor, i: usize, place: hud_mod.CaretPlace) usize {
+pub fn caretDrawOffset(ed: *const core.TextSnapshot, i: usize, place: hud_mod.CaretPlace) usize {
     const ends = ed.selectionEnds(i);
     if (place == .head or ends.head <= ends.anchor) return ends.head;
     const rope = ed.text();
@@ -386,7 +386,7 @@ pub fn hasSemanticInput(self: *const View) bool {
 }
 
 /// Keep the cursor's row inside a pane's body viewport.
-fn scrollToCursor(editor: *const core.Editor, top_row: *usize, body_rows: usize) void {
+fn scrollToCursor(editor: *const core.TextSnapshot, top_row: *usize, body_rows: usize) void {
     const cur = editor.text().offsetToPoint(editor.cursorOffset()).row;
     if (cur < top_row.*) top_row.* = cur;
     if (cur >= top_row.* + body_rows) top_row.* = cur + 1 - body_rows;
@@ -394,7 +394,7 @@ fn scrollToCursor(editor: *const core.Editor, top_row: *usize, body_rows: usize)
 
 /// The scroll a text body settles on: the caret kept in view, the top row
 /// clamped to the document. The one place `build` moves `top_row`.
-fn settleRows(editor: *const core.Editor, top_row: *usize, body_rows: usize) void {
+fn settleRows(editor: *const core.TextSnapshot, top_row: *usize, body_rows: usize) void {
     scrollToCursor(editor, top_row, body_rows);
     const total_rows = editor.text().lineCount();
     if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
@@ -444,9 +444,15 @@ fn bodyRowsOf(self: *const View, body: region.Rect) usize {
 /// highlight paint window, markdown attributes) have to be prepared. Preparing
 /// them around the pre-scroll `top_row` instead is how a jump used to draw
 /// its first frame at the destination with no highlighting at all.
-pub fn settleScroll(self: *const View, editor: *const core.Editor, hud: Hud, top_row: *usize, frame: region.Rect) void {
+pub fn settleScroll(self: *const View, editor: *const core.TextSnapshot, hud: Hud, top_row: *usize, frame: region.Rect) void {
     if (hud.semantic_view != null) return;
-    settleRows(editor, top_row, self.bodyRowsOf(self.carve(frame, hud).body));
+    settleRows(editor, top_row, self.bodyRowsIn(hud, frame));
+}
+
+/// How many text rows a pane's body shows in `frame` under `hud` — what its
+/// per-byte inputs have to cover (`core.TextSnapshot.window`).
+pub fn bodyRowsIn(self: *const View, hud: Hud, frame: region.Rect) usize {
+    return self.bodyRowsOf(self.carve(frame, hud).body);
 }
 
 // ── Frame assembly ───────────────────────────────────────────────
@@ -456,10 +462,16 @@ pub fn settleScroll(self: *const View, editor: *const core.Editor, hud: Hud, top
 /// from that map, add the HUD, then place everything into shapes.
 /// A null `editor` is an entry that holds no text: the body is the HUD's
 /// semantic view (or nothing), with no rope and no caret.
+///
+/// Everything this reads is the frame's input (doc/model.md §2.7): the text
+/// is a `core.TextSnapshot` and every layer on `hud` a `layers.Snapshot`,
+/// never a live `Editor` or `Layer`. So building twice from the same input
+/// draws the same picture, and nothing that edits while — or after — this
+/// runs can put one version's carets on another version's text.
 pub fn build(
     self: *View,
     scratch: Allocator,
-    editor: ?*const core.Editor,
+    editor: ?*const core.TextSnapshot,
     hud: Hud,
     top_row: *usize,
     frame: region.Rect,
@@ -520,10 +532,10 @@ pub fn build(
         const rope = ed.text();
         const total_rows = rope.lineCount();
         settleRows(ed, top_row, rows_visible);
-        const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
+        const styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
         // Every block caret flips the glyph it covers, not only the primary's.
         var flips: std.ArrayList(usize) = .empty;
-        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selections.items.len) |i|
+        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selectionCount()) |i|
             try flips.append(scratch, caretDrawOffset(ed, i, hud.caret_place));
 
         // Lay out the body's visible rows into the frame arena (the geometry
@@ -552,13 +564,13 @@ pub fn build(
         // Every selection draws, the primary like any other: one wash per
         // selection and one caret per head (the single-selection case is the
         // one-iteration loop of what this always drew).
-        for (ed.selections.items) |sel| {
-            if (ed.rangeOf(sel)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
+        for (0..ed.selectionCount()) |i| {
+            if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
         }
         for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
         if (hud.cursor_on) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
-            for (0..ed.selections.items.len) |i| {
+            for (0..ed.selectionCount()) |i| {
                 if (i == ed.primary) continue;
                 try decoration.caretRect(self, scratch, &rects, caretDrawOffset(ed, i, hud.caret_place), hud.cursor_style, self.theme.cursor);
             }

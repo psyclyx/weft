@@ -168,6 +168,48 @@ test "repl_session: a malformed sequence cannot swallow the output after it" {
     try std.testing.expectEqual(Controls.text, st);
 }
 
+/// What a session's reader has read and the frame thread has not delivered
+/// yet: the child's output, its terminal controls stripped. stdout and
+/// stderr are two byte streams, and each has its OWN filter state. A read
+/// ends wherever the pipe had data, so a sequence is routinely left open
+/// at the end of one chunk; if the next chunk were from the other stream
+/// and read under that state, it would be swallowed as the rest of the
+/// sequence, and the open sequence's real tail, arriving later, would show
+/// as text. (A shell whose rc prints an OSC 7 cwd report on stdout while
+/// the prompt goes to stderr did exactly that: the prompt was eaten up to
+/// its first BEL and the path from the cwd report was left after it.)
+pub const Pending = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    controls: [2]Controls = @splat(.text),
+
+    pub const Stream = enum(u1) { stdout, stderr };
+
+    /// Filter `chunk`, read from `from`, onto `bytes`, under `from`'s own
+    /// state. On failure the state is left where it was.
+    pub fn absorb(self: *Pending, gpa: Allocator, from: Stream, chunk: []const u8) Allocator.Error!void {
+        const state = &self.controls[@intFromEnum(from)];
+        state.* = try stripControls(gpa, state.*, chunk, &self.bytes);
+    }
+
+    pub fn deinit(self: *Pending, gpa: Allocator) void {
+        self.bytes.deinit(gpa);
+    }
+};
+
+test "repl_session: a sequence one stream leaves open does not swallow the other stream" {
+    const gpa = std.testing.allocator;
+    var pending: Pending = .{};
+    defer pending.deinit(gpa);
+    // A cwd report on stdout, cut by the end of a read; the prompt on
+    // stderr, read in between; then the report's tail.
+    try pending.absorb(gpa, .stdout, "\x1b]7;file://host/tmp/ni");
+    try pending.absorb(gpa, .stderr, "\x1b]133;A\x07host % \x1b]133;B\x07");
+    try pending.absorb(gpa, .stdout, "x-shell/build\x07");
+    try std.testing.expectEqualStrings("host % ", pending.bytes.items);
+    try std.testing.expectEqual(Controls.text, pending.controls[0]);
+    try std.testing.expectEqual(Controls.text, pending.controls[1]);
+}
+
 pub const Session = struct {
     gpa: Allocator,
     ctx: *command.Context,
@@ -184,10 +226,8 @@ pub const Session = struct {
     environ_owned: bool = false,
     child: std.process.Child,
     out_mutex: task.Mutex = .{},
-    out_buf: std.ArrayList(u8) = .empty,
-    /// Where the terminal-control filter stands between two chunks: an
-    /// escape sequence may be split across reads.
-    controls: Controls = .text,
+    /// Streamed output not yet delivered, guarded by `out_mutex`.
+    pending: Pending = .{},
     reader: task.Handle(void),
     /// The child's exit code once `exitCode` has seen it end.
     exit_code: ?u8 = null,
@@ -253,12 +293,12 @@ pub const Session = struct {
         mr.init(s.gpa, io, mr_buf.toStreams(), &.{ s.child.stdout.?, s.child.stderr.? });
         defer mr.deinit();
         while (mr.fill(256, .none)) |_| {
-            inline for (.{ 0, 1 }) |idx| {
-                const r = mr.reader(idx);
+            inline for (.{ Pending.Stream.stdout, Pending.Stream.stderr }) |from| {
+                const r = mr.reader(@intFromEnum(from));
                 const chunk = r.buffered();
                 if (chunk.len > 0) {
                     s.out_mutex.lock();
-                    s.controls = stripControls(s.gpa, s.controls, chunk, &s.out_buf) catch s.controls;
+                    s.pending.absorb(s.gpa, from, chunk) catch {};
                     s.out_mutex.unlock();
                     r.toss(chunk.len);
                 }
@@ -271,7 +311,7 @@ pub const Session = struct {
     pub fn drain(s: *Session) bool {
         s.out_mutex.lock();
         defer s.out_mutex.unlock();
-        if (s.out_buf.items.len == 0) return false;
+        if (s.pending.bytes.items.len == 0) return false;
         const bufs = s.ctx.buffers;
         // Generation-checked identity, captured on first delivery — never a name
         // scan per tick, so a rename or a second same-named buffer cannot
@@ -280,11 +320,11 @@ pub const Session = struct {
         const ed = b.textEditor() orelse return false;
         const doc = &ed.doc;
         const end = ed.text().byteLen();
-        command.renderInto(s.gpa, &s.ctx.buffers.status, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {
-            s.out_buf.clearRetainingCapacity();
+        command.renderInto(s.gpa, &s.ctx.buffers.status, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.pending.bytes.items }}) catch {
+            s.pending.bytes.clearRetainingCapacity();
             return false;
         };
-        s.out_buf.clearRetainingCapacity();
+        s.pending.bytes.clearRetainingCapacity();
         return true;
     }
 
@@ -301,7 +341,7 @@ pub const Session = struct {
         {
             s.out_mutex.lock();
             defer s.out_mutex.unlock();
-            if (s.out_buf.items.len > 0) return null;
+            if (s.pending.bytes.items.len > 0) return null;
         }
         const pid = s.child.id orelse return null;
         const linux = std.os.linux;
@@ -340,7 +380,7 @@ pub const Session = struct {
         while (!s.reader.residentExited()) std.Thread.yield() catch {}; // join the reader
         _ = s.reader.poll();
         _ = s.child.wait(s.io_threaded.io()) catch {};
-        s.out_buf.deinit(gpa);
+        s.pending.deinit(gpa);
         s.io_threaded.deinit();
         if (s.environ_owned) s.environ.block.deinit(gpa);
         gpa.free(s.plugin);

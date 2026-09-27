@@ -121,8 +121,16 @@ var closer_ids: [closers.len]u32 = @splat(std.math.maxInt(u32));
 fn describe() callconv(.c) void {
     loadPairs();
     loadQuoteLangs();
-    for (pairs[0..pairs_len]) |pr| weft.declareCommand(pr.name);
-    for (closers) |c| weft.declareCommand(c.name);
+    // A pair (or a type-over) goes in at every caret: dispatch runs each
+    // command once per selection.
+    for (pairs[0..pairs_len]) |pr| {
+        weft.declareCommand(pr.name);
+        weft.declareArity(pr.name, weft.Arity.each_extent);
+    }
+    for (closers) |c| {
+        weft.declareCommand(c.name);
+        weft.declareArity(c.name, weft.Arity.each_extent);
+    }
 }
 fn init() callconv(.c) void {
     loadPairs();

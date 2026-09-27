@@ -292,13 +292,6 @@ dispatch_depth: usize = 0,
 /// dispatch returns, so a guest that forgets to close one (or traps) never
 /// leaves an editor's barriers held shut.
 undo_units: std.ArrayList(UndoUnit) = .empty,
-/// Nonzero while this guest is ANSWERING a provider round (`on_slot_fire`:
-/// a gutter or status segment asked mid-layout, an annotation round asked
-/// from the frame loop). Answering conveys no authority: every door not
-/// declared safe to call then (`contract.render_safe`) refuses, enforced
-/// once where the doors are bound (`wasm_host.defineImports`).
-answering: u32 = 0,
-
 // The three guest-handle tables. Monotonic issuance, never-recycled numbers
 // and fail-closed exhaustion are `handles.Handles`'s, stated once there
 // instead of three times here; what stays below is the only thing that
@@ -386,10 +379,10 @@ surface: surface_mod.Surface = .{},
 /// address it captures is the address it keeps.
 offers: plugin_offers.Publisher = undefined,
 offers_ready: bool = false,
-/// Whether this plugin exports `on_offers_changed` — learned on the first
-/// delivery (`wasm_host/intent.zig`'s `notifyOffersChanged`), so a plugin
+/// Whether this plugin exports `on_context_changed` — learned on the first
+/// delivery (`wasm_host/context.zig`'s `notifyContextChanged`), so a plugin
 /// without it is asked once, not every change.
-offers_listener: enum { unknown, listening, deaf } = .unknown,
+context_listener: enum { unknown, listening, deaf } = .unknown,
 
 // ── Sandboxed semantic field providers ──
 /// Stable heap proxies + host-owned snapshots for fields registered by this
@@ -843,6 +836,12 @@ pub fn deinit(self: *WasmPlugin) void {
     // by its name. The declared actions themselves persist (cheap names; another
     // plugin/config may still provide for them).
     self.ctx.actions.unregisterByOwnerPrefix(self.name);
+    // So does every context value it published (`wl_context_set`): a claim
+    // about the plugin's work must not outlive the code that knew it true.
+    if (self.ctx.context) |context| _ = context.store.retractOwner(self.resources.name);
+    // The projection kinds it claimed go with it: a designation of one is
+    // then refused as having no producer, not handed to a dead command.
+    if (self.ctx.designations) |openers| openers.release(gpa, self.name);
     // D2 slot providers (wl_slot_bind) die with it too — same shape. Slots
     // THEMSELVES (wl_slot_declare) persist, exactly like declared actions —
     // Container has no slot-removal API (matches every other domain's

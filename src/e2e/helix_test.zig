@@ -691,11 +691,16 @@ test "e2e/helix: the caret draws on a forward selection's last character" {
     keys(ed, "w"); // "hello ", head at 6
     try expectSelections(ed, &.{.{ 0, 6 }});
     app.proj.shot(ed, "helix-caret");
-    const te = textEd(ed);
-    try t.expectEqual(@as(usize, 5), h.view.View.caretDrawOffset(te, te.primary, .inside));
-    try t.expectEqual(@as(usize, 6), h.view.View.caretDrawOffset(te, te.primary, .head));
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var fwd = try core.TextSnapshot.of(textEd(ed), arena.allocator());
+    defer fwd.release(ed.gpa);
+    try t.expectEqual(@as(usize, 5), h.view.View.caretDrawOffset(&fwd, fwd.primary, .inside));
+    try t.expectEqual(@as(usize, 6), h.view.View.caretDrawOffset(&fwd, fwd.primary, .head));
     keys(ed, "b"); // backward: the head is the first character either way
-    try t.expectEqual(@as(usize, 0), h.view.View.caretDrawOffset(te, te.primary, .inside));
+    var back = try core.TextSnapshot.of(textEd(ed), arena.allocator());
+    defer back.release(ed.gpa);
+    try t.expectEqual(@as(usize, 0), h.view.View.caretDrawOffset(&back, back.primary, .inside));
 }
 
 // ── The jumplist, macros and the clipboard (core's doors) ───────────────

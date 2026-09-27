@@ -132,6 +132,20 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
         @intCast(summary.len),
     );
 }
+/// Say how a declared command maps over a selection of several extents
+/// (`Arity`). The manifest calls this for every entry; `.one` sends
+/// nothing, since an undeclared command is the one the host refuses.
+pub fn declareArity(name: []const u8, arity: Arity) void {
+    const code = arity.code() orelse return;
+    const over = arity.over();
+    e.wl_declare_arity(p(name.ptr), @intCast(name.len), code, p(over.ptr), @intCast(over.len));
+}
+/// Whether this dispatch is one run of a selection mapping, and how many runs
+/// come after it — null outside one.
+pub fn visitsLeft() ?u32 {
+    const n = e.wl_visit();
+    return if (n < 0) null else @intCast(n);
+}
 /// Declare a capability this plugin will provide (e.g. "edit/completion").
 /// Cross-checked host-side against the matching `provide*` at init time.
 pub fn declareCapability(name: []const u8) void {
@@ -148,6 +162,7 @@ pub fn requestPerm(perm: Perm) void {
 // return value, and `thunk` is the only place a command argument is
 // copied off the shared shim scratch before a handler can be handed it.
 pub const CommandEntry = @import("plugin.zig").Entry;
+pub const Arity = @import("plugin.zig").Arity;
 pub const PluginHooks = @import("plugin.zig").Hooks;
 pub const plugin = @import("plugin.zig").plugin;
 pub const exportCallback = @import("plugin.zig").exportCallback;
@@ -521,52 +536,69 @@ pub fn setSelection(r: Range) void {
     e.wl_set_selection(@intCast(r.start), @intCast(r.end));
 }
 
-// ── Multiple selections ───────────────────────────────────────────────
-// Core holds N selections per editor; everything above (`cursor`,
-// `selection`, `jump`, `setSelection`) reads and writes the PRIMARY one. A
-// grammar that works on all of them reads the set, computes the new one, and
-// hands it back — add/remove/collapse below are exactly that, not doors.
+// ── The selection ─────────────────────────────────────────────────────
+// One selection model for every entry (doc/model.md §2.6): one or more
+// extents, a primary, anchor and head. In text an extent is a byte range; in
+// a scene it is a range of rows, counted by their place in the view's focus
+// order. Everything above (`cursor`, `selection`, `jump`, `setSelection`)
+// reads and writes THE selection: during a run dispatch maps a command into,
+// the one it is visiting; otherwise the primary. A command that shapes the
+// whole set (`.whole`) reads it, computes the next one, and hands it back —
+// add/remove/collapse below are exactly that, not doors.
 
-/// One selection's endpoints. `anchor == head` is a caret.
+/// What an extent is a range of.
+pub const SelectionKind = enum(u32) { text = 0, rows = 1 };
+
+/// One extent's endpoints. `anchor == head` is a caret (a single row).
 pub const Selection = struct {
     anchor: usize,
     head: usize,
+    kind: SelectionKind = .text,
 
     pub fn range(s: Selection) Range {
         return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
     }
 };
 
-/// The selection set: document order, `primary` indexing into `items`.
+/// The selection: document order, `primary` indexing into `items`.
 pub const Selections = struct { primary: usize, items: []Selection };
 
-/// How many selections `selections()` can carry in one read.
+/// How many extents `selections()` can carry in one read.
 pub const max_selections = 1024;
-var sel_words: [1 + 2 * max_selections]u32 = undefined;
+/// Words per extent in the door's record: kind, anchor, head.
+const extent_words = 3;
+var sel_words: [1 + extent_words * max_selections]u32 = undefined;
 var sel_items: [max_selections]Selection = undefined;
 
-/// The active editor's selection count (0 for an entry with no text).
+/// How many extents the selection has (0 for an entry with neither text nor
+/// a scene; 1 inside a mapping's run).
 pub fn selectionCount() usize {
     return e.wl_selections_get(p(&sel_words), 0);
 }
 
-/// The active editor's selections, into a private scratch (valid until the
-/// next call). Past `max_selections`, the rest are not reported.
+/// The selection, into a private scratch (valid until the next call). Past
+/// `max_selections`, the rest are not reported.
 pub fn selections() Selections {
     const total = e.wl_selections_get(p(&sel_words), max_selections);
     const n = @min(total, max_selections);
-    for (sel_items[0..n], 0..) |*s, i| s.* = .{ .anchor = sel_words[1 + 2 * i], .head = sel_words[2 + 2 * i] };
+    for (sel_items[0..n], 0..) |*s, i| {
+        const at = 1 + extent_words * i;
+        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2] };
+    }
     return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
 }
 
-/// Replace every selection (at least one). Core normalizes the set — sorted,
-/// overlaps merged — so read it back rather than assume the indices held.
+/// Replace the selection (at least one extent, of the entry's kind). Core
+/// normalizes text — sorted, overlaps merged — so read it back rather than
+/// assume the indices held.
 pub fn setSelections(items: []const Selection, primary: usize) bool {
     if (items.len == 0 or items.len > max_selections) return false;
     sel_words[0] = @intCast(primary);
     for (items, 0..) |s, i| {
-        sel_words[1 + 2 * i] = @intCast(s.anchor);
-        sel_words[2 + 2 * i] = @intCast(s.head);
+        const at = 1 + extent_words * i;
+        sel_words[at] = @intFromEnum(s.kind);
+        sel_words[at + 1] = @intCast(s.anchor);
+        sel_words[at + 2] = @intCast(s.head);
     }
     return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
 }
@@ -598,32 +630,10 @@ pub fn collapseSelections() bool {
     return setSelections(set.items[set.primary..][0..1], 0);
 }
 
-/// Run a motion once per selection (each read as "the cursor") and fill
-/// `out` with one live-range handle per selection, null where the motion
-/// returned none. Returns the filled prefix of `out`.
-pub fn runRangeEach(cmd: []const u8, out: []?u32) []?u32 {
-    var raw: [max_selections]i32 = undefined;
-    const cap = @min(out.len, max_selections);
-    const total: usize = @intCast(@max(0, e.wl_run_range_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(cap))));
-    const n = @min(total, cap);
-    for (out[0..n], raw[0..n]) |*o, h| o.* = if (h < 0) null else @intCast(h);
-    return out[0..n];
-}
-
-/// Run an operator once per range handle — reverse offset order, one undo
-/// unit. Null entries (a selection the motion found nothing for) are skipped.
-pub fn runRangeArgEach(cmd: []const u8, handles: []const ?u32) void {
-    var raw: [max_selections]i32 = undefined;
-    const n = @min(handles.len, max_selections);
-    for (raw[0..n], handles[0..n]) |*r, h| r.* = if (h) |v| @intCast(v) else -1;
-    if (n == 0) return;
-    e.wl_run_range_arg_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(n));
-}
-
 /// Call `f(args…)` as ONE undo unit of the entry this command is about:
 /// whatever it edits, across however many commands, one undo takes back. Units
-/// nest and the outermost owns the unit, so a count loop over operators that
-/// are each one unit (`runRangeArgEach`) is one unit too. The host closes the
+/// nest and the outermost owns the unit, so a loop over edits that are each
+/// their own unit is one unit too. The host closes the
 /// unit if `f` does not return (a unit never outlives the command dispatch).
 pub fn undoUnit(comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
     _ = e.wl_undo_unit(1);
@@ -1022,33 +1032,6 @@ pub fn commandArg(i: usize, k: usize) ?[]const u8 {
     if (n < 0) return null;
     return param_scratch[0..@intCast(n)];
 }
-// ── Live offers (what the FOCUSED context can do right now) ──────────
-/// How many intentions the focused context offers. An intention nobody
-/// offers is absent — absence is nonapplicable, not refused.
-pub fn offerCount() usize {
-    return e.wl_offer_count();
-}
-/// The `i`-th offered intention's name (into `scratch`).
-pub fn offerName(i: usize) ?[]const u8 {
-    const n = e.wl_offer_name(@intCast(i), p(&scratch), scratch.len);
-    if (n < 0) return null;
-    return scratch[0..@intCast(n)];
-}
-/// Who wins that offer (into `arg_scratch`, so it survives a paired
-/// `offerName` read).
-pub fn offerProvider(i: usize) ?[]const u8 {
-    const n = e.wl_offer_provider(@intCast(i), p(&arg_scratch), arg_scratch.len);
-    if (n < 0) return null;
-    return arg_scratch[0..@intCast(n)];
-}
-/// Why the `i`-th offer cannot run right now (into `intent_scratch`), or
-/// null when it can. Relevant but impossible — worth SHOWING, not hiding.
-pub fn offerReason(i: usize) ?[]const u8 {
-    const n = e.wl_offer_reason(@intCast(i), p(&intent_scratch), intent_scratch.len);
-    if (n <= 0) return null;
-    return intent_scratch[0..@intCast(n)];
-}
-
 /// What `invokeIntention` did. `unknown` is not a refusal: the name is no
 /// intention, so the caller's other vocabulary (commands) still owns it.
 pub const Invocation = union(enum) {
@@ -1146,6 +1129,96 @@ pub fn offersIn(where: OfferContext) Offers {
     const bytes = offers_scratch[0..@intCast(n)];
     return .{ .bytes = bytes, .count = std.mem.readInt(u32, bytes[0..4], .little) };
 }
+
+// ── Context (doc/model.md §2.5) ──────────────────────────────────────
+/// Which level of the context stack a published value lives at: the entry a
+/// call is about, the place that entry is in, or the whole workspace.
+pub const ContextScope = enum(u32) { entry = 0, place = 1, global = 2 };
+
+pub const ContextSetError = error{
+    /// Not a namespaced key (`repl.session`), a value too long, or no
+    /// context to publish into.
+    Refused,
+    /// Another plugin publishes this key at this scope.
+    Held,
+};
+
+/// Say `value` is true of `key` at `scope`, as this plugin — so a provider
+/// gated on `{ .context = .{ .key = key, .value = "*" } }` is offered there.
+/// An empty value retracts; unloading the plugin retracts everything it
+/// published. Keys are namespaced by convention (`<plugin>.<what>`), and a
+/// builtin (`mode`, `entry`, …) cannot be published at all.
+pub fn contextSet(key: []const u8, value: []const u8, scope: ContextScope) ContextSetError!void {
+    return contextSetIn(key, value, scope, "");
+}
+
+/// `contextSet` at the place scope of a place NAMED by its designation
+/// (`weft://here/dir/…` — what `contextGet("place")` answered when the value
+/// was published) rather than the calling entry's. How a plugin retracts
+/// what it said about one project while the user is in another: a REPL
+/// quit from elsewhere names the place its session was published at.
+pub fn contextSetAt(key: []const u8, value: []const u8, place: []const u8) ContextSetError!void {
+    return contextSetIn(key, value, .place, place);
+}
+
+fn contextSetIn(key: []const u8, value: []const u8, scope: ContextScope, place: []const u8) ContextSetError!void {
+    return switch (e.wl_context_set(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len), @intFromEnum(scope), p(place.ptr), @intCast(place.len))) {
+        0 => {},
+        -2 => error.Held,
+        else => error.Refused,
+    };
+}
+
+var context_scratch: [2048]u8 = undefined;
+
+/// The PRIMARY context's value for `key` — any key, builtin (`mode`,
+/// `entry`, `offers`) or published (`repl.session`) — or null when unset.
+/// Borrowed until the next `contextGet`.
+pub fn contextGet(key: []const u8) ?[]const u8 {
+    const n = e.wl_context_get(p(key.ptr), @intCast(key.len), p(&context_scratch), context_scratch.len);
+    if (n < 0) return null;
+    return context_scratch[0..@min(@as(usize, @intCast(n)), context_scratch.len)];
+}
+
+var places_scratch: [8192]u8 = undefined;
+
+/// The places the workspace is working in — every open entry's place, then
+/// every tree a peer shares with us — each a designation (`weft://here/dir/…`,
+/// `weft://<peer>/dir/`). Borrowed until the next call.
+pub fn places() ContextKeys {
+    const n = e.wl_places(p(&places_scratch), places_scratch.len);
+    const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), places_scratch.len);
+    return .{ .it = std.mem.splitScalar(u8, places_scratch[0..len], '\n'), .empty = len == 0 };
+}
+
+var changed_scratch: [4096]u8 = undefined;
+
+/// The keys the `on_context_changed` being delivered reports as moved.
+/// Borrowed until the next call.
+pub fn contextChanged() ContextKeys {
+    const n = e.wl_context_changed(p(&changed_scratch), changed_scratch.len);
+    const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), changed_scratch.len);
+    return .{ .it = std.mem.splitScalar(u8, changed_scratch[0..len], '\n'), .empty = len == 0 };
+}
+
+pub const ContextKeys = struct {
+    it: std.mem.SplitIterator(u8, .scalar),
+    empty: bool,
+
+    pub fn next(self: *ContextKeys) ?[]const u8 {
+        if (self.empty) return null;
+        return self.it.next();
+    }
+
+    /// Did any of `keys` move? The one question most listeners ask.
+    pub fn any(self: ContextKeys, keys: []const []const u8) bool {
+        var copy = self;
+        while (copy.next()) |moved| {
+            for (keys) |k| if (std.mem.eql(u8, k, moved)) return true;
+        }
+        return false;
+    }
+};
 
 /// `invokeIntention` in a chosen context: resolved and run THERE, so a
 /// toolbar's Undo undoes the editor it describes. Only from a dispatch (a
@@ -1563,10 +1636,13 @@ pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
 pub fn pickEnd() void {
     e.wl_pick_end();
 }
-/// Open a fuzzy FILE picker rooted at `root` (native recursive finder);
-/// accept dispatches to `on_pick_accept` with the chosen path.
-pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
-    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), p(root.ptr), @intCast(root.len), pick_id);
+/// Open a fuzzy FILE picker over the place this dispatch runs in (native
+/// recursive finder); accept dispatches to `on_pick_accept` with the chosen
+/// path, relative to that place — hand it to `open` as typed. The plugin
+/// names no directory: core resolves the place, and refuses one with no
+/// local directory.
+pub fn openFilePick(prompt: []const u8, pick_id: u32) void {
+    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), pick_id);
 }
 
 // ── Surface (retained overlay: build begin→row→span…→end, then close) ────
@@ -1897,6 +1973,81 @@ pub fn toolBacking(name: []const u8) void {
     e.wl_tool_backing(p(name.ptr), @intCast(name.len));
 }
 
+// ── Designations (doc/model.md §2.1) ─────────────────────────────────
+// The only way content is named across the membrane. `open` takes one (or an
+// absolute path standing in for `weft://here/file|dir/…`); a relative path is
+// refused, because the only thing it could be relative to is the directory
+// the editor was launched in.
+
+var designation_scratch: [8192]u8 = undefined;
+
+/// The designation of the entry this call is about — `weft://here/file/…`,
+/// `…/doc/<id>`, `…/git.status/…` — or null when it has none. Borrowed until
+/// the next call.
+pub fn designation() ?[]const u8 {
+    const n = e.wl_entry_designation(p(&designation_scratch), designation_scratch.len);
+    if (n < 0) return null;
+    return designation_scratch[0..@min(@as(usize, @intCast(n)), designation_scratch.len)];
+}
+
+/// Declare the designation the entry this call is about represents: a
+/// `weft://here/proc/<id>` for a live resource this plugin runs, or
+/// `weft://here/<kind>/…` for a projection kind it claimed with
+/// `designationOpener`. Returns whether the host took it; empty clears.
+pub fn designate(text: []const u8) bool {
+    return e.wl_entry_designate(p(text.ptr), @intCast(text.len)) == 0;
+}
+
+/// Claim projection `kind` for this plugin: `open` of a
+/// `weft://here/<kind>/…` no entry shows runs `command` with the designation
+/// as its one argument — how a jump back to a closed status buffer, or a
+/// viewport re-showing one, re-runs the producer. False when `kind` is one of
+/// the grammar's own (`file`, `dir`, `doc`, `proc`) or another plugin's.
+pub fn designationOpener(kind: []const u8, command: []const u8) bool {
+    return e.wl_designation_opener(p(kind.ptr), @intCast(kind.len), p(command.ptr), @intCast(command.len)) == 0;
+}
+
+/// Open a designation — or an absolute path — through the ordinary `open`.
+pub fn openDesignation(target: []const u8) void {
+    runStr("open", target);
+}
+
+/// Open a name as a person typed it — a designation, an absolute path, a
+/// `host:path`, or a name relative to the place this dispatch runs in —
+/// through the ordinary `open`, which resolves it ONCE, in core
+/// (`designation.resolveRelative`). A plugin never joins a name onto a
+/// directory itself: a second resolver is a second set of rules (`..`,
+/// `host:path`, a place with no local directory) to drift from the first.
+pub fn openTyped(name: []const u8) void {
+    runStr("open", name);
+}
+
+/// The designation of a projection that is ABOUT a place — a status, a
+/// search, a build — as `weft://here/<kind>/<place directory>[?params]`:
+/// the place's directory is the ref, spelled without its leading `/`
+/// (`placeOf` reads it back). Null when this dispatch has no local place.
+pub fn placeProjection(kind: []const u8, params: []const u8, out: []u8) ?[]const u8 {
+    const root = placeRoot();
+    if (root.len < 2) return null;
+    const d: semantic.durable.Designation = .{ .kind = .{ .projection = kind }, .ref = root[1..], .params = params };
+    return d.render(out) catch null;
+}
+
+/// The designation of the place this dispatch is in, `weft://here/dir/<its
+/// directory>` — the string a place-scoped context value is keyed by, and
+/// what `contextSetAt` names a place with. Null when the place has no local
+/// directory.
+pub fn placeDesignation(out: []u8) ?[]const u8 {
+    const d = semantic.durable.Designation.ofPath(.directory, placeRoot()) orelse return null;
+    return d.render(out) catch null;
+}
+
+/// The place directory a `placeProjection` designation names, into `out`.
+pub fn placeOf(d: semantic.durable.Designation, out: []u8) ?[]const u8 {
+    if (d.kind != .projection or d.authority != .here) return null;
+    return std.fmt.bufPrint(out, "/{s}", .{d.ref}) catch null;
+}
+
 // ── Register / kill (core, shared by every editor) ───────────────────
 /// A private scratch for `registerText`, so a paste can hold the register bytes
 /// while it reads the buffer through `slice`/`lineAt` (which reuse `scratch`).
@@ -1933,32 +2084,6 @@ pub fn pasteAt(base: usize) void {
 }
 pub fn pasteAtIn(name: u8, base: usize) void {
     e.wl_paste_at(@intCast(base), name);
-}
-
-/// Yank one value per selection: each of `ranges` (selection order) becomes
-/// its own value in register `name`.
-pub fn yankEachIn(name: u8, ranges: []const Range, linewise: bool) void {
-    // `sel_words` is free here: `ranges` may alias `sel_items`, never it.
-    const words = sel_words[0 .. 2 * max_selections];
-    const n = @min(ranges.len, max_selections);
-    if (n == 0) return;
-    for (ranges[0..n], 0..) |r, i| {
-        words[2 * i] = @intCast(r.start);
-        words[2 * i + 1] = @intCast(r.end);
-    }
-    e.wl_yank_each(p(words.ptr), @intCast(n), @intFromBool(linewise), name);
-}
-/// What selection `index` of `count` pastes from register `name` — its own
-/// value when the register holds exactly `count`, else every value joined
-/// (core's one distribution rule, `register.zig`'s `pasteSpan`). Private
-/// scratch, valid until the next call.
-pub fn registerPasteValueIn(name: u8, index: usize, count: usize) []const u8 {
-    const n = e.wl_register_paste_value(@intCast(index), @intCast(count), p(&reg_scratch), reg_scratch.len, name);
-    return reg_scratch[0..@intCast(n)];
-}
-/// `pasteAtIn` for the value selection `index` of `count` pasted at `base`.
-pub fn pasteValueAtIn(name: u8, base: usize, index: usize, count: usize) void {
-    e.wl_paste_value_at(@intCast(base), @intCast(index), @intCast(count), name);
 }
 
 // ── System clipboard (grant: clipboard — CONFIG-ONLY) ─────────────────

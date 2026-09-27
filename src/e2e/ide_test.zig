@@ -455,6 +455,8 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     ed.applyWindow();
     ed.applyWindow();
     try t.expectEqual(first + 1, runInt(ed, "ow-fired", &.{}));
+    // …and it names exactly what moved: the offers, not the entry or mode.
+    try t.expectEqualStrings("offers", runStr(ed, &buf, "ow-keys", &.{}));
 
     // Focus the docked sidebar. The PRIMARY context is still the editor, so
     // what a toolbar describes did not move: no event.
@@ -510,10 +512,62 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     ed.applyWindow();
     try t.expectEqual(editor_entry, ed.buffers.active_id);
     try t.expectEqual(first + 3, runInt(ed, "ow-fired", &.{}));
-    // …and a different entry in the primary pane is one.
+    // …and a different entry in the primary pane is one, naming the entry.
     try openFile(ed, "b.txt", "two\n");
     ed.applyWindow();
     try t.expectEqual(first + 4, runInt(ed, "ow-fired", &.{}));
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "entry") != null);
+}
+
+test "e2e/ide: a live REPL is a key of the context — the event names it, a predicate reads it, explain agrees with the keypress" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try h.loadOfferwatch(ed);
+    try openFile(ed, "a.txt", "sent line\n");
+    const source = ed.buffers.active_id;
+    ed.applyWindow();
+    var buf: [1 << 12]u8 = undefined;
+    const arms = [_][]const u8{"plugin.ide.send-to-repl"};
+
+    // Nothing publishes `repl.session`: the gated provider is not offered,
+    // and explain says so exactly as a keypress would find it.
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    try t.expect(!offered(ed, "plugin.ide.send-to-repl"));
+    try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
+
+    // Starting one publishes it on this place, and the ONE event of that
+    // frame lists it.
+    ed.runStr("repl-start", "cat");
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
+    ed.runStr("open", "a.txt");
+    try t.expectEqual(source, ed.buffers.active_id);
+    ed.applyWindow();
+    // Its value is the REPL's designation: a live resource, by name.
+    try t.expectEqualStrings("weft://here/proc/repl", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    // Back on the source, the entry moved — the REPL key did not.
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") == null);
+
+    // Explain and the keypress read the same freshly synced table: both say
+    // the config's provider runs it, and running it sends the line.
+    const why = core.intent.explain(ed.ctx, &arms);
+    try t.expect(why == .ready);
+    try t.expectEqualStrings("config", why.ready.provider);
+    try t.expect(offered(ed, "plugin.ide.send-to-repl"));
+    var refusal: [256]u8 = undefined;
+    try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.ide.send-to-repl", &refusal) == .invoked);
+    try t.expect(h.drainToolContains(ed, "*repl*", "sent line"));
+
+    // Quitting retracts it: one event naming the key, and nothing offered.
+    const before = runInt(ed, "ow-fired", &.{});
+    ed.run("repl-quit");
+    ed.applyWindow();
+    try t.expect(runInt(ed, "ow-fired", &.{}) > before);
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
 }
 
 test "e2e/ide: C-d adds the next occurrence, C-S-l takes them all, and typing edits every one as one undo unit" {
@@ -857,4 +911,243 @@ test "e2e/ide: a clipboard holding the register's line plus its line break paste
     for (0..4) |_| ed.press("Right", "");
     ed.press("C-v", "");
     try expectText(ed, "beta\none two\nbeta");
+}
+
+// ── The selection's mapping, declared (doc/model.md §2.6) ────────────
+
+test "e2e/ide: a command that declares no mapping refuses several selections — the key, which-key and the echo agree" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "u.txt", "foo foo\n");
+    // `mark-region` marks THE line: it says nothing about several
+    // selections, so it is bound here to see how a key reaches it.
+    try ed.keymap.bind(gpa, "ide", "F6", "mark-region", core.Keymap.prio_config, "test");
+
+    // One selection is the degenerate case: it runs.
+    try t.expect(explainKey(ed, "F6") == .none);
+
+    // Two: which-key says it is blocked and why, and pressing it refuses,
+    // out loud, instead of marking the primary's line alone.
+    ed.press("C-Home", "");
+    ed.press("C-d", "");
+    ed.press("C-d", "");
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    try expectBlocked(ed, "F6", "mark-region", "one-selection");
+    ed.press("F6", "");
+    try t.expectEqualStrings("mark-region: acts on one selection; several are selected", ed.echoText());
+    try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
+    try expectText(ed, "foo foo\n");
+}
+
+/// The name field of the files listing's row for `name`.
+fn filesNameNode(ed: *Editor, name: []const u8) !h.semantic_model.scene.NodeId {
+    const view_ref = ed.toolView() orelse return error.NoFilesView;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
+    for (instance.scene.content.container.children) |row| {
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (std.mem.eql(u8, snap.value.bytes, name)) return node.id;
+        }
+    }
+    return error.FilesNameNotFound;
+}
+
+/// How many rows of the focused listing are flagged for removal.
+fn rowsFlaggedDeleted(ed: *Editor) usize {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return 0) orelse return 0;
+    var n: usize = 0;
+    for (instance.scene.content.container.children) |row| for (row.facts) |fact| {
+        if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete")) n += 1;
+    };
+    return n;
+}
+
+/// Focus the files sidebar, click a.txt and C-click c.txt: two rows, two
+/// extents, b.txt unmarked between them.
+fn markTwoRows(ed: *Editor) !void {
+    try openFile(ed, "a.txt", "x\n");
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expectEqualStrings("ide-structural", ed.mode());
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+}
+
+/// How the active context offers `intention`: null when nothing offers it,
+/// "" when enabled, else the disabled reason code.
+fn offerReason(ed: *Editor, intention: []const u8) ?[]const u8 {
+    const plane = ed.ctx.intent orelse return null;
+    const id = plane.catalog.findIntention(intention) orelse return null;
+    const snap = plane.snapshotFor(ed.ctx) orelse return null;
+    for (snap.candidates) |c| if (c.intention == id) return switch (c.availability) {
+        .disabled => |d| d.reason,
+        else => "",
+    };
+    return null;
+}
+
+test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one, and a one-row action is disabled with the reason" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try markTwoRows(ed);
+    // The view washes both as selected.
+    const rows = core.selection.read(ed.ctx, gpa) catch return error.OutOfMemory;
+    defer gpa.free(rows.extents);
+    try t.expectEqual(@as(usize, 2), rows.extents.len);
+    try t.expectEqual(core.selection.Kind.rows, rows.extents[0].kind);
+
+    // An action a row offers for ITSELF says nothing about two rows: the
+    // toolbar and the context menu read it disabled, with the reason.
+    const plane = ed.ctx.intent.?;
+    const snap = plane.snapshotFor(ed.ctx).?;
+    var disabled_one: bool = false;
+    for (snap.candidates) |c| switch (c.availability) {
+        .disabled => |d| disabled_one = disabled_one or std.mem.eql(u8, d.reason, "one-selection"),
+        else => {},
+    };
+    try t.expect(disabled_one);
+
+    // A command that maps over TEXT targets has none to find among rows: it
+    // is refused on both, never run once on the primary.
+    const counted = struct {
+        var runs: usize = 0;
+        fn run(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+            runs += 1;
+            return .nil;
+        }
+    };
+    _ = try ed.ctx.commands.bind(gpa, "t-over-lines", core.command.define("t-over-lines", "", counted.run).maps(.{ .each = .{ .over = "line-range" } }));
+    try t.expectError(error.UntargetableExtents, core.command.run(ed.ctx.commands, ed.ctx, "t-over-lines", &.{}));
+    try t.expectEqual(@as(usize, 0), counted.runs);
+
+    // Delete maps over the rows: both are flagged, b.txt between them is not.
+    ed.press("Delete", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+
+    // A plain click is THE selection again.
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "b.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
+}
+
+/// Whether a buffer holds the project file `name`.
+fn fileOpen(ed: *Editor, name: []const u8) bool {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = core.file.processDirectory(&cwd_buf) orelse return false;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cwd, name }) catch return false;
+    return ed.buffers.findByPath(path) != null;
+}
+
+test "e2e/ide: files-enter over two marked rows opens both — a plugin's command maps as IT declares, never as its table's default" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try openFile(ed, "b.txt", "x\n");
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+    try t.expect(!fileOpen(ed, "a.txt") and !fileOpen(ed, "c.txt"));
+
+    // `files-enter` is `target-open-focused` by name, and maps as it does:
+    // each marked row opens. A table-wide `.whole` ran it once, on the
+    // primary, and the other row was silently not opened.
+    ed.run("files-enter");
+    try t.expect(fileOpen(ed, "a.txt"));
+    try t.expect(fileOpen(ed, "c.txt"));
+}
+
+/// The names of the focused listing's rows whose pending change is `change`,
+/// in view order, joined by spaces.
+pub fn rowsChanged(ed: *Editor, change: []const u8, buf: []u8) ![]const u8 {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return error.NoFilesView) orelse return error.StaleView;
+    var len: usize = 0;
+    for (instance.scene.content.container.children) |row| {
+        const hit = for (row.facts) |fact| {
+            if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, change)) break true;
+        } else false;
+        if (!hit) continue;
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (len > 0) {
+                buf[len] = ' ';
+                len += 1;
+            }
+            @memcpy(buf[len..][0..snap.value.bytes.len], snap.value.bytes);
+            len += snap.value.bytes.len;
+        }
+    }
+    return buf[0..len];
+}
+
+test "e2e/ide: copy of several marked rows is one transfer — paste lands every row, in order" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try markTwoRows(ed);
+
+    // Copy reads the whole set: ONE request naming both rows, one transfer
+    // holding both — not two runs each overwriting the one captured value.
+    ed.run("selection-copy");
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+
+    // Paste after b.txt, one row focused: both copies land, a.txt's first.
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "b.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
+    ed.run("selection-paste-after");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("a.txt c.txt", try rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/ide: a one-row verb on several marked rows is refused — Rename, insert beside and step out act on one row, and the offers say so" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try markTwoRows(ed);
+
+    // Rename (F2, the toolbar's button) edits ONE row's name: with two rows
+    // marked the offer is disabled, with the reason, instead of renaming
+    // the focused row alone.
+    try t.expectEqualStrings("one-selection", offerReason(ed, "plugin.ide.rename") orelse return error.RenameNotOffered);
+    const view_ref = ed.toolView().?;
+    const rows_before = ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len;
+    for ([_][]const u8{ "field-edit", "item-insert-before", "item-insert-after", "hierarchy-step-out" }) |verb|
+        try t.expectError(error.UndeclaredMapping, core.command.run(ed.commands, ed.ctx, verb, &.{}));
+    // F2 reaches the same refusal, and says so.
+    ed.press("F2", "");
+    try t.expectEqualStrings("plugin.ide.rename: acts on one selection; several are selected", ed.echoText());
+    // Nothing ran: no row inserted, the listing where it was, both rows
+    // still marked.
+    try t.expectEqualStrings("ide-structural", ed.mode());
+    try t.expect(view_ref.eql(ed.toolView().?));
+    try t.expectEqual(rows_before, ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
 }

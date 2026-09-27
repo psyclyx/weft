@@ -67,10 +67,12 @@ resolved_group: std.ArrayList(bool) = .empty,
 pick: Pick = .empty,
 /// This head's transient status-line message.
 echo: std.ArrayList(u8) = .empty,
-/// Semantic focus is a stable view/node/field path rather than a text cursor.
-/// A renderer or editing plugin may project that path into its own local
-/// caret state, but tool views do not need to pretend to be text buffers.
-semantic_focus: SemanticFocus = .empty,
+/// The selection of the scene this head shows (doc/model.md §2.6): the
+/// focused row — a stable view/node/field path, never a text cursor — is its
+/// PRIMARY extent; rows marked beside it are its others. One model with the
+/// text selections an `Editor` holds (`selection.zig`), which dispatch maps
+/// commands over the same way.
+scene_selection: SceneSelection = .empty,
 /// Dialogs, pickers, and popups are nested semantic interactions local to
 /// this head. Their bindings are resolved here before any global keymap help.
 interactions: view_runtime.interaction.Stack = .empty,
@@ -156,12 +158,13 @@ catalog_clock: CatalogClock = .{},
 
 /// Where this head's PRIMARY focus last was: the last pane it focused whose
 /// viewport is a `focus_source` (a text pane, never a docked companion), and
-/// the entry that pane showed. Recorded by the layout phase beside its
-/// primary-focus feed publish (`focus_feed.zig` — the same attribute decides
-/// both). A toolbar or sidebar that takes focus leaves this on the editor, so
-/// the offers it enumerates (`intent.Where.primary`) still describe the
-/// editor rather than itself. Null until the first layout phase; readers fall
-/// back to the active entry.
+/// the entry that pane showed. Recorded by the layout phase, and the ONLY
+/// input the primary context (`context.zig`) reads focus from — so a companion
+/// viewport taking focus moves nothing any follower can observe. A toolbar or
+/// sidebar that takes focus leaves this on the editor, so the offers it
+/// enumerates (`intent.Where.primary`) still describe the editor rather than
+/// itself. Null until the first layout phase; offer readers fall back to the
+/// active entry, and the primary context is empty.
 primary_focus: ?PrimaryFocus = null,
 /// The catalog clock for the primary context when it is NOT the active one —
 /// its own cache key, so describing the editor from a sidebar never evicts
@@ -172,7 +175,12 @@ pub const PrimaryFocus = struct {
     /// A `window_layout` pane slot id, plain data for the reason
     /// `focused_pane` is.
     pane: u32,
-    /// The `Buffers.Id` that pane shows.
+    /// The `Buffers.Id` that pane shows. A raw slot, not a `Buffers.Ref` or
+    /// a designation, and knowingly so: it is not state that outlives the
+    /// entry — the layout phase re-reads it from the pane every frame
+    /// (`window_cmds`), and the pane itself holds the same raw id — so a
+    /// closed entry's reused slot is corrected within the frame that reuses
+    /// it. It becomes a `Ref` when panes hold refs.
     entry: u32,
 };
 
@@ -221,7 +229,14 @@ pub const WorkingTarget = struct {
     }
 };
 
-pub const SemanticFocus = struct {
+/// A scene's selection (doc/model.md §2.6): extents of rows in one view. The
+/// PRIMARY extent is the focus — the path to the focused row (and field) —
+/// grown from `anchor` when a row range is being made (`set-mark` then a
+/// move: `V j` in a listing). The `others` are rows marked beside it (a
+/// C-click): each its own extent, from its anchor row to its head row in
+/// the view's focus order. The text twin is `Editor.selections`; both
+/// answer `selection.Extent`s, and dispatch maps a command over either.
+pub const SceneSelection = struct {
     view: ?semantic.view.Ref = null,
     nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
     field: ?semantic.scene.FieldRef = null,
@@ -231,51 +246,94 @@ pub const SemanticFocus = struct {
     navigation_anchor: ?semantic.scene.NodeId = null,
     /// Extend focused-field movements from the selection anchor.
     selection_mark: bool = false,
+    /// Where the primary extent's row range starts, while one is being made;
+    /// null is the one focused row.
+    anchor: ?semantic.scene.NodeId = null,
+    /// The other extents, in no particular order (the view's focus order
+    /// sorts them when they are read). Always in `view`.
+    others: std.ArrayList(Rows) = .empty,
 
-    pub const empty: SemanticFocus = .{};
+    /// One extent of rows: from `anchor` to `head`, both focusable nodes.
+    pub const Rows = struct { anchor: semantic.scene.NodeId, head: semantic.scene.NodeId };
 
-    pub fn deinit(self: *SemanticFocus, gpa: Allocator) void {
+    pub const empty: SceneSelection = .{};
+
+    pub fn deinit(self: *SceneSelection, gpa: Allocator) void {
         self.nodes.deinit(gpa);
+        self.others.deinit(gpa);
         self.* = .{};
     }
 
-    pub fn set(self: *SemanticFocus, gpa: Allocator, next: semantic.focus.Path) Allocator.Error!void {
+    /// Focus `next`. Within the same view the extents stay — a move grows a
+    /// range from its anchor, and marked rows stay marked; in another view
+    /// they mean nothing, and go.
+    pub fn set(self: *SceneSelection, gpa: Allocator, next: semantic.focus.Path) Allocator.Error!void {
         try self.nodes.ensureTotalCapacity(gpa, next.nodes.len);
+        const same_view = if (self.view) |v| v.eql(next.view) else false;
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(next.nodes);
         self.view = next.view;
         self.field = next.field;
         self.navigation_anchor = null;
         self.selection_mark = false;
+        if (!same_view) self.collapse();
     }
 
-    pub fn clear(self: *SemanticFocus) void {
+    pub fn clear(self: *SceneSelection) void {
         self.view = null;
         self.nodes.clearRetainingCapacity();
         self.field = null;
         self.navigation_anchor = null;
         self.selection_mark = false;
+        self.collapse();
+    }
+
+    /// Back to the one focused row: no range, no marks.
+    pub fn collapse(self: *SceneSelection) void {
+        self.anchor = null;
+        self.others.clearRetainingCapacity();
+    }
+
+    /// The focused row — the primary extent's head.
+    pub fn head(self: *const SceneSelection) ?semantic.scene.NodeId {
+        return if (self.nodes.items.len == 0) null else self.nodes.items[self.nodes.items.len - 1];
+    }
+
+    /// How many extents: the focus, and every marked extent beside it.
+    pub fn extentCount(self: *const SceneSelection) usize {
+        if (self.view == null) return 0;
+        return 1 + self.others.items.len;
+    }
+
+    /// The primary extent, as rows.
+    pub fn primaryRows(self: *const SceneSelection) ?Rows {
+        const h = self.head() orelse return null;
+        return .{ .anchor = self.anchor orelse h, .head = h };
     }
 
     /// Replace this focus with an owned copy of another head/buffer focus.
     /// Buffer switches use this to save and restore semantic tools with the
     /// same lifetime rules as cursor/mode state; the scene itself remains in
     /// the semantic view registry.
-    pub fn copyFrom(self: *SemanticFocus, gpa: Allocator, other: *const SemanticFocus) Allocator.Error!void {
+    pub fn copyFrom(self: *SceneSelection, gpa: Allocator, other: *const SceneSelection) Allocator.Error!void {
         try self.nodes.ensureTotalCapacity(gpa, other.nodes.items.len);
+        try self.others.ensureTotalCapacity(gpa, other.others.items.len);
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(other.nodes.items);
+        self.others.clearRetainingCapacity();
+        self.others.appendSliceAssumeCapacity(other.others.items);
         self.view = other.view;
         self.field = other.field;
         self.navigation_anchor = other.navigation_anchor;
         self.selection_mark = other.selection_mark;
+        self.anchor = other.anchor;
     }
 
-    pub fn setNavigationAnchor(self: *SemanticFocus, anchor: ?semantic.scene.NodeId) void {
+    pub fn setNavigationAnchor(self: *SceneSelection, anchor: ?semantic.scene.NodeId) void {
         self.navigation_anchor = anchor;
     }
 
-    pub fn path(self: *const SemanticFocus) ?semantic.focus.Path {
+    pub fn path(self: *const SceneSelection) ?semantic.focus.Path {
         return .{
             .view = self.view orelse return null,
             .nodes = self.nodes.items,
@@ -416,7 +474,7 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.resolved_group.deinit(gpa);
     self.pick.deinit(gpa);
     self.echo.deinit(gpa);
-    self.semantic_focus.deinit(gpa);
+    self.scene_selection.deinit(gpa);
     self.interactions.deinit(gpa);
     for (self.transient_stack.items) |frame| {
         gpa.free(frame.mode);
@@ -985,9 +1043,9 @@ test "head: semantic focus and interaction scopes are independent" {
     const view_ref: semantic.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
     const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
     const nodes = [_]semantic.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
-    try a.semantic_focus.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
-    try t.expectEqual(@as(usize, 2), a.semantic_focus.path().?.nodes.len);
-    try t.expect(b.semantic_focus.path() == null);
+    try a.scene_selection.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
+    try t.expectEqual(@as(usize, 2), a.scene_selection.path().?.nodes.len);
+    try t.expect(b.scene_selection.path() == null);
 
     const definition: semantic.interaction.Definition = .{
         .role = .dialog,

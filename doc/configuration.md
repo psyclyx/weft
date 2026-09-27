@@ -111,13 +111,16 @@ The existing verbs persist with their meanings — `weft.plugin(name, {grants})`
   concrete command remains possible only through the legacy allowlist
   (architecture §17) and disappears with it.
 - **`weft.viewport(name, {attributes...})`** and
-  **`weft.present(viewport, {subject, presentation, options})`** — the
-  workspace-composition declarations (attributes per architecture §7;
-  `subject` is a durable target or a provider-computed value). A "sidebar" is
-  a fragment bundling these; so is a "toolbar" (`config/toolbar.js`: a top
-  dock one text row tall, `extent: {rows: 1}`, that takes no focus and has
-  no status line). `present(v, {command})` presents whatever entry a command
-  leaves active — how a plugin's own entry, which has no path, is shown.
+  **`weft.present(viewport, {subject, as, reveal})`** — the
+  workspace-composition declarations (attributes per architecture §7). The
+  subject is a designation or ONE context key (`{context: "place"}`), re-read
+  when that key moves; `as` picks the projection; `reveal` highlights a
+  designation or a key's value inside what is shown, without taking focus
+  (doc/model.md §2.5; D2 revisited in doc/cwa-config-decisions.md). A
+  "sidebar" is a fragment bundling these; so is a "toolbar"
+  (`config/toolbar.js`: a top dock one text row tall, `extent: {rows: 1}`,
+  that takes no focus and has no status line, presenting
+  `weft://here/offers/primary` as a strip).
 - **Action contracts, not bare names.** A declared semantic action carries
   its contract (schema, shapes, effect grade — architecture §9.1);
   `{ name }`-only declarations are legacy.

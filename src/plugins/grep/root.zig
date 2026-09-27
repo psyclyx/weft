@@ -27,9 +27,10 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "grep", .call = grep, .params = "pattern", .summary = "search the project for a pattern, into *grep*" },
-    .{ .name = "grep-word", .call = grepWord, .summary = "search the project for the word under the cursor" },
-    .{ .name = "grep-visit", .call = output.visit, .summary = "open the location the focused result row names" },
+    .{ .name = "grep", .call = grep, .arity = .whole, .params = "pattern", .summary = "search the project for a pattern, into *grep*" },
+    .{ .name = "grep-word", .arity = .one, .call = grepWord, .summary = "search the project for the word under the cursor" },
+    .{ .name = "grep-visit", .call = output.visit, .arity = .one, .summary = "open the location the focused result row names" },
+    .{ .name = "grep-open", .call = reopen, .arity = .whole, .params = "designation", .summary = "run the search a `weft://here/grep/…` designation names" },
 };
 
 fn describeExtra() void {
@@ -40,6 +41,8 @@ fn initExtra() void {
     // `*grep*` is a results list you navigate: Return visits the location the
     // focused row carries, j/k walk the matches, q goes back.
     output.installMode("grep", "grep-visit");
+    // A search is a projection this plugin re-runs by designation.
+    _ = weft.designationOpener(kind, "grep-open");
 }
 
 /// An identifier byte — the run `grep-word` grows around the cursor.
@@ -66,6 +69,24 @@ fn runGrep(pattern: []const u8) void {
         "grep",
         .{ .row_style = styleMatch },
     );
+    // The entry is this search in this place: `weft://here/grep/<place>?q=…`.
+    var q: [3 * (1 << 10) + 2]u8 = undefined;
+    const encoded = output.encodeParam(pattern_buf[0..pattern_len], q[2..]) orelse return;
+    q[0] = 'q';
+    q[1] = '=';
+    output.designate(kind, q[0 .. 2 + encoded.len]);
+}
+
+/// The projection kind a search is (doc/model.md §2.1).
+const kind = "grep";
+
+/// The opener for `weft://here/grep/<place>?q=<pattern>`: the same search
+/// again, in that place.
+fn reopen() void {
+    const d = output.reopening(kind) orelse return;
+    var raw: [1 << 10]u8 = undefined;
+    const pattern = output.decodeParam(d.param("q") orelse return, &raw) orelse return;
+    runGrep(pattern);
 }
 
 /// Search for the pattern passed as arg 0; a no-op when none was given.

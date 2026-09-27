@@ -1,12 +1,8 @@
-//! Live offers: the focused context's catalog, enumerated for a UI, and the
-//! narrow door that accepts one.
-//!
-//! Enumeration is index-addressed like the command registry beside it
-//! (`commands.zig`): count, then name/provider/reason per row, each read
-//! against the snapshot for the CURRENT context (a cache hit while nothing
-//! moves). A row carries its refusal reason rather than vanishing —
-//! architecture §9.3: absence means nonapplicable, `disabled` means relevant
-//! but impossible, and only the second is a thing to explain.
+//! Live offers: a context's catalog, enumerated for a UI as one record
+//! (`wl_offers_list`), and the narrow door that accepts one. A row carries
+//! its refusal reason rather than vanishing — architecture §9.3: absence
+//! means nonapplicable, `disabled` means relevant but impossible, and only
+//! the second is a thing to explain.
 //!
 //! `wl_intent_invoke` stores no decision: it resolves the NAME again, here,
 //! at accept time, and goes through `Plane.invokeNamed` — the effect door,
@@ -18,72 +14,12 @@ const wasm = @import("../wasm.zig");
 const catalog = @import("../catalog.zig");
 const intent_mod = @import("../intent.zig");
 const plugin_offers = @import("../plugin_offers.zig");
-const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
 /// Longest refusal text the door reports; longer is truncated, never dropped.
 const reason_max = 512;
-
-fn snapshot(p: *WasmPlugin) ?*const catalog.Snapshot {
-    const ctx = p.activeCtx();
-    const plane = ctx.intent orelse return null;
-    return plane.snapshotFor(ctx);
-}
-
-fn leader(p: *WasmPlugin, i: i32) ?catalog.Candidate {
-    const snap = snapshot(p) orelse return null;
-    return snap.leader(@intCast(i));
-}
-
-fn write(caller: *wasm.Caller, args: []const i32, text: []const u8) i32 {
-    return @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), text) catch 0);
-}
-
-pub fn hOfferCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const snap = snapshot(p) orelse {
-        results[0] = 0;
-        return;
-    };
-    results[0] = @intCast(snap.intentionCount());
-}
-
-pub fn hOfferName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const c = leader(p, args[0]) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = write(caller, args, p.activeCtx().intent.?.catalog.intentionName(c.intention));
-}
-
-pub fn hOfferProvider(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const c = leader(p, args[0]) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = write(caller, args, c.owner);
-}
-
-/// Why the `i`-th offer cannot run: the provider's stable reason code, or
-/// nothing written (0) when it can.
-pub fn hOfferReason(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const c = leader(p, args[0]) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = switch (c.availability) {
-        .enabled => 0,
-        .disabled => |d| write(caller, args, d.reason),
-        .checking => write(caller, args, "checking"),
-    };
-}
 
 /// Resolve `name` for the context as it is NOW and invoke the winner. Returns
 /// the length of a refusal reason written to guest memory (0 = invoked), or
@@ -111,13 +47,13 @@ pub fn hIntentInvoke(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
 
 // ── Offers for a CHOSEN context (doc/configs.md §3.5.2-4) ────────────
 //
-// The reads above answer for the ACTIVE pane, which is the palette's
-// question. A toolbar asks a different one: it may hold focus itself and
-// still has to describe the editor. `where` (`intent.Where`) picks the
-// context — 0 active, 1 the head's primary focus — and the whole
+// The palette asks about the ACTIVE pane; a strip of offers may hold focus
+// itself and still has to describe the editor. `where` (`intent.Where`)
+// picks the context — 0 active, 1 the head's primary focus — and the whole
 // enumeration crosses as ONE record per call, so the snapshot a UI reads
 // cannot move between its rows, and nothing index-addressed has to be kept
-// in step across calls.
+// in step across calls. It is the only enumeration: the palette's rows and
+// the offers projection read it through one library (`weft_offers`).
 
 /// Longest record one enumeration writes; a context offering more is cut at
 /// a row boundary (the count says how many made it).
@@ -216,7 +152,7 @@ fn putU32(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) std.mem.Alloc
 /// HEAD-GATED, unlike `wl_intent_invoke`: running in the primary context
 /// moves which entry the head is on for the call (`Plane.invokeNamedAt`),
 /// and moving the head is a dispatching entry's business — never a
-/// background callback's, such as the `on_offers_changed` that told a
+/// background callback's, such as the `on_context_changed` that tells a
 /// toolbar to redraw.
 pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -242,28 +178,6 @@ pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         .unknown => -1,
         .refused => |why| @intCast(caller.writeMemory(@intCast(args[3]), @intCast(args[4]), why) catch 0),
     };
-}
-
-/// Fire the offers-changed event (`on_offers_changed`) at one plugin: what
-/// the head's primary context offers just moved. The caller (the app's frame
-/// phase, `app/application.zig`'s `notifyOffersChanged`) decides WHEN — once
-/// per frame at most, at the frame boundary, never from inside a dispatch —
-/// and this only delivers.
-/// A plugin that does not export the callback is remembered as deaf after the
-/// first try, so it costs nothing on later changes. Returns whether it ran.
-pub fn notifyOffersChanged(p: *WasmPlugin) bool {
-    if (p.offers_listener == .deaf) return false;
-    contract.callOptionalExport("on_offers_changed", &p.instance, .{}) catch |err| {
-        if (err == error.MissingExport) p.offers_listener = .deaf;
-        return false;
-    };
-    p.offers_listener = .listening;
-    return true;
-}
-
-/// Could this plugin be listening? Unknown counts as yes — it is asked once.
-pub fn hearsOffers(p: *const WasmPlugin) bool {
-    return p.offers_listener != .deaf;
 }
 
 /// `order` value meaning "no ordering hint" on `wl_provide_affordance`.
@@ -374,7 +288,8 @@ pub fn hOffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         results[0] = 0;
         return;
     }
-    pub_.add(gpa, intention, cmd, reason) catch {
+    const arity = if (p.activeCtx().commands.resolve(cmd)) |c| c.arity else null;
+    pub_.add(gpa, intention, cmd, reason, arity) catch {
         results[0] = 0;
         return;
     };

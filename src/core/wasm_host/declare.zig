@@ -12,6 +12,7 @@ const plugin_resources = @import("../plugin_resources.zig");
 const Resources = plugin_resources.Resources;
 const Door = plugin_resources.Door;
 const Perm = shared.Perm;
+const selection = @import("../selection.zig");
 
 pub fn hLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -90,11 +91,35 @@ pub fn declareDocBody(d: Door, caller: *wasm.Caller, args: []const i32, results:
     };
 }
 
-/// The two doors, and the table the anti-drift gate reads. Same shape as
+/// `declare_arity(name, code, over)` — say how an already-declared command
+/// maps over a selection of several extents (`selection.Arity`; the codes are
+/// `Arity.code`'s, `over` the target command of codes 3 and 4). A command
+/// that never says is UNDECLARED, and dispatch refuses it on several extents.
+/// An unknown code, or a name not yet declared, declares nothing.
+pub fn declareArityBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const r = d.resources;
+    if (!r.accepting_declarations) return;
+    const gpa = r.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const decl = r.declarationMut(name) orelse return;
+    const over = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
+    const arity = selection.Arity.fromCode(@bitCast(args[2]), over) orelse {
+        gpa.free(over);
+        return;
+    };
+    gpa.free(decl.over);
+    decl.over = over;
+    decl.arity = arity;
+}
+
+/// The three doors, and the table the anti-drift gate reads. Same shape as
 /// `wasm_host/proc.zig`'s `doors`, for the same reason.
 pub const doors = .{
     .{ .name = "declare_command", .body = declareBody, .wl = hDeclareCommand, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
     .{ .name = "declare_command_doc", .body = declareDocBody, .wl = hDeclareCommandDoc, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
+    .{ .name = "declare_arity", .body = declareArityBody, .wl = hDeclareArity, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
 };
 
 /// Re-exported so the anti-drift gate can recompute a handler from the table
@@ -103,6 +128,7 @@ pub const wasmDoorFor = shared.wasmDoor;
 
 pub const hDeclareCommand = wasmDoorFor(declareBody, null);
 pub const hDeclareCommandDoc = wasmDoorFor(declareDocBody, null);
+pub const hDeclareArity = wasmDoorFor(declareArityBody, null);
 
 pub fn hDeclareCapability(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;

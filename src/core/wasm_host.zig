@@ -58,9 +58,18 @@ pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
 pub const deliverSignals = activation.deliverSignals;
 
-const intent_doors = @import("wasm_host/intent.zig");
-pub const notifyOffersChanged = intent_doors.notifyOffersChanged;
-pub const hearsOffers = intent_doors.hearsOffers;
+/// The context doors, whose set and get bodies both membranes run.
+/// Re-exported for the same function-pointer proof as `edit_doors`, and for
+/// the app's frame boundary, which delivers `on_context_changed`.
+const context = @import("wasm_host/context.zig");
+pub const notifyContextChanged = context.notifyContextChanged;
+pub const hearsContext = context.hearsContext;
+pub const context_doors = struct {
+    pub const setBody = context.setBody;
+    pub const getBody = context.getBody;
+    pub const hContextSet = context.hContextSet;
+    pub const hContextGet = context.hContextGet;
+};
 
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
 /// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
@@ -144,12 +153,12 @@ pub const initSemanticRelationBridge = semantic_relation.initBridge;
 /// state. The contract table is the only place an import's name/arity/
 /// handler are declared; nothing here hand-lists them anymore.
 ///
-/// This is also where the render-phase door policy lives: every door but the
-/// ones `contract.render_safe` names is bound through `plugin.answerGate`, so
-/// a guest answering a provider round cannot act through any of them.
+/// There is no render-phase door policy: no guest runs while a frame is
+/// drawn. Provider answers are asked for between frames (doc/model.md §2.7,
+/// `app/answers.zig`), so a provider answering may call any door its grants
+/// allow, and whatever it changes is the next version.
 pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     inline for (contract.imports) |entry| {
-        const handler = comptime if (contract.renderSafe(entry.name)) entry.handler else plugin.answerGate(entry.handler, entry.name);
-        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, handler, p);
+        try linker.defineFn(contract.abi_namespace, entry.name, entry.params.len, entry.results.len, entry.handler, p);
     }
 }

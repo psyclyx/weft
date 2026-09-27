@@ -134,7 +134,9 @@ fn buildFrame(ed: *Editor, gpa: std.mem.Allocator, hud: view.Hud, fw: u32, fh: u
     defer arena.deinit();
     v.resetFrame();
     var top_row: usize = 0;
-    const built = try v.build(arena.allocator(), ed.buffers.active().textEditor().?, hud, &top_row, frame, .{}, w2p);
+    var text = try h.core.TextSnapshot.of(ed.buffers.active().textEditor().?, arena.allocator());
+    defer text.release(gpa);
+    const built = try v.build(arena.allocator(), &text, hud, &top_row, frame, .{}, w2p);
     return .{ .v = v, .built = built };
 }
 

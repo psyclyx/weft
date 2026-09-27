@@ -347,11 +347,50 @@ pub const Model = struct {
         });
     }
 
+    /// Capture several rows as ONE transfer: a lone item for one row, else a
+    /// set in the listing's order. A row inside another captured directory
+    /// already travels in that directory's tree, so it is not captured twice.
+    pub fn yankSet(self: *const Model, ids: []const NodeId, intent: transfer.Intent) !transfer.OwnedItem {
+        if (ids.len == 0) return error.UnknownNode;
+        var order: std.ArrayList(usize) = .empty;
+        defer order.deinit(self.gpa);
+        for (ids) |id| {
+            const at = self.indexOf(id) orelse return error.UnknownNode;
+            const inside = for (ids) |other| {
+                if (other != id and self.isDescendant(id, other)) break true;
+            } else false;
+            if (!inside) try order.append(self.gpa, at);
+        }
+        std.mem.sort(usize, order.items, {}, std.sort.asc(usize));
+        if (order.items.len == 1) return self.yank(self.rows.items[order.items[0]].id, intent);
+
+        var parts: std.ArrayList(transfer.OwnedItem) = .empty;
+        defer {
+            for (parts.items) |*part| part.deinit();
+            parts.deinit(self.gpa);
+        }
+        try parts.ensureTotalCapacity(self.gpa, order.items.len);
+        for (order.items) |at| parts.appendAssumeCapacity(try self.yank(self.rows.items[at].id, intent));
+        const members = try self.gpa.alloc(transfer.Item, parts.items.len - 1);
+        defer self.gpa.free(members);
+        for (parts.items[1..], members) |part, *member| member.* = part.value;
+        var set = parts.items[0].value;
+        set.members = members;
+        return transfer.OwnedItem.init(self.gpa, set);
+    }
+
     /// Paste mutates the destination draft. No one-off plan is returned: the
     /// visible rows and `buildPlan()` are the same preview/apply source.
+    /// Every item `item` carries is pasted — one, or a set in its order —
+    /// and the first pasted row returned.
     pub fn paste(self: *Model, parent: ?NodeId, item: *const transfer.OwnedItem) !NodeId {
+        const first = try self.pasteItem(parent, item.value.part(0));
+        for (1..item.value.partCount()) |index| _ = try self.pasteItem(parent, item.value.part(index));
+        return first;
+    }
+
+    fn pasteItem(self: *Model, parent: ?NodeId, value: transfer.Item) !NodeId {
         try self.validateParent(parent);
-        const value = item.value;
         if (value.representation(entry_media)) |representation| {
             const schema = representation.schema orelse return error.InvalidTransfer;
             if (!isEntryTransferSchema(schema)) return error.InvalidTransfer;
@@ -366,10 +405,24 @@ pub const Model = struct {
     /// Paste beside a stable row anchor. The anchor's parent is supplied by
     /// the caller so a stale listing cannot silently retarget the operation.
     /// Placement affects only visible draft ordering; filesystem plans carry
-    /// typed destinations and never encode a row index.
+    /// typed destinations and never encode a row index. A set lands in its
+    /// order: each item before the anchor, or after it and then after the
+    /// item before it. Returns the first pasted row.
     pub fn pasteAt(self: *Model, anchor: PasteAnchor, placement: PastePlacement, item: *const transfer.OwnedItem) !NodeId {
+        const first = try self.pasteItemAt(anchor, placement, item.value.part(0));
+        var last = first;
+        for (1..item.value.partCount()) |index| {
+            const next: PasteAnchor = switch (placement) {
+                .before => anchor,
+                .after => .{ .row = last, .parent = anchor.parent },
+            };
+            last = try self.pasteItemAt(next, placement, item.value.part(index));
+        }
+        return first;
+    }
+
+    fn pasteItemAt(self: *Model, anchor: PasteAnchor, placement: PastePlacement, value: transfer.Item) !NodeId {
         const index = try self.anchorIndex(anchor, placement);
-        const value = item.value;
         if (value.representation(entry_media)) |representation| {
             const schema = representation.schema orelse return error.InvalidTransfer;
             if (!isEntryTransferSchema(schema)) return error.InvalidTransfer;

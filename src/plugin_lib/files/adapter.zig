@@ -13,11 +13,57 @@ const semantic = weft.semantic;
 const fs = weft.fs;
 const contract = fs.contract;
 
+/// What a reveal that has folders to read raises for itself: heard at the
+/// frame boundary (`Plugin.signal`), so the reading never runs in the layout
+/// pass that asked.
+pub const reveal_signal = "files.reveal";
+
+/// A draft's rows by (parent, name) — what a reveal walks, one lookup per
+/// name instead of a scan of every row at every level. Borrows the draft's
+/// names: built again whenever the draft it indexes changes.
+const NameIndex = struct {
+    map: std.HashMapUnmanaged(Key, usize, KeyContext, std.hash_map.default_max_load_percentage) = .empty,
+
+    /// A top-level row's parent, which has no id.
+    const top = std.math.maxInt(files.NodeId);
+    const Key = struct { parent: files.NodeId, name: []const u8 };
+    const KeyContext = struct {
+        pub fn hash(_: KeyContext, k: Key) u64 {
+            var h = std.hash.Wyhash.init(k.parent);
+            h.update(k.name);
+            return h.final();
+        }
+        pub fn eql(_: KeyContext, a: Key, b: Key) bool {
+            return a.parent == b.parent and std.mem.eql(u8, a.name, b.name);
+        }
+    };
+
+    fn deinit(self: *NameIndex, gpa: std.mem.Allocator) void {
+        self.map.deinit(gpa);
+    }
+
+    fn build(self: *NameIndex, gpa: std.mem.Allocator, draft: *const files.Model) !void {
+        self.map.clearRetainingCapacity();
+        try self.map.ensureTotalCapacity(gpa, @intCast(draft.rows.items.len));
+        for (draft.rows.items, 0..) |row, i| {
+            // The first row of a name wins, as a scan in row order would.
+            const slot = self.map.getOrPutAssumeCapacity(.{ .parent = row.parent orelse top, .name = row.draft.name });
+            if (!slot.found_existing) slot.value_ptr.* = i;
+        }
+    }
+
+    fn get(self: *const NameIndex, draft: *const files.Model, parent: ?files.NodeId, name: []const u8) ?*const files.Row {
+        const i = self.map.get(.{ .parent = parent orelse top, .name = name }) orelse return null;
+        return &draft.rows.items[i];
+    }
+};
+
 pub const Plugin = struct {
     gpa: std.mem.Allocator,
     sessions: std.ArrayList(*Session) = .empty,
     next_field_token: u32 = 1,
     started: bool = false,
+    reveal_signal_id: ?u32 = null,
 
     pub fn init(gpa: std.mem.Allocator) Plugin {
         return .{ .gpa = gpa };
@@ -28,7 +74,16 @@ pub const Plugin = struct {
         if (!weft.semanticActionProvider()) return error.Rejected;
         _ = try weft.semanticTargetHandlerRegister(1, "files.directory");
         _ = try weft.semanticRelationProviderRegister(1, "files.container");
+        self.reveal_signal_id = weft.signalSubscribe(reveal_signal);
         self.started = true;
+    }
+
+    /// A signal this plugin hears (export `on_signal` to here). The only one
+    /// is its own `files.reveal`: the reading reveals accepted in the layout
+    /// pass, done at the frame boundary.
+    pub fn signal(self: *Plugin, id: u32) void {
+        if (self.reveal_signal_id != id) return;
+        for (self.sessions.items) |session| session.revealWork();
     }
 
     /// The wasm instance owns guest memory wholesale; host teardown revokes
@@ -291,6 +346,18 @@ pub const Session = struct {
     loaded: bool = false,
     apply_committed: bool = false,
     scene_revision: u32 = 1,
+    /// A reveal accepted with folders still to read (`view.reveal` answered
+    /// `.handled`): its designation, owned, read at the `files.reveal`
+    /// signal — never in the layout pass that asked.
+    reveal_want: ?[]u8 = null,
+    /// A reveal whose reading failed, owned: asked again it declines rather
+    /// than waiting for a republish that is not coming.
+    reveal_failed: ?[]u8 = null,
+    /// The folders reveals opened, and the user has not touched since: a
+    /// later reveal that does not pass through one folds it again, so the
+    /// listing does not grow (and re-read on refresh) every folder the
+    /// editor ever visited.
+    reveal_opened: std.ArrayList(files.NodeId) = .empty,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
@@ -331,6 +398,9 @@ pub const Session = struct {
         self.closeAllRowTargets();
         self.closeAllFields();
         self.draft.deinit();
+        if (self.reveal_want) |w| self.plugin.gpa.free(w);
+        if (self.reveal_failed) |w| self.plugin.gpa.free(w);
+        self.reveal_opened.deinit(self.plugin.gpa);
         self.* = undefined;
     }
 
@@ -360,6 +430,13 @@ pub const Session = struct {
             try self.toggleExpanded(row);
             return .handled;
         }
+        if (std.mem.eql(u8, request.action, semantic.action.standard.reveal)) return switch (try self.reveal(request.argument)) {
+            .found => |node| .{ .focus = node },
+            // Accepted: the folders are read at the signal, and the view's
+            // republish is what has the viewport ask again.
+            .pending => .handled,
+            .absent => .declined,
+        };
         if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
             if (request.subject == files.rootNodeId()) return .{ .set_working_target = .{
                 .target = self.target,
@@ -473,8 +550,164 @@ pub const Session = struct {
         else
             try self.readChildren(&staged, row);
         try self.publishDraft(&staged);
+        // The user folded it: theirs now, never folded behind their back.
+        for (self.reveal_opened.items, 0..) |id, i| if (id == row) {
+            _ = self.reveal_opened.swapRemove(i);
+            break;
+        };
     }
 
+    /// What a reveal came to.
+    const RevealAnswer = union(enum) {
+        /// The name node of the row that shows it.
+        found: semantic.scene.NodeId,
+        /// Below this listing, behind a folder not read yet: accepted, and
+        /// answered once the reading (at the `files.reveal` signal) has
+        /// republished the view.
+        pending,
+        /// Not below this listing, or not there.
+        absent,
+    };
+
+    /// `view.reveal`: the row showing `argument`, a designation somewhere
+    /// below this listing's directory. Answered from what the draft already
+    /// holds, one index lookup per name: found when every folder on the way
+    /// is open, else `pending` — this runs in the layout pass that asked, so
+    /// it never reads a directory (a peer's is a round trip) or publishes;
+    /// `revealWork` does, off that pass, once.
+    fn reveal(self: *Session, argument: []const u8) !RevealAnswer {
+        const gpa = self.plugin.gpa;
+        if (self.reveal_failed) |failed| {
+            if (std.mem.eql(u8, failed, argument)) return .absent;
+            gpa.free(failed);
+            self.reveal_failed = null;
+        }
+        const rest = (try self.revealPath(argument)) orelse return .absent;
+        var index: NameIndex = .{};
+        defer index.deinit(gpa);
+        try index.build(gpa, &self.draft);
+        var parent: ?files.NodeId = null;
+        var found: ?files.NodeId = null;
+        var closed = false;
+        var through: std.ArrayList(files.NodeId) = .empty;
+        defer through.deinit(gpa);
+        var names = std.mem.tokenizeScalar(u8, rest, '/');
+        while (names.next()) |name| {
+            const row = index.get(&self.draft, parent, name) orelse return .absent;
+            found = row.id;
+            if (names.peek() == null) break;
+            if (row.draft.kind != .directory) return .absent;
+            if (!row.expanded) {
+                closed = true;
+                break;
+            }
+            try through.append(gpa, row.id);
+            parent = row.id;
+        }
+        // Folders an earlier reveal opened that this one does not pass
+        // through are folded again — by the same deferred work.
+        const stale = for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) == null) break true;
+        } else false;
+        if (closed or stale) {
+            const owned = try gpa.dupe(u8, argument);
+            if (self.reveal_want) |w| gpa.free(w);
+            self.reveal_want = owned;
+            weft.signalEmit(reveal_signal);
+        }
+        if (closed) return .pending;
+        return .{ .found = try files.nameNodeId(found orelse return .absent) };
+    }
+
+    /// The part of `argument` below this listing's directory (`/`-separated
+    /// names), or null when it is not below it: another authority, another
+    /// tree. The listing's own designation is the one its publisher bound it
+    /// under, stated on its descriptor.
+    fn revealPath(self: *Session, argument: []const u8) !?[]const u8 {
+        const durable = semantic.durable;
+        const want = durable.parse(argument) orelse return null;
+        if (!want.kind.isPath()) return null;
+        var descriptor = try weft.semanticTargetDescribe(self.target, self.plugin.gpa);
+        defer descriptor.deinit();
+        const own_text = for (descriptor.value.facts) |fact| {
+            if (std.mem.eql(u8, fact.name, fs.target.designation_fact_name)) break fact.value;
+        } else return null;
+        const own = durable.parse(own_text) orelse return null;
+        if (!own.authority.eql(want.authority)) return null;
+        const base = std.mem.trimEnd(u8, own.ref, "/");
+        if (want.ref.len <= base.len or !std.mem.startsWith(u8, want.ref, base) or want.ref[base.len] != '/') return null;
+        return want.ref[base.len..];
+    }
+
+    /// The reading a reveal asked for, at the `files.reveal` signal — the
+    /// frame boundary, off the layout pass: open every folder on the way,
+    /// fold the ones earlier reveals opened that this one does not pass
+    /// through, and publish ONCE. The waiting viewport asks again when the
+    /// view republishes, and the answer is then `found`. A failure records
+    /// the reveal as failed, so asking again declines.
+    fn revealWork(self: *Session) void {
+        const want = self.reveal_want orelse return;
+        self.reveal_want = null;
+        self.openTowards(want) catch {
+            self.abortRowTargets();
+            if (self.reveal_failed) |w| self.plugin.gpa.free(w);
+            self.reveal_failed = want;
+            return;
+        };
+        self.plugin.gpa.free(want);
+    }
+
+    fn openTowards(self: *Session, want: []const u8) !void {
+        const gpa = self.plugin.gpa;
+        const rest = (try self.revealPath(want)) orelse return;
+        var staged = try self.stage();
+        defer staged.deinit();
+        var index: NameIndex = .{};
+        defer index.deinit(gpa);
+        try index.build(gpa, &staged);
+        var through: std.ArrayList(files.NodeId) = .empty;
+        defer through.deinit(gpa);
+        var opened: std.ArrayList(files.NodeId) = .empty;
+        defer opened.deinit(gpa);
+        var parent: ?files.NodeId = null;
+        var names = std.mem.tokenizeScalar(u8, rest, '/');
+        while (names.next()) |name| {
+            if (names.peek() == null) break;
+            const row = index.get(&staged, parent, name) orelse break;
+            if (row.draft.kind != .directory) break;
+            const id = row.id;
+            try through.append(gpa, id);
+            if (!row.expanded) {
+                // A folder is read through its row's own target; a row this
+                // walk just listed has none until the staged rows' targets
+                // are published (the scene publish below keeps them).
+                if (self.rowTarget(id) == null) try self.prepareRowTargets(&staged);
+                try self.readChildren(&staged, id);
+                try opened.append(gpa, id);
+                try index.build(gpa, &staged);
+            }
+            parent = id;
+        }
+        var folded = false;
+        for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) != null) continue;
+            const row = staged.row(id) orelse continue;
+            if (!row.expanded) continue;
+            try staged.setExpanded(id, false);
+            folded = true;
+        }
+        if (opened.items.len == 0 and !folded) return;
+        try self.publishDraft(&staged);
+        // What reveals hold open now: the folders on this path they opened.
+        var kept: usize = 0;
+        for (self.reveal_opened.items) |id| {
+            if (std.mem.indexOfScalar(files.NodeId, through.items, id) == null) continue;
+            self.reveal_opened.items[kept] = id;
+            kept += 1;
+        }
+        self.reveal_opened.shrinkRetainingCapacity(kept);
+        try self.reveal_opened.appendSlice(gpa, opened.items);
+    }
     /// Read one expanded row's directory through its own exact child target
     /// and reconcile the result into that row's scope.
     fn readChildren(self: *Session, staged: *files.Model, row: files.NodeId) !void {
@@ -568,9 +801,37 @@ pub const Session = struct {
         return true;
     }
 
+    /// Lease every copied file the capture carries — each item of a set the
+    /// same as a lone one — so the copy survives its source changing.
     fn materializeCapture(self: *Session, captured: *semantic.transfer.OwnedItem) !void {
         if (captured.value.intent != .copy or self.capabilities.durable_lease == null) return;
-        const representation = captured.value.representation(files.entry_media_type) orelse return;
+        const gpa = self.plugin.gpa;
+        const count = captured.value.partCount();
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const parts = try arena.alloc(semantic.transfer.Item, count);
+        var changed = false;
+        for (parts, 0..) |*part, index| {
+            part.* = captured.value.part(index);
+            if (try self.leased(arena, part.*)) |representations| {
+                part.representations = representations;
+                changed = true;
+            }
+        }
+        if (!changed) return;
+        var set = parts[0];
+        set.members = parts[1..];
+        const materialized = try semantic.transfer.OwnedItem.init(gpa, set);
+        captured.deinit();
+        captured.* = materialized;
+    }
+
+    /// `item`'s representations with its entry leased, allocated in `arena`,
+    /// or null when there is nothing to lease (a directory, an existing
+    /// lease, no entry representation).
+    fn leased(self: *Session, arena: std.mem.Allocator, item: semantic.transfer.Item) !?[]semantic.transfer.Representation {
+        const representation = item.representation(files.entry_media_type) orelse return null;
         const schema = representation.schema orelse return error.InvalidTransfer;
         const decoded = try files.decodeEntryTransferWithAttachment(
             representation.payload,
@@ -580,36 +841,24 @@ pub const Session = struct {
         );
         const entry = switch (decoded.source) {
             .entry => |source| source,
-            .lease => return,
+            .lease => return null,
         };
         switch (decoded.kind) {
             .regular, .symlink => {},
-            .directory, .other => return,
+            .directory, .other => return null,
         }
         const capture = try weft.semanticTransferCapture(self.target, self.target_revision, entry);
-        const payload = try files.encodeEntryTransfer(self.plugin.gpa, .{ .lease = capture.source }, decoded.kind, decoded.mode);
-        defer self.plugin.gpa.free(payload);
-        const representations = try self.plugin.gpa.alloc(semantic.transfer.Representation, captured.value.representations.len);
-        defer self.plugin.gpa.free(representations);
-        var replaced = false;
-        for (captured.value.representations, representations) |source, *destination| {
+        const payload = try files.encodeEntryTransfer(arena, .{ .lease = capture.source }, decoded.kind, decoded.mode);
+        const representations = try arena.alloc(semantic.transfer.Representation, item.representations.len);
+        for (item.representations, representations) |source, *destination| {
             destination.* = source;
             if (!std.mem.eql(u8, source.media_type, files.entry_media_type)) continue;
             destination.schema = files.entry_schema_current;
             destination.payload = payload;
             destination.resource = null;
             destination.attachment = capture.attachment;
-            replaced = true;
         }
-        if (!replaced) return error.InvalidTransfer;
-        const materialized = try semantic.transfer.OwnedItem.init(self.plugin.gpa, .{
-            .intent = captured.value.intent,
-            .suggested_name = captured.value.suggested_name,
-            .source = captured.value.source,
-            .representations = representations,
-        });
-        captured.deinit();
-        captured.* = materialized;
+        return representations;
     }
 
     fn editField(self: *Session, field: *Field, edit: weft.SemanticFieldEdit) !void {

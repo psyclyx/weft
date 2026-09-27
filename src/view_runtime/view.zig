@@ -98,6 +98,11 @@ pub const Registry = struct {
     const Slot = struct {
         generation: u32 = 1,
         instance: ?*Instance = null,
+        /// The node a viewport's `reveal` last named in this view — a
+        /// highlight the renderer draws beside the selection, never the
+        /// selection itself. Kept across `replace` (node ids are stable); a
+        /// node the new scene lacks reads as none.
+        revealed: ?semantic.scene.NodeId = null,
     };
 
     pub fn init(authority: semantic.handle.Authority) Registry {
@@ -139,6 +144,29 @@ pub const Registry = struct {
         return slot.instance;
     }
 
+    /// Mark `node` as what view `ref` reveals (doc/model.md §2.5). This is
+    /// the ONLY thing a reveal writes: no head's focus and no entry's
+    /// selection is reachable from here, so revealing can never move what
+    /// the user selected. Null reveals nothing (what was revealed is not in
+    /// this view, or not yet). False when the view is gone or lacks the
+    /// node, which reveals nothing too.
+    pub fn reveal(self: *Registry, ref: semantic.view.Ref, node: ?semantic.scene.NodeId) bool {
+        const instance = self.get(ref) orelse return false;
+        const slot = &self.slots.items[ref.slot];
+        slot.revealed = null;
+        const id = node orelse return true;
+        if (instance.node(id) == null) return false;
+        slot.revealed = id;
+        return true;
+    }
+
+    /// The node view `ref` reveals, while its scene still holds it.
+    pub fn revealed(self: *const Registry, ref: semantic.view.Ref) ?semantic.scene.NodeId {
+        const instance = self.get(ref) orelse return null;
+        const node = self.slots.items[ref.slot].revealed orelse return null;
+        return if (instance.node(node) != null) node else null;
+    }
+
     pub fn replace(self: *Registry, gpa: std.mem.Allocator, owner: semantic.owner.Id, ref: semantic.view.Ref, revision: u64, root: semantic.scene.Node) Error!void {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return error.StaleView;
         const slot = &self.slots.items[ref.slot];
@@ -174,6 +202,7 @@ pub const Registry = struct {
     fn retire(_: *Registry, gpa: std.mem.Allocator, slot: *Slot) void {
         slot.instance.?.destroy(gpa);
         slot.instance = null;
+        slot.revealed = null;
         slot.generation +%= 1;
         if (slot.generation == 0) slot.generation = 1;
     }
@@ -290,6 +319,23 @@ test "stable focus survives row reorder without text anchors" {
     const instance = views.get(ref).?;
     try std.testing.expectEqual(@as(?semantic.scene.NodeId, @enumFromInt(3)), instance.reconcileFocus(@enumFromInt(3)));
     try std.testing.expectEqual(@as(?semantic.scene.NodeId, @enumFromInt(2)), instance.move(@enumFromInt(3), .next));
+}
+
+test "a view's revealed node survives a republish that keeps it, and reads as none once it is gone" {
+    const gpa = std.testing.allocator;
+    const owner: semantic.owner.Id = @enumFromInt(1);
+    const both = [_]semantic.scene.Node{ labelNode(2, "a"), labelNode(3, "b") };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &both } } };
+    var views = Registry.init(.here);
+    defer views.deinit(gpa);
+    const ref = try views.publish(gpa, owner, null, 1, root);
+    try std.testing.expect(!views.reveal(ref, @enumFromInt(9)));
+    try std.testing.expect(views.reveal(ref, @enumFromInt(3)));
+    try views.replace(gpa, owner, ref, 2, root);
+    try std.testing.expectEqual(@as(?semantic.scene.NodeId, @enumFromInt(3)), views.revealed(ref));
+    const one = [_]semantic.scene.Node{labelNode(2, "a")};
+    try views.replace(gpa, owner, ref, 3, .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &one } } });
+    try std.testing.expectEqual(@as(?semantic.scene.NodeId, null), views.revealed(ref));
 }
 
 test "focus path identifies a field semantically" {

@@ -1,51 +1,72 @@
 //! Test fixture ONLY (not installed — see build.zig's `guests` table): the
-//! multiple-selection doors (doc/configs.md §0.1) driven across the real
-//! membrane, the way a selection-first grammar (helix, ide's add-next-match)
-//! will drive them. No permissions: selections and registers are editor
-//! state and core mechanism, never an effect.
+//! selection doors and declared mapping (doc/model.md §2.6) driven across the
+//! real membrane, the way a selection-first grammar (helix, ide) drives them.
+//! No permissions: selections and registers are editor state and core
+//! mechanism, never an effect.
 //!
 //!   - `ms-add <anchor> <head>` / `ms-remove <i>` / `ms-collapse`: the SDK's
 //!     add/remove/collapse, which are compositions over `selections_get`/
-//!     `selections_set`, not doors of their own. Each answers the count.
-//!   - `ms-motion`: a motion — the scalar after "the cursor". Run through
-//!     `run_range_each`, "the cursor" is each selection's head in turn.
-//!   - `ms-op-upcase`: an operator over its range arg that also seals the undo
-//!     unit (`undo-barrier`), so the one-undo-unit claim of
-//!     `run_range_arg_each` is tested against an operator that tries to break
-//!     it.
-//!   - `ms-upcase-each`: motion-then-operator at every selection.
-//!   - `ms-yank` / `ms-paste`: one value per selection into the unnamed
-//!     register, and a paste at every head under core's distribution rule.
+//!     `selections_set`, not doors of their own. `.whole`; each answers the
+//!     count.
+//!   - `ms-motion`: a motion — the scalar after "the cursor", which in a run
+//!     dispatch maps is that run's selection.
+//!   - `ms-upcase-each`: an operator declared `.each` over `ms-motion`, which
+//!     also seals the undo unit (`undo-barrier`), so the one-undo-unit claim
+//!     of the mapping is tested against an operator that tries to break it.
+//!   - `ms-yank` / `ms-paste`: `.each` — one register value per selection,
+//!     and a paste at every head under core's distribution rule, with no
+//!     index in sight.
+//!   - `ms-undeclared`: says nothing about its mapping — refused on several
+//!     selections.
 //!   - `ms-unit-leak`: opens an undo unit (`undo_unit(1)`), edits, and never
 //!     closes it — the unit must still end with the dispatch.
 //!   - `ms-unit-close`: closes a unit it never opened; answers the door's -1.
+//!   - `ms-line` (`.each`: select the caret's line, so two carets on one line
+//!     merge), `ms-op-none` (`.each` over `ms-none`, which finds no target),
+//!     and `ms-epilogues` (how many times the table's `after` hook ran): a
+//!     mapping's epilogue runs exactly once, however many runs it had.
 
 const weft = @import("weft");
 
-const Cmd = struct { name: []const u8, handler: *const fn () void };
-const cmds = [_]Cmd{
-    .{ .name = "ms-add", .handler = add },
-    .{ .name = "ms-remove", .handler = remove },
-    .{ .name = "ms-collapse", .handler = collapse },
-    .{ .name = "ms-motion", .handler = motion },
-    .{ .name = "ms-op-upcase", .handler = opUpcase },
-    .{ .name = "ms-upcase-each", .handler = upcaseEach },
-    .{ .name = "ms-yank", .handler = yank },
-    .{ .name = "ms-paste", .handler = paste },
-    .{ .name = "ms-unit-leak", .handler = unitLeak },
-    .{ .name = "ms-unit-close", .handler = unitClose },
+const each = weft.Arity.each_extent;
+
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "ms-add", .call = add, .arity = .whole },
+    .{ .name = "ms-remove", .call = remove, .arity = .whole },
+    .{ .name = "ms-collapse", .call = collapse, .arity = .whole },
+    .{ .name = "ms-motion", .call = motion, .arity = each },
+    .{ .name = "ms-upcase-each", .call = opUpcase, .arity = .{ .each = .{ .over = "ms-motion" } } },
+    .{ .name = "ms-yank", .call = yank, .arity = each },
+    .{ .name = "ms-paste", .call = paste, .arity = each },
+    .{ .name = "ms-undeclared", .arity = .one, .call = undeclared },
+    .{ .name = "ms-unit-leak", .call = unitLeak, .arity = .whole },
+    .{ .name = "ms-unit-close", .call = unitClose, .arity = .whole },
+    .{ .name = "ms-line", .call = line, .arity = each },
+    .{ .name = "ms-none", .call = none, .arity = each },
+    .{ .name = "ms-op-none", .call = opUpcase, .arity = .{ .each = .{ .over = "ms-none" } } },
+    .{ .name = "ms-epilogues", .call = epilogueCount, .arity = .whole },
 };
 
-fn describe() callconv(.c) void {
-    for (cmds) |c| weft.declareCommand(c.name);
+comptime {
+    weft.plugin(&cmds, .{ .after = epilogue }).exportAll();
 }
 
-fn init() callconv(.c) void {
-    for (cmds) |c| _ = weft.register(c.name);
+fn line() void {
+    weft.setSelection(weft.lineAt(weft.cursor()));
 }
 
-fn on_command(id: u32) callconv(.c) void {
-    if (id < cmds.len) cmds[id].handler();
+/// A target finder with nothing to find.
+fn none() void {}
+
+/// The epilogue, counted: a test reads how often it ran.
+var epilogues: i32 = 0;
+
+fn epilogue(_: usize) void {
+    epilogues += 1;
+}
+
+fn epilogueCount() void {
+    weft.setResultInt(epilogues);
 }
 
 fn count() void {
@@ -82,36 +103,25 @@ fn opUpcase() void {
     for (buf[0..n], src[0..n]) |*d, c| d.* = if (c >= 'a' and c <= 'z') c - 32 else c;
     weft.editRange(h, buf[0..n]);
     // Seal the undo unit, as a modal grammar does on its boundaries — the
-    // attempt `run_range_arg_each`'s one-unit bracket must hold shut.
+    // attempt the mapping's one-unit bracket must hold shut.
     weft.run("undo-barrier");
 }
 
-fn upcaseEach() void {
-    var handles: [weft.max_selections]?u32 = undefined;
-    const hs = weft.runRangeEach("ms-motion", &handles);
-    weft.runRangeArgEach("ms-op-upcase", hs);
-}
-
 fn yank() void {
-    const set = weft.selections();
-    var ranges: [weft.max_selections]weft.Range = undefined;
-    for (set.items, ranges[0..set.items.len]) |s, *r| r.* = s.range();
-    weft.yankEachIn(0, ranges[0..set.items.len], false);
+    const r = weft.selection() orelse return;
+    weft.yankRange(r.start, r.end, false);
 }
 
-/// Paste at every head, last first so each earlier head's offset still holds.
+/// Paste this selection's value at its head.
 fn paste() void {
-    const set = weft.selections();
-    var heads: [weft.max_selections]usize = undefined;
-    for (set.items, heads[0..set.items.len]) |s, *h| h.* = s.head;
-    const n = set.items.len;
-    var i = n;
-    while (i > 0) {
-        i -= 1;
-        const v = weft.registerPasteValueIn(0, i, n);
-        weft.edit(.{ .start = heads[i], .end = heads[i] }, v);
-        weft.pasteValueAtIn(0, heads[i], i, n);
-    }
+    const at = weft.cursor();
+    const v = weft.registerText();
+    weft.edit(.{ .start = at, .end = at }, v);
+    weft.pasteAt(at);
+}
+
+fn undeclared() void {
+    weft.edit(.{ .start = 0, .end = 0 }, "?");
 }
 
 // The raw door: the SDK's `undoUnit` always closes what it opens, and this
@@ -125,10 +135,4 @@ fn unitLeak() void {
 
 fn unitClose() void {
     weft.setResultInt(wl_undo_unit(0));
-}
-
-comptime {
-    weft.exportCallback("describe", &describe);
-    weft.exportCallback("init", &init);
-    weft.exportCallback("on_command", &on_command);
 }

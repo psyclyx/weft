@@ -18,6 +18,10 @@ pub const AdvanceResult = struct {
     had_input: bool,
     damaged: bool,
     blink_on: bool,
+    /// Answers the frame asked for landed after it was built: the next frame
+    /// is due now, with no further input. A host that sleeps between wakes
+    /// must not sleep through it.
+    redraw: bool = false,
 };
 
 pub const Lifecycle = struct {
@@ -32,7 +36,14 @@ pub const Lifecycle = struct {
 
     /// Advance one complete application wake. `host` is structural: it must
     /// provide `prepare`, `beforeAsync`, `blinkEnabled`, `tickAsync`,
-    /// `applyWindowIntents`, `observe`, `damage`, and `buildPrepared`.
+    /// `applyWindowIntents`, `observe`, `damage`, `buildPrepared` and
+    /// `answerRequests`.
+    ///
+    /// The last phase is the frame's questions (doc/model.md §2.7): a frame
+    /// draws what providers last said and notes what it had no answer to;
+    /// here, after it is built, the host asks. Nothing a provider does while
+    /// answering can reach the frame already drawn — its edits are the next
+    /// version — and answers that land damage the view for the next wake.
     /// Renderers and prepared-frame types remain concrete and statically typed;
     /// the policy module needs neither an opaque object graph nor app imports.
     pub fn advance(self: *Lifecycle, host: anytype, renderer: anytype, opts: AdvanceOptions) !AdvanceResult {
@@ -65,10 +76,13 @@ pub const Lifecycle = struct {
             .blink_on = self.blink_on,
             .force_rebuild = opts.force_rebuild,
         });
+        const redraw = try host.answerRequests(renderer);
+        if (redraw) host.damage();
         return .{
             .had_input = had_input,
             .damaged = damaged,
             .blink_on = self.blink_on,
+            .redraw = redraw,
         };
     }
 };
@@ -115,13 +129,19 @@ test "application lifecycle sequences one complete wake" {
         fn buildPrepared(self: *@This(), _: void, _: Prepared, _: BuildOptions) !void {
             try self.calls.append(std.testing.allocator, 'b');
         }
+        fn answerRequests(self: *@This(), _: void) !bool {
+            try self.calls.append(std.testing.allocator, 'r');
+            return true;
+        }
     };
 
     var host: Host = .{};
     defer host.calls.deinit(std.testing.allocator);
     var lifecycle: Lifecycle = .{};
     const result = try lifecycle.advance(&host, {}, .{ .frame_start = 10, .fb = .{ 80, 24 } });
-    try std.testing.expectEqualStrings("piawpob", host.calls.items);
+    // The frame's questions are asked after it is built, never before.
+    try std.testing.expectEqualStrings("piawpobr", host.calls.items);
+    try std.testing.expect(result.redraw);
     try std.testing.expect(result.had_input);
     try std.testing.expect(result.damaged);
     try std.testing.expect(host.damaged);

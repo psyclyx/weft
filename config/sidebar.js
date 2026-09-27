@@ -5,10 +5,6 @@
 // manifest data: declarations the resolver and explain() read, with no
 // interposing behavior anywhere — no hook in the keystroke path, no
 // window-management code, no plugin of its own.
-//
-// The rows come from the generic tree presentation over whatever claims the
-// subject, so slotting in document symbols or tree-sitter objects instead is
-// a different `weft.present` line, not a different plugin.
 weft.viewport("sidebar", {
   edge: "left",
   extent: 0.25,
@@ -16,13 +12,26 @@ weft.viewport("sidebar", {
   // cycling past it.
   cycles: false,
   // It owns its entry — an open that lands elsewhere never drags it off its
-  // root.
+  // root, and what you navigate to inside it stays until what it follows
+  // moves.
   persistent: true,
-  // Focus landing here is not a primary-focus change, so companions that
-  // follow the focus feed ignore it (and cannot chase themselves).
+  // Focus landing here is not a primary-focus change, so nothing that
+  // follows the primary context hears it (and cannot chase itself).
   followFocus: false,
 });
 
-// "Present resource R in viewport V" — an ordinary operation, declared. The
-// subject opens through the same `open` every other locus runs.
-weft.present("sidebar", { subject: "." });
+// What the sidebar shows FOLLOWS the editor, as data (doc/model.md §2.5): the
+// subject is the current value of ONE context key, never an expression. The
+// `place` key is the designation of the place the editor's entry is in — a
+// local project (`weft://here/dir/…`), a peer's shared tree
+// (`weft://<peer>/dir/`) — so the files provider lists wherever you are
+// working, and moves when you move. `reveal` highlights the editor's own
+// entry inside that tree (opening the folders above it) without taking the
+// keys from the editor. Where there is no place (a scratch buffer), the
+// sidebar says so instead of showing the last one.
+weft.present("sidebar", { subject: { context: "place" }, reveal: { context: "entry" } });
+
+// The alternative: the PLACES you are working in — the places of your open
+// entries, the trees connected peers share with you — as one list, each a
+// row that opens that tree. Swap it in for the line above:
+// weft.present("sidebar", { subject: "weft://here/places/all", reveal: { context: "place" } });
