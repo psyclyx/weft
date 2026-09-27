@@ -95,25 +95,28 @@ fn word(comptime f: fn (weft.Selection, bool) ?weft.Selection, comptime big: boo
 
 /// One motion, named once; every key that runs it lists it by name. A `jump`
 /// leaves the old place on the jumplist first, so `C-o` comes back.
-/// `what` finishes the sentence "Move each selection …" for its summary.
-const MotionDef = struct { name: []const u8, what: []const u8, motion: sel.Motion, jump: bool = false };
+/// `what` finishes the sentence "Move each selection …" for its summary; `to`
+/// is what a person reads for its target (`Goto Line Start` moving, `Extend
+/// to Line Start` extending) — `g h`, `] p` are chord leaves which-key lists,
+/// not machinery.
+const MotionDef = struct { name: []const u8, what: []const u8, to: []const u8, motion: sel.Motion, jump: bool = false };
 const motion_defs = [_]MotionDef{
-    .{ .name = "left", .what = "one character left", .motion = sel.point(left) },
-    .{ .name = "right", .what = "one character right", .motion = sel.point(right) },
-    .{ .name = "down", .what = "one line down", .motion = sel.point(down) },
-    .{ .name = "up", .what = "one line up", .motion = sel.point(up) },
-    .{ .name = "word-next", .what = "to the start of the next word", .motion = word(text.nextWordStart, false) },
-    .{ .name = "word-prev", .what = "to the start of the previous word", .motion = word(text.prevWordStart, false) },
-    .{ .name = "word-end", .what = "to the end of the next word", .motion = word(text.nextWordEnd, false) },
-    .{ .name = "big-word-next", .what = "to the start of the next whitespace-delimited word", .motion = word(text.nextWordStart, true) },
-    .{ .name = "big-word-prev", .what = "to the start of the previous whitespace-delimited word", .motion = word(text.prevWordStart, true) },
-    .{ .name = "big-word-end", .what = "to the end of the next whitespace-delimited word", .motion = word(text.nextWordEnd, true) },
-    .{ .name = "line-start", .what = "to the start of its line", .motion = sel.point(lineStart) },
-    .{ .name = "line-end", .what = "to the end of its line", .motion = sel.point(lineEnd) },
-    .{ .name = "first-non-blank", .what = "to the first non-blank character of its line", .motion = sel.point(firstNonBlank) },
-    .{ .name = "last-line", .what = "to the last line", .motion = sel.point(lastLine), .jump = true },
-    .{ .name = "paragraph-next", .what = "to the next paragraph", .motion = text.nextParagraph },
-    .{ .name = "paragraph-prev", .what = "to the previous paragraph", .motion = text.prevParagraph },
+    .{ .name = "left", .what = "one character left", .to = "Character Left", .motion = sel.point(left) },
+    .{ .name = "right", .what = "one character right", .to = "Character Right", .motion = sel.point(right) },
+    .{ .name = "down", .what = "one line down", .to = "Line Below", .motion = sel.point(down) },
+    .{ .name = "up", .what = "one line up", .to = "Line Above", .motion = sel.point(up) },
+    .{ .name = "word-next", .what = "to the start of the next word", .to = "Next Word Start", .motion = word(text.nextWordStart, false) },
+    .{ .name = "word-prev", .what = "to the start of the previous word", .to = "Previous Word Start", .motion = word(text.prevWordStart, false) },
+    .{ .name = "word-end", .what = "to the end of the next word", .to = "Next Word End", .motion = word(text.nextWordEnd, false) },
+    .{ .name = "big-word-next", .what = "to the start of the next whitespace-delimited word", .to = "Next WORD Start", .motion = word(text.nextWordStart, true) },
+    .{ .name = "big-word-prev", .what = "to the start of the previous whitespace-delimited word", .to = "Previous WORD Start", .motion = word(text.prevWordStart, true) },
+    .{ .name = "big-word-end", .what = "to the end of the next whitespace-delimited word", .to = "Next WORD End", .motion = word(text.nextWordEnd, true) },
+    .{ .name = "line-start", .what = "to the start of its line", .to = "Line Start", .motion = sel.point(lineStart) },
+    .{ .name = "line-end", .what = "to the end of its line", .to = "Line End", .motion = sel.point(lineEnd) },
+    .{ .name = "first-non-blank", .what = "to the first non-blank character of its line", .to = "First Non-Blank", .motion = sel.point(firstNonBlank) },
+    .{ .name = "last-line", .what = "to the last line", .to = "Last Line", .motion = sel.point(lastLine), .jump = true },
+    .{ .name = "paragraph-next", .what = "to the next paragraph", .to = "Next Paragraph", .motion = text.nextParagraph },
+    .{ .name = "paragraph-prev", .what = "to the previous paragraph", .to = "Previous Paragraph", .motion = text.prevParagraph },
 };
 
 /// Motion keys. Each binds the standard navigation intention where one names
@@ -160,8 +163,8 @@ fn motionCmd(comptime m: sel.Motion, comptime mode: sel.Mode, comptime jump: boo
 const motion_cmds = blk: {
     var arr: [motion_defs.len * 2]weft.CommandEntry = undefined;
     for (motion_defs, 0..) |d, i| {
-        arr[2 * i] = .{ .name = "helix.move-" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each, .summary = "Move each selection " ++ d.what ++ ".", .internal = true };
-        arr[2 * i + 1] = .{ .name = "helix.extend-" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each, .summary = "Extend each selection " ++ d.what ++ ".", .internal = true };
+        arr[2 * i] = .{ .name = "helix.move-" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each, .summary = "Move each selection " ++ d.what ++ ".", .label = "Goto " ++ d.to };
+        arr[2 * i + 1] = .{ .name = "helix.extend-" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each, .summary = "Extend each selection " ++ d.what ++ ".", .label = "Extend to " ++ d.to };
     }
     break :blk arr;
 };
@@ -238,15 +241,15 @@ const find_cmds = [_]weft.CommandEntry{
     .{ .name = "helix.move-till-next-char", .call = findEnter(.till, .move), .arity = .whole, .summary = "Select up to the next occurrence of the next key typed.", .label = "Till Next Char", .prompts = true },
     .{ .name = "helix.move-find-prev-char", .call = findEnter(.back_to, .move), .arity = .whole, .summary = "Select back to and including the previous occurrence of the next key typed.", .label = "Find Previous Char", .prompts = true },
     .{ .name = "helix.move-till-prev-char", .call = findEnter(.back_till, .move), .arity = .whole, .summary = "Select back to just after the previous occurrence of the next key typed.", .label = "Till Previous Char", .prompts = true },
-    .{ .name = "helix.extend-find-next-char", .call = findEnter(.to, .extend), .arity = .whole, .summary = "Extend each selection through the next occurrence of the next key typed.", .internal = true },
-    .{ .name = "helix.extend-till-next-char", .call = findEnter(.till, .extend), .arity = .whole, .summary = "Extend each selection up to the next occurrence of the next key typed.", .internal = true },
-    .{ .name = "helix.extend-find-prev-char", .call = findEnter(.back_to, .extend), .arity = .whole, .summary = "Extend each selection back through the previous occurrence of the next key typed.", .internal = true },
-    .{ .name = "helix.extend-till-prev-char", .call = findEnter(.back_till, .extend), .arity = .whole, .summary = "Extend each selection back to just after the previous occurrence of the next key typed.", .internal = true },
+    .{ .name = "helix.extend-find-next-char", .call = findEnter(.to, .extend), .arity = .whole, .summary = "Extend each selection through the next occurrence of the next key typed.", .label = "Extend Find Next Char", .prompts = true },
+    .{ .name = "helix.extend-till-next-char", .call = findEnter(.till, .extend), .arity = .whole, .summary = "Extend each selection up to the next occurrence of the next key typed.", .label = "Extend Till Next Char", .prompts = true },
+    .{ .name = "helix.extend-find-prev-char", .call = findEnter(.back_to, .extend), .arity = .whole, .summary = "Extend each selection back through the previous occurrence of the next key typed.", .label = "Extend Find Previous Char", .prompts = true },
+    .{ .name = "helix.extend-till-prev-char", .call = findEnter(.back_till, .extend), .arity = .whole, .summary = "Extend each selection back to just after the previous occurrence of the next key typed.", .label = "Extend Till Previous Char", .prompts = true },
     .{ .name = "helix.find-char", .call = findChar, .arity = each, .summary = "Find the typed character for the pending find.", .internal = true },
     .{ .name = "helix.move-goto-line", .call = gotoLine(.move), .arity = each, .summary = "Go to the first line, or to the line the count names.", .label = "Goto Line" },
-    .{ .name = "helix.extend-goto-line", .call = gotoLine(.extend), .arity = each, .summary = "Extend each selection to the first line, or to the line the count names.", .internal = true },
+    .{ .name = "helix.extend-goto-line", .call = gotoLine(.extend), .arity = each, .summary = "Extend each selection to the first line, or to the line the count names.", .label = "Extend to Line" },
     .{ .name = "helix.move-match", .call = matchPair(.move), .arity = each, .summary = "Move each selection to its matching bracket.", .label = "Goto Matching Bracket" },
-    .{ .name = "helix.extend-match", .call = matchPair(.extend), .arity = each, .summary = "Extend each selection to its matching bracket.", .internal = true },
+    .{ .name = "helix.extend-match", .call = matchPair(.extend), .arity = each, .summary = "Extend each selection to its matching bracket.", .label = "Extend to Matching Bracket" },
 };
 
 // ── `mi` / `ma`: text objects, per selection ────────────────────────────
@@ -399,17 +402,17 @@ const pattern_cmds = [_]weft.CommandEntry{
     .{ .name = "helix.keep-regex", .call = regexOp(.keep, .move), .arity = .whole, .summary = "Keep only the selections that match a regex.", .label = "Keep Selections", .prompts = true },
     .{ .name = "helix.remove-regex", .call = regexOp(.remove, .move), .arity = .whole, .summary = "Remove the selections that match a regex.", .label = "Remove Selections", .prompts = true },
     .{ .name = "helix.move-search", .call = regexOp(.search_forward, .move), .arity = .whole, .summary = "Search forward for a regex and select the match.", .label = "Search", .icon = "search", .prompts = true },
-    .{ .name = "helix.extend-search", .call = regexOp(.search_forward, .extend), .arity = .whole, .summary = "Search forward for a regex and add the match as a new selection.", .internal = true },
+    .{ .name = "helix.extend-search", .call = regexOp(.search_forward, .extend), .arity = .whole, .summary = "Search forward for a regex and add the match as a new selection.", .label = "Extend Search", .prompts = true },
     .{ .name = "helix.move-search-reverse", .call = regexOp(.search_backward, .move), .arity = .whole, .summary = "Search backward for a regex and select the match.", .label = "Reverse Search", .prompts = true },
-    .{ .name = "helix.extend-search-reverse", .call = regexOp(.search_backward, .extend), .arity = .whole, .summary = "Search backward for a regex and add the match as a new selection.", .internal = true },
+    .{ .name = "helix.extend-search-reverse", .call = regexOp(.search_backward, .extend), .arity = .whole, .summary = "Search backward for a regex and add the match as a new selection.", .label = "Extend Reverse Search", .prompts = true },
     .{ .name = "helix.move-search-next", .call = searchAgain(true, .move), .arity = .whole, .summary = "Select the next match of the last search.", .label = "Search Next" },
-    .{ .name = "helix.extend-search-next", .call = searchAgain(true, .extend), .arity = .whole, .summary = "Add the next match of the last search as a new selection.", .internal = true },
+    .{ .name = "helix.extend-search-next", .call = searchAgain(true, .extend), .arity = .whole, .summary = "Add the next match of the last search as a new selection.", .label = "Extend Search Next" },
     .{ .name = "helix.move-search-prev", .call = searchAgain(false, .move), .arity = .whole, .summary = "Select the previous match of the last search.", .label = "Search Previous" },
-    .{ .name = "helix.extend-search-prev", .call = searchAgain(false, .extend), .arity = .whole, .summary = "Add the previous match of the last search as a new selection.", .internal = true },
+    .{ .name = "helix.extend-search-prev", .call = searchAgain(false, .extend), .arity = .whole, .summary = "Add the previous match of the last search as a new selection.", .label = "Extend Search Previous" },
     .{ .name = "helix.search-selection", .call = searchSelection(true), .arity = .whole, .summary = "Use the selections' text, bounded at word edges, as the search pattern.", .label = "Search Selection" },
     .{ .name = "helix.search-selection-raw", .call = searchSelection(false), .arity = .whole, .summary = "Use the selections' text as the search pattern, without word bounds.", .label = "Search Selection Without Bounds" },
     .{ .name = "helix.move-goto-word", .call = gotoWord(.move), .arity = .whole, .summary = "Label the words in view and jump to the one whose label is typed.", .label = "Goto Word", .prompts = true },
-    .{ .name = "helix.extend-goto-word", .call = gotoWord(.extend), .arity = .whole, .summary = "Label the words in view and extend the selection to the one whose label is typed.", .internal = true },
+    .{ .name = "helix.extend-goto-word", .call = gotoWord(.extend), .arity = .whole, .summary = "Label the words in view and extend the selection to the one whose label is typed.", .label = "Extend Goto Word", .prompts = true },
     .{ .name = "helix.goto-word-key", .call = goto_word.key, .arity = .whole, .summary = "Narrow or pick a word label with the typed key.", .internal = true },
     .{ .name = "helix.goto-word-cancel", .call = goto_word.cancel, .arity = .whole, .summary = "Cancel goto word and clear its labels.", .internal = true },
 };

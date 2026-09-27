@@ -273,3 +273,80 @@ fn contains(keys: []const []u8, want: []const u8) bool {
     for (keys) |k| if (std.mem.eql(u8, k, want)) return true;
     return false;
 }
+
+/// Plumbing a key inside a chord may still run (doc/chrome.md §1.2): a
+/// mode's leave, a digit of a count, the letter that names a register or a
+/// macro's register. What the key does is choose, not act, and which-key
+/// lists none of it.
+fn plumbing(arm: []const u8) bool {
+    if (std.mem.endsWith(u8, arm, "-cancel") or std.mem.startsWith(u8, arm, "vim.cancel-")) return true;
+    for ([_][]const u8{ "vim.count-", "helix.count-", "vim.register-", "vim.macro-record-" }) |prefix| {
+        if (std.mem.startsWith(u8, arm, prefix)) return true;
+    }
+    const play = "vim.macro-play-";
+    return std.mem.startsWith(u8, arm, play) and arm.len == play.len + 1;
+}
+
+test "e2e/identity: a key pressed inside a chord or a menu is presented — only plumbing is internal" {
+    const gpa = t.allocator;
+    for (configs) |config| {
+        var b: Booted = .{};
+        try b.init(gpa, config);
+        defer b.deinit();
+        var bad: usize = 0;
+        var modes = b.ed.keymap.modes.iterator();
+        while (modes.next()) |mode| {
+            const name = mode.key_ptr.*;
+            // A transient paints its own menu (`plugin_sdk/transient.zig`),
+            // each switch and action by the label its spec gives.
+            if (std.mem.endsWith(u8, name, "-menu")) continue;
+            const menu = b.ed.keymap.modeHasTag(name, "menu");
+            var keys = mode.value_ptr.iterator();
+            while (keys.next()) |key| {
+                const chord = std.mem.indexOfScalar(u8, key.key_ptr.*, ' ') != null;
+                if (!menu and !chord) continue;
+                for (key.value_ptr.commands) |arm| {
+                    const shown = core.presentations.of(b.ed.ctx, arm) orelse continue;
+                    if (!shown.internal or plumbing(arm)) continue;
+                    std.debug.print("[e2e/identity] {s}: {s} [{s}] runs '{s}', marked internal — which-key cannot show it\n", .{ config, name, key.key_ptr.*, arm });
+                    bad += 1;
+                }
+            }
+        }
+        try t.expectEqual(@as(usize, 0), bad);
+    }
+}
+
+test "e2e/identity: which-key reads the keys inside `d`, `d i`, `d a` and helix's `g` by their labels" {
+    const gpa = t.allocator;
+    {
+        var b: Booted = .{};
+        try b.init(gpa, "config.js");
+        defer b.deinit();
+        const ed = &b.ed;
+        try core.file.writeBytes(gpa, "wk.txt", "one two\n");
+        ed.runStr("file.open", "wk.txt");
+        ed.press("d", "");
+        try t.expect(h.whichKeyShows(ed, "Inner Object"));
+        try t.expect(h.whichKeyShows(ed, "To End of Line"));
+        ed.press("i", "");
+        try t.expectEqualStrings("op-inner", ed.mode());
+        try t.expect(h.whichKeyShows(ed, "Inner Word"));
+        try t.expect(h.whichKeyShows(ed, "Inner Paragraph"));
+        ed.press("Escape", "");
+        ed.press("d", "");
+        ed.press("a", "");
+        try t.expect(h.whichKeyShows(ed, "A Paragraph"));
+        ed.press("Escape", "");
+    }
+    var b: Booted = .{};
+    try b.init(gpa, "helix.js");
+    defer b.deinit();
+    const ed = &b.ed;
+    try core.file.writeBytes(gpa, "wk.txt", "one two\n");
+    ed.runStr("file.open", "wk.txt");
+    ed.press("g", "");
+    try t.expect(h.whichKeyShows(ed, "Goto Line Below"));
+    try t.expect(h.whichKeyShows(ed, "Goto Last Line"));
+    ed.press("Escape", "");
+}

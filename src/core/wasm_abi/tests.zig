@@ -2212,10 +2212,10 @@ test "wasm plugins: vim di( through the keymap (operator + text object)" {
     try ed.insertText(gpa, "f(a, b)");
     ed.placeCursor(4); // inside the parens
 
-    // di( : d → op-pending, i → op-to (inner), ( → the paren object.
+    // di( : d → op-pending, i → op-inner, ( → the paren object.
     _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "i").?, &.{});
-    try t.expectEqualStrings("op-to", env.head.currentMode());
+    try t.expectEqualStrings("op-inner", env.head.currentMode());
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "parenleft").?, &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 

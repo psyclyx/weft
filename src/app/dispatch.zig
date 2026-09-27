@@ -24,7 +24,7 @@
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
 //! OWN direct menu entry — the `weft.transient` flag menus `git.push`/
 //! `git.pull`/`git.fetch` (sticky, and now generated rather than
-//! hand-written), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
+//! hand-written), `git-reset-menu`, vim's `op-pending`/`op-inner`/`op-around`, helix's
 //! `helix-op`, files's `files-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for

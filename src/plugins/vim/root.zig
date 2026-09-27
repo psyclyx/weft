@@ -269,9 +269,8 @@ fn operate() void {
     applyOpRange(hnd);
 }
 
-// ── Text objects: `i`/`a` in operator-pending enter a text-object mode with a
-// pending inner/a variant; the object key drives the `textobjects` plugin. ──
-var to_variant: []const u8 = "inner";
+// ── Text objects: `i`/`a` in operator-pending enter the inner or around
+// text-object mode; the object key drives the `textobjects` plugin. ──
 const OB = struct { key: []const u8, obj: []const u8 };
 const otable = [_]OB{
     .{ .key = "w", .obj = "word" },                .{ .key = "W", .obj = "big-word" },
@@ -286,25 +285,23 @@ const otable = [_]OB{
 };
 const to_objs = [_][]const u8{ "word", "big-word", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph", "function", "class", "call" };
 
-/// Run textobjects.<variant>-<obj> (variant chosen by i/a) and apply the pending
-/// operator over its range — the same path motions take.
-fn objWrap(comptime obj: []const u8) fn () void {
+/// Run textobjects.<variant>-<obj> and apply the pending operator over its
+/// range — the same path motions take. The variant is the command's own, not
+/// state `i`/`a` left behind: `d i w` runs `vim.operate-inner-word`, so which-key
+/// in `d i` reads `Inner Word` and in `d a` reads `A Word`.
+fn objWrap(comptime variant: []const u8, comptime obj: []const u8) fn () void {
     return struct {
         fn h() void {
-            var buf: [64]u8 = undefined;
-            const name = std.fmt.bufPrint(&buf, "textobjects.{s}-{s}", .{ to_variant, obj }) catch return opCancel();
-            const hnd = weft.runRange(name) orelse return opCancel();
+            const hnd = weft.runRange("textobjects." ++ variant ++ "-" ++ obj) orelse return opCancel();
             applyOpRange(hnd);
         }
     }.h;
 }
 fn enterOpInner() void {
-    to_variant = "inner";
-    weft.setMode("op-to");
+    weft.setMode("op-inner");
 }
 fn enterOpAround() void {
-    to_variant = "around";
-    weft.setMode("op-to");
+    weft.setMode("op-around");
 }
 
 fn enterRegister() void {
@@ -417,16 +414,16 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim.comment", .call = enterOpComment, .arity = .whole, .summary = "Toggle comments over the lines the next motion or text object covers.", .label = "Comment" },
     .{ .name = "vim.cancel-operator", .call = opCancel, .arity = .whole, .summary = "Cancel the pending operator and return to the resting mode.", .internal = true },
     .{ .name = "vim.operate", .call = operate, .arity = each, .summary = "Apply the pending operator over a range another plugin computed.", .internal = true },
-    .{ .name = "vim.operate-line", .call = opLine, .arity = .whole, .summary = "Apply the pending operator to the whole line, or to the selected rows.", .internal = true },
+    .{ .name = "vim.operate-line", .call = opLine, .arity = .whole, .summary = "Apply the pending operator to the whole line, or to the selected rows.", .label = "Whole Line" },
     .{ .name = "vim.operate-line-text", .call = opLineText, .arity = each, .summary = "Apply the pending operator to the cursor's line of text, one caret at a time.", .internal = true },
-    .{ .name = "vim.object-inner", .call = enterOpInner, .arity = .whole, .summary = "Choose the inner variant of the next text object.", .internal = true },
-    .{ .name = "vim.object-around", .call = enterOpAround, .arity = .whole, .summary = "Choose the around variant of the next text object.", .internal = true },
+    .{ .name = "vim.object-inner", .call = enterOpInner, .arity = .whole, .summary = "Choose the inner variant of the next text object.", .label = "Inner Object", .prompts = true },
+    .{ .name = "vim.object-around", .call = enterOpAround, .arity = .whole, .summary = "Choose the around variant of the next text object.", .label = "Around Object", .prompts = true },
     .{ .name = "vim.select-register", .call = enterRegister, .arity = .whole, .summary = "Name the register the next yank, delete or paste uses.", .label = "Select Register", .prompts = true },
     .{ .name = "vim.register-plus", .call = chooseClipboard, .arity = .whole, .summary = "Use the system clipboard for the next yank or paste.", .internal = true },
     .{ .name = "vim.register-star", .call = chooseClipboard, .arity = .whole, .summary = "Use the system clipboard for the next yank or paste.", .internal = true },
     .{ .name = "vim.macro-record", .call = macroQ, .arity = .whole, .summary = "Start recording a macro into a register, or stop the recording in progress.", .label = "Record Macro", .prompts = true },
     .{ .name = "vim.macro-play", .call = macroAt, .arity = .whole, .summary = "Play the macro in a register, a count's times.", .label = "Play Macro", .prompts = true, .icon = "play" },
-    .{ .name = "vim.macro-play-last", .call = macroPlay(0), .arity = .whole, .summary = "Replay the macro played last, a count's times.", .internal = true },
+    .{ .name = "vim.macro-play-last", .call = macroPlay(0), .arity = .whole, .summary = "Replay the macro played last, a count's times.", .label = "Replay Last Macro" },
     // `"/`: the search register, the last pattern any grammar searched for.
     .{ .name = "vim.register-search", .call = chooseRegister(weft.register_search), .arity = .whole, .summary = "Use the search register, holding the last searched pattern, for the next paste.", .internal = true },
     // `vim.cancel-pending` stays: the f/F/t/T char-capture modes bind Escape to it.
@@ -467,9 +464,11 @@ const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
 
 /// Generated normal- and op-mode motion commands (one `vim.move-*` per motion,
 /// plus a `vim.operate-to-*` for operator-valid motions, and a
-/// `vim.operate-on-*` per text object). Keymap machinery, never listed.
+/// `vim.operate-inner-*` and `vim.operate-around-*` per text object). Every one
+/// is a key a person presses — `w`, `d $`, `d i w` — so each has a label
+/// which-key reads in its chord; none is machinery.
 const n_gen = blk: {
-    var n: usize = to_objs.len; // one text-object wrapper per unique object
+    var n: usize = 2 * to_objs.len; // an inner and an around wrapper per object
     for (mtable) |m| {
         n += 1;
         if (m.in_op) n += 1;
@@ -486,7 +485,7 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
             .call = moveByMotion(m.motion, m.jump),
             .arity = each,
             .summary = "Move the cursor " ++ motionProse(motionWord(m.motion)) ++ ", once per count.",
-            .internal = true,
+            .label = motionLabel(motionWord(m.motion)),
         };
         i += 1;
         if (m.in_op) {
@@ -495,23 +494,77 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
                 .call = opByMotion(m.motion),
                 .arity = each,
                 .summary = "Apply the pending operator from the cursor " ++ motionProse(motionWord(m.motion)) ++ ".",
-                .internal = true,
+                .label = "To " ++ motionLabel(motionWord(m.motion)),
             };
             i += 1;
         }
     }
     for (to_objs) |obj| {
         arr[i] = .{
-            .name = "vim.operate-on-" ++ obj,
-            .call = objWrap(obj),
+            .name = "vim.operate-inner-" ++ obj,
+            .call = objWrap("inner", obj),
             .arity = each,
-            .summary = "Apply the pending operator over the " ++ objectProse(obj) ++ " around the cursor, inner or around as chosen.",
-            .internal = true,
+            .summary = "Apply the pending operator over the inside of the " ++ objectProse(obj) ++ " around the cursor.",
+            .label = "Inner " ++ objectLabel(obj),
         };
-        i += 1;
+        arr[i + 1] = .{
+            .name = "vim.operate-around-" ++ obj,
+            .call = objWrap("around", obj),
+            .arity = each,
+            .summary = "Apply the pending operator over the " ++ objectProse(obj) ++ " around the cursor, its delimiters or surrounding space included.",
+            .label = "A " ++ objectLabel(obj),
+        };
+        i += 2;
     }
     break :blk arr;
 };
+
+/// `big-word-next` → `Next WORD`: a generated motion as a person reads it.
+fn motionLabel(comptime word: []const u8) []const u8 {
+    const pairs = .{
+        .{ "left", "Character Left" },
+        .{ "right", "Character Right" },
+        .{ "down", "Line Below" },
+        .{ "up", "Line Above" },
+        .{ "word-next", "Next Word" },
+        .{ "word-prev", "Previous Word" },
+        .{ "word-end", "End of Word" },
+        .{ "big-word-next", "Next WORD" },
+        .{ "big-word-prev", "Previous WORD" },
+        .{ "big-word-end", "End of WORD" },
+        .{ "line-start", "Start of Line" },
+        .{ "line-end", "End of Line" },
+        .{ "first-non-blank", "First Non-Blank" },
+        .{ "doc-end", "End of Buffer" },
+        .{ "match-pair", "Matching Bracket" },
+    };
+    inline for (pairs) |p| {
+        if (std.mem.eql(u8, p[0], word)) return p[1];
+    }
+    @compileError("vim: no label for the motion " ++ word);
+}
+
+/// `quote-double` → `Double-Quoted String`: a text object as a label reads it.
+fn objectLabel(comptime obj: []const u8) []const u8 {
+    const pairs = .{
+        .{ "word", "Word" },
+        .{ "big-word", "WORD" },
+        .{ "quote-double", "Double-Quoted String" },
+        .{ "quote-single", "Single-Quoted String" },
+        .{ "quote-back", "Backtick-Quoted String" },
+        .{ "paren", "Parenthesised Block" },
+        .{ "bracket", "Bracketed Block" },
+        .{ "brace", "Braced Block" },
+        .{ "paragraph", "Paragraph" },
+        .{ "function", "Function" },
+        .{ "class", "Class" },
+        .{ "call", "Function Call" },
+    };
+    inline for (pairs) |p| {
+        if (std.mem.eql(u8, p[0], obj)) return p[1];
+    }
+    @compileError("vim: no label for the text object " ++ obj);
+}
 
 /// `big-word-next` → `to the start of the next WORD`: a generated motion
 /// command's target, as the phrase its summary reads.
@@ -782,10 +835,13 @@ fn initExtra() void {
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
     weft.bindKey("op-pending", "i", "vim.object-inner");
     weft.bindKey("op-pending", "a", "vim.object-around");
-    weft.menuMode("op-to");
-    weft.setFallback("op-to", "default");
-    weft.bindKey("op-to", "Escape", "vim.cancel-operator");
-    inline for (otable) |o| weft.bindKey("op-to", o.key, "vim.operate-on-" ++ o.obj);
+    inline for (.{ "inner", "around" }) |variant| {
+        const mode = "op-" ++ variant;
+        weft.menuMode(mode);
+        weft.setFallback(mode, "default");
+        weft.bindKey(mode, "Escape", "vim.cancel-operator");
+        inline for (otable) |o| weft.bindKey(mode, o.key, "vim.operate-" ++ variant ++ "-" ++ o.obj);
+    }
 
     // A register prefix is a generic input mode, not a files/editor special
     // case. The selected slot is consumed by the next semantic action.

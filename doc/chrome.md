@@ -119,8 +119,15 @@ All of §1.
   wins field by field (`Presentations`). `presentations.of(ctx, name)` is the
   one reading — an intention's is its provider's here, else the std label —
   served by `wl_command_meta`/`qjs_command_meta`. Every command has a
-  one-sentence summary; the 455 a person runs have labels, 486 are
-  `internal`. Menu paths use File, Edit, Selection, View, Go, Run, Terminal,
+  one-sentence summary and every one a person runs has a label. `internal`
+  means never offered to a person anywhere: a count's digits, a prompt's
+  editing keys, the letter naming a register or a macro's register, a
+  mode's leave, a range provider another command calls. A key pressed
+  inside a chord is a person's: vim's motions after an operator (`To End of
+  Line`), its text objects (`d i w` is `Inner Word`, `d a p` `A Paragraph`,
+  one command each, under `op-inner`/`op-around`), helix's `g` and `[`/`]`
+  leaves, snipe's operator targets. `e2e/identity` holds every key in a
+  chord or a menu mode to that (transients paint their own menus). Menu paths use File, Edit, Selection, View, Go, Run, Terminal,
   Help. The icon set grew to 94 Lucide drawings. Viewports publish
   `viewport.<name>.shown`, which the sidebar and panel toggles name.
 - **keysFor** (`core/keys_for.zig`): the keys that run a command, action or
