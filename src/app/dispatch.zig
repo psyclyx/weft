@@ -557,6 +557,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;
 
+    // A new key: its serial, and the end of any paint that was published to
+    // last only until the next key (`Layer.until_key`) — dropped BEFORE the
+    // command runs, so what this key paints survives to the one after.
+    ctx.head.key_serial +%= 1;
+    ctx.caps.layers.expireUntilKey(ctx.gpa);
+
     const macros = &ctx.head.macros;
     macros.key_depth += 1;
     defer macros.key_depth -= 1;

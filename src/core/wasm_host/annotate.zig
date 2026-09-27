@@ -86,6 +86,19 @@ pub fn hBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     results[0] = 1;
 }
 
+/// `annotate.begin_until_key(handle)` → 1 when the round opened: `begin`,
+/// for paint that lasts only until the next key — a search's matches, gone
+/// the moment you do anything else. Dispatch ends it (`Layers.expireUntilKey`);
+/// the guest needs no hook to hear that a key it did not bind was pressed.
+pub fn hBeginUntilKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    results[0] = 0;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.annotationLayer(@bitCast(args[0])) orelse return;
+    layer.beginUntilKey(p.gpa);
+    results[0] = 1;
+}
+
 /// `annotate.span(handle, start, end, role, placement, ptr, len)`: one
 /// anchored span in the open round — a face over `[start, end)` (placement
 /// 0), or a display-only decoration anchored at `start` carrying `text`.

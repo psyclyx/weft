@@ -149,6 +149,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_annotate_len", .handler = annotate.hLen },
     .{ .name = "wl_annotate_read", .handler = annotate.hRead },
     .{ .name = "wl_annotate_begin", .handler = annotate.hBegin },
+    .{ .name = "wl_annotate_begin_until_key", .handler = annotate.hBeginUntilKey },
     .{ .name = "wl_annotate_span", .handler = annotate.hSpan },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
@@ -163,6 +164,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_arg_str", .handler = dispatch.hArgStr },
     .{ .name = "wl_set_result_int", .handler = dispatch.hSetResultInt },
     .{ .name = "wl_set_result_str", .handler = dispatch.hSetResultStr },
+    .{ .name = "wl_key_serial", .handler = dispatch.hKeySerial },
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .handler = keymap.hBindKey },

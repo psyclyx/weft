@@ -69,6 +69,7 @@ pub extern "weft:abi/1" fn wl_annotate_close(handle: u32) void;
 pub extern "weft:abi/1" fn wl_annotate_len(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_read(handle: u32, start: u32, end: u32, ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_begin(handle: u32) i32;
+pub extern "weft:abi/1" fn wl_annotate_begin_until_key(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_span(handle: u32, start: u32, end: u32, role: u32, placement: u32, ptr: u32, len: u32) void;
 // Native `editor` surface + anchored ranges. A range crosses as an opaque u32
 // handle into a host-side table of document-owned anchors.
@@ -99,6 +100,7 @@ pub extern "weft:abi/1" fn wl_arg_int(i: u32) i32;
 pub extern "weft:abi/1" fn wl_arg_str(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_set_result_int(n: i32) void;
 pub extern "weft:abi/1" fn wl_set_result_str(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_key_serial() u32;
 // Config surface (the local plane — bindings/modes, as init.fnl did).
 pub extern "weft:abi/1" fn wl_bind_key(m: u32, ml: u32, k: u32, kl: u32, c: u32, cl: u32) void;
 pub extern "weft:abi/1" fn wl_bind_keys(m: u32, ml: u32, k: u32, kl: u32, list: u32, list_len: u32) void;

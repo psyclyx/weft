@@ -129,6 +129,13 @@ focused_pane_gen: u32 = 0,
 /// land between the frame and the read.
 view_range: ?ViewRange = null,
 
+/// How many keys this head has dispatched, the one being dispatched included
+/// (`wl_key_serial`). Bumped once per key at the top of dispatch — a pointer
+/// gesture is a key here too; a bare modifier is not. What a guest compares
+/// to ask "is this the very next key after mine?" — Emacs's transient map,
+/// without core holding a keymap that knows it is one.
+key_serial: u32 = 0,
+
 /// This head's pointer facts: the gesture being dispatched and what is under
 /// the pointer (`pointer.zig`). Per-head because the pointer is: another
 /// head's click must never move this head's drag origin.

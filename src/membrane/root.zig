@@ -236,6 +236,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_annotate_len", .params = &.{.u32}, .results = &.{.i32}, .group = .annotate, .doc = "the decorated entry's byte length at the current head, or -1 when it is gone" },
     .{ .name = "wl_annotate_read", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .annotate, .doc = "read `[start,end)` of the decorated entry's text into guest memory" },
     .{ .name = "wl_annotate_begin", .params = &.{.u32}, .results = &.{.i32}, .group = .annotate, .doc = "open a publish round: drop the old set and stamp the entry revision" },
+    .{ .name = "wl_annotate_begin_until_key", .params = &.{.u32}, .results = &.{.i32}, .group = .annotate, .doc = "open a publish round like `wl_annotate_begin` whose paint lasts only until the next key is dispatched" },
     .{ .name = "wl_annotate_span", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .annotate, .doc = "publish one anchored span with a role and placement into the open round" },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
@@ -250,6 +251,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_arg_str", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .dispatch, .doc = "the `i`-th dispatch arg as a string, into guest memory" },
     .{ .name = "wl_set_result_int", .params = &.{.i32}, .results = &.{}, .group = .dispatch, .doc = "set the command result to an int" },
     .{ .name = "wl_set_result_str", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .dispatch, .doc = "set the command result to a string" },
+    .{ .name = "wl_key_serial", .params = &.{}, .results = &.{.u32}, .group = .dispatch, .doc = "how many keys the dispatching head has dispatched, the current one included" },
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to command `c`" },
@@ -604,9 +606,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 257;
+const max_import_count: usize = 259;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 279;
+const max_semantic_operation_count: usize = 281;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -761,7 +763,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 257), census.imports);
+    try t.expectEqual(@as(usize, 259), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 279), census.semantic_operations);
+    try t.expectEqual(@as(usize, 281), census.semantic_operations);
 }

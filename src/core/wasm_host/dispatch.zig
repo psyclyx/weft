@@ -68,3 +68,15 @@ pub fn hSetResultStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     p.result_buf.appendSlice(p.gpa, bytes) catch return;
     p.result = .{ .string = p.result_buf.items };
 }
+
+/// `keySerial() -> n`: how many keys the dispatching head has dispatched, the
+/// one being dispatched included (`Head.key_serial`). A read, nothing more —
+/// "was the key before this one mine?" is the guest's comparison to make, so
+/// a repeat-on-the-same-key (Emacs's transient map) needs no keymap in core
+/// that knows it is one.
+pub fn hKeySerial(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @bitCast(p.activeCtx().head.key_serial);
+}

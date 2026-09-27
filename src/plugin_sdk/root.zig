@@ -506,6 +506,13 @@ pub const Annotations = struct {
         return e.wl_annotate_begin(self.handle) == 1;
     }
 
+    /// `begin`, for a round whose paint lasts only until the next key: the
+    /// next key dispatched (by anyone) takes it away — highlights that should
+    /// vanish the moment you do anything else, with no hook to hear the key.
+    pub fn beginUntilKey(self: Annotations) bool {
+        return e.wl_annotate_begin_until_key(self.handle) == 1;
+    }
+
     /// One span in the open round, colored by `role` (a styles-palette class).
     /// `text` is the display string for a decoration placement, ignored by
     /// `.range`.
@@ -797,6 +804,14 @@ pub fn setResultInt(n: i32) void {
 /// Set the command's string return value (copied host-side).
 pub fn setResultStr(s: []const u8) void {
     e.wl_set_result_str(p(s.ptr), @intCast(s.len));
+}
+
+/// How many keys this head has dispatched, the one being dispatched included.
+/// Compare it with a value saved on an earlier key to ask "was the key before
+/// this one mine?" — a repeat-on-the-same-key (Emacs's transient map) with no
+/// keymap in core that knows it is one.
+pub fn keySerial() u32 {
+    return e.wl_key_serial();
 }
 
 // ── Config surface (the local plane) ─────────────────────────────────
