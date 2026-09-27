@@ -159,6 +159,13 @@ picks the projection when a designation has several. `reveal` expands to and
 highlights a designation inside what's presented, without taking focus.
 There are no functions, no composition, and no evaluation order to define.
 
+`as` has two readings, and which one applies is decided by registration, not
+by the config author: if a plugin claims the name as a projection kind
+(`symbols`), the subject is opened *through that plugin*; otherwise the
+subject's own provider reads it as a layout (`strip`, `menu`). `reveal` is
+an unlisted request (`view.reveal`) rather than a node action, because listed
+node actions become offers and would appear as toolbar buttons.
+
 This revisits D2 (doc/cwa-config-decisions.md), which rejected
 `subject: follows(focused, lang.symbols)` as an expression language. That
 rejection holds for expressions. It doesn't hold here, because designations
@@ -220,6 +227,25 @@ shared tree.
    peer as your authored ops.
 5. The frame for the result is drawn from a snapshot. The gutter's answer for
    the previous version shows for at most one frame.
+
+## 3.5 Open gaps found while building
+
+- **Remote shells can't be followed.** A `shell:` place has no filesystem
+  provider that lists directories; making the coreutils tier (substrate §7) a
+  real filesystem provider closes it.
+- **Locality of peer places reads `local`.** The locus registry isn't wired,
+  so a peer place's locus is `here`. §3's example (Build dropping for a
+  remote file) holds for peer *documents* today by other facts, but locality
+  is wrong until the registry is wired.
+- **Peer files open read-only.** Editing one still means sharing it as a
+  document; a remote-file backing (substrate §2) is the general answer.
+- **Projections can't see documents change.** The outline re-reads on
+  presentation; there is no "document changed" event, so a later parse shows
+  only on the next presentation. This belongs to the context/signal layer.
+- **Scratch documents don't persist across restarts**, and the answer cache is
+  keyed by the local buffer ref rather than the designation (a prerequisite
+  for peer-rendered views).
+- **JS plugins** lack the designation doors and `on_context_changed`.
 
 ## 4. What retires
 
