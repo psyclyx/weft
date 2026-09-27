@@ -4,20 +4,24 @@
 //!
 //! - **here** — this process. The always-present sentinel, `Locus` 0, so
 //!   the local case is never a branch and never a lookup.
-//! - **peer** — an authenticated weft connection (`session.Conn`). Its
-//!   identity is the connection itself, not the wire address: `Conn.rebind`
-//!   re-points a live connection at a fresh `Session` after a reconnect,
-//!   and the `Locus` (and every `Resource` built on it) is unchanged —
-//!   rule R2. So a peer locus references the stable `*Conn`, never the
-//!   swappable `*Session`.
-//! - **shell** — a persistent coreutils channel (`ShellFs`), the tramp tier.
+//! - **peer** — another weft, named by its identity FINGERPRINT (rule R2:
+//!   the fingerprint is identity, the address is a hint). The connection
+//!   that reaches it now is a BINDING on the entry, not its key: a reconnect
+//!   from another address rebinds the same locus to whatever `Conn` reaches
+//!   it (and `Conn.rebind` re-points that one at a fresh `Session`), while
+//!   the `Locus` — and every place and `Resource` built on it — is
+//!   unchanged.
+//! - **shell** — a persistent coreutils channel (`ShellFs`), the tramp tier,
+//!   named by its shell id (`weft://shell:<id>/…`). Its channel is a binding
+//!   the same way: a respawned shell rebinds the same locus.
 //!
 //! Effect handles carry their locus *inside* them: a `Resource` is an
 //! opaque `(locus, kind, ref)` triple whose `ref` only the owning tier
 //! interprets, so a guest holding one cannot re-target it at another
 //! locus. `Loci` is the host-side registry that owns the table and hands
-//! back stable handles; `resolve*` is idempotent per authority (same
-//! connection/shell/name → same `Locus`).
+//! back stable handles; `peer`/`shell` are idempotent per NAME (same
+//! fingerprint / shell id → same `Locus`), so a place minted before a
+//! reconnect and one minted after it are the same place.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -25,6 +29,7 @@ const linux = std.os.linux;
 
 const session = @import("session.zig");
 const ShellFs = @import("ShellFs.zig");
+const durable = @import("weft_semantic").durable;
 
 /// Which kind of place a locus names.
 pub const Tier = enum { here, peer, shell };
@@ -37,6 +42,11 @@ pub const Kind = enum { file, dir, proc, lsp, sock, buf };
 /// local process); every other value is an index into a `Loci` table.
 /// Compare for equality, never interpret the integer.
 pub const Locus = enum(u32) { here = 0, _ };
+
+/// How reachable a locus is (substrate §7, R5) — the session's own
+/// vocabulary, for every tier: a remote degrades exactly like a dead
+/// provider, and nothing remote is simply "up".
+pub const Liveness = session.Liveness;
 
 /// An opaque effect handle. Carries its own locus, so it cannot be
 /// mis-targeted: whoever holds it can only act *there*. `ref` is a u64
@@ -58,18 +68,20 @@ pub const Resource = struct {
 };
 
 /// The host-side locus registry. Owns the table; entry index == `Locus`
-/// value, with index 0 permanently the `here` sentinel.
+/// value, with index 0 permanently the `here` sentinel. Entries are never
+/// removed: a locus names a place that may come back, and an index that
+/// could be reused would let an old place silently mean a new peer.
 pub const Loci = struct {
     gpa: Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
-    /// A registered place. The tag is the `Tier`; a peer holds the stable
-    /// `*Conn` (never the session, which `rebind` swaps), a shell holds
-    /// its `*ShellFs`.
+    /// A registered place. The tag is the `Tier`; the name is its identity
+    /// (owned), the transport a replaceable binding — null while nothing
+    /// reaches it, which is what `offline` means.
     const Entry = union(Tier) {
         here,
-        peer: *session.Conn,
-        shell: *ShellFs,
+        peer: struct { fingerprint: []u8, conn: ?*session.Conn = null },
+        shell: struct { id: []u8, channel: ?*ShellFs = null },
     };
 
     pub fn init(gpa: Allocator) !Loci {
@@ -79,75 +91,139 @@ pub const Loci = struct {
     }
 
     pub fn deinit(self: *Loci) void {
+        for (self.entries.items) |e| switch (e) {
+            .here => {},
+            .peer => |p| self.gpa.free(p.fingerprint),
+            .shell => |s| self.gpa.free(s.id),
+        };
         self.entries.deinit(self.gpa);
     }
 
-    /// Register a live connection as a peer locus. Idempotent: the same
-    /// `*Conn` always maps to the same `Locus` (the connection *is* the
-    /// identity, per R2).
-    pub fn resolvePeer(self: *Loci, c: *session.Conn) !Locus {
-        for (self.entries.items, 0..) |e, i| switch (e) {
-            .peer => |ec| if (ec == c) return @enumFromInt(@as(u32, @intCast(i))),
-            else => {},
-        };
-        const idx = self.entries.items.len;
-        try self.entries.append(self.gpa, .{ .peer = c });
-        return @enumFromInt(@as(u32, @intCast(idx)));
+    fn handle(i: usize) Locus {
+        return @enumFromInt(@as(u32, @intCast(i)));
     }
 
-    /// Register a live coreutils channel as a shell locus. Idempotent per
-    /// `*ShellFs`.
-    pub fn resolveShell(self: *Loci, sh: *ShellFs) !Locus {
-        for (self.entries.items, 0..) |e, i| switch (e) {
-            .shell => |es| if (es == sh) return @enumFromInt(@as(u32, @intCast(i))),
-            else => {},
-        };
-        const idx = self.entries.items.len;
-        try self.entries.append(self.gpa, .{ .shell = sh });
-        return @enumFromInt(@as(u32, @intCast(idx)));
+    fn entry(self: *const Loci, l: Locus) Entry {
+        return self.entries.items[@intFromEnum(l)];
     }
 
-    /// Resolve a URI authority to a locus. Only the trivial `"here"` case
-    /// today; anything else is null.
-    /// TODO: fingerprint/alias resolution arrives with the connection
-    /// registry (a known-peer fingerprint or short name → its live `Conn`).
-    pub fn resolve(self: *Loci, authority: []const u8) ?Locus {
-        _ = self;
-        if (std.mem.eql(u8, authority, "here")) return .here;
+    /// The peer locus named by `fingerprint`, minted on first sight.
+    /// Idempotent per fingerprint (R2): whatever address or connection
+    /// reached it, the same peer is the same locus.
+    pub fn peer(self: *Loci, fingerprint: []const u8) Allocator.Error!Locus {
+        if (self.findPeer(fingerprint)) |l| return l;
+        const owned = try self.gpa.dupe(u8, fingerprint);
+        errdefer self.gpa.free(owned);
+        try self.entries.append(self.gpa, .{ .peer = .{ .fingerprint = owned } });
+        return handle(self.entries.items.len - 1);
+    }
+
+    /// The shell locus named by `id` (`weft://shell:<id>/…`), minted on
+    /// first sight. Idempotent per id.
+    pub fn shell(self: *Loci, id: []const u8) Allocator.Error!Locus {
+        if (self.findShell(id)) |l| return l;
+        const owned = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(owned);
+        try self.entries.append(self.gpa, .{ .shell = .{ .id = owned } });
+        return handle(self.entries.items.len - 1);
+    }
+
+    /// The locus an authority names, minted on first sight — `here` for
+    /// `here`. What a trusted publisher calls when it binds something under
+    /// a designation: the place it makes is on the locus its name says.
+    pub fn of(self: *Loci, named: durable.Authority) Allocator.Error!Locus {
+        return switch (named) {
+            .here => .here,
+            .peer => |fp| self.peer(fp),
+            .shell => |id| self.shell(id),
+        };
+    }
+
+    fn findPeer(self: *const Loci, fingerprint: []const u8) ?Locus {
+        for (self.entries.items, 0..) |e, i| switch (e) {
+            .peer => |p| if (std.mem.eql(u8, p.fingerprint, fingerprint)) return handle(i),
+            else => {},
+        };
         return null;
     }
 
+    fn findShell(self: *const Loci, id: []const u8) ?Locus {
+        for (self.entries.items, 0..) |e, i| switch (e) {
+            .shell => |s| if (std.mem.eql(u8, s.id, id)) return handle(i),
+            else => {},
+        };
+        return null;
+    }
+
+    /// Point a peer locus at the connection that reaches it now, or at none
+    /// (the connection went away). The locus value does not move — that is
+    /// the whole of R2.
+    pub fn bindPeer(self: *Loci, l: Locus, c: ?*session.Conn) void {
+        switch (self.entries.items[@intFromEnum(l)]) {
+            .peer => |*p| p.conn = c,
+            else => unreachable, // a connection bound to a non-peer locus
+        }
+    }
+
+    /// Point a shell locus at its live channel, or at none.
+    pub fn bindShell(self: *Loci, l: Locus, ch: ?*ShellFs) void {
+        switch (self.entries.items[@intFromEnum(l)]) {
+            .shell => |*s| s.channel = ch,
+            else => unreachable, // a channel bound to a non-shell locus
+        }
+    }
+
+    /// The locus a designation's authority names, if one has been minted.
+    /// Never mints: an authority string alone must not grow the table.
+    pub fn resolve(self: *const Loci, named: durable.Authority) ?Locus {
+        return switch (named) {
+            .here => .here,
+            .peer => |fp| self.findPeer(fp),
+            .shell => |id| self.findShell(id),
+        };
+    }
+
+    /// The authority a locus is named by in a designation — `resolve`'s
+    /// inverse. Borrowed from the table.
+    pub fn authority(self: *const Loci, l: Locus) durable.Authority {
+        return switch (self.entry(l)) {
+            .here => .here,
+            .peer => |p| .{ .peer = p.fingerprint },
+            .shell => |s| .{ .shell = s.id },
+        };
+    }
+
     pub fn tier(self: *const Loci, l: Locus) Tier {
-        return std.meta.activeTag(self.entries.items[@intFromEnum(l)]);
+        return std.meta.activeTag(self.entry(l));
     }
 
-    /// The peer connection behind a locus, or null if it is not a peer.
+    /// The peer connection bound to a locus now, or null (not a peer, or
+    /// nothing reaches it).
     pub fn conn(self: *const Loci, l: Locus) ?*session.Conn {
-        return switch (self.entries.items[@intFromEnum(l)]) {
-            .peer => |c| c,
+        return switch (self.entry(l)) {
+            .peer => |p| p.conn,
             else => null,
         };
     }
 
-    /// The shell channel behind a locus, or null if it is not a shell.
-    pub fn shell(self: *const Loci, l: Locus) ?*ShellFs {
-        return switch (self.entries.items[@intFromEnum(l)]) {
-            .shell => |s| s,
+    /// The shell channel bound to a locus now, or null.
+    pub fn channel(self: *const Loci, l: Locus) ?*ShellFs {
+        return switch (self.entry(l)) {
+            .shell => |s| s.channel,
             else => null,
         };
     }
 
-    /// Reachability of the place a locus names. `here` is always up; a
-    /// peer delegates to its connection's current session (the point of
-    /// R2: the same locus reports whatever the freshly-rebound session
-    /// reports).
-    pub fn liveness(self: *const Loci, l: Locus) session.Liveness {
-        return switch (self.entries.items[@intFromEnum(l)]) {
+    /// Reachability of the place a locus names (R5). `here` is always up; a
+    /// peer reports whatever its connection's CURRENT session reports (a
+    /// rebound session is read, not the one the place was minted under); a
+    /// shell reports its channel's own state. A locus with nothing bound is
+    /// offline — never "connected" by default.
+    pub fn liveness(self: *const Loci, l: Locus) Liveness {
+        return switch (self.entry(l)) {
             .here => .connected,
-            .peer => |c| c.session.liveness(),
-            // TODO: ShellFs exposes no liveness signal yet; a dead shell
-            // surfaces as an error on the next call, not here.
-            .shell => .connected,
+            .peer => |p| if (p.conn) |c| c.session.liveness() else .offline,
+            .shell => |s| if (s.channel) |ch| ch.liveness() else .offline,
         };
     }
 
@@ -177,22 +253,36 @@ test "locus: here sentinel is index 0, tier .here, always connected" {
 
     try t.expectEqual(@as(u32, 0), @intFromEnum(Locus.here));
     try t.expectEqual(Tier.here, loci.tier(.here));
-    try t.expectEqual(session.Liveness.connected, loci.liveness(.here));
+    try t.expectEqual(Liveness.connected, loci.liveness(.here));
     try t.expect(loci.conn(.here) == null);
-    try t.expect(loci.shell(.here) == null);
+    try t.expect(loci.channel(.here) == null);
+    try t.expect(loci.authority(.here) == .here);
 }
 
-test "locus: resolve authority — here sentinel, everything else null" {
+test "locus: an authority resolves only once something minted it, and names it back" {
     const gpa = t.allocator;
     var loci = try Loci.init(gpa);
     defer loci.deinit();
 
-    try t.expect(loci.resolve("here") == Locus.here);
-    try t.expect(loci.resolve("weft://deadbeef") == null);
-    try t.expect(loci.resolve("") == null);
+    try t.expect(loci.resolve(.here) == Locus.here);
+    try t.expect(loci.resolve(.{ .peer = "deadbeef" }) == null);
+    try t.expect(loci.resolve(.{ .shell = "box" }) == null);
+
+    const p = try loci.of(.{ .peer = "deadbeef" });
+    const s = try loci.of(.{ .shell = "box" });
+    try t.expect(p != .here and s != .here and p != s);
+    try t.expectEqual(p, loci.resolve(.{ .peer = "deadbeef" }).?);
+    try t.expectEqual(s, loci.resolve(.{ .shell = "box" }).?);
+    // A shell and a peer with the same name are different places.
+    try t.expect(loci.resolve(.{ .shell = "deadbeef" }) == null);
+    try t.expect(loci.authority(p).eql(.{ .peer = "deadbeef" }));
+    try t.expect(loci.authority(s).eql(.{ .shell = "box" }));
+    // Nothing reaches either yet: offline, never connected by default.
+    try t.expectEqual(Liveness.offline, loci.liveness(p));
+    try t.expectEqual(Liveness.offline, loci.liveness(s));
 }
 
-test "locus: a resource built on a locus survives Conn.rebind (handle stable)" {
+test "locus: a peer is its fingerprint — rebinding the connection, or Conn.rebind, moves nothing built on it (R2)" {
     const gpa = t.allocator;
 
     // Two live sessions over their own socketpairs. The session owns the
@@ -213,53 +303,58 @@ test "locus: a resource built on a locus survives Conn.rebind (handle stable)" {
     defer sb.destroy();
     defer _ = linux.close(fds_b[1]);
 
-    var conn = try session.Conn.init(gpa, sa, "peer", .client);
-    defer conn.deinit();
+    var first = try session.Conn.init(gpa, sa, "peer", .client);
+    defer first.deinit();
+    var second = try session.Conn.init(gpa, sb, "peer", .client);
+    defer second.deinit();
 
     var loci = try Loci.init(gpa);
     defer loci.deinit();
 
-    const l = try loci.resolvePeer(&conn);
+    const l = try loci.peer("fp-of-alice");
     const r = loci.resource(l, .file, 42);
-
+    loci.bindPeer(l, &first);
     try t.expectEqual(Tier.peer, loci.tier(l));
-    try t.expect(loci.conn(l).? == &conn);
-    try t.expectEqual(l, r.locus());
-    try t.expectEqual(Kind.file, r.kind());
-    try t.expectEqual(@as(u64, 42), r.ref());
+    try t.expect(loci.conn(l).? == &first);
+    // Not yet handshaken: the session says connecting, and so does the locus.
+    try t.expectEqual(Liveness.connecting, loci.liveness(l));
 
-    // Idempotent: the same connection resolves to the same locus.
-    const l_again = try loci.resolvePeer(&conn);
-    try t.expectEqual(l, l_again);
+    // Idempotent per fingerprint.
+    try t.expectEqual(l, try loci.peer("fp-of-alice"));
 
-    // R2: rebind swaps the underlying session but not the identity. The
-    // locus and every resource on it are byte-for-byte unchanged.
-    try conn.rebind(sb);
-    try t.expect(conn.session == sb);
+    // R2: Conn.rebind swaps the session under the same connection…
+    try first.rebind(sb);
+    try t.expect(loci.conn(l).? == &first);
+    // …and a reconnect from elsewhere rebinds the locus to another
+    // connection. Neither moves the locus or anything built on it.
+    loci.bindPeer(l, &second);
+    try t.expectEqual(l, try loci.peer("fp-of-alice"));
     try t.expectEqual(l, r.locus());
     try t.expectEqual(@as(u64, 42), r.ref());
-    try t.expectEqual(Tier.peer, loci.tier(l));
-    try t.expect(loci.conn(l).? == &conn);
+    try t.expect(loci.conn(l).? == &second);
+
+    // The connection goes away: the place stays, offline.
+    loci.bindPeer(l, null);
+    try t.expectEqual(Liveness.offline, loci.liveness(l));
+    try t.expectEqual(l, loci.resolve(.{ .peer = "fp-of-alice" }).?);
 }
 
-test "locus: shell resolves, reports tier .shell, idempotent" {
+test "locus: a shell is its id, and reports its channel's liveness" {
     const gpa = t.allocator;
     var loci = try Loci.init(gpa);
     defer loci.deinit();
 
-    // We only register the pointer and read back its tier — never call
-    // into ShellFs — so an uninitialized value is a fine identity token.
-    var sh: ShellFs = undefined;
+    var sh = try ShellFs.spawn(gpa, &.{"/bin/sh"}, .{ .block = .{ .slice = std.mem.span(std.c.environ) } });
+    defer sh.deinit();
 
-    const l = try loci.resolveShell(&sh);
+    const l = try loci.shell("box");
     try t.expectEqual(Tier.shell, loci.tier(l));
-    try t.expect(loci.shell(l).? == &sh);
+    try t.expectEqual(Liveness.offline, loci.liveness(l));
+    loci.bindShell(l, &sh);
+    try t.expect(loci.channel(l).? == &sh);
     try t.expect(loci.conn(l) == null);
-    try t.expectEqual(session.Liveness.connected, loci.liveness(l));
-
-    const l_again = try loci.resolveShell(&sh);
-    try t.expectEqual(l, l_again);
-    try t.expect(l != Locus.here);
+    try t.expect(loci.liveness(l) != .offline);
+    try t.expectEqual(l, try loci.shell("box"));
 }
 
 test {

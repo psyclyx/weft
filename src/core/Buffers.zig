@@ -270,6 +270,17 @@ pub const Buffer = struct {
     /// declared otherwise. `field_focused` is the head's question (an
     /// editable field owns the commits while it holds focus), so the entry
     /// answers it per head rather than remembering a foreign cursor.
+    /// WHERE this entry's bytes live, in `Facts`' vocabulary — read off its
+    /// place's locus and nothing else, so a peer's file, a shell's file and
+    /// every entry in their places read `remote` because that is where they
+    /// are, not because some other fact happens to differ. A tool entry is
+    /// `tool` first: its content is a projection its owner produced, so where
+    /// the FILES are is not a question about it.
+    pub fn locality(self: *const Buffer) @import("weft_facts").Locality {
+        if (self.tool.len > 0) return .tool;
+        return if (self.place.isHere()) .local else .remote;
+    }
+
     pub fn posture(self: *const Buffer, field_focused: bool) Posture {
         const derived: Posture = if (self.editor != null and !self.read_only) .text else .structural;
         const declared = self.declared_posture orelse derived;

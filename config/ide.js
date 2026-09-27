@@ -129,11 +129,20 @@ function provideInSource(action, when, cmd, opts) {
     weft.provide(action, Object.assign({ posture: "text", locality: locality }, when), cmd, opts);
 }
 
+// Building, running, testing and debugging start a process WHERE the source
+// is, and processes start only here (a peer's or a shell's place has no
+// directory of ours to run in). So those are offered in local source only:
+// open a peer's file and the toolbar drops "Build" because the file is
+// remote — its locality — and for no other reason.
+function provideLocal(action, when, cmd, opts) {
+  weft.provide(action, Object.assign({ posture: "text", locality: "local" }, when), cmd, opts);
+}
+
 // Build/run by language: the language's provider says more than the
 // fallback (one fact more), so it wins where it applies.
 weft.action("plugin.ide.build");
-provideInSource("plugin.ide.build", {}, "run-line", { label: "Run line", group: "run", order: 1 });
-provideInSource("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Build", group: "build", order: 1 });
+provideLocal("plugin.ide.build", {}, "run-line", { label: "Run line", group: "run", order: 1 });
+provideLocal("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Build", group: "build", order: 1 });
 // Send to REPL: offered only where a REPL is live. The repl plugin publishes
 // `repl.session` on the place its interpreter runs in, so this is a fact of
 // the context like the language is — the toolbar grows the button while a
@@ -141,11 +150,11 @@ provideInSource("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Bui
 // this file knows how a REPL is tracked.
 weft.action("plugin.ide.send-to-repl");
 provideInSource("plugin.ide.send-to-repl", { context: { "repl.session": "*" } }, "repl-send-line", { label: "Send to REPL", group: "run", order: 2 });
-provideInSource("plugin.ide.build", { lang: "py" }, "lang-run", { label: "Run", group: "run", order: 1 });
+provideLocal("plugin.ide.build", { lang: "py" }, "lang-run", { label: "Run", group: "run", order: 1 });
 weft.action("plugin.ide.test");
-provideInSource("plugin.ide.test", { lang: "zig" }, "make-test", { label: "Test", group: "build", order: 2 });
+provideLocal("plugin.ide.test", { lang: "zig" }, "make-test", { label: "Test", group: "build", order: 2 });
 weft.action("plugin.ide.debug");
-provideInSource("plugin.ide.debug", { lang: "zig" }, "debug-start", { label: "Debug", group: "build", order: 3 });
+provideLocal("plugin.ide.debug", { lang: "zig" }, "debug-start", { label: "Debug", group: "build", order: 3 });
 weft.action("plugin.ide.format");
 provideInSource("plugin.ide.format", {}, "format-buffer", { label: "Format", group: "edit", order: 10 });
 

@@ -78,6 +78,7 @@ const SlotHost = @import("slot.zig").SlotHost;
 const kv = @import("kv.zig");
 const env_mod = @import("env.zig");
 const place_mod = @import("place.zig");
+const locus_mod = @import("locus.zig");
 const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
@@ -166,6 +167,10 @@ environments: env_mod.Environments = undefined,
 /// Dense opaque ids for the places this run has seen (`place.Ids`), so a
 /// guest can key a session table on "which place" without being handed one.
 place_ids: place_mod.Ids = undefined,
+/// Every locus this run has reached (`locus.Loci`): where a place is — here,
+/// a peer by its fingerprint, a shell by its id — and how reachable it is.
+/// A place carries a `Locus`; this is what that handle names.
+loci: locus_mod.Loci = undefined,
 /// This system's headless/background head: what `command.run` dispatches
 /// against when no OTHER head is specified, and (once plugins are wired
 /// per-system — see the module doc) what a background wasm entry
@@ -258,6 +263,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .filesystems = .init(gpa),
         .environments = .init(gpa),
         .place_ids = try place_mod.Ids.init(gpa),
+        .loci = try locus_mod.Loci.init(gpa),
         .context = .init(gpa),
     };
     errdefer self.context.deinit();
@@ -333,6 +339,7 @@ pub fn destroy(self: *System) void {
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
     self.place_ids.deinit();
+    self.loci.deinit();
     self.environments.deinit();
     self.config_kv.deinit(gpa);
     self.grants.deinit();
@@ -364,6 +371,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .designations = &self.designations,
         .environments = &self.environments,
         .place_ids = &self.place_ids,
+        .loci = &self.loci,
     };
 }
 

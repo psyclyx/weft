@@ -323,7 +323,7 @@ fn openPeerFile(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const 
     buf.read_only = true;
     var named: [core.designation.max_len]u8 = undefined;
     try buf.setDesignation(ctx.gpa, try d.bare().render(&named));
-    if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(id, p);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
 }
@@ -337,7 +337,7 @@ fn openPeerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []c
     const at = (try peerDirectory(sc, ctx, fingerprint, path, &why)) orelse return .{ .string = why };
     try @import("session.zig").presentDirectory(ctx, at);
     // The listing is IN the peer's tree, wherever it was opened from.
-    if (sc.remotePlace()) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
+    if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
     return .nil;
 }
 
@@ -647,7 +647,7 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
     }
     // A document the peer we share a tree with offers is in that tree's
     // place; any other peer's is in no place of ours.
-    if (ref.peer == null) if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    if (ref.peer == null) if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(id, p);
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.

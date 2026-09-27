@@ -144,6 +144,10 @@ pub const Context = struct {
     /// `System`; every place then reads as the degenerate one, which is what an
     /// embedding with no places should see.
     place_ids: ?*@import("place.zig").Ids = null,
+    /// The loci this system has reached (`locus.Loci`): what a place's locus
+    /// names, and how reachable it is. Null in embeddings without a `System`,
+    /// where every place is here.
+    loci: ?*@import("locus.zig").Loci = null,
     /// Turns a `Place` into an OS directory for a local effect
     /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
     /// opened; `null` in headless embeddings, where only the degenerate

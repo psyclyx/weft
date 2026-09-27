@@ -202,13 +202,14 @@ pub const ShareCtx = struct {
     /// The place a peer's shared tree is (doc/place.md): its root container,
     /// named by the designation it was published under (`weft://<peer>/dir/`),
     /// so the `place` context key of an entry opened from the peer's tree is
-    /// the tree, and a sidebar following that key lists it. Bound in this
-    /// process's router, hence the `here` locus — which also means nothing
-    /// local can be realized there: a spawn from a peer's file has no
-    /// directory of ours to run in, and says so.
-    pub fn remotePlace(self: *const ShareCtx) ?core.Place {
+    /// the tree, and a sidebar following that key lists it. On the PEER's
+    /// locus, the one its fingerprint names (`designation.placeOf`), so the
+    /// entries in it read `locality = remote`, and nothing local can be
+    /// realized there: a spawn from a peer's file has no directory of ours to
+    /// run in, and says so.
+    pub fn remotePlace(self: *const ShareCtx, ctx: *core.command.Context) !?core.Place {
         const root = self.remote_fs_target orelse return null;
-        return .{ .container = .{ .locus = .here, .ref = root.target, .revision = root.revision } };
+        return core.designation.placeOf(ctx, root);
     }
 
     /// Remember what the person called the host they connected to: the
@@ -291,6 +292,9 @@ pub const Collab = struct {
     remote_owner: ?semantic.owner.Id,
     remote_publication: ?fs_runtime.publication.Registration,
     next_remote_authority: u32,
+    /// The peer locus the published tree is on, while this connection is
+    /// what reaches it.
+    remote_locus: ?core.locus.Locus,
     remote_attempted_session: ?*core.session.Session,
 
     // ── The share intent surface (self-referential: points at siblings) ──
@@ -376,6 +380,7 @@ pub const Collab = struct {
         self.remote_owner = null;
         self.remote_publication = null;
         self.next_remote_authority = 1;
+        self.remote_locus = null;
         self.remote_attempted_session = null;
         // Best-effort: a failed eventfd create (fd exhaustion) falls back to
         // the scheduler's bounded background-services poll rather than
@@ -549,10 +554,17 @@ pub const Collab = struct {
         // not the address, is the authority (substrate §7, R2), so the name
         // survives a reconnect from somewhere else.
         var designation_buf: [64]u8 = undefined;
-        const designation: []const u8 = if (active_session.peerFingerprint()) |fp|
+        const fingerprint = active_session.peerFingerprint();
+        const designation: []const u8 = if (fingerprint) |fp|
             (semantic.durable.Designation{ .authority = .{ .peer = &fp }, .kind = .directory, .ref = "/" }).render(&designation_buf) catch ""
         else
             "";
+        // The peer's locus is its fingerprint; this connection is only what
+        // reaches it now (R2) — bound here, unbound when the tree goes.
+        if (fingerprint) |fp| {
+            self.remote_locus = try system.loci.peer(&fp);
+            system.loci.bindPeer(self.remote_locus.?, &self.conn.?);
+        }
         var publication = try fs_runtime.publication.publish(
             self.gpa,
             &system.semantic.targets,
@@ -576,6 +588,8 @@ pub const Collab = struct {
 
     fn detachRemoteFilesystem(self: *Collab) void {
         const system = self.remote_system orelse return;
+        if (self.remote_locus) |l| system.loci.bindPeer(l, null);
+        self.remote_locus = null;
         self.share_ctx.remote_fs_target = null;
         self.share_ctx.closeRemoteChildren(&system.semantic.targets);
         self.share_ctx.remote_fs_owner = null;
