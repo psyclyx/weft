@@ -203,19 +203,29 @@ test "e2e/designation: a document keeps its minted id through a save and a reloa
     try t.expect(te.doc.id.eql(id));
 }
 
-test "e2e/designation: a relative path names nothing, and a malformed designation is not one" {
+test "e2e/designation: a typed relative name opens against the place, and a malformed designation is not one" {
     var app: App = undefined;
     try app.init(t.allocator);
     defer app.deinit();
     const ed = &app.ed;
+    const gpa = t.allocator;
+    // A bare name is resolved once, at the door, against the place the
+    // command runs in, and what is held afterwards is absolute: the same
+    // entry its absolute spelling opens.
+    try t.expect(openRaw(ed, "a.txt") == null);
+    const opened = ed.buffers.active().textEditor().?.backingPath().?;
+    try t.expect(std.fs.path.isAbsolute(opened));
+    try t.expectEqualStrings("a.txt", std.fs.path.basename(opened));
     const before = ed.buffers.count();
-    const why = openRaw(ed, "a.txt") orelse return error.RelativeOpened;
-    try t.expect(std.mem.indexOf(u8, why, "relative") != null);
-    try t.expect(openRaw(ed, ".") != null);
+    try t.expect(openRaw(ed, opened) == null);
+    try t.expectEqual(before, ed.buffers.count());
+    // A malformed designation opens nothing.
     try t.expect(openRaw(ed, "weft://here/doc/not-an-id") != null);
     try t.expectEqual(before, ed.buffers.count());
-    // A viewport subject is refused where it is written, too.
-    try t.expectError(error.RelativeSubject, ed.session.system.viewports.present(t.allocator, "nowhere", .{ .subject = .{ .text = "." } }));
+    // A viewport SUBJECT is declared in config, where there is no dispatch to
+    // take a place from: a relative one is still refused where it is written
+    // (`{context: "place"}` is how to say "wherever I am").
+    try t.expectError(error.RelativeSubject, ed.session.system.viewports.present(gpa, "nowhere", .{ .subject = .{ .text = "." } }));
 }
 
 test "e2e/designation: the jumplist reopens a closed file and a closed scratch document by name" {

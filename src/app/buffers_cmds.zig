@@ -81,11 +81,14 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         .designation => |d| openDesignation(ctx, command_context, d, spec),
         .malformed => .{ .string = "open: " ++ durable.Spec.malformed_refusal },
         // `host:path` names its locus, so it is not relative to anything
-        // here; any other name without a root is.
+        // here. Any other bare name is relative to the place the command runs
+        // in, and is made absolute once, here.
         .relative => if (scpSpec(spec)) |r|
             openShell(ctx, command_context, r.host, r.path)
-        else
-            .{ .string = "open: " ++ durable.Spec.relative_refusal },
+        else if (try core.designation.resolveRelative(ctx, ctx.gpa, spec)) |abs| blk: {
+            defer ctx.gpa.free(abs);
+            break :blk openLocal(ctx, command_context, abs);
+        } else .{ .string = "open: " ++ core.designation.refuse_relative_elsewhere },
     };
 }
 

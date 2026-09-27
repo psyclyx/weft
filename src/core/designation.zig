@@ -189,6 +189,28 @@ pub const as_param = "as";
 /// Paths and peers are the shell's — it owns the filesystems and the
 /// connections — so for those this answers only the live-entry case and
 /// null otherwise. Focuses what it opens.
+/// Resolve a relative path someone TYPED (or a stored name that predates
+/// designations) against the place the command runs in: the dispatching
+/// entry's place directory, or the process directory for the degenerate place.
+/// Relative names never get past a user-facing door — they are made absolute
+/// here, once — so nothing downstream ever holds one (substrate §7, R1: a path
+/// means something only paired with the place that hosts it, and the dispatch
+/// always has one). Null when that place has no local directory (a peer's
+/// tree): a bare name there has nothing honest to resolve against.
+pub fn resolveRelative(ctx: *command.Context, gpa: Allocator, rel: []const u8) !?[]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const place = @import("place.zig");
+    const base: []const u8 = switch (place.realize(ctx.place(), ctx.realizer)) {
+        .process => @import("file.zig").processDirectory(&buf) orelse return null,
+        .path => |abs| abs,
+        .elsewhere, .unavailable => return null,
+    };
+    return try std.fs.path.resolve(gpa, &.{ base, rel });
+}
+
+/// The words for a relative name in a place that has no local directory.
+pub const refuse_relative_elsewhere = "this place has no local directory to resolve a relative name against: give an absolute path or a weft:// designation";
+
 pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outcome {
     if (d.param(as_param)) |as| if (try openAs(ctx, d, text, as)) |outcome| return outcome;
     if (find(ctx.buffers, d)) |b| if (sameProjection(b, d)) {

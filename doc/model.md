@@ -43,8 +43,13 @@ nothing (substrate §7, R1).
 The shift: **a designation is the only way to name content across the ABI.**
 `open`, `present`, `reveal`, jumplist entries, embeds, context values and
 viewport subjects all take one. A bare absolute path is accepted as sugar for
-`weft://here/file/…`; a relative path is refused rather than resolved against
-the process directory.
+`weft://here/file/…`. A relative name a person types (`open foo.txt`, `:e`,
+the command line, a stored recent that predates designations) is resolved
+once, at the user-facing door, against the place the command runs in
+(`designation.resolveRelative`), so nothing downstream ever holds one. The
+only place a relative name is refused is a config `present` subject: config
+has no dispatch to take a place from, and `{context: "place"}` says what
+`"."` used to mean.
 
 Every kind of thing an entry can show gets a designation, in honest tiers:
 

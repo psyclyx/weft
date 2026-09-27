@@ -585,11 +585,16 @@ fn cBufferCloseForce(ctx: *Context, args: struct {}) anyerror!Value {
 /// an absolute path standing in for one), and whatever core alone can answer
 /// (`designation.openHeld`: documents, processes, projections). A shell
 /// shadows this with one that also reaches directories, shells and peers,
-/// and routes the same way. A relative path is refused: it could only be
-/// relative to wherever the process was launched.
+/// and routes the same way. A relative path resolves against the place the
+/// command runs in (`designation.resolveRelative`).
 fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
     switch (designation.durable.Spec.of(args.path)) {
-        .relative => return .{ .string = "open: " ++ designation.durable.Spec.relative_refusal },
+        .relative => {
+            const abs = try designation.resolveRelative(ctx, ctx.gpa, args.path) orelse
+                return .{ .string = "open: " ++ designation.refuse_relative_elsewhere };
+            defer ctx.gpa.free(abs);
+            return openFilePath(ctx, abs);
+        },
         .malformed => return .{ .string = "open: " ++ designation.durable.Spec.malformed_refusal },
         .path => |path| return openFilePath(ctx, path),
         .designation => |d| {

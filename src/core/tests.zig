@@ -1397,16 +1397,18 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     defer tmp_dir.cleanup();
     const relative = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
     defer gpa.free(relative);
-    // A relative path names nothing: refused in words, nothing opened.
-    const refused = try run(&host.commands, &host.ctx, "open", &.{.{ .string = relative }});
-    try t.expect(refused == .string);
-    try t.expectEqualStrings("*tool*", host.buffers.active().name);
+    // A relative name resolves against the place the command runs in (the
+    // process directory, for the degenerate place) and is made absolute once,
+    // at the door: it opens the SAME entry its absolute spelling does.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fs.path.resolve(gpa, &.{ @import("file.zig").processDirectory(&cwd_buf).?, relative });
     defer gpa.free(path);
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
+    const id3 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = relative }});
+    try t.expectEqual(id1.integer, id3.integer);
+    try t.expectEqualStrings(path, host.buffers.active().textEditor().?.backingPath().?);
     // A document binds through the source layer its grammar DECLARED; with no
     // declaration the mode binds as itself. Core names neither mode.
     try t.expectEqualStrings("normal", host.buffers.active().bindingMode(&host.keymap, "normal"));
