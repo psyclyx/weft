@@ -2,7 +2,7 @@
 //! `Buffer.frontend`; its capability providers decline foreign documents, so
 //! per-buffer registrations race correctly. Highlight layers key by (doc, name)
 //! in the shared store. Also the config-supplied grammar registry these attach
-//! from (`grammar-add`) and the pooled reconnect task. LSP is no longer here at
+//! from (`syntax.add-grammar`) and the pooled reconnect task. LSP is no longer here at
 //! all — it's an async wasm plugin (`src/plugins/lsp/root.zig`) that talks to servers
 //! over the streaming membrane and provides every capability, completion
 //! included, as a caps provider; server commands come from config, not a
@@ -21,7 +21,7 @@ const collab = @import("collab.zig");
 /// a grammar that config cannot say.
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
-        .name = "grammar-add",
+        .name = "syntax.add-grammar",
         .summary = "Register a tree-sitter grammar for one or more extensions.",
         .args = &.{
             .{ .name = "exts", .type = .string },
@@ -35,7 +35,7 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     };
 }
 
-/// The FEWEST arguments `grammar-add` will act on. This — not the declared
+/// The FEWEST arguments `syntax.add-grammar` will act on. This — not the declared
 /// arity, which is larger because query and outline are optional — is the
 /// number that has to stay out of guest reach: it is what it takes to get to
 /// `std.DynLib.open` on a caller-named directory. The gate below reads this,
@@ -292,7 +292,7 @@ pub fn detachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) void {
 /// object instead of loose provider locals.
 ///
 /// Two-phase, because the pieces are born at different times: the registry exists
-/// BEFORE the session (its capability consumers bind `grammar-add` onto it),
+/// BEFORE the session (its capability consumers bind `syntax.add-grammar` onto it),
 /// while `attach_deps` borrows the session's caps, so it is built AFTER.
 ///
 /// CRITICAL TEARDOWN ORDER — the whole reason this is a distinct cluster:
@@ -312,7 +312,7 @@ pub const Providers = struct {
 
     /// Phase one: the config-extended registries, built before the session.
     /// The grammar registry starts EMPTY — weft ships no languages. Config
-    /// fills it through `grammar-add`; the search path names are resolved
+    /// fills it through `syntax.add-grammar`; the search path names are resolved
     /// against is supplied by `main`.
     pub fn initRegistries(self: *Providers, gpa: std.mem.Allocator) !void {
         self.grammars = .empty;
@@ -347,9 +347,9 @@ pub const Providers = struct {
     }
 };
 
-// ── `grammar-add` is held shut by ARITY. Keep it that way. ───────────
+// ── `syntax.add-grammar` is held shut by ARITY. Keep it that way. ───────────
 //
-// `grammar-add` hands a caller-supplied directory to `std.DynLib.open`
+// `syntax.add-grammar` hands a caller-supplied directory to `std.DynLib.open`
 // (`core/syntax.zig`'s `loadGrammar`) — arbitrary NATIVE code into this
 // process — and it is an ordinary bound command with no permission gate.
 // For its one real caller that is fine and deliberate: config JS is a
@@ -358,13 +358,13 @@ pub const Providers = struct {
 //
 // For a WASM GUEST it would not be fine, and today a guest cannot reach it
 // — but only by accident. The membrane's command runners top out at TWO
-// arguments (`wl_run_str2`); `grammar-add` declares three, so every guest
+// arguments (`wl_run_str2`); `syntax.add-grammar` declares three, so every guest
 // call dies on `error.ArityMismatch` before `loadGrammar` is reached. That
 // is a sandbox escape held shut by a coincidence of signatures.
 //
 // The census below turns the coincidence into a property, and the test
 // under it fails the moment either side moves: a runner gaining the arity
-// to pass three arguments, or `grammar-add` shrinking to a shape a runner
+// to pass three arguments, or `syntax.add-grammar` shrinking to a shape a runner
 // can already call. Whichever fires, the answer is the same — put a real
 // gate on the door BEFORE it becomes reachable, not after.
 
@@ -458,7 +458,7 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
         }
     }
 
-    // 3. The property itself: `grammar-add` takes more arguments than any
+    // 3. The property itself: `syntax.add-grammar` takes more arguments than any
     //    guest can pass, so a guest call cannot survive `command.run`'s
     //    arity check to reach `std.DynLib.open`.
     var max_guest_args: usize = 0;

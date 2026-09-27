@@ -69,7 +69,6 @@ weft.plugin("make");        // zig build / test into tool buffers (proc)
 weft.plugin("notes");       // capture/open notes, and resolve their embeds (fs)
 weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
 weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
-weft.plugin("windows");     // win-split/vsplit/focus/close/center
 weft.plugin("modes");       // language activation (on focus) + lang-run
 weft.plugin("snippets");    // expand named templates from a file (fs read)
 weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
@@ -174,8 +173,8 @@ weft.set("linenumbers", "style", "relative");
 // repeat over what is visible. (Doom's `char-fold` has no weft equivalent.)
 // An operator-pending snipe (`d z a b`, `c t )`) hands its range to vim's
 // pending operator, and `3sab` reads vim's typed count.
-weft.set("snipe", "operator", "vim-operate");
-weft.set("snipe", "count", "vim-count-take");
+weft.set("snipe", "operator", "vim.operate");
+weft.set("snipe", "count", "vim.count-take");
 weft.set("snipe", "smart-case", "on");
 weft.set("snipe", "scope", "line");
 weft.set("snipe", "repeat-scope", "visible");
@@ -184,14 +183,14 @@ weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust,
 // command, and maximum count. Source commands return newline-delimited lists.
 weft.set("dashboard", "sections", [
   "start\tStart\t\t\t0",
-  "files\tRecent files\tproject-recent\topen\t5",
-  "projects\tProjects\tproject-recent-roots\topen\t4",
+  "files\tRecent files\tproject.recent\tfile.open\t5",
+  "projects\tProjects\tproject.recent-roots\tfile.open\t4",
 ]);
 weft.set("dashboard", "items", [
-  "start\tOpen file\tdashboard-open-file",
-  "start\tNew buffer\tdashboard-new",
+  "start\tOpen file\tfiles.find",
+  "start\tNew buffer\tbuffer.scratch",
 ]);
-weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
+weft.set("collab", "collab.share-presence", "on"); // "off" hides your caret from peers
 // The palette's argument behaviour. A command with parameters can be run two
 // ways: type them next to the name (`listen 7777 edit` — the palette accepts
 // typed text, not only a listed row), or pick the row and be ASKED for each
@@ -229,12 +228,12 @@ weft.set("palette", "signature", "on");     // show each row's <parameters>
 // intention is the config author's choice: the structured-view group (SPC v),
 // persistence, and going back.
 
-weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
+weft.bind("global", "F1", "which-key.show"); // force the hint now, mid-chord
 // The pointer's secondary button presents what the thing under it offers
 // (`weft://here/offers/at-pointer`) as a menu — a row, the text, a git hunk —
 // in any mode, vim's included: the menu's own keys (Up/Down/Return/Escape)
 // are its interaction's, not a mode.
-weft.bind("global", "mouse-3", "offers-menu");
+weft.bind("global", "mouse-3", "offers.menu");
 
 // The keymap derives groups from longer chords. Give those prefixes names for
 // which-key; an unnamed prefix intentionally falls back to "+prefix".
@@ -257,26 +256,26 @@ weft.group("normal", "SPC t", "Text toggles");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
-weft.bind("normal", "SPC SPC", "find-file");   // SPC SPC — find file
-weft.bind("normal", "SPC :", "pick-commands"); // SPC :   — M-x (run a command)
-weft.bind("normal", "SPC .", "find-file");     // SPC .   — find file
-weft.bind("normal", "SPC ,", "buf-pick");      // SPC ,   — switch buffer
+weft.bind("normal", "SPC SPC", "files.find");   // SPC SPC — find file
+weft.bind("normal", "SPC :", "palette.open"); // SPC :   — M-x (run a command)
+weft.bind("normal", "SPC .", "files.find");     // SPC .   — find file
+weft.bind("normal", "SPC ,", "buffer.pick");      // SPC ,   — switch buffer
 
 // SPC f — files. `f s` asks for the persistence INTENTION and falls back to
 // the plain command: in a *git-commit* buffer that commits, in a note it
 // saves.
-weft.bind("normal", "SPC f f", "find-file");
-weft.bind("normal", "SPC f s", ["std.persistence.save", "save"]);
-weft.bind("normal", "SPC f S", "save-as");
-weft.bind("normal", "SPC f r", "project-recent");
-weft.bind("normal", "SPC f d", "files");
+weft.bind("normal", "SPC f f", "files.find");
+weft.bind("normal", "SPC f s", ["std.persistence.save", "file.save"]);
+weft.bind("normal", "SPC f S", "file.save-as");
+weft.bind("normal", "SPC f r", "project.recent");
+weft.bind("normal", "SPC f d", "files.browse");
 
 // SPC b — buffers
-weft.bind("normal", "SPC b b", "buf-pick");
-weft.bind("normal", "SPC b d", "close");
-weft.bind("normal", "SPC b D", "buffer-close-force"); // explicitly discard unsaved edits
-weft.bind("normal", "SPC b n", "buffer-next");
-weft.bind("normal", "SPC b N", "buf-scratch");
+weft.bind("normal", "SPC b b", "buffer.pick");
+weft.bind("normal", "SPC b d", "buffer.close");
+weft.bind("normal", "SPC b D", "buffer.close-force"); // explicitly discard unsaved edits
+weft.bind("normal", "SPC b n", "buffer.next");
+weft.bind("normal", "SPC b N", "buffer.scratch");
 
 // SPC g — git. `git-status` opens the *git* model buffer, which runs its own
 // `git` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
@@ -292,21 +291,21 @@ weft.bind("normal", "SPC b N", "buf-scratch");
 //   x  on a file/hunk discards (confirmed); on a commit opens the reset transient
 //   A/V  cherry-pick / revert the commit under point
 //   P/F/f  push/pull/fetch — flag transients (toggle -f/-u, --rebase, --all/--prune)
-weft.bind("normal", "SPC g g", "git-status");
-weft.bind("normal", "SPC g i", "git-init"); // start version control from the editor
-weft.bind("normal", "SPC g l", "git-log");
-weft.bind("normal", "SPC g d", "git-diff");
-weft.bind("normal", "SPC g D", "git-diff-staged");
-weft.bind("normal-source", "SPC g b", "git-blame");
+weft.bind("normal", "SPC g g", "git.status");
+weft.bind("normal", "SPC g i", "git.init"); // start version control from the editor
+weft.bind("normal", "SPC g l", "git.log");
+weft.bind("normal", "SPC g d", "git.diff");
+weft.bind("normal", "SPC g D", "git.diff-staged");
+weft.bind("normal-source", "SPC g b", "git.blame");
 
 // `.` — repeat the last change (vim dot-repeat). The recorder is core (it
 // records keystrokes through the one dispatch path), so it repeats a change made
 // by ANY plugin — vim operators, autopair, comment, structural — not just vim's.
-weft.bind("normal", ".", "repeat-change");
+weft.bind("normal", ".", "edit.repeat");
 
 // `/` — search in this buffer (vim's search key). consult-line is a fuzzy
 // in-buffer jump: type a pattern, Return lands on the match.
-weft.bind("normal", "/", "consult-line");
+weft.bind("normal", "/", "consult.line");
 
 // Snipe, bound the way Doom binds evil-snipe (both of its modes on):
 //   s S       — two-character snipe forward/back (vim's substitute `s`/`S` go),
@@ -334,10 +333,10 @@ weft.bind("op-pending", ",", "snipe-op-repeat-rev");
 // `C-o` / `C-i` — vim's jumplist. The intention first: a focused view that
 // knows its own history answers it; otherwise the head's jumplist does, which
 // core fills on every move between entries and vim fills on `G`, `gg`, `%`.
-// `q` in a tool is a different verb (leave it) and stays `navigate-back`.
-weft.bind("normal", "C-o", ["std.navigation.back", "jump-back"]);
-weft.bind("normal", "C-i", "jump-forward");
-weft.bind("normal", "SPC s j", "jumplist-pick");
+// `q` in a tool is a different verb (leave it) and stays `buffer.back`.
+weft.bind("normal", "C-o", ["std.navigation.back", "jump.back"]);
+weft.bind("normal", "C-i", "jump.forward");
+weft.bind("normal", "SPC s j", "jump.pick");
 
 // `q<reg>` / `@<reg>` / `@@` — macros are vim's (it binds them); the recorder
 // is core, so a macro replays through every plugin a typed key reaches.
@@ -347,44 +346,44 @@ weft.bind("normal", "SPC s j", "jumplist-pick");
 weft.grant("vim", "clipboard");
 
 // SPC s — search
-weft.bind("normal", "SPC s s", "consult-line");
-weft.bind("normal-source", "SPC s i", "consult-imenu");
-weft.bind("normal", "SPC s p", "grep");
-weft.bind("normal", "SPC s w", "grep-word");
+weft.bind("normal", "SPC s s", "consult.line");
+weft.bind("normal-source", "SPC s i", "consult.imenu");
+weft.bind("normal", "SPC s p", "grep.search");
+weft.bind("normal", "SPC s w", "grep.search-word");
 
 // SPC p — project
-weft.bind("normal", "SPC p p", "project-recent");
-weft.bind("normal", "SPC p f", "find-file");
-weft.bind("normal", "SPC p R", "project-root"); // echo the VCS root (projectile-style)
-weft.bind("normal", "SPC p /", "grep");
+weft.bind("normal", "SPC p p", "project.recent");
+weft.bind("normal", "SPC p f", "files.find");
+weft.bind("normal", "SPC p R", "project.show-root"); // echo the VCS root (projectile-style)
+weft.bind("normal", "SPC p /", "grep.search");
 
 // SPC c — code
-weft.bind("normal-source", "SPC c c", "comment-line");
-weft.bind("normal-source", "SPC c f", "format"); // the format action (below)
-weft.bind("normal-source", "SPC c d", "goto-definition");
-weft.bind("normal-source", "SPC c h", "hover");
-weft.bind("normal-source", "SPC c s", "symbols");
-weft.bind("normal-source", "SPC c F", "lsp-format"); // format via the language server
-weft.bind("normal-source", "SPC c R", "references");
-weft.bind("normal-source", "g r", "references"); // vim-style
-weft.bind("normal-source", "g R", "rename");     // rename the symbol under the cursor
-weft.bind("normal-source", "SPC c k", "signature-help");
-weft.bind("normal-source", "SPC c i", "inlay-hints");
-weft.bind("normal-source", "SPC c a", "code-actions");
-weft.bind("normal-source", "] d", "next-diagnostic"); // vim-style diagnostic navigation
-weft.bind("normal-source", "[ d", "prev-diagnostic");
-weft.bind("normal-source", "K", "hover");        // vim-style: K shows hover
-weft.bind("normal-source", "SPC c e", "ts-expand-selection");
-weft.bind("normal-source", "SPC c n", "ts-select-node");
-weft.bind("normal-source", "SPC c b", "make-build");
-weft.bind("normal-source", "SPC c t", "make-test");
-weft.bind("normal-source", "SPC c r", "lang-run");
-weft.bind("normal-source", "SPC c x", "run-line");
+weft.bind("normal-source", "SPC c c", "comment.toggle-line");
+weft.bind("normal-source", "SPC c f", "plugin.code.format"); // the format action (below)
+weft.bind("normal-source", "SPC c d", "lsp.goto-definition");
+weft.bind("normal-source", "SPC c h", "lsp.hover");
+weft.bind("normal-source", "SPC c s", "lsp.pick-symbol");
+weft.bind("normal-source", "SPC c F", "lsp.format"); // format via the language server
+weft.bind("normal-source", "SPC c R", "lsp.references");
+weft.bind("normal-source", "g r", "lsp.references"); // vim-style
+weft.bind("normal-source", "g R", "lsp.rename");     // rename the symbol under the cursor
+weft.bind("normal-source", "SPC c k", "lsp.signature-help");
+weft.bind("normal-source", "SPC c i", "lsp.toggle-inlay-hints");
+weft.bind("normal-source", "SPC c a", "lsp.code-actions");
+weft.bind("normal-source", "] d", "lsp.next-diagnostic"); // vim-style diagnostic navigation
+weft.bind("normal-source", "[ d", "lsp.prev-diagnostic");
+weft.bind("normal-source", "K", "lsp.hover");        // vim-style: K shows hover
+weft.bind("normal-source", "SPC c e", "ts.expand-selection");
+weft.bind("normal-source", "SPC c n", "ts.select-node");
+weft.bind("normal-source", "SPC c b", "make.build");
+weft.bind("normal-source", "SPC c t", "make.test");
+weft.bind("normal-source", "SPC c r", "modes.run");
+weft.bind("normal-source", "SPC c x", "run.line");
 
 // Completion — trigger the at-caret popup (buffer-word + LSP race + merge-rank).
 // C-SPC from insert (where you're typing) and normal (browse from rest).
-weft.bind("insert", "C-SPC", "complete");
-weft.bind("normal", "C-SPC", "complete");
+weft.bind("insert", "C-SPC", "complete.show");
+weft.bind("normal", "C-SPC", "complete.show");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
 // The dispatch middle tier. weft.action(name) declares an intent a key binds
@@ -393,18 +392,18 @@ weft.bind("normal", "C-SPC", "complete");
 // script run different commands, and any language plugin can weft.provide a
 // new provider without touching this keymap. `eval` unifies the SPC-c r/x
 // split (lang-run vs run-line) into one language-aware key; a buffer with no
-// provider echoes "no eval provider here". `:explain-binding eval` says which
+// provider echoes "no eval provider here". `:action.explain eval` says which
 // provider wins here and why.
-weft.action("eval");
-weft.provide("eval", {}, "run-line");                 // default: run the current line
-weft.provide("eval", { lang: "zig" }, "make-build");  // a .zig buffer builds the project
-weft.provide("eval", { lang: "py" }, "lang-run");     // python: the language runner
-weft.bind("normal-source", "SPC e", "eval");          // SPC e — eval/run, by language
+weft.action("plugin.code.run");
+weft.provide("plugin.code.run", {}, "run.line");                 // default: run the current line
+weft.provide("plugin.code.run", { lang: "zig" }, "make.build");  // a .zig buffer builds the project
+weft.provide("plugin.code.run", { lang: "py" }, "modes.run");     // python: the language runner
+weft.bind("normal-source", "SPC e", "plugin.code.run");          // SPC e — eval/run, by language
 
 // format is likewise an action: fmt handles most languages by extension, but a
-// language plugin can weft.provide("format", {lang:"…"}, "…") to override.
-weft.action("format");
-weft.provide("format", {}, "format-buffer");
+// language plugin can weft.provide("plugin.code.format", {lang:"…"}, "…") to override.
+weft.action("plugin.code.format");
+weft.provide("plugin.code.format", {}, "fmt.format-buffer");
 
 // ── SPC o — tools, and the INSTANCING surface ────────────────────────
 // A tool that holds state is instantiable: each start mints its own buffer
@@ -412,60 +411,60 @@ weft.provide("format", {}, "format-buffer");
 // instances never share a sink. A send routes to the instance whose buffer is
 // focused, else the most recent — never to "the current one". Lowercase
 // starts an instance here; uppercase talks to the focused one.
-weft.bind("normal", "SPC o d", "files");
-weft.bind("normal", "SPC o e", "direnv-status");
-weft.bind("normal", "SPC o r", "repl-start");
-weft.bind("normal", "SPC o R", "repl-send-line");
-weft.bind("normal", "SPC o q", "repl-quit");
-weft.bind("normal", "SPC o c", "console-open");
-weft.bind("normal", "SPC o C", "console-send");
-weft.bind("normal", "SPC o a", "llm-ask-line"); // one-shot: each ask is its own instance
-weft.bind("normal", "SPC o h", "http-get");     // fetch a URL into its own *http* buffer
-weft.bind("normal", "SPC o p", "problems");     // the diagnostics list, in the bottom panel
-weft.bind("normal", "SPC o t", "terminal");     // the shell, in the bottom panel
-weft.bind("normal", "SPC o P", "panel-toggle"); // hide or show whichever the panel holds
+weft.bind("normal", "SPC o d", "files.browse");
+weft.bind("normal", "SPC o e", "direnv.status");
+weft.bind("normal", "SPC o r", "repl.start");
+weft.bind("normal", "SPC o R", "repl.send-line");
+weft.bind("normal", "SPC o q", "repl.quit");
+weft.bind("normal", "SPC o c", "console.open");
+weft.bind("normal", "SPC o C", "console.send");
+weft.bind("normal", "SPC o a", "llm.ask-line"); // one-shot: each ask is its own instance
+weft.bind("normal", "SPC o h", "http.get");     // fetch a URL into its own *http* buffer
+weft.bind("normal", "SPC o p", "problems.open");     // the diagnostics list, in the bottom panel
+weft.bind("normal", "SPC o t", "terminal.open");     // the shell, in the bottom panel
+weft.bind("normal", "SPC o P", "panel.toggle"); // hide or show whichever the panel holds
 
-// SPC a — coding agents (ACP). Each `agent-start` is a fresh conversation:
+// SPC a — coding agents (ACP). Each `agent.start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo
 // separates one agent's edits from another's. Set weft.set("acp", "cmd", …)
 // above first; the launch command is yours, weft assumes nothing.
-weft.bind("normal", "SPC a a", "agent-start");
-weft.bind("normal", "SPC a s", "agent-send");  // send this line to the focused conversation
-weft.bind("normal", "SPC a f", "agent-focus"); // choose which conversation that is
+weft.bind("normal", "SPC a a", "agent.start");
+weft.bind("normal", "SPC a s", "agent.send");  // send this line to the focused conversation
+weft.bind("normal", "SPC a f", "agent.focus"); // choose which conversation that is
 
 // SPC d — debug. Breakpoints are gutter markers the debug plugin owns;
 // run/step/inspect are the DAP session (dap.js) over the adapter you named.
 // F5/F9/F10/F11 are the IDE conventions; the SPC d leaves mirror them.
-weft.bind("normal-source", "SPC d b", "debug-toggle-breakpoint");
-weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
-weft.bind("normal", "SPC d l", "debug-list-breakpoints");
-weft.bind("normal", "SPC d d", "debug-start");
-weft.bind("normal", "SPC d r", "debug-continue");
-weft.bind("normal", "SPC d n", "debug-step-over");
-weft.bind("normal", "SPC d i", "debug-step-into");
-weft.bind("normal", "SPC d o", "debug-step-out");
-weft.bind("normal", "SPC d q", "debug-stop");
-weft.bind("normal", "F5", "debug-continue");
-weft.bind("normal-source", "F9", "debug-toggle-breakpoint");
-weft.bind("normal", "F10", "debug-step-over");
-weft.bind("normal", "F11", "debug-step-into");
+weft.bind("normal-source", "SPC d b", "debug.toggle-breakpoint");
+weft.bind("normal", "SPC d c", "debug.clear-breakpoints");
+weft.bind("normal", "SPC d l", "debug.list-breakpoints");
+weft.bind("normal", "SPC d d", "debug.start");
+weft.bind("normal", "SPC d r", "debug.continue");
+weft.bind("normal", "SPC d n", "debug.step-over");
+weft.bind("normal", "SPC d i", "debug.step-into");
+weft.bind("normal", "SPC d o", "debug.step-out");
+weft.bind("normal", "SPC d q", "debug.stop");
+weft.bind("normal", "F5", "debug.continue");
+weft.bind("normal-source", "F9", "debug.toggle-breakpoint");
+weft.bind("normal", "F10", "debug.step-over");
+weft.bind("normal", "F11", "debug.step-into");
 
 // ── SPC n — notes and EMBEDS ─────────────────────────────────────────
-// `notes-capture` appends the current line to the notes file; `notes-capture-
+// `notes.capture` appends the current line to the notes file; `notes-capture-
 // here` appends a link to where you are, as an embed line:
 //
 //     @embed weft://here/file/src/core/Head.zig?at=1024
 //
-// That text is both the storage form and the fallback form. `notes-embeds`
+// That text is both the storage form and the fallback form. `notes.show-embeds`
 // resolves every embed in the focused note and renders each live beside its
 // own bytes; one that cannot resolve (no grant, gone, no provider) shows its
 // reason instead and never errors the note. Return on an embed line opens
 // what it designates — the same `std.target.activate` as everywhere else.
-weft.bind("normal", "SPC n n", "notes-open");
-weft.bind("normal", "SPC n c", "notes-capture");
-weft.bind("normal", "SPC n h", "notes-capture-here");
-weft.bind("normal", "SPC n e", "notes-embeds");
-weft.bind("normal", "SPC n E", "notes-embeds-off");
+weft.bind("normal", "SPC n n", "notes.open");
+weft.bind("normal", "SPC n c", "notes.capture");
+weft.bind("normal", "SPC n h", "notes.capture-here");
+weft.bind("normal", "SPC n e", "notes.show-embeds");
+weft.bind("normal", "SPC n E", "notes.hide-embeds");
 
 // ── SPC C — collaboration ────────────────────────────────────────────
 // `share` announces the active buffer to every peer. With a PRESET it also
@@ -478,7 +477,7 @@ weft.bind("normal", "SPC n E", "notes-embeds-off");
 //     :share pair              :share-presence off      :share-fs read
 //     :listen 7000 edit        :connect host:7000       :grant <fp> edit
 //
-// `share-fs` selects which surfaces of a `--share-root` peers hold
+// `collab.share-fs` selects which surfaces of a `--share-root` peers hold
 // (hierarchy | bytes | write, or none/read/rw). Presence is separate from
 // sharing a document: it defaults on (see weft.set("collab", …) above) and
 // `off` retracts the caret peers are already rendering.
@@ -497,47 +496,47 @@ weft.bind("normal", "SPC n E", "notes-embeds-off");
 //
 // The buffer that was active when `listen` began is already the shared one;
 // `share` there answers "already shared" rather than doing it twice.
-weft.bind("normal", "SPC C s", "share");
-weft.bind("normal", "SPC C o", "open-shared"); // open a buffer a peer shared
-weft.bind("normal", "SPC C f", "peer-files");  // browse the peer's shared root
-weft.bind("normal", "SPC C p", "peers");       // fingerprints, SAS words, trust
-weft.bind("normal", "SPC C l", "listen");      // asks: port, then access grade
-weft.bind("normal", "SPC C c", "connect");     // asks: host:port
-weft.bind("normal", "SPC C x", "disconnect");
+weft.bind("normal", "SPC C s", "collab.share");
+weft.bind("normal", "SPC C o", "collab.open-shared"); // open a buffer a peer shared
+weft.bind("normal", "SPC C f", "collab.peer-files");  // browse the peer's shared root
+weft.bind("normal", "SPC C p", "collab.peers");       // fingerprints, SAS words, trust
+weft.bind("normal", "SPC C l", "collab.listen");      // asks: port, then access grade
+weft.bind("normal", "SPC C c", "collab.connect");     // asks: host:port
+weft.bind("normal", "SPC C x", "collab.disconnect");
 
 // SPC w — window. Split/close via the windows plugin; focus + move go
 // straight to the core window-layout commands (a real recursive split
 // tree), so h/j/k/l walk panes and H/J/K/L swap them, vim-style. The sidebar
 // is out of the cycling rotation by declaration, so directional focus is how
 // you reach it.
-weft.bind("normal", "SPC w v", "win-vsplit");
-weft.bind("normal", "SPC w s", "win-split");
-weft.bind("normal", "SPC w w", "win-focus");
-weft.bind("normal", "SPC w c", "win-center");
-weft.bind("normal", "SPC w o", "win-close");
-weft.bind("normal", "SPC w q", "window-close");
-weft.bind("normal", "SPC w h", "window-focus-left");
-weft.bind("normal", "SPC w j", "window-focus-down");
-weft.bind("normal", "SPC w k", "window-focus-up");
-weft.bind("normal", "SPC w l", "window-focus-right");
-weft.bind("normal", "SPC w H", "window-move-left");
-weft.bind("normal", "SPC w J", "window-move-down");
-weft.bind("normal", "SPC w K", "window-move-up");
-weft.bind("normal", "SPC w L", "window-move-right");
+weft.bind("normal", "SPC w v", "window.split-right");
+weft.bind("normal", "SPC w s", "window.split-below");
+weft.bind("normal", "SPC w w", "window.focus-next");
+weft.bind("normal", "SPC w c", "scroll.center-line");
+weft.bind("normal", "SPC w o", "window.close");
+weft.bind("normal", "SPC w q", "window.close");
+weft.bind("normal", "SPC w h", "window.focus-left");
+weft.bind("normal", "SPC w j", "window.focus-down");
+weft.bind("normal", "SPC w k", "window.focus-up");
+weft.bind("normal", "SPC w l", "window.focus-right");
+weft.bind("normal", "SPC w H", "window.move-left");
+weft.bind("normal", "SPC w J", "window.move-down");
+weft.bind("normal", "SPC w K", "window.move-up");
+weft.bind("normal", "SPC w L", "window.move-right");
 
 // SPC q — quit
-weft.bind("normal", "SPC q q", "quit");
+weft.bind("normal", "SPC q q", "app.quit");
 
 // SPC h — help. The palette lists commands AND the live offers the focused
 // entry publishes, each attributed to its provider, so it doubles as "what
-// can I do here". `grants-show` lists every authority row this session ever
+// can I do here". `grants.show` lists every authority row this session ever
 // minted, alive or revoked.
-weft.bind("normal", "SPC h h", "pick-commands");
-weft.bind("normal", "SPC h g", "grants-show");
+weft.bind("normal", "SPC h h", "palette.open");
+weft.bind("normal", "SPC h g", "grants.show");
 
 // SPC t — toggle
-weft.bind("normal", "SPC t w", "trim-trailing-buffer");
-weft.bind("normal-source", "SPC t c", "comment-line");
+weft.bind("normal", "SPC t w", "whitespace.trim-buffer");
+weft.bind("normal-source", "SPC t c", "comment.toggle-line");
 
 // ── SPC v — structured views ─────────────────────────────────────────
 // The structured-view group lives in a fragment, config/semantic.js, because
@@ -548,20 +547,20 @@ weft.bind("normal-source", "SPC t c", "comment-line");
 weft.use("semantic");
 
 // Numbers: vim-style increment/decrement.
-weft.bind("normal", "C-a", "increment-number");
-weft.bind("normal", "C-x", "decrement-number");
+weft.bind("normal", "C-a", "numbers.increment");
+weft.bind("normal", "C-x", "numbers.decrement");
 
 // Auto-close pairs while typing (insert mode).
-weft.bind("insert", "parenleft", "pair-paren");
-weft.bind("insert", "braceleft", "pair-brace");
-weft.bind("insert", "bracketleft", "pair-bracket");
-weft.bind("insert", "quotedbl", "pair-quote");
-weft.bind("insert", "apostrophe", "pair-quote-single"); // ' pairs, except in lisps (a quote)
+weft.bind("insert", "parenleft", "autopair.open-paren");
+weft.bind("insert", "braceleft", "autopair.open-brace");
+weft.bind("insert", "bracketleft", "autopair.open-bracket");
+weft.bind("insert", "quotedbl", "autopair.quote-double");
+weft.bind("insert", "apostrophe", "autopair.quote-single"); // ' pairs, except in lisps (a quote)
 // Type-over: typing the closing delimiter steps over an auto-inserted one, so
 // typing balanced `f(x)` stays `f(x)` instead of `f(x))`.
-weft.bind("insert", "parenright", "pair-close-paren");
-weft.bind("insert", "braceright", "pair-close-brace");
-weft.bind("insert", "bracketright", "pair-close-bracket");
+weft.bind("insert", "parenright", "autopair.close-paren");
+weft.bind("insert", "braceright", "autopair.close-brace");
+weft.bind("insert", "bracketright", "autopair.close-bracket");
 
 // ── Theme ────────────────────────────────────────────────────────────
 // TWO FAMILIES, and the namespace says which. `weft.set(ns, key, value)` binds
@@ -572,7 +571,7 @@ weft.bind("insert", "bracketright", "pair-close-bracket");
 //   theme/<role>    how a ROW ROLE reads  — a style class, read by projection
 //
 // A whole colorscheme is just a block of the first kind — a fragment you
-// weft.use(); the runtime `set-color` command binds the same slot live, at a
+// weft.use(); the runtime `theme.set-color` command binds the same slot live, at a
 // tier that outranks this file.
 weft.set("palette", "accent", "#8ec07c");
 weft.set("palette", "cursor", "#fabd2f");

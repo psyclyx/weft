@@ -44,7 +44,7 @@
 //! Allocation discipline: `resolveOne` — the hot-path entry (action dispatch
 //! rides it every keystroke, see action.zig) — never allocates. `eligible`/
 //! `explain` allocate through a caller-supplied `Allocator` (off the hot
-//! path: load-time binding, or an explicit `explain-binding` command).
+//! path: load-time binding, or an explicit `action.explain` command).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -74,7 +74,7 @@ test "e2e/notes: a note's directory and file embeds render, and typing never pay
 
     // Opening the note is the whole interaction: activation drives the round,
     // so nothing in the note says "resolve me".
-    ed.runStr("open", "journal.md");
+    ed.runStr("file.open", "journal.md");
     ed.settle(6);
     try t.expectEqual(@as(usize, 2), embedCount(&ed));
     const listing = bodyOf(&ed, 0);
@@ -94,7 +94,7 @@ test "e2e/notes: a note's directory and file embeds render, and typing never pay
     ed.press("x", "x");
     ed.press("Escape", "");
     try t.expectEqual(@as(usize, 0), embedCount(&ed));
-    ed.run("notes-embeds");
+    ed.run("notes.show-embeds");
     try t.expectEqual(@as(usize, 2), embedCount(&ed));
 
     // Typing latency: the note with two live embeds against an equivalent
@@ -113,11 +113,11 @@ fn typingMedian(ed: *Editor, path: []const u8) !u64 {
     const iters = 20;
     var samples: [iters]u64 = undefined;
     var medians: [runs]u64 = undefined;
-    ed.runStr("open", path);
+    ed.runStr("file.open", path);
     ed.settle(6);
     for (&medians) |*m| {
         ed.press("Escape", "");
-        ed.run("notes-embeds");
+        ed.run("notes.show-embeds");
         ed.press("o", "");
         for (&samples) |*s| s.* = ed.pressTimed("x", "x");
         m.* = latency.statsOf(&samples).median_ns;
@@ -140,7 +140,7 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
 
     try seed(&proj, gpa, "p=\"$(pwd -P)\"; printf '@embed weft://here/dir%s/tree?lines=4\\n@embed weft://here/file%s/readme.md\\n@embed weft://here/commit/deadbeefcafe\\n' \"$p\" \"$p\" > journal.md");
 
-    ed.runStr("open", "journal.md");
+    ed.runStr("file.open", "journal.md");
     ed.settle(6);
     try t.expectEqual(@as(usize, 3), embedCount(&ed));
     try t.expect(!has(bodyOf(&ed, 0), "gamma.txt"));
@@ -152,13 +152,13 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
 
     // The world moves under the note.
     gpa.free(try proj.oracle("printf 'g\\n' > tree/gamma.txt"));
-    ed.run("notes-embeds");
+    ed.run("notes.show-embeds");
     try t.expect(has(bodyOf(&ed, 0), "gamma.txt"));
 
     // The world goes away. Each embed degrades on its own — the note still
     // reads as itself, and the host presentation never failed.
     gpa.free(try proj.oracle("rm -rf tree readme.md"));
-    ed.run("notes-embeds");
+    ed.run("notes.show-embeds");
     try t.expectEqual(@as(usize, 3), embedCount(&ed));
     try t.expect(has(bodyOf(&ed, 0), "unresolved:"));
     try t.expect(has(bodyOf(&ed, 0), "no such directory"));
@@ -192,21 +192,21 @@ test "e2e/notes: a captured location round-trips through the note and back" {
 
     gpa.free(try proj.oracle("printf 'one\\ntwo\\nthree\\nfour\\n' > main.zig"));
 
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.settle(4);
     ed.chord("j j w");
     const captured = ed.buffers.active().textEditor().?.cursorOffset();
     try t.expect(captured > 0);
-    ed.runStr("notes-capture-here", "journal.md");
+    ed.runStr("notes.capture-here", "journal.md");
     ed.settle(2);
 
     // Close everything the capture knew about: the round trip must survive on
     // the note's bytes alone.
-    ed.run("buffer-close");
+    ed.run("buffer.close-unmodified");
     ed.settle(2);
     try t.expect(!std.mem.endsWith(u8, ed.bufferName(), "main.zig"));
 
-    ed.runStr("notes-open", "journal.md");
+    ed.runStr("notes.open", "journal.md");
     ed.settle(6);
     const note = try ed.textAlloc();
     defer gpa.free(note);

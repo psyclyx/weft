@@ -170,7 +170,7 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
     try viewports.declare(gpa, "diag-b", .{ .dock = .right, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 30 });
     try viewports.present(gpa, "diag-a", .{ .subject = .{ .text = a } });
     try viewports.present(gpa, "diag-b", .{ .subject = .{ .text = b } });
-    ed.runStr("open", "q.txt");
+    ed.runStr("file.open", "q.txt");
     ed.applyWindow();
     ed.applyWindow();
 
@@ -438,7 +438,7 @@ test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click
 
     // The grammar parses off the frame thread; frames until the crumbs show.
     var want_buf: [64]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "breadcrumbs-jump {d}", .{fn_at});
+    const want = try std.fmt.bufPrint(&want_buf, "breadcrumbs.jump {d}", .{fn_at});
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     const at = while (core.task.nowNs() < deadline) {
         try frame(ed);
@@ -446,7 +446,7 @@ test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click
         std.Thread.yield() catch {};
     } else return error.NoCrumbs;
     // The outer crumb is there too, and names the struct.
-    try t.expect(ed.pointAtStatusCommand("breadcrumbs-jump 0") != null);
+    try t.expect(ed.pointAtStatusCommand("breadcrumbs.jump 0") != null);
 
     // Clicking the inner crumb runs its command: the caret goes to `fn`.
     ed.click(at);
@@ -462,9 +462,9 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     const ed = &app.ed;
 
     try ide.openFile(ed, "x.txt", "x\n");
-    ed.runStr("buffer-create", "held");
+    ed.runStr("buffer.create", "held");
     const held = ed.buffers.active_id;
-    ed.runStr("viewport-take", "panel");
+    ed.runStr("viewport.take", "panel");
     ed.applyWindow();
     try t.expectEqualStrings("held", (panelEntry(ed) orelse return error.PanelNotShown).name);
 
@@ -473,12 +473,12 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     ed.press("C-j", "");
     ed.applyWindow();
     try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
-    _ = try core.command.run(ed.commands, ed.ctx, "buffer-switch", &.{.{ .integer = held }});
-    ed.run("buffer-close");
+    _ = try core.command.run(ed.commands, ed.ctx, "buffer.switch", &.{.{ .integer = held }});
+    ed.run("buffer.close-unmodified");
     try t.expect(ed.buffers.get(held) == null);
-    ed.runStr("buffer-create", "intruder");
+    ed.runStr("buffer.create", "intruder");
     try t.expectEqual(held, ed.buffers.active_id);
-    ed.runStr("open", "x.txt");
+    ed.runStr("file.open", "x.txt");
 
     // Shown again, the panel must not claim the intruder as what it held.
     ed.press("C-j", "");

@@ -53,7 +53,7 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     const root_a = try proj.path("repo-a");
     defer gpa.free(root_a);
     try chdirTo(root_a);
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
 
     // Change something in repo A only.
@@ -70,7 +70,7 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     const root_b = try proj.path("repo-b");
     defer gpa.free(root_b);
     try chdirTo(root_b);
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git:2*", "Branch:"));
     try t.expect(ed.buffers.findByName("*git*") != null);
     {
@@ -142,9 +142,9 @@ test "e2e/git-gates: G1b seven repos are all live, and a draft opened against th
         defer gpa.free(root);
         try chdirTo(root);
     }
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "f1.txt"));
-    ed.run("git-commit");
+    ed.run("git.commit");
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     ed.press("i", "");
     ed.typeText("G1b: committed to the first repository");
@@ -157,7 +157,7 @@ test "e2e/git-gates: G1b seven repos are all live, and a draft opened against th
         const root = try proj.path(try std.fmt.bufPrint(&leaf, "r{d}", .{n}));
         defer gpa.free(root);
         try chdirTo(root);
-        ed.run("git-status");
+        ed.run("git.status");
         var name: [16]u8 = undefined;
         var needle: [16]u8 = undefined;
         try t.expect(drainToolContains(
@@ -228,7 +228,7 @@ test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wron
         gpa.free(out);
     }
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "f.txt"));
 
     // Navigate point onto the hunk header (the first `@@` line) in the FIRST
@@ -306,7 +306,7 @@ test "e2e/git-gates: G3 no git mode is locked" {
         const out = try proj.oracle(cmd);
         gpa.free(out);
     }
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
     try t.expectEqualStrings("git", ed.mode());
 
@@ -354,7 +354,7 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
         gpa.free(out);
     }
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
     ed.press("c", ""); // git-commit-dispatch
     ed.press("c", ""); // the commit offer → a draft ENTRY
@@ -367,7 +367,7 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
     ed.press("Escape", "");
 
     // Switch away to an ordinary buffer and back — a draft is just an entry.
-    ed.runStr("buffer-create", "*scratch-g4*");
+    ed.runStr("buffer.create", "*scratch-g4*");
     try h.focusBuffer(&ed, "*git-commit*");
     {
         const msg = try ed.textAlloc();
@@ -392,20 +392,20 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
         const out = try proj.oracle("printf 'y\\n' >> f.txt && git add f.txt");
         gpa.free(out);
     }
-    ed.run("git-status");
+    ed.run("git.status");
     // `f.txt` is in the buffer from the FIRST status already, so the needle
     // proves nothing about this one: wait for the refresh's own subprocess to
     // land, or its arrival re-focuses the status buffer over the draft below.
     try t.expect(drainToolContains(&ed, "*git*", "f.txt"));
     try t.expect(h.drainLoopIdle(&ed));
-    ed.run("git-commit");
+    ed.run("git.commit");
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     ed.press("i", "");
     ed.typeText("throwaway draft");
     ed.press("Escape", "");
 
     // `close` is an ACTION, so the draft's own provider answers it: it asks.
-    ed.run("close");
+    ed.run("buffer.close");
     try t.expect(ed.pick.active);
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
 
@@ -420,10 +420,10 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
     }
 
     // Answering "yes" is what drops it.
-    ed.run("close");
+    ed.run("buffer.close");
     try t.expect(ed.pick.active);
-    ed.run("pick-next");
-    ed.run("pick-accept");
+    ed.run("pick.next");
+    ed.run("pick.accept");
     ed.settle(2);
     try t.expect(ed.buffers.findByName("*git-commit*") == null);
 }
@@ -458,7 +458,7 @@ test "e2e/git-gates: G8 a working tree past the old caps renders whole" {
         gpa.free(out);
     }
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "f300.txt"));
 
     // The first and the last are both there — not a prefix of the tree.

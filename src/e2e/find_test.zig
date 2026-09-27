@@ -58,7 +58,7 @@ fn expectText(ed: *Editor, want: []const u8) !void {
 
 fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     try t.expectEqualStrings("ide", ed.mode());
 }
 

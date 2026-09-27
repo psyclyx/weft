@@ -114,7 +114,7 @@ pub fn validateClassName(name: []const u8) NameError!void {
 
 /// Does a bound name REFER to an intention rather than name a command?
 /// One grammar (doc/configuration.md §5.1): the §5.1 spelling IS the
-/// reference, so a flat name (`insert-newline`) and a dotted name under an
+/// reference, so a flat name (`edit.insert-newline`) and a dotted name under an
 /// unknown root (`git.commit`) both stay commands, and there is no second
 /// sigil to keep in sync with the validator above.
 pub fn isIntentionName(name: []const u8) bool {

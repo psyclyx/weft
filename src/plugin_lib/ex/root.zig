@@ -21,8 +21,9 @@
 //! the `:` line's signature help comes from — `cfg.hint` below trails the
 //! typed line with the parameters it has not supplied yet.
 //!
-//! Instantiated per editor with its own mode names (`Ex("normal","ex")` for vim,
-//! `Ex("helix-normal","helix-ex")` for helix). Each guest is a separate wasm
+//! Instantiated per editor with its own mode names and command namespace
+//! (`Ex("normal", "ex", "vim.ex")` for vim, `Ex("helix-normal", "helix-ex",
+//! "helix.ex")` for helix). Each guest is a separate wasm
 //! module, so the module-level scratch below never crosses editors.
 
 const std = @import("std");
@@ -47,13 +48,14 @@ fn echoFmt(comptime fmt: []const u8, args: anytype) void {
 
 // ── The command line: a prompt, plus what to do with the line ──────────────
 /// A `:` command line for an editor whose resting mode is `normal_mode` and
-/// whose command-line keymap mode is `ex_mode`.
+/// whose command-line keymap mode is `ex_mode`; its commands are named
+/// `<id>-accept`, `<id>-type`, … and its argument prompt's `<id>-arg-*`.
 ///
 /// The whole minibuffer half is `prompt.Prompt` now — `:` is a prompt whose
 /// label is ":" and whose accept handler is `exec`. Every key that gets you
 /// out of it is the one that gets you out of any other prompt in the editor,
 /// because there is only one implementation left to disagree with.
-pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
+pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8, comptime id: []const u8) type {
     return struct {
         const Self = @This();
 
@@ -62,12 +64,14 @@ pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
         /// legal thing to type — it becomes "port?", "access?", run — rather
         /// than a silent arity refusal.
         pub const asker = invoke.Invoker(.{
-            .name = ex_mode ++ "-arg",
+            .name = id ++ "-arg",
+            .mode = ex_mode ++ "-arg",
             .resting = normal_mode,
         });
 
         pub const line = prompt.Prompt(.{
-            .name = ex_mode,
+            .name = id,
+            .mode = ex_mode,
             .resting = normal_mode,
             .capacity = LINE_CAP,
             .on_accept = struct {
@@ -161,21 +165,21 @@ fn execWith(comptime Asker: type, line: []const u8) void {
 /// The vim-owned classic commands. Returns true if `kw` matched (and ran).
 fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
     if (eqAny(kw, &.{ "w", "wr", "write" })) {
-        if (args.len > 0) weft.runStr("save-as", args) else weft.run("save");
+        if (args.len > 0) weft.runStr("file.save-as", args) else weft.run("file.save");
         return true;
     }
     // wa/wall save the buffer (weft's save is the active buffer only — see note).
     if (eqAny(kw, &.{ "wa", "wall" })) {
-        weft.run("save");
+        weft.run("file.save");
         return true;
     }
     if (eqAny(kw, &.{ "wq", "x", "xit", "wqa", "wqall", "xa", "xall" })) {
-        if (args.len > 0) weft.runStr("save-as", args) else weft.run("save");
-        weft.run("quit");
+        if (args.len > 0) weft.runStr("file.save-as", args) else weft.run("file.save");
+        weft.run("app.quit");
         return true;
     }
     if (eqAny(kw, &.{ "q", "quit", "qa", "qall", "quita", "quitall" })) {
-        weft.run("quit");
+        weft.run("app.quit");
         return true;
     }
     if (eqAny(kw, &.{ "e", "ed", "edit", "o", "op", "open" })) {
@@ -197,24 +201,24 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
         return true;
     }
     if (eqAny(kw, &.{ "clo", "close" })) {
-        weft.run("window-close");
+        weft.run("window.close");
         return true;
     }
     if (eqAny(kw, &.{ "bd", "bdel", "bdelete" })) {
-        weft.run("buffer-close");
+        weft.run("buffer.close-unmodified");
         return true;
     }
     if (eqAny(kw, &.{ "sp", "spl", "split", "new", "hsp", "hsplit" })) {
-        weft.run("window-split");
+        weft.run("window.split-below");
         return true;
     }
     if (eqAny(kw, &.{ "vs", "vsp", "vsplit", "vnew" })) {
-        weft.run("window-vsplit");
+        weft.run("window.split-right");
         return true;
     }
     // No hlsearch in core: clear the selection (the nearest visual analogue).
     if (eqAny(kw, &.{ "noh", "nohl", "nohlsearch" })) {
-        weft.run("clear-selection");
+        weft.run("selection.clear");
         weft.echo("noh");
         return true;
     }

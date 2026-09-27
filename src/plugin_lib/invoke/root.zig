@@ -3,7 +3,7 @@
 //! Two doors in this editor take a command from a person: the palette (pick a
 //! name) and the `:` line (type a name and some arguments). Both used to lose
 //! on the same rock. The palette ran EVERY command with zero arguments, so
-//! `listen`, `connect`, `grant`, `share-fs` — every command that takes
+//! `listen`, `connect`, `grant`, `collab.share-fs` — every command that takes
 //! something — refused on arity into a discarded error and looked, from the
 //! outside, exactly like a command that does nothing. The `:` line could pass
 //! arguments but not ask for them, so `:listen` with the port left off did the
@@ -37,18 +37,21 @@ const prompt = @import("weft_prompt");
 /// instead of assembled and then rejected at the membrane.
 ///
 /// Two is not a buffer size. `app/providers.zig`'s census gate rests on no
-/// guest passing three arguments to a command, because `grammar-add` takes
+/// guest passing three arguments to a command, because `syntax.add-grammar` takes
 /// three and opens a caller-named directory with them. Every command a person
-/// invokes interactively fits; `grammar-add` is config's to call, from the
+/// invokes interactively fits; `syntax.add-grammar` is config's to call, from the
 /// trusted plane, and is meant to stay there.
 pub const max_args = 2;
 const NAME_CAP = 128;
 const ARG_CAP = 512;
 
 pub const Config = struct {
-    /// The prompt mode this invoker asks in, and the prefix of the five
-    /// command names it registers. One per instantiation.
+    /// The prefix of the five command names its prompt registers, in the id
+    /// grammar (`palette.arg`); the prompt's mode derives from it
+    /// (`weft_prompt`'s `Config.name`). One per instantiation.
     name: []const u8,
+    /// The prompt's keymap mode, when it is not the one `name` spells.
+    mode: ?[]const u8 = null,
     /// Where the argument prompt returns to. Null — right for a service — is
     /// "the entry's own resting mode"; a grammar that owns a mode names it.
     /// See `weft_prompt`'s `Config.resting` for why that distinction matters.
@@ -99,6 +102,7 @@ pub fn Invoker(comptime cfg: Config) type {
         /// not a syntax to get right in one line.
         pub const ask_line = prompt.Prompt(.{
             .name = cfg.name,
+            .mode = cfg.mode,
             .resting = cfg.resting,
             .capacity = ARG_CAP,
             // Wrapped rather than referenced directly: `onArg` reopens this
@@ -136,7 +140,7 @@ pub fn Invoker(comptime cfg: Config) type {
 
         /// Invoke a whole typed line: `name arg…`. The arguments are split
         /// against what the command DECLARES, so the last one absorbs the rest
-        /// of the line (`:llm-ask write me a poem` is one argument, `:grant fp
+        /// of the line (`:llm.ask write me a poem` is one argument, `:grant fp
         /// edit` is two) instead of against a fixed guess.
         pub fn invokeLine(text: []const u8) void {
             const trimmed = trim(text);

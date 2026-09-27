@@ -3,7 +3,7 @@
 //! asynchronously with `rg`'s matches via the native `proc` surface — the
 //! output lands authored as this plugin's peer, off the frame thread. perms
 //! `{proc, timer}`; grant_max edit (it only writes its own tool buffer).
-//! `grep` takes an explicit pattern arg; `grep-word` lifts the identifier under
+//! `grep` takes an explicit pattern arg; `grep.search-word` lifts the identifier under
 //! the cursor and searches for that — search-for-the-thing-I'm-on.
 
 const std = @import("std");
@@ -27,10 +27,10 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "grep", .call = grep, .arity = .whole, .params = "pattern", .summary = "search the project for a pattern, into *grep*" },
-    .{ .name = "grep-word", .arity = .one, .call = grepWord, .summary = "search the project for the word under the cursor" },
-    .{ .name = "grep-visit", .call = output.visit, .arity = .one, .summary = "open the location the focused result row names" },
-    .{ .name = "grep-open", .call = reopen, .arity = .whole, .params = "designation", .summary = "run the search a `weft://here/grep/…` designation names" },
+    .{ .name = "grep.search", .call = grep, .arity = .whole, .params = "pattern", .summary = "search the project for a pattern, into *grep*" },
+    .{ .name = "grep.search-word", .arity = .one, .call = grepWord, .summary = "search the project for the word under the cursor" },
+    .{ .name = "grep.visit", .call = output.visit, .arity = .one, .summary = "open the location the focused result row names" },
+    .{ .name = "grep.open", .call = reopen, .arity = .whole, .params = "designation", .summary = "run the search a `weft://here/grep/…` designation names" },
 };
 
 fn describeExtra() void {
@@ -40,12 +40,12 @@ fn describeExtra() void {
 fn initExtra() void {
     // `*grep*` is a results list you navigate: Return visits the location the
     // focused row carries, j/k walk the matches, q goes back.
-    output.installMode("grep", "grep-visit");
+    output.installMode("grep", "grep.visit");
     // A search is a projection this plugin re-runs by designation.
-    _ = weft.designationOpener(kind, "grep-open");
+    _ = weft.designationOpener(kind, "grep.open");
 }
 
-/// An identifier byte — the run `grep-word` grows around the cursor.
+/// An identifier byte — the run `grep.search-word` grows around the cursor.
 fn isWord(ch: u8) bool {
     return ch == '_' or (ch >= '0' and ch <= '9') or
         (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z');

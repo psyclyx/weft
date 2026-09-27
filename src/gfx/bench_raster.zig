@@ -57,8 +57,8 @@ const chrome_tabs = [_]view_mod.Tab{
 const chrome_segs = [_]view_mod.ui_mesh.Seg{
     .{ .text = " NORMAL ", .bg_override = .{ 0.3, 0.6, 0.3, 1 }, .gap_after = 1 },
     .{ .text = "1/6", .gap_after = 1 },
-    .{ .text = "src/core/Document.zig", .command = "open" },
-    .{ .text = "E:2 W:5", .align_right = true, .command = "problems" },
+    .{ .text = "src/core/Document.zig", .command = "file.open" },
+    .{ .text = "E:2 W:5", .align_right = true, .command = "problems.open" },
 };
 const chrome_hud: view_mod.Hud = .{
     .mode = "normal",

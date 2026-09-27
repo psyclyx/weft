@@ -84,7 +84,7 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     try makeProjects(gpa);
     var buf: [4096]u8 = undefined;
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     // The subject is the `place` key's value: this project's directory.
     try t.expectEqualStrings(under(&app.proj, &buf, "dir", ""), try sidebarShows(ed));
@@ -99,7 +99,7 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
     ed.applyWindow();
     try t.expectEqual(pane.pane().buffer_id, ed.buffers.active_id);
-    ed.run("hierarchy-step-out");
+    ed.run("target.open-container");
     ed.applyWindow();
     const parent = std.fs.path.dirname(app.proj.root).?;
     const stepped = try std.fmt.allocPrint(gpa, "weft://here/dir{s}", .{parent});
@@ -111,7 +111,7 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     // not — so the sidebar is not presented again, and keeps what you
     // navigated to. The reveal still finds the file inside it, opening the
     // folders on the way.
-    ed.runStr("open", "sub/inner.txt");
+    ed.runStr("file.open", "sub/inner.txt");
     ed.applyWindow();
     try t.expectEqual(navigated, (try paneEntry(ed, pane)).ref());
     try t.expectEqualStrings(stepped, try sidebarShows(ed));
@@ -120,7 +120,7 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     // Another project: the place moved, so the sidebar presents it — and the
     // listing the last presentation made is closed, not left behind as a tab.
     const before = files(ed);
-    ed.runStr("open", "other/b.txt");
+    ed.runStr("file.open", "other/b.txt");
     ed.applyWindow();
     try t.expectEqualStrings(under(&app.proj, &buf, "dir", "/other"), try sidebarShows(ed));
     try t.expectEqualStrings(under(&app.proj, &buf, "file", "/other/b.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
@@ -137,7 +137,7 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
     try makeProjects(gpa);
     var buf: [4096]u8 = undefined;
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     // Into the sidebar, and rename a row there: a draft, not yet applied.
     const pane = try sidebarPane(ed);
@@ -163,7 +163,7 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
     }
 
     // Another project: the sidebar follows it…
-    ed.runStr("open", "other/b.txt");
+    ed.runStr("file.open", "other/b.txt");
     ed.applyWindow();
     try t.expectEqualStrings(under(&app.proj, &buf, "dir", "/other"), try sidebarShows(ed));
     // …and the listing holding the draft is still an entry, the draft in it.
@@ -184,10 +184,10 @@ test "e2e/projection: the reveal highlights the editor's entry in the sidebar wi
     try makeProjects(gpa);
     var buf: [4096]u8 = undefined;
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
-    ed.runStr("open", "sub/inner.txt");
+    ed.runStr("file.open", "sub/inner.txt");
     ed.applyWindow();
     // The folder above it is open, and its row is the listing's highlight…
     try t.expectEqualStrings(under(&app.proj, &buf, "file", "/sub/inner.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
@@ -214,7 +214,7 @@ test "e2e/projection: a key with no value presents an explicit empty state, neve
     const viewports = &ed.session.system.viewports;
     try viewports.declare(gpa, "repl-panel", .{ .dock = .bottom, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 6 });
     try viewports.present(gpa, "repl-panel", .{ .subject = .{ .text = "repl.session", .key = true } });
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     const panel = ed.win_layout.dockedPanel(.bottom) orelse return error.NoPanel;
     const empty = try paneEntry(ed, panel);
@@ -224,8 +224,8 @@ test "e2e/projection: a key with no value presents an explicit empty state, neve
     try t.expect(std.mem.indexOf(u8, empty_text, "repl.session") != null);
 
     // The repl publishes the key: the panel presents what it names.
-    ed.runStr("repl-start", "cat");
-    ed.runStr("open", "a.txt");
+    ed.runStr("repl.start", "cat");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     try t.expectEqualStrings("weft://here/proc/repl", (try paneEntry(ed, panel)).designationText());
     // The empty state went with it: it is the viewport's, never a tab.
@@ -233,7 +233,7 @@ test "e2e/projection: a key with no value presents an explicit empty state, neve
     while (it.next()) |b| try t.expect(!std.mem.eql(u8, b.tool, "viewport.empty"));
 
     // Retracted: the empty state again — not the REPL it showed a moment ago.
-    ed.run("repl-quit");
+    ed.run("repl.quit");
     ed.applyWindow();
     try t.expectEqualStrings("viewport.empty", (try paneEntry(ed, panel)).tool);
 }
@@ -267,7 +267,7 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
         try t.expect(std.mem.indexOf(u8, text, "Point") == null);
     }
     // Back to the other entry: its symbols, nested.
-    ed.runStr("open", "shapes.zig");
+    ed.runStr("file.open", "shapes.zig");
     ed.applyWindow();
     {
         const entry = try paneEntry(ed, outline);
@@ -505,11 +505,11 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     defer tree.deinit(gpa, &b);
 
     // Local: this project.
-    b.runStr("open", "a.txt");
+    b.runStr("file.open", "a.txt");
     b.applyWindow();
     try t.expectEqualStrings(under(&proj, &buf, "dir", ""), try sidebarShows(&b));
     // Another local project.
-    b.runStr("open", "other/b.txt");
+    b.runStr("file.open", "other/b.txt");
     b.applyWindow();
     try t.expectEqualStrings(under(&proj, &buf, "dir", "/other"), try sidebarShows(&b));
 
@@ -520,7 +520,7 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     // editor keeps the keys.
     var file_name: [128]u8 = undefined;
     const file_designation = try (durable.Designation{ .authority = .{ .peer = &fp }, .kind = .file, .ref = "/src/main.zig" }).render(&file_name);
-    const opened = core.command.run(b.commands, b.ctx, "open", &.{.{ .string = file_designation }}) catch return error.OpenFailed;
+    const opened = core.command.run(b.commands, b.ctx, "file.open", &.{.{ .string = file_designation }}) catch return error.OpenFailed;
     if (opened == .string) {
         std.debug.print("[e2e/projection] open refused: {s}\n", .{opened.string});
         return error.PeerFileRefused;
@@ -542,7 +542,7 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
 
     // The peer's place has no local directory: its problems list is
     // refused by name, never every diagnostic in the workspace standing in.
-    b.run("problems");
+    b.run("problems.open");
     b.applyWindow();
     {
         var it = b.buffers.iterator();
@@ -610,7 +610,7 @@ test "e2e/projection: the places list shows a peer's tree the frame it is shared
     defer link.deinit();
     const fp = link.peer_sess.peerFingerprint() orelse return error.NoHandshake;
 
-    b.runStr("open", "a.txt");
+    b.runStr("file.open", "a.txt");
     b.applyWindow();
     try t.expect(openOk(&b, "weft://here/places/all"));
     const view = b.toolView() orelse return error.NoPlacesView;
@@ -641,7 +641,7 @@ test "e2e/projection: the places list shows a peer's tree the frame it is shared
 }
 
 pub fn openOk(ed: *Editor, spec: []const u8) bool {
-    const outcome = core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = spec }}) catch return false;
+    const outcome = core.command.run(ed.commands, ed.ctx, "file.open", &.{.{ .string = spec }}) catch return false;
     ed.applyWindow();
     return outcome != .string;
 }
@@ -677,9 +677,9 @@ test "e2e/projection: a reveal highlights beside the selection — the rows you 
     for ([_][]const u8{ "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
     var buf: [4096]u8 = undefined;
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     const view = ed.toolView() orelse return error.NoFilesView;
     // Mark b.txt and c.txt: two extents, neither of them the editor's file.
@@ -693,7 +693,7 @@ test "e2e/projection: a reveal highlights beside the selection — the rows you 
     const marked = before.others.items[0];
 
     // The editor moves to another file: the sidebar reveals it…
-    ed.runStr("open", "sub/inner.txt");
+    ed.runStr("file.open", "sub/inner.txt");
     ed.applyWindow();
     try t.expectEqualStrings(under(&app.proj, &buf, "file", "/sub/inner.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
     // …and the selection is exactly what the user made: the same primary,
@@ -723,13 +723,13 @@ test "e2e/projection: a deep reveal opens its folders in one publish, off the la
     try core.file.writeBytesMakingDirs(gpa, "deep/one/two", "deep/one/two/leaf.txt", "LEAF\n");
     var buf: [4096]u8 = undefined;
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     const before = try sidebarView(ed);
 
     // Three folders to open on the way: read at the frame boundary, not in
     // the layout pass that asked, and published once — still in this wake.
-    ed.runStr("open", "deep/one/two/leaf.txt");
+    ed.runStr("file.open", "deep/one/two/leaf.txt");
     ed.applyWindow();
     try t.expectEqualStrings(under(&app.proj, &buf, "file", "/deep/one/two/leaf.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
     const deep = try sidebarView(ed);
@@ -743,7 +743,7 @@ test "e2e/projection: a deep reveal opens its folders in one publish, off the la
 
     // Back to a file at the top: the folders the reveal opened fold again,
     // so the listing does not keep every folder the editor ever visited.
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     ed.applyWindow();
     try t.expectEqualStrings(under(&app.proj, &buf, "file", "/a.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
     {

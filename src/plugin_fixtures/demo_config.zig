@@ -22,8 +22,8 @@ fn on_command(id: u32) callconv(.c) void {
     _ = id;
     // Compose two other commands through the registry — the config-as-glue
     // pattern. Each authors as its own plugin peer, grade-gated.
-    weft.run("duplicate-line");
-    weft.run("upcase-line");
+    weft.run("edit.duplicate-line");
+    weft.run("edit.upcase-line");
 }
 
 comptime {

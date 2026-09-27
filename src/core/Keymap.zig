@@ -67,7 +67,7 @@ modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// mode → command a TEXT COMMIT runs in it (one string arg). A mode that
-/// declares one COMMITS TEXT — insert-flavored modes name `insert-text`, a
+/// declares one COMMITS TEXT — insert-flavored modes name `edit.insert-text`, a
 /// picker names its query-append command. Never inherited (see
 /// `commitCommand`): a mode that does not declare one cannot commit,
 /// whatever it inherits BINDINGS from.
@@ -888,11 +888,11 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     defer km.deinit(gpa);
 
     try km.bind(gpa, "normal", "i", "enter-insert", prio_plugin, "vim");
-    try km.bind(gpa, "normal", "C-s", "save", prio_plugin, "vim");
+    try km.bind(gpa, "normal", "C-s", "file.save", prio_plugin, "vim");
     try km.bind(gpa, "insert", "Escape", "enter-normal", prio_plugin, "vim");
 
     try t.expectEqualStrings("enter-insert", km.lookup("normal", "i").?);
-    try t.expectEqualStrings("save", km.lookup("normal", "C-s").?);
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
     try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "Escape"));
 
     try t.expectEqualStrings("enter-normal", km.lookup("insert", "Escape").?);
@@ -916,8 +916,8 @@ test "keymap: layering is order-independent — higher priority always wins" {
     // Core default, then a plugin shadows it, then user config shadows that.
     var a: Keymap = .empty;
     defer a.deinit(gpa);
-    try a.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
-    try a.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
+    try a.bind(gpa, "default", "j", "cursor.down", prio_core, "core");
+    try a.bind(gpa, "default", "j", "motions.down", prio_plugin, "vim");
     try a.bind(gpa, "default", "j", "my-thing", prio_config, "config");
     try t.expectEqualStrings("my-thing", a.lookup("default", "j").?);
 
@@ -926,8 +926,8 @@ test "keymap: layering is order-independent — higher priority always wins" {
     var b: Keymap = .empty;
     defer b.deinit(gpa);
     try b.bind(gpa, "default", "j", "my-thing", prio_config, "config");
-    try b.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
-    try b.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
+    try b.bind(gpa, "default", "j", "motions.down", prio_plugin, "vim");
+    try b.bind(gpa, "default", "j", "cursor.down", prio_core, "core");
     try t.expectEqualStrings("my-thing", b.lookup("default", "j").?);
 }
 
@@ -936,12 +936,12 @@ test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bind(gpa, "normal", "j", "cursor-down", prio_imported, "import:defaults");
-    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
+    try km.bind(gpa, "normal", "j", "cursor.down", prio_imported, "import:defaults");
+    try t.expectEqualStrings("cursor.down", km.lookup("normal", "j").?);
 
     // A different owner can't steal-then-unbind the slot out from under it.
     km.unbind(gpa, "normal", "j", "someone-else");
-    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
+    try t.expectEqualStrings("cursor.down", km.lookup("normal", "j").?);
 
     // A higher tier has since taken the slot — unbinding the ORIGINAL owner
     // must not remove the newer binding.
@@ -950,7 +950,7 @@ test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
     try t.expectEqualStrings("my-thing", km.lookup("normal", "j").?);
 
     // The rightful owner unbinds cleanly.
-    try km.bind(gpa, "normal", "k", "cursor-up", prio_imported, "import:defaults");
+    try km.bind(gpa, "normal", "k", "cursor.up", prio_imported, "import:defaults");
     km.unbind(gpa, "normal", "k", "import:defaults");
     try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "k"));
 
@@ -965,7 +965,7 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     defer km.deinit(gpa);
 
     try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
-    try km.bind(gpa, "leader", "f", "find-file", prio_plugin, "vim");
+    try km.bind(gpa, "leader", "f", "files.find", prio_plugin, "vim");
     try km.bind(gpa, "leader", "c", "collab", prio_plugin, "vim");
 
     // which-key shows only for modes the config declared as menus.
@@ -980,7 +980,7 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     try km.ownBindings(gpa, "leader", &hints);
     try t.expectEqual(@as(usize, 2), hints.items.len);
     try t.expectEqualStrings("f", hints.items[0].key);
-    try t.expectEqualStrings("find-file", hints.items[0].command);
+    try t.expectEqualStrings("files.find", hints.items[0].command);
 }
 
 test "keymap: sticky menus stay open (implies menu-mode)" {
@@ -1006,14 +1006,14 @@ test "keymap: the global layer applies under every mode, overridable locally" {
     defer km.deinit(gpa);
 
     // F1 bound only in the global layer (config's which-key key).
-    try km.bind(gpa, Keymap.global_mode, "F1", "which-key-now", prio_plugin, "cfg");
+    try km.bind(gpa, Keymap.global_mode, "F1", "which-key.show", prio_plugin, "cfg");
     try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
 
     // In normal (which has no F1 of its own) F1 falls through to global.
-    try t.expectEqualStrings("which-key-now", km.lookup("normal", "F1").?);
+    try t.expectEqualStrings("which-key.show", km.lookup("normal", "F1").?);
     // In a standalone tool mode with NO fallback chain, F1 still works —
     // that's the whole point (before, tool modes were islands).
-    try t.expectEqualStrings("which-key-now", km.lookup("tool", "F1").?);
+    try t.expectEqualStrings("which-key.show", km.lookup("tool", "F1").?);
     // A mode still overrides a global key by binding it locally.
     try km.bind(gpa, "tool", "F1", "tool-help", prio_plugin, "tool");
     try t.expectEqualStrings("tool-help", km.lookup("tool", "F1").?);
@@ -1025,16 +1025,16 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
     defer km.deinit(gpa);
 
     // The nav base's keys are config data (here: Backspace pops a level).
-    try km.bind(gpa, Keymap.menu_nav_mode, "BackSpace", "menu-escape", prio_config, "cfg");
-    try km.bind(gpa, Keymap.menu_nav_mode, "PageDown", "which-key-page-down", prio_config, "cfg");
+    try km.bind(gpa, Keymap.menu_nav_mode, "BackSpace", "mode.leave-menu", prio_config, "cfg");
+    try km.bind(gpa, Keymap.menu_nav_mode, "PageDown", "which-key.page-down", prio_config, "cfg");
 
     // Declaring a menu auto-wires it to inherit menu-nav (no per-config wiring),
     // so its nav keys resolve through the fallback — but its OWN keys still win.
     try km.tagMode(gpa, "leader", tag_menu);
     try km.bind(gpa, "leader", "f", "leader-file", prio_config, "cfg");
     try t.expectEqualStrings("leader-file", km.lookup("leader", "f").?); // own key
-    try t.expectEqualStrings("menu-escape", km.lookup("leader", "BackSpace").?); // inherited nav
-    try t.expectEqualStrings("which-key-page-down", km.lookup("leader", "PageDown").?);
+    try t.expectEqualStrings("mode.leave-menu", km.lookup("leader", "BackSpace").?); // inherited nav
+    try t.expectEqualStrings("which-key.page-down", km.lookup("leader", "PageDown").?);
 
     // baseMode stops at the menu (a buffer is never remembered as a menu, nor as
     // the menu-nav base it falls back to) — so switchTo's menu-skip stays correct.
@@ -1076,8 +1076,8 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.bind(gpa, "normal", "SPC :", "pick-commands", prio_config, "cfg");
-    try t.expectEqualStrings("pick-commands", km.lookup("normal", "space colon").?);
+    try km.bind(gpa, "normal", "SPC :", "palette.open", prio_config, "cfg");
+    try t.expectEqualStrings("palette.open", km.lookup("normal", "space colon").?);
 
     // displayKey is the inverse — which-key shows the config's notation back.
     try t.expectEqualStrings("SPC :", km.displayKey(&buf, "space colon"));
@@ -1109,8 +1109,8 @@ test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass thro
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.bind(gpa, global_mode, "S-C-mouse-1", "pointer-extend-selection", prio_config, "cfg");
-    try t.expectEqualStrings("pointer-extend-selection", km.lookup("normal", spec).?);
+    try km.bind(gpa, global_mode, "S-C-mouse-1", "pointer.extend-selection", prio_config, "cfg");
+    try t.expectEqualStrings("pointer.extend-selection", km.lookup("normal", spec).?);
     // A pointer chord is a sequence like any other.
     try km.bind(gpa, "normal", "SPC mouse-3", "menu-at-point", prio_config, "cfg");
     try t.expectEqualStrings("menu-at-point", km.resolveExact("normal", "space mouse-3").?);
@@ -1121,13 +1121,13 @@ test "keymap: committing text is DECLARED per mode — bindings inherit, the dec
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bind(gpa, "insert", "C-s", "save", prio_core, "core");
-    try km.setCommitCommand(gpa, "insert", "insert-text");
+    try km.bind(gpa, "insert", "C-s", "file.save", prio_core, "core");
+    try km.setCommitCommand(gpa, "insert", "edit.insert-text");
     // A structural mode inheriting an insert-flavored parent's BINDINGS.
     try km.setFallback(gpa, "structural", "insert");
 
-    try t.expectEqualStrings("save", km.lookup("structural", "C-s").?); // bindings inherit
-    try t.expectEqualStrings("insert-text", km.commitCommand("insert").?);
+    try t.expectEqualStrings("file.save", km.lookup("structural", "C-s").?); // bindings inherit
+    try t.expectEqualStrings("edit.insert-text", km.commitCommand("insert").?);
     try t.expect(km.commitCommand("structural") == null); // the authority does not
     try t.expect(km.commitCommand("never-declared") == null);
 
@@ -1141,21 +1141,21 @@ test "keymap: an arm list is stored whole, in authored order; a plain bind is it
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bindArms(gpa, "normal", "Return", &.{ "std.target.activate", "vim-open-focused" }, prio_plugin, "vim");
+    try km.bindArms(gpa, "normal", "Return", &.{ "std.target.activate", "vim.next-line" }, prio_plugin, "vim");
     const authored = km.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 2), authored.len);
     try t.expectEqualStrings("std.target.activate", authored[0]);
-    try t.expectEqualStrings("vim-open-focused", authored[1]);
+    try t.expectEqualStrings("vim.next-line", authored[1]);
     // The head is what a single-command reader sees — the keymap picks nothing.
     try t.expectEqualStrings("std.target.activate", km.lookup("normal", "Return").?);
 
     // Re-binding at a winning tier replaces the WHOLE list, fallbacks included.
-    try km.bind(gpa, "normal", "Return", "insert-newline", prio_config, "config");
+    try km.bind(gpa, "normal", "Return", "edit.insert-newline", prio_config, "config");
     const rebound = km.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 1), rebound.len);
-    try t.expectEqualStrings("insert-newline", rebound[0]);
+    try t.expectEqualStrings("edit.insert-newline", rebound[0]);
 
     // A lower tier cannot shadow it.
     try km.bindArms(gpa, "normal", "Return", &.{"std.target.activate"}, prio_core, "core");
-    try t.expectEqualStrings("insert-newline", km.lookup("normal", "Return").?);
+    try t.expectEqualStrings("edit.insert-newline", km.lookup("normal", "Return").?);
 }

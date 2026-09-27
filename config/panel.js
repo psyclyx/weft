@@ -2,7 +2,7 @@
 //
 // Like the sidebar, "panel" is a named bundle of viewport attributes, not a
 // kind the workspace knows. It shows ONE entry at a time: whatever a plugin
-// last brought into it with core's `viewport-take` (the problems list, the
+// last brought into it with core's `viewport.take` (the problems list, the
 // terminal) — taking replaces, and hiding keeps the entry for when it is
 // shown again. Nothing is presented at startup, so it starts hidden and
 // opens on demand; `viewport-toggle panel` shows and hides it.
@@ -12,7 +12,7 @@ weft.viewport("panel", {
   // It owns its entry: an open from a problem row lands in the editor,
   // never in the panel.
   persistent: true,
-  // Out of `focus-other`'s rotation, and not a primary-focus change: the
+  // Out of `window.focus-next`'s rotation, and not a primary-focus change: the
   // toolbar and the breadcrumbs keep describing the editor while you are
   // in the panel.
   cycles: false,

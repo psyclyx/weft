@@ -6,7 +6,7 @@
 //! Declares NO capabilities. It used to hold `fs_read` for one reason — a
 //! VCS-marker climb up from the active buffer — and that climb was a second
 //! detector of a fact the host already establishes when a file is opened;
-//! `project-root` reads it through `weft.placeRoot()` now (`doc/place.md`
+//! `project.show-root` reads it through `weft.placeRoot()` now (`doc/place.md`
 //! §4.2). What remains is pure list arithmetic over the kv store.
 
 const std = @import("std");
@@ -36,10 +36,10 @@ var list_buf: std.ArrayList(u8) = .empty;
 // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
 // second cost a grant over the whole filesystem.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "project-remember", .arity = .whole, .call = remember, .summary = "remember this project so it shows up in recents" },
-    .{ .name = "project-recent", .arity = .whole, .call = recent, .summary = "open a project you were in recently" },
-    .{ .name = "project-recent-roots", .arity = .whole, .call = recentRoots, .summary = "list recently visited project roots" },
-    .{ .name = "project-root", .arity = .whole, .call = projectRoot, .summary = "say where this project's root is" },
+    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "remember this project so it shows up in recents" },
+    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "open a project you were in recently" },
+    .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "list recently visited project roots" },
+    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "say where this project's root is" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -79,7 +79,7 @@ fn recordActive() i32 {
     return @intCast(countLines(list));
 }
 
-/// The `project-remember` command: record + report the count.
+/// The `project.remember` command: record + report the count.
 fn remember() void {
     weft.setResultInt(recordActive());
 }
@@ -93,7 +93,7 @@ fn recentRoots() void {
     weft.setResultStr(weft.kvGet(recent_roots_key) orelse "");
 }
 
-/// `project-root` command: the project this command is in, absolute — which is
+/// `project.show-root` command: the project this command is in, absolute — which is
 /// WHERE it dispatches (`doc/place.md`). One door, no detection.
 ///
 /// This used to be a climb: copy the active buffer's path, walk up probing

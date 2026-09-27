@@ -9,7 +9,7 @@
 //!     C-/, A-Down, each one undo unit;
 //!   • ONE key resolves to a different provider per context — a text buffer,
 //!     the files sidebar, a git status buffer — asked through the same
-//!     `explain` paths which-key and `explain-binding` answer from, with no
+//!     `explain` paths which-key and `action.explain` answer from, with no
 //!     sidebar- or git-specific code in the grammar.
 
 const std = @import("std");
@@ -53,9 +53,8 @@ pub const IdeApp = struct {
 /// Commands only a WINDOWED embedder registers (config_test.zig's list): a
 /// headless editor has no live System or scrolling view to own them.
 fn embedderOwned(command: []const u8) bool {
-    return std.mem.eql(u8, command, "grants-show") or
-        std.mem.eql(u8, command, "center-line") or
-        std.mem.startsWith(u8, command, "scroll-");
+    return std.mem.eql(u8, command, "grants.show") or
+        std.mem.startsWith(u8, command, "scroll.");
 }
 
 pub fn textEd(ed: *Editor) *core.Editor {
@@ -82,7 +81,7 @@ fn selected(ed: *Editor) ?Span {
 /// Open `name` holding `body` as the focused text entry.
 pub fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     try t.expectEqualStrings("ide", ed.mode());
 }
 
@@ -160,9 +159,9 @@ fn expectCommand(ed: *Editor, key: []const u8, command: []const u8) !void {
     try t.expectEqualStrings(command, arms[arms.len - 1]);
 }
 
-/// The provider `explain-binding <action>` names for the focused context.
+/// The provider `action.explain <action>` names for the focused context.
 fn expectActionWinner(ed: *Editor, action: []const u8, winner: []const u8) !void {
-    ed.runStr("explain-binding", action);
+    ed.runStr("action.explain", action);
     var want: [128]u8 = undefined;
     const needle = try std.fmt.bufPrint(&want, "winner={s} ", .{winner});
     if (std.mem.indexOf(u8, ed.echoText(), needle) == null) {
@@ -351,10 +350,10 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     // Return has nothing to activate, so the line break core offers wins.
     try expectReady(ed, "Return", "std.editing.insert-line-break", "core.editing");
     // No row to transfer: the copy/cut/paste words fall to the text commands.
-    try expectCommand(ed, "C-c", "ide-copy");
-    try expectCommand(ed, "C-x", "ide-cut");
-    try expectCommand(ed, "C-v", "ide-paste");
-    try expectCommand(ed, "Down", "ide-down");
+    try expectCommand(ed, "C-c", "ide.copy");
+    try expectCommand(ed, "C-x", "ide.cut");
+    try expectCommand(ed, "C-v", "ide.paste");
+    try expectCommand(ed, "Down", "ide.down");
     // REAL availability: a buffer nothing has changed has nothing to undo, so
     // the offer is there but DISABLED, with the reason which-key shows — and
     // it becomes ready the moment there is an edit to take back.
@@ -368,10 +367,10 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectReady(ed, "C-S-z", "std.history.redo", "core.editing");
     try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
     // F2 is an ACTION: in source it is the language server's rename.
-    try expectActionWinner(ed, "plugin.ide.rename", "rename");
+    try expectActionWinner(ed, "plugin.code.rename", "rename");
 
     // ── The files sidebar: the same keys, answered by the listing. ──
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
@@ -388,18 +387,18 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     try expectReady(ed, "C-v", "std.transfer.paste", "core.view");
     // …and F2 renames the ROW, through the config provider keyed on this
     // entry's tool identity (a `weft.provide` fact beyond mode and lang).
-    try expectActionWinner(ed, "plugin.ide.rename", "field-edit");
+    try expectActionWinner(ed, "plugin.code.rename", "field.edit");
     // Whether the persistence word applies is the `save` providers' call, not
     // core's: the files listing provides one (it applies the draft), so C-s
     // is offered here and runs THAT — while a git listing, below, provides
     // none and is not offered it at all.
     try expectReady(ed, "C-s", "std.persistence.save", "core.editing");
-    try expectActionWinner(ed, "save", "files-apply");
+    try expectActionWinner(ed, "file.save", "view.apply");
 
     // ── A git status buffer: git's own mode, and the global layer. ──
-    ed.run("window-focus-right");
+    ed.run("window.focus-right");
     ed.applyWindow();
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(h.drainToolContains(ed, "*git*", "f.txt"));
     try t.expectEqualStrings("git", ed.mode());
     {
@@ -419,11 +418,11 @@ test "e2e/ide: one key, three contexts — text, the files sidebar, and git reso
     // refuses for want of a provider instead of "saving" a listing.
     try t.expect(ed.keymap.lookupArms("git", "C-s") != null);
     try t.expect(!offered(ed, "std.persistence.save"));
-    try expectCommand(ed, "C-s", "save");
+    try expectCommand(ed, "C-s", "file.save");
     // F2's config providers: git's rows are not the files tool, and a status
     // listing is not text, so neither answers — the same action, a third
     // answer: not offered here at all (so no toolbar shows it either).
-    try t.expect(!offered(ed, "plugin.ide.rename"));
+    try t.expect(!offered(ed, "plugin.code.rename"));
 }
 
 test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus, and say when that changes" {
@@ -460,7 +459,7 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
 
     // Focus the docked sidebar. The PRIMARY context is still the editor, so
     // what a toolbar describes did not move: no event.
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expect(ed.buffers.active_id != editor_entry);
     ed.press("Down", ""); // onto a row, as a user would
@@ -480,7 +479,7 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     try t.expect(std.mem.indexOf(u8, active, "|core.view|") != null);
     // The listing's own non-standard node actions are offers too, labelled as
     // the scene labels them — what a toolbar in the sidebar would show.
-    try t.expect(std.mem.indexOf(u8, active, "plugin.fs.entry.create-file|core.view|enabled||New file|fs|") != null);
+    try t.expect(std.mem.indexOf(u8, active, "plugin.fs.create-file|core.view|enabled||New file|fs|") != null);
 
     // Invoking in the primary context acts on the editor, and leaves the
     // head where it was.
@@ -508,7 +507,7 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     try t.expect(std.mem.indexOf(u8, probed, "plugin.offerwatch.probe|plugin.offerwatch|enabled||Probe|watch|5") != null);
 
     // Back to the editor: the same primary context, so no event…
-    ed.run("window-focus-right");
+    ed.run("window.focus-right");
     ed.applyWindow();
     try t.expectEqual(editor_entry, ed.buffers.active_id);
     try t.expectEqual(first + 3, runInt(ed, "ow-fired", &.{}));
@@ -530,19 +529,19 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     const source = ed.buffers.active_id;
     ed.applyWindow();
     var buf: [1 << 12]u8 = undefined;
-    const arms = [_][]const u8{"plugin.ide.send-to-repl"};
+    const arms = [_][]const u8{"plugin.code.send-to-repl"};
 
     // Nothing publishes `repl.session`: the gated provider is not offered,
     // and explain says so exactly as a keypress would find it.
     try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
-    try t.expect(!offered(ed, "plugin.ide.send-to-repl"));
+    try t.expect(!offered(ed, "plugin.code.send-to-repl"));
     try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
 
     // Starting one publishes it on this place, and the ONE event of that
     // frame lists it.
-    ed.runStr("repl-start", "cat");
+    ed.runStr("repl.start", "cat");
     try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
     // Its value is the REPL's designation: a live resource, by name.
@@ -555,14 +554,14 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     const why = core.intent.explain(ed.ctx, &arms);
     try t.expect(why == .ready);
     try t.expectEqualStrings("config", why.ready.provider);
-    try t.expect(offered(ed, "plugin.ide.send-to-repl"));
+    try t.expect(offered(ed, "plugin.code.send-to-repl"));
     var refusal: [256]u8 = undefined;
-    try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.ide.send-to-repl", &refusal) == .invoked);
+    try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.code.send-to-repl", &refusal) == .invoked);
     try t.expect(h.drainToolContains(ed, "*repl*", "sent line"));
 
     // Quitting retracts it: one event naming the key, and nothing offered.
     const before = runInt(ed, "ow-fired", &.{});
-    ed.run("repl-quit");
+    ed.run("repl.quit");
     ed.applyWindow();
     try t.expect(runInt(ed, "ow-fired", &.{}) > before);
     try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") != null);
@@ -922,9 +921,9 @@ test "e2e/ide: a command that declares no mapping refuses several selections —
     defer app.deinit();
     const ed = &app.ed;
     try openFile(ed, "u.txt", "foo foo\n");
-    // `mark-region` marks THE line: it says nothing about several
+    // `region.mark` marks THE line: it says nothing about several
     // selections, so it is bound here to see how a key reaches it.
-    try ed.keymap.bind(gpa, "ide", "F6", "mark-region", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "ide", "F6", "region.mark", core.Keymap.prio_config, "test");
 
     // One selection is the degenerate case: it runs.
     try t.expect(explainKey(ed, "F6") == .none);
@@ -935,9 +934,9 @@ test "e2e/ide: a command that declares no mapping refuses several selections —
     ed.press("C-d", "");
     ed.press("C-d", "");
     try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
-    try expectBlocked(ed, "F6", "mark-region", "one-selection");
+    try expectBlocked(ed, "F6", "region.mark", "one-selection");
     ed.press("F6", "");
-    try t.expectEqualStrings("mark-region: acts on one selection; several are selected", ed.echoText());
+    try t.expectEqualStrings("region.mark: acts on one selection; several are selected", ed.echoText());
     try t.expectEqual(@as(usize, 2), textEd(ed).selectionCount());
     try expectText(ed, "foo foo\n");
 }
@@ -971,7 +970,7 @@ fn rowsFlaggedDeleted(ed: *Editor) usize {
 /// extents, b.txt unmarked between them.
 fn markTwoRows(ed: *Editor) !void {
     try openFile(ed, "a.txt", "x\n");
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expectEqualStrings("ide-structural", ed.mode());
     ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
@@ -1059,7 +1058,7 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     const ed = &app.ed;
     for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
     try openFile(ed, "b.txt", "x\n");
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
     ed.applyWindow();
@@ -1068,10 +1067,10 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
     try t.expect(!fileOpen(ed, "a.txt") and !fileOpen(ed, "c.txt"));
 
-    // `files-enter` is `target-open-focused` by name, and maps as it does:
+    // `target.open` is `target.open` by name, and maps as it does:
     // each marked row opens. A table-wide `.whole` ran it once, on the
     // primary, and the other row was silently not opened.
-    ed.run("files-enter");
+    ed.run("target.open");
     try t.expect(fileOpen(ed, "a.txt"));
     try t.expect(fileOpen(ed, "c.txt"));
 }
@@ -1112,14 +1111,14 @@ test "e2e/ide: copy of several marked rows is one transfer — paste lands every
 
     // Copy reads the whole set: ONE request naming both rows, one transfer
     // holding both — not two runs each overwriting the one captured value.
-    ed.run("selection-copy");
+    ed.run("selection.copy");
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
 
     // Paste after b.txt, one row focused: both copies land, a.txt's first.
     ed.click(ed.pointAtNode(try filesNameNode(ed, "b.txt")) orelse return error.RowNotDrawn);
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
-    ed.run("selection-paste-after");
+    ed.run("selection.paste-after");
     var buf: [256]u8 = undefined;
     try t.expectEqualStrings("a.txt c.txt", try rowsChanged(ed, "copy", &buf));
 }
@@ -1136,14 +1135,14 @@ test "e2e/ide: a one-row verb on several marked rows is refused — Rename, inse
     // Rename (F2, the toolbar's button) edits ONE row's name: with two rows
     // marked the offer is disabled, with the reason, instead of renaming
     // the focused row alone.
-    try t.expectEqualStrings("one-selection", offerReason(ed, "plugin.ide.rename") orelse return error.RenameNotOffered);
+    try t.expectEqualStrings("one-selection", offerReason(ed, "plugin.code.rename") orelse return error.RenameNotOffered);
     const view_ref = ed.toolView().?;
     const rows_before = ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len;
-    for ([_][]const u8{ "field-edit", "item-insert-before", "item-insert-after", "hierarchy-step-out" }) |verb|
+    for ([_][]const u8{ "field.edit", "item.insert-before", "item.insert-after", "target.open-container" }) |verb|
         try t.expectError(error.UndeclaredMapping, core.command.run(ed.commands, ed.ctx, verb, &.{}));
     // F2 reaches the same refusal, and says so.
     ed.press("F2", "");
-    try t.expectEqualStrings("plugin.ide.rename: acts on one selection; several are selected", ed.echoText());
+    try t.expectEqualStrings("plugin.code.rename: acts on one selection; several are selected", ed.echoText());
     // Nothing ran: no row inserted, the listing where it was, both rows
     // still marked.
     try t.expectEqualStrings("ide-structural", ed.mode());

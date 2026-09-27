@@ -39,6 +39,22 @@ pub const EntryOpener = struct {
 };
 pub const Grade = authority.Grade;
 
+/// The shell's half of an entry's life: what OPENING a designation and
+/// RETIRING an entry mean where providers (syntax, language servers), peers
+/// and remote shells are attached — things core cannot see. `file.open` and
+/// the `buffer.close-*` commands are core's, registered once; with this door
+/// installed they route through it, and without it (a headless embedding)
+/// they do what core alone can. A door, so there is one command per verb
+/// rather than a shell registration shadowing core's.
+pub const EntryShell = struct {
+    context: *anyopaque,
+    /// Open `spec` (a designation, an absolute path, `host:path`) and answer
+    /// what `file.open` answers: the entry id, or a refusal in words.
+    open: *const fn (*anyopaque, *Context, []const u8) anyerror!Value,
+    /// `entry` is about to close: let go of what the shell attached to it.
+    retire: *const fn (*anyopaque, *Context, *Buffers.Buffer) void,
+};
+
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
 /// carry; strings are borrowed for the duration of the call.
 pub const Value = union(enum) {
@@ -171,6 +187,8 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The shell's half of opening and retiring entries (`EntryShell`).
+    entry_shell: ?EntryShell = null,
     /// The shell's pane operations for pointer commands (focus and scroll
     /// the pane under the pointer). `null` in embeddings without panes.
     panes: ?@import("pointer.zig").Panes = null,
@@ -791,7 +809,7 @@ pub const Command = struct {
     /// .attribution` exist so a resolver can say whose answer won. A command
     /// had no such field, so anything wanting to GROUP commands had to parse
     /// their names — and a name is a convention nobody enforces, which lies
-    /// about exactly the cases that matter (`motion.line-start` is vim's,
+    /// about exactly the cases that matter (`motions.line-start` is vim's,
     /// `zig` is `modes`'). This is that fact, recorded.
     ///
     /// Mechanism, not policy: what a namespace is FOR — grouping a palette,
@@ -1228,23 +1246,23 @@ test "command: schema derivation, validation, late-bound run" {
     };
 
     // Late binding: invoked-by-name before it exists → UnknownCommand.
-    try t.expectError(error.UnknownCommand, run(&commands, &ctx, "insert-text", &.{}));
+    try t.expectError(error.UnknownCommand, run(&commands, &ctx, "edit.insert-text", &.{}));
 
-    const cmd = comptime define("insert-text", "Insert text at a byte offset.", insertText);
+    const cmd = comptime define("edit.insert-text", "Insert text at a byte offset.", insertText);
     try t.expectEqual(@as(usize, 2), cmd.args.len);
     try t.expectEqual(Type.integer, cmd.args[0].type);
     try t.expectEqual(Type.string, cmd.args[1].type);
     try t.expectEqualStrings("offset", cmd.args[0].name);
-    _ = try commands.bind(gpa, "insert-text", cmd);
+    _ = try commands.bind(gpa, "edit.insert-text", cmd);
 
     // Wrong arity / wrong types are rejected before the handler runs.
-    try t.expectError(error.ArityMismatch, run(&commands, &ctx, "insert-text", &.{.nil}));
-    try t.expectError(error.TypeMismatch, run(&commands, &ctx, "insert-text", &.{
+    try t.expectError(error.ArityMismatch, run(&commands, &ctx, "edit.insert-text", &.{.nil}));
+    try t.expectError(error.TypeMismatch, run(&commands, &ctx, "edit.insert-text", &.{
         .{ .string = "oops" }, .{ .string = "hi" },
     }));
     try t.expectEqual(@as(usize, 0), buffers.active().textEditor().?.text().byteLen());
 
-    const res = try run(&commands, &ctx, "insert-text", &.{
+    const res = try run(&commands, &ctx, "edit.insert-text", &.{
         .{ .integer = 0 }, .{ .string = "graft" },
     });
     try t.expectEqual(Value{ .integer = 5 }, res);

@@ -87,7 +87,7 @@ fn on_slot_fire(session: i32) callconv(.c) void {
         if (n >= max_crumbs) break;
         if (q.caret < s.start or q.caret >= s.end) continue;
         const text = std.fmt.bufPrint(&text_buf[n], " › {s}", .{nameOf(s)}) catch continue;
-        const command = std.fmt.bufPrint(&command_buf[n], "breadcrumbs-jump {d}", .{s.start}) catch continue;
+        const command = std.fmt.bufPrint(&command_buf[n], "breadcrumbs.jump {d}", .{s.start}) catch continue;
         segs[n] = .{ .text = text, .role = if (n == 0) .muted else .accent, .command = command };
         n += 1;
     }
@@ -104,7 +104,7 @@ fn jump() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "breadcrumbs-jump", .arity = .one, .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
+    .{ .name = "breadcrumbs.jump", .arity = .one, .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
 };
 
 comptime {

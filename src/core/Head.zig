@@ -241,7 +241,7 @@ pub const WorkingTarget = struct {
 
 /// A scene's selection (doc/model.md §2.6): extents of rows in one view. The
 /// PRIMARY extent is the focus — the path to the focused row (and field) —
-/// grown from `anchor` when a row range is being made (`set-mark` then a
+/// grown from `anchor` when a row range is being made (`selection.start` then a
 /// move: `V j` in a listing). The `others` are rows marked beside it (a
 /// C-click): each its own extent, from its anchor row to its head row in
 /// the view's focus order. The text twin is `Editor.selections`; both
@@ -484,7 +484,7 @@ pub const Macros = struct {
     /// Nonzero while any replay is running — replayed keys are not recorded
     /// into a macro being recorded (vim records the `@a`, not what it did).
     depth: u8 = 0,
-    /// What `macro-play` with no register replays (vim's `@@`).
+    /// What `macro.play` with no register replays (vim's `@@`).
     last_played: ?u8 = null,
     last_recorded: ?u8 = null,
 
@@ -738,7 +738,7 @@ pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
 
 /// Where a printable keystroke nothing bound goes as TEXT, or null when it
 /// inserts nothing (doc/chrome.md §5.2): the mode's commit command, else
-/// core's own `insert-text` while a begun edit holds a field — the edit took
+/// core's own `edit.insert-text` while a begun edit holds a field — the edit took
 /// the keys, whatever the resting mode says. The one question both the
 /// commit path and the caret shape ask, so a bar can never be drawn where
 /// typing does nothing.
@@ -750,7 +750,7 @@ pub fn textCommit(self: *const Head, km: *const Keymap) ?[]const u8 {
 /// the mode it returns to, and asks this of that one.
 pub fn textCommitIn(self: *const Head, km: *const Keymap, mode: []const u8) ?[]const u8 {
     if (km.commitCommand(mode)) |cmd| return cmd;
-    return if (self.scene_selection.began) "insert-text" else null;
+    return if (self.scene_selection.began) "edit.insert-text" else null;
 }
 
 /// Feed one keyspec through THIS HEAD's pending sequence — see
@@ -815,7 +815,7 @@ test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     try km.bind(gpa, "normal", "i", "enter-insert", Keymap.prio_plugin, "vim");
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_plugin, "vim");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_plugin, "vim");
 
     var h: Head = .empty;
     defer h.deinit(gpa);
@@ -828,7 +828,7 @@ test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run[0]);
+        try t.expectEqualStrings("files.find", r.run[0]);
     }
     try t.expectEqual(@as(usize, 0), h.pending.len);
 }
@@ -838,9 +838,9 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> find-file, etc.
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", Keymap.prio_config, "vim");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "space g g", "git.status", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim.insert", Keymap.prio_config, "vim");
     try km.bind(gpa, "global", "C-w", "window-thing", Keymap.prio_config, "cfg");
 
     var h: Head = .empty;
@@ -851,7 +851,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "i");
         try t.expect(r == .run);
-        try t.expectEqualStrings("vim-insert", r.run[0]);
+        try t.expectEqualStrings("vim.insert", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // SPC is a prefix -> pending; f -> still pending; f -> completes -> run.
@@ -862,7 +862,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run[0]);
+        try t.expectEqualStrings("files.find", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // The "global is too global" fix falls out: SPC then C-w is the CHORD
@@ -892,10 +892,10 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     // A leader tree as sequences: SPC f {f,r}, SPC g g; a plain top-level key.
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_config, "cfg");
     try km.bind(gpa, "normal", "space f r", "recent-files", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", Keymap.prio_config, "vim");
+    try km.bind(gpa, "normal", "space g g", "git.status", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim.insert", Keymap.prio_config, "vim");
     try km.bind(gpa, "global", "C-w", "window-thing", Keymap.prio_config, "cfg");
     try km.setGroupName(gpa, "normal", "SPC", "leader", Keymap.prio_config, "cfg");
     try km.setGroupName(gpa, "normal", "SPC f", "files", Keymap.prio_config, "cfg");
@@ -929,7 +929,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     try t.expect(Found.get(&h, "space") != null);
     try t.expect(Found.group(&h, "space")); // continues a chord → group
     try t.expectEqualStrings("leader", Found.get(&h, "space").?.command);
-    try t.expectEqualStrings("vim-insert", Found.get(&h, "i").?.command);
+    try t.expectEqualStrings("vim.insert", Found.get(&h, "i").?.command);
     try t.expect(!Found.group(&h, "i")); // runnable leaf
     try t.expectEqualStrings("window-thing", Found.get(&h, "C-w").?.command); // global at top
     // `space f f` and `space f r` collapse to ONE `space` group at the top.
@@ -953,7 +953,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     {
         const n = try h.completions(gpa, &km, "space f");
         try t.expectEqual(@as(usize, 2), n);
-        try t.expectEqualStrings("find-file", Found.get(&h, "f").?.command);
+        try t.expectEqualStrings("files.find", Found.get(&h, "f").?.command);
         try t.expect(!Found.group(&h, "f")); // a leaf now
         try t.expectEqualStrings("recent-files", Found.get(&h, "r").?.command);
     }
@@ -1035,7 +1035,7 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     try km.bind(gpa, "normal", "i", "enter-insert", Keymap.prio_plugin, "vim");
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_plugin, "vim");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_plugin, "vim");
     try km.tagMode(gpa, "leader", "menu");
 
     var head_a: Head = .empty;

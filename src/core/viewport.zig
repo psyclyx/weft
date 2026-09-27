@@ -10,7 +10,7 @@
 //! Each attribute earns its place by the rendering.md granularity rule —
 //! someone would swap just it:
 //!
-//! - `cycles`: a docked tree should not appear in `focus-other`'s rotation,
+//! - `cycles`: a docked tree should not appear in `window.focus-next`'s rotation,
 //!   but a peek split should.
 //! - `persistent`: a sidebar keeps its own entry when the active buffer
 //!   changes; an ordinary pane follows it.
@@ -54,7 +54,7 @@ pub fn parseEdge(name: []const u8) ?Edge {
 }
 
 pub const Attrs = struct {
-    /// Participates in pane cycling (`focus-other`).
+    /// Participates in pane cycling (`window.focus-next`).
     cycles: bool = true,
     /// Keeps its own workspace entry when the active entry changes.
     persistent: bool = false,

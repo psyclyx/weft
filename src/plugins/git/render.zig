@@ -194,7 +194,7 @@ pub fn repaint() void {
         _ = b.add(.{
             .key = "s:none",
             .role = role_header,
-            .text = "Not a git repository.\n\nRun git-init (SPC g i) to start one.",
+            .text = "Not a git repository.\n\nRun git.init (SPC g i) to start one.",
         });
         _ = b.commit();
         return;

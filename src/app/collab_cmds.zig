@@ -97,10 +97,10 @@ pub fn verifyPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const fp = parseFingerprint(args[0].string) orelse
-        return ok_echo(ctx, "verify-peer: expected a fingerprint like k7q2-9fh3-...");
+        return ok_echo(ctx, "collab.verify-peer: expected a fingerprint like k7q2-9fh3-...");
     kp.verify(fp) catch |err| {
         var buf: [64]u8 = undefined;
-        return ok_echo(ctx, std.fmt.bufPrint(&buf, "verify-peer failed: {t}", .{err}) catch "verify-peer failed");
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "collab.verify-peer failed: {t}", .{err}) catch "collab.verify-peer failed");
     };
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "verified {s}", .{&fp}) catch "verified");
@@ -110,10 +110,10 @@ pub fn forgetPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const fp = parseFingerprint(args[0].string) orelse
-        return ok_echo(ctx, "forget-peer: expected a fingerprint like k7q2-9fh3-...");
+        return ok_echo(ctx, "collab.forget-peer: expected a fingerprint like k7q2-9fh3-...");
     kp.forget(fp) catch |err| {
         var buf: [64]u8 = undefined;
-        return ok_echo(ctx, std.fmt.bufPrint(&buf, "forget-peer failed: {t}", .{err}) catch "forget-peer failed");
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "collab.forget-peer failed: {t}", .{err}) catch "collab.forget-peer failed");
     };
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "forgot {s}", .{&fp}) catch "forgot");
@@ -194,7 +194,7 @@ pub fn fsGrantNote(grant: core.peer_fs.Grant) []const u8 {
     };
 }
 
-/// `stop-listening` — stop accepting new peers; connected peers stay.
+/// `collab.stop-listening` — stop accepting new peers; connected peers stay.
 pub fn stopListeningHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
@@ -224,7 +224,7 @@ pub fn disconnectHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, "disconnecting…");
 }
 
-/// `realize-all` — fetch the whole partial checkout.
+/// `collab.realize-all` — fetch the whole partial checkout.
 pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
@@ -233,7 +233,7 @@ pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, "fetching the whole document…");
 }
 
-/// `peer-files` opens the peer's shared tree — which is to say it runs `open`
+/// `collab.peer-files` opens the peer's shared tree — which is to say it runs `open`
 /// on the tree's designation, `weft://<fingerprint>/dir/`, and nothing else.
 /// There is one path to a peer's directory, whether a person asked for the
 /// root by this name or for `weft://<peer>/dir/src` by designation: the one
@@ -247,7 +247,7 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
         return ok_echo(ctx, "the peer's shared tree has no designation yet (no handshake)");
     const text = try ctx.gpa.dupe(u8, named);
     defer ctx.gpa.free(text);
-    return core.command.run(ctx.commands, ctx, "open", &.{.{ .string = text }});
+    return core.command.run(ctx.commands, ctx, "file.open", &.{.{ .string = text }});
 }
 
 // ── Peer designations (doc/model.md §2.1) ───────────────────────────
@@ -562,7 +562,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
     }
 }
 
-/// `open-shared` — pick over every peer's unopened announcements
+/// `collab.open-shared` — pick over every peer's unopened announcements
 /// (outbound host + all hub peers); accept opens it into a fresh buffer.
 pub fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
@@ -667,106 +667,106 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
 /// last-wins) — preserving the exact order these were registered inline.
 /// `sc` and `known` are borrowed as command `data` and must outlive the run.
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, sc: *ShareCtx, known: *core.known_peers.KnownPeers) !void {
-    _ = try commands.bind(gpa, "connect", .{
-        .name = "connect",
+    _ = try commands.bind(gpa, "collab.connect", .{
+        .name = "collab.connect",
         .summary = "Connect to a host at runtime; its document opens as a buffer.",
         .args = &.{.{ .name = "hostport", .type = .string }},
         .handler = connectHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "disconnect", .{
-        .name = "disconnect",
+    _ = try commands.bind(gpa, "collab.disconnect", .{
+        .name = "collab.disconnect",
         .summary = "Drop the connection; shared buffers stay as local copies.",
         .args = &.{},
         .handler = disconnectHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "realize-all", .{
-        .name = "realize-all",
+    _ = try commands.bind(gpa, "collab.realize-all", .{
+        .name = "collab.realize-all",
         .summary = "Fetch the whole partial checkout.",
         .args = &.{},
         .handler = realizeAllHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "peer-files", .{
-        .name = "peer-files",
+    _ = try commands.bind(gpa, "collab.peer-files", .{
+        .name = "collab.peer-files",
         .summary = "Open the connected peer's shared filesystem target.",
         .args = &.{},
         .handler = peerFilesHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "share", .{
-        .name = "share",
+    _ = try commands.bind(gpa, "collab.share", .{
+        .name = "collab.share",
         .summary = "Share the active buffer over the connection; an optional preset (look_together|pair|review) compiles to a grant bundle.",
         .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
         .handler = shareHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "share-presence", .{
-        .name = "share-presence",
+    _ = try commands.bind(gpa, "collab.share-presence", .{
+        .name = "collab.share-presence",
         .summary = "Share your cursor with peers (on|off); off retracts it, separate from sharing a buffer.",
         .args = &.{.{ .name = "state", .type = .string }},
         .handler = sharePresenceHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "share-fs", .{
-        .name = "share-fs",
+    _ = try commands.bind(gpa, "collab.share-fs", .{
+        .name = "collab.share-fs",
         .summary = "Select which shared-root surfaces peers hold: hierarchy|bytes|write (comma-separated) or none|read|rw.",
         .args = &.{.{ .name = "surfaces", .type = .string }},
         .handler = shareFsHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "open-shared", .{
-        .name = "open-shared",
+    _ = try commands.bind(gpa, "collab.open-shared", .{
+        .name = "collab.open-shared",
         .summary = "Pick one of the peer's shared buffers and open it.",
         .args = &.{},
         .handler = openSharedHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "listen", .{
-        .name = "listen",
+    _ = try commands.bind(gpa, "collab.listen", .{
+        .name = "collab.listen",
         .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
         .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
         .handler = listenHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "stop-listening", .{
-        .name = "stop-listening",
+    _ = try commands.bind(gpa, "collab.stop-listening", .{
+        .name = "collab.stop-listening",
         .summary = "Stop accepting new peers (connected peers stay).",
         .args = &.{},
         .handler = stopListeningHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "verify-peer", .{
-        .name = "verify-peer",
+    _ = try commands.bind(gpa, "collab.verify-peer", .{
+        .name = "collab.verify-peer",
         .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = verifyPeerHandler,
         .data = known,
     });
-    _ = try commands.bind(gpa, "forget-peer", .{
-        .name = "forget-peer",
+    _ = try commands.bind(gpa, "collab.forget-peer", .{
+        .name = "collab.forget-peer",
         .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = forgetPeerHandler,
         .data = known,
     });
-    _ = try commands.bind(gpa, "peers", .{
-        .name = "peers",
+    _ = try commands.bind(gpa, "collab.peers", .{
+        .name = "collab.peers",
         .summary = "List connected peers with fingerprint, SAS words, and trust.",
         .args = &.{},
         .handler = peersHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "cancel", .{
-        .name = "cancel",
+    _ = try commands.bind(gpa, "collab.cancel", .{
+        .name = "collab.cancel",
         .summary = "Abort a pending/in-flight connect and drop queued host intents.",
         .args = &.{},
         .handler = cancelHandler,
         .data = sc,
     });
-    _ = try commands.bind(gpa, "grant", .{
-        .name = "grant",
+    _ = try commands.bind(gpa, "collab.grant", .{
+        .name = "collab.grant",
         .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
         .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
         .handler = grantHandler,

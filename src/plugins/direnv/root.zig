@@ -17,13 +17,13 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "direnv-status", .arity = .whole, .call = status, .summary = "say what direnv makes of this directory" },
-    .{ .name = "direnv-allow", .arity = .whole, .call = allow, .summary = "allow this directory's .envrc" },
-    .{ .name = "direnv-reload", .arity = .whole, .call = reload, .summary = "re-read the environment" },
-    .{ .name = "direnv-apply", .arity = .whole, .call = apply, .summary = "apply this directory's environment" },
+    .{ .name = "direnv.status", .arity = .whole, .call = status, .summary = "say what direnv makes of this directory" },
+    .{ .name = "direnv.allow", .arity = .whole, .call = allow, .summary = "allow this directory's .envrc" },
+    .{ .name = "direnv.reload", .arity = .whole, .call = reload, .summary = "re-read the environment" },
+    .{ .name = "direnv.apply", .arity = .whole, .call = apply, .summary = "apply this directory's environment" },
 };
 
-/// The fill token `direnv-apply` waits on. Any other fill in this buffer (a
+/// The fill token `direnv.apply` waits on. Any other fill in this buffer (a
 /// `status`, an `allow`) must not be read as an environment.
 const apply_token: u32 = 1;
 
@@ -37,7 +37,7 @@ fn describeExtra() void {
 }
 
 fn show(cmd: []const u8) void {
-    weft.runStr("buffer-create", "*direnv*");
+    weft.runStr("buffer.create", "*direnv*");
     weft.procToBuffer(cmd, "*direnv*", if (std.mem.startsWith(u8, cmd, "direnv exec")) apply_token else 0);
 }
 fn status() void {
@@ -50,7 +50,7 @@ fn reload() void {
     show("direnv reload 2>&1 && echo reloaded");
 }
 
-/// `direnv-apply` — hand this place the environment its `.envrc` describes, so
+/// `direnv.apply` — hand this place the environment its `.envrc` describes, so
 /// every child run here inherits it: a build, a language server, an agent.
 ///
 /// `direnv exec . env` is used rather than `export json` because its output IS

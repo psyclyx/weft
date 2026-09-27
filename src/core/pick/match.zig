@@ -121,10 +121,10 @@ const t = std.testing;
 
 test "matchSpan: subsequence with tightness" {
     try t.expectEqual(@as(?usize, 0), matchSpan("", "anything"));
-    try t.expectEqual(@as(?usize, null), matchSpan("xyz", "cursor-left"));
+    try t.expectEqual(@as(?usize, null), matchSpan("xyz", "cursor.left"));
     try t.expectEqual(@as(?usize, 4), matchSpan("save", "save"));
-    try t.expect(matchSpan("cl", "cursor-left") != null);
-    try t.expect(matchSpan("CL", "cursor-left") != null);
+    try t.expect(matchSpan("cl", "cursor.left") != null);
+    try t.expect(matchSpan("CL", "cursor.left") != null);
 }
 
 test "match styles: orderless, prefix, substring, boundary bonus" {

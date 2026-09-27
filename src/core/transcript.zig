@@ -532,7 +532,7 @@ pub fn reconcileOnSave(gpa: Allocator, tr: *TranscriptDoc, doc: *Document, subs:
 }
 
 /// One transcript buffer's save binding — the opaque closure `install`
-/// hangs `transcript-save` off (`command.Command.data`, "the command's
+/// hangs `transcript.save` off (`command.Command.data`, "the command's
 /// closure payload", the exact mechanism `registerAction`'s own trampoline
 /// uses). Named deferral: this binds the `save` action to exactly ONE
 /// live `TranscriptDoc`/`SubBuffers` pair, matching files's own single-
@@ -564,7 +564,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
         // command already reports through.
         ctx.head.echo.clearRetainingCapacity();
         var buf: [96]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "transcript-save: refused ({t})", .{err}) catch "transcript-save: refused";
+        const msg = std.fmt.bufPrint(&buf, "transcript.save: refused ({t})", .{err}) catch "transcript.save: refused";
         ctx.head.echo.appendSlice(gpa, msg) catch {};
         return .{ .boolean = false };
     };
@@ -577,7 +577,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     if (report.stale > 0) {
         ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "transcript-save: {d} row(s) were stale, discarded", .{report.stale}) catch "transcript-save: some rows were stale";
+        const msg = std.fmt.bufPrint(&buf, "transcript.save: {d} row(s) were stale, discarded", .{report.stale}) catch "transcript.save: some rows were stale";
         ctx.head.echo.appendSlice(gpa, msg) catch {};
     }
     return .{ .boolean = true };
@@ -590,17 +590,17 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
 /// default file-save provider), extended here to its first HOST-NATIVE
 /// provider — until now only wasm guests registered a tool-scoped `save`.
 pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, bind: *SaveBinding) !void {
-    _ = try commands.bind(gpa, "transcript-save", .{
-        .name = "transcript-save",
+    _ = try commands.bind(gpa, "transcript.save", .{
+        .name = "transcript.save",
         .summary = "Reconcile an edited transcript projection's rows back into the graph doc by NodeRef identity.",
         .args = &.{},
         .handler = cTranscriptSave,
         .data = bind,
     });
     try actions.provide(.{
-        .action = "save",
+        .action = "file.save",
         .predicate = .{ .tool = projection_author },
-        .command = "transcript-save",
+        .command = "transcript.save",
         .priority = 10,
         .owner = "transcript",
     });
@@ -960,7 +960,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
     // The trampoline `save` dispatches through — `builtins.install` binds
     // this in the real app; a focused unit test binds just the piece it
     // exercises.
-    try command.registerAction(gpa, &commands, &actions, "save", .pick);
+    try command.registerAction(gpa, &commands, &actions, "file.save", .pick);
 
     var tr = try TranscriptDoc.create(gpa, "alice");
     defer tr.deinit(gpa);
@@ -994,7 +994,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
         .quit = &quit,
         .head = &head,
     };
-    _ = try command.run(&commands, &ctx, "save", &.{});
+    _ = try command.run(&commands, &ctx, "file.save", &.{});
 
     const b1 = try tr.at(1).text(gpa);
     defer gpa.free(b1);

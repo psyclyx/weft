@@ -866,7 +866,7 @@ pub const Manifest = struct {
     }
 
     /// A length-framed identity for add-only run reconciliation. Arguments are
-    /// part of identity: changing `grammar-add`'s package or symbol must run the
+    /// part of identity: changing `syntax.add-grammar`'s package or symbol must run the
     /// new invocation even though its command name is unchanged.
     fn runKey(gpa: Allocator, d: RunDecl) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
@@ -1198,7 +1198,7 @@ pub const Manifest = struct {
     /// `wasm_host/plugin.zig`'s `mintGrantHandles`/composition check — the
     /// ONLY place a plugin's OWN `grant_handles[i]` gets (re)pointed at a
     /// row — never runs again for it. The freshly-minted, narrower row
-    /// exists in the table, live and correct for `grants-show`/future
+    /// exists in the table, live and correct for `grants.show`/future
     /// principals, but the ALREADY-RUNNING plugin keeps possessing its
     /// original, BROADER describe()-boolean handle (minted at ITS load,
     /// before this grant existed) until a fresh load re-runs
@@ -1470,8 +1470,8 @@ fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32)
     _ = prio;
     // Declaring a menu is a FACT about the mode — which-key lists it, and it
     // inherits the `menu-nav` layer. What keys a menu answers is not core's
-    // opinion: this used to also bind Escape/C-g to `menu-escape` and F1 to
-    // `which-key-now`, the last of which is a command core does not own and
+    // opinion: this used to also bind Escape/C-g to `mode.leave-menu` and F1 to
+    // `which-key.show`, the last of which is a command core does not own and
     // cannot know exists — a plugin's name, spelled in core, per menu. Those
     // three live in `config/defaults.js` on the `menu-nav` layer now, declared
     // once for every menu instead of copied into each.
@@ -1505,20 +1505,20 @@ test "manifest: staging + hash — two identical manifests hash identically" {
     const gpa = t.allocator;
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addBind("normal", "j", &.{"cursor-down"});
+    try a.addBind("normal", "j", &.{"cursor.down"});
     try a.addValue("palette", "accent", "#8ec07c");
     try a.addPlugin("vim");
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addBind("normal", "j", &.{"cursor-down"});
+    try b.addBind("normal", "j", &.{"cursor.down"});
     try b.addValue("palette", "accent", "#8ec07c");
     try b.addPlugin("vim");
 
     try t.expectEqual(a.hash(), b.hash());
 
     // A changed manifest hashes differently.
-    try b.addBind("normal", "k", &.{"cursor-up"});
+    try b.addBind("normal", "k", &.{"cursor.up"});
     try t.expect(a.hash() != b.hash());
 }
 
@@ -1531,11 +1531,11 @@ test "manifest: argument-bearing runs are owned and hash-sensitive" {
     };
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addRun("grammar-add", &args);
+    try a.addRun("syntax.add-grammar", &args);
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addRun("grammar-add", &args);
+    try b.addRun("syntax.add-grammar", &args);
     try t.expectEqual(a.hash(), b.hash());
     try t.expectEqualStrings("/tmp/grammar", a.runs.items[0].args[1].value);
 
@@ -1544,7 +1544,7 @@ test "manifest: argument-bearing runs are owned and hash-sensitive" {
         .{ .string = "/tmp/grammar" },
         .{ .string = "other_symbol" },
     };
-    try b.addRun("grammar-add", &changed);
+    try b.addRun("syntax.add-grammar", &changed);
     try t.expect(a.hash() != b.hash());
 }
 

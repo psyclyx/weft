@@ -141,7 +141,7 @@ const InsertDriver = struct {
     }
 };
 
-/// `j`/`k` — a bound single-key motion (`vim/n/motion.down`/`.up`), alternated
+/// `j`/`k` — a bound single-key motion (`vim.move-down`/`.up`), alternated
 /// so the cursor stays put (no risk of running off either end of the fixture).
 const MotionDriver = struct {
     ed: *Editor,
@@ -426,7 +426,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try loadVim(&ed);
-    ed.runStr("open", path);
+    ed.runStr("file.open", path);
     try t.expectEqualStrings("normal", ed.mode());
     try registerActionFixture(gpa, &ed);
 

@@ -162,14 +162,14 @@ const CoreOffer = struct {
 };
 
 const core_offers = [_]CoreOffer{
-    .{ .intention = "std.history.undo", .command = "undo", .gate = .undo },
-    .{ .intention = "std.history.redo", .command = "redo", .gate = .redo },
+    .{ .intention = "std.history.undo", .command = "edit.undo", .gate = .undo },
+    .{ .intention = "std.history.redo", .command = "edit.redo", .gate = .redo },
     // Not a text verb: WHAT is durable is the `save` providers' call (a files
     // listing applies its draft), so the gate is theirs and holding text is
     // not a precondition.
-    .{ .intention = "std.persistence.save", .command = "save", .needs_text = false, .gate = .persists },
-    .{ .intention = "std.editing.insert-line-break", .command = "insert-newline" },
-    .{ .intention = "std.input.break-out", .command = "posture-break-out", .needs_text = false },
+    .{ .intention = "std.persistence.save", .command = "file.save", .needs_text = false, .gate = .persists },
+    .{ .intention = "std.editing.insert-line-break", .command = "edit.insert-newline" },
+    .{ .intention = "std.input.break-out", .command = "mode.break-out", .needs_text = false },
 };
 
 /// The facts about the focused ENTRY core's table is computed from. A value,
@@ -180,7 +180,7 @@ pub const Shape = struct {
     can_undo: bool = true,
     can_redo: bool = true,
     /// Some provider of the `save` action is eligible here. Decided by the
-    /// providers' own predicates (core's `save-file` excludes tool
+    /// providers' own predicates (core's `file.write` excludes tool
     /// projections by locality) — never by naming a tool.
     persists: bool = true,
 };
@@ -337,7 +337,7 @@ pub const Plane = struct {
     /// whether anything here is durable.
     fn shapeOf(self: *Plane, scope: Scope) Shape {
         const persists = if (self.derived_attached)
-            self.derived.actions.resolveFacts("save", factsIn(scope)) != null
+            self.derived.actions.resolveFacts("file.save", factsIn(scope)) != null
         else
             true;
         const ed = scope.entry.textEditor() orelse

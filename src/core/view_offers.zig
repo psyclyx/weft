@@ -59,41 +59,41 @@ pub const Binding = struct {
 };
 
 pub const bindings = [_]Binding{
-    .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = "hierarchy-toggle-expanded" },
-    .{ .intent = .step_out, .intention = "std.hierarchy.step-out", .route = "hierarchy-step-out" },
-    .{ .intent = .activate, .intention = "std.target.activate", .route = "target-open-focused" },
+    .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = "hierarchy.toggle-expanded" },
+    .{ .intent = .step_out, .intention = "std.hierarchy.step-out", .route = "target.open-container" },
+    .{ .intent = .activate, .intention = "std.target.activate", .route = "target.open" },
     // The same intention on an `action` node, routed to the action it names
     // (`pointer.zig`'s `activateFocusedAction`, also what a click on it runs).
-    .{ .intent = .activate_action, .intention = "std.target.activate", .route = "activate-focused-action" },
+    .{ .intent = .activate_action, .intention = "std.target.activate", .route = "view.run-focused-action" },
     // Transfer rides the routes the register already owns: capture, place,
     // and capture-as-a-move. The provider decides what a capture MEANS for
     // its rows; the standard word only says which half of the ferry runs.
-    .{ .intent = .transfer_yank, .intention = "std.transfer.yank", .route = "selection-copy" },
-    .{ .intent = .transfer_paste, .intention = "std.transfer.paste", .route = "selection-paste-after" },
-    .{ .intent = .transfer_delete, .intention = "std.transfer.delete-to-register", .route = "selection-cut" },
-    // ROW steps, not line steps. `row-up`/`row-down` fall through to the
+    .{ .intent = .transfer_yank, .intention = "std.transfer.yank", .route = "selection.copy" },
+    .{ .intent = .transfer_paste, .intention = "std.transfer.paste", .route = "selection.paste-after" },
+    .{ .intent = .transfer_delete, .intention = "std.transfer.delete-to-register", .route = "selection.cut" },
+    // ROW steps, not line steps. `cursor.row-up`/`cursor.row-down` fall through to the
     // ordinary cursor move when the entry is not a projection, so this is the
     // same route for a scene and strictly better for a listing: it lands on
     // the row's actionable part and keeps the column you were in.
-    .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "row-up" },
-    .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "row-down" },
-    .{ .intent = .navigate_left, .intention = "std.navigation.left", .route = "cursor-left" },
-    .{ .intent = .navigate_right, .intention = "std.navigation.right", .route = "cursor-right" },
-    .{ .intent = .word_previous, .intention = "std.navigation.word-previous", .route = "field-word-previous" },
-    .{ .intent = .word_next, .intention = "std.navigation.word-next", .route = "field-word-next" },
-    .{ .intent = .word_end, .intention = "std.navigation.word-end", .route = "field-word-end" },
-    .{ .intent = .WORD_previous, .intention = "std.navigation.big-word-previous", .route = "field-big-word-previous" },
-    .{ .intent = .WORD_next, .intention = "std.navigation.big-word-next", .route = "field-big-word-next" },
-    .{ .intent = .WORD_end, .intention = "std.navigation.big-word-end", .route = "field-big-word-end" },
-    .{ .intent = .line_start, .intention = "std.navigation.line-start", .route = "field-line-start" },
-    .{ .intent = .line_end, .intention = "std.navigation.line-end", .route = "field-line-end" },
-    .{ .intent = .first_non_blank, .intention = "std.navigation.first-non-blank", .route = "field-first-non-blank" },
-    .{ .intent = .back, .intention = "std.navigation.back", .route = "navigate-back" },
-    .{ .intent = .insert_before, .intention = "std.editing.insert-before", .route = "item-insert-before" },
-    .{ .intent = .insert_after, .intention = "std.editing.insert-after", .route = "item-insert-after" },
-    .{ .intent = .begin_edit, .intention = "std.editing.begin", .route = "field-edit" },
-    .{ .intent = .commit_edit, .intention = "std.target.activate", .route = "field-edit-commit" },
-    .{ .intent = .cancel_edit, .intention = "std.gesture.cancel", .route = "field-edit-cancel" },
+    .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "cursor.row-up" },
+    .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "cursor.row-down" },
+    .{ .intent = .navigate_left, .intention = "std.navigation.left", .route = "cursor.left" },
+    .{ .intent = .navigate_right, .intention = "std.navigation.right", .route = "cursor.right" },
+    .{ .intent = .word_previous, .intention = "std.navigation.word-prev", .route = "field.word-prev" },
+    .{ .intent = .word_next, .intention = "std.navigation.word-next", .route = "field.word-next" },
+    .{ .intent = .word_end, .intention = "std.navigation.word-end", .route = "field.word-end" },
+    .{ .intent = .WORD_previous, .intention = "std.navigation.big-word-prev", .route = "field.big-word-prev" },
+    .{ .intent = .WORD_next, .intention = "std.navigation.big-word-next", .route = "field.big-word-next" },
+    .{ .intent = .WORD_end, .intention = "std.navigation.big-word-end", .route = "field.big-word-end" },
+    .{ .intent = .line_start, .intention = "std.navigation.line-start", .route = "field.line-start" },
+    .{ .intent = .line_end, .intention = "std.navigation.line-end", .route = "field.line-end" },
+    .{ .intent = .first_non_blank, .intention = "std.navigation.first-non-blank", .route = "field.first-non-blank" },
+    .{ .intent = .back, .intention = "std.navigation.back", .route = "buffer.back" },
+    .{ .intent = .insert_before, .intention = "std.editing.insert-before", .route = "item.insert-before" },
+    .{ .intent = .insert_after, .intention = "std.editing.insert-after", .route = "item.insert-after" },
+    .{ .intent = .begin_edit, .intention = "std.editing.begin", .route = "field.edit" },
+    .{ .intent = .commit_edit, .intention = "std.target.activate", .route = "field.commit-edit" },
+    .{ .intent = .cancel_edit, .intention = "std.gesture.cancel", .route = "field.cancel-edit" },
 };
 
 comptime {
@@ -272,7 +272,7 @@ pub const Publisher = struct {
     }
 
     /// Publish the actions the focus path ADVERTISES that no standard
-    /// intention above already carries — `fs.entry.create-file`, `view.apply`
+    /// intention above already carries — `fs.create-file`, `view.apply`
     /// — so a toolbar or context menu enumerating offers sees them, labelled
     /// as the scene labels them. Deepest advertiser wins an id, the same walk
     /// the focused-action route makes. Each is offered under the
@@ -513,13 +513,13 @@ test "a focused files row publishes activation and its grid, never expansion" {
     // Return resolves activation through the target-open route; Tab finds
     // nothing to expand on a leaf and never reaches a text insertion.
     const activated = try fixture.resolve(&.{ "std.target.activate", "std.editing.insert-line-break" });
-    try t.expectEqualStrings("target-open-focused", fixture.routeOf(activated.decision));
+    try t.expectEqualStrings("target.open", fixture.routeOf(activated.decision));
     try fixture.absent("std.hierarchy.toggle-expanded");
 
     const down = try fixture.resolve(&.{"std.navigation.down"});
     // A ROW step. Falls through to the plain cursor move when the entry is not
     // a projection, so a scene reaches the same behaviour by the same route.
-    try t.expectEqualStrings("row-down", fixture.routeOf(down.decision));
+    try t.expectEqualStrings("cursor.row-down", fixture.routeOf(down.decision));
     // A row of columns has a horizontal axis, and a focused view can be left.
     try t.expect((try fixture.resolve(&.{"std.navigation.right"})) == .decision);
     try t.expect((try fixture.resolve(&.{"std.navigation.back"})) == .decision);
@@ -583,7 +583,7 @@ test "node actions outside the standard vocabulary are offers too, labelled as t
 
     const extra = [_]model.scene.Action{
         .{ .id = standard.open, .label = "Open", .enabled = true },
-        .{ .id = "fs.entry.create-file", .label = "New file", .enabled = true },
+        .{ .id = "fs.create-file", .label = "New file", .enabled = true },
         .{ .id = standard.apply, .label = "Apply draft", .enabled = false },
     };
     var root = fixture.scene(false);
@@ -596,7 +596,7 @@ test "node actions outside the standard vocabulary are offers too, labelled as t
     try t.expect(try fixture.refresh());
 
     const snapshot = try fixture.plane.catalog.snapshot(fixture.context());
-    const create = fixture.plane.catalog.findIntention("plugin.fs.entry.create-file").?;
+    const create = fixture.plane.catalog.findIntention("plugin.fs.create-file").?;
     const rows = snapshot.offersFor(create);
     try t.expectEqual(@as(usize, 1), rows.len);
     try t.expectEqualStrings("New file", rows[0].affordance.label);
@@ -618,10 +618,10 @@ test "a row's transfer designations resolve to the register's own routes" {
     try t.expect(try fixture.refresh());
 
     const words = [_][2][]const u8{
-        .{ "std.transfer.yank", "selection-copy" },
-        .{ "std.transfer.paste", "selection-paste-after" },
-        .{ "std.transfer.delete-to-register", "selection-cut" },
-        .{ "std.hierarchy.step-out", "hierarchy-step-out" },
+        .{ "std.transfer.yank", "selection.copy" },
+        .{ "std.transfer.paste", "selection.paste-after" },
+        .{ "std.transfer.delete-to-register", "selection.cut" },
+        .{ "std.hierarchy.step-out", "target.open-container" },
     };
     for (words) |word| {
         const resolution = try fixture.resolve(&.{word[0]});

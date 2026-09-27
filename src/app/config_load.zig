@@ -22,11 +22,11 @@ pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []
 }
 
 /// A LIVE config binding (doc/configuration.md §5): remembers the manifest
-/// last applied so a `config-reload` is a `Manifest.reconcile` against it
+/// last applied so a `app.reload-config` is a `Manifest.reconcile` against it
 /// (an unchanged reload is a verified no-op; a changed one tears down what
 /// it owned and applies the delta) instead of a blind re-run of the whole
 /// JS program against already-mutated state. `main.zig` owns one of these
-/// for the session's config file and wires `config-reload` to `.reload()`.
+/// for the session's config file and wires `app.reload-config` to `.reload()`.
 pub const ConfigSession = struct {
     gpa: std.mem.Allocator,
     ctx: *core.command.Context,
@@ -76,14 +76,14 @@ pub const ConfigSession = struct {
     }
 };
 
-/// The `config-reload` command handler — `main.zig` binds this over a
+/// The `app.reload-config` command handler — `main.zig` binds this over a
 /// `*ConfigSession` (`.data`). A failed reload is logged, never fatal (same
 /// degrade as the initial load).
 pub fn configReloadHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = ctx;
     _ = args;
     const cs: *ConfigSession = @ptrCast(@alignCast(data.?));
-    cs.reload() catch |e| std.log.warn("config-reload: {t}", .{e});
+    cs.reload() catch |e| std.log.warn("app.reload-config: {t}", .{e});
     return .nil;
 }
 
@@ -227,13 +227,13 @@ test "config_load: W4 slice 4 GATE — the PRODUCTION loader wires a real, revoc
     try t.expect(sys.grants.check(plugin.grant_handles[core.wasm_host.perm_fs_write]));
 
     // Live and working through the production path.
-    _ = try core.command.run(&sys.commands, &c, "notes-capture", &.{ .{ .string = "before" }, .{ .string = tmp_note } });
+    _ = try core.command.run(&sys.commands, &c, "notes.capture", &.{ .{ .string = "before" }, .{ .string = tmp_note } });
 
     // Revoke through the SAME table the loader wired — no reload, no
     // re-describe: the running plugin's very next matching call traps.
     const n = sys.revoke("notes", "fs_write");
     try t.expectEqual(@as(usize, 1), n);
-    try t.expectError(error.Trap, core.command.run(&sys.commands, &c, "notes-capture", &.{ .{ .string = "after" }, .{ .string = tmp_note } }));
+    try t.expectError(error.Trap, core.command.run(&sys.commands, &c, "notes.capture", &.{ .{ .string = "after" }, .{ .string = tmp_note } }));
 }
 
 test "config_load: W4 slice 4 — the composition rule holds through the PRODUCTION loader: a config-authored weft.grant narrows describe()'s ask into ONE row" {

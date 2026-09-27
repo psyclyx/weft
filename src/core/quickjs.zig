@@ -1691,7 +1691,7 @@ fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 
 /// weft.menu(name) — declare `name` as a prefix-menu keymap mode: a which-key
 /// submenu. It swallows text (a modal menu, not typing) and Escape/C-g leave it
-/// via `menu-escape`. A leader key bound to `name` enters it (the dispatch
+/// via `mode.leave-menu`. A leader key bound to `name` enters it (the dispatch
 /// treats a bound command that names a menu mode as "enter that submenu").
 fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;

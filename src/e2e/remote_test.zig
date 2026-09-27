@@ -59,10 +59,10 @@ test "e2e/remote: a shell place lists, the sidebar follows into it and reveals t
     ed.prov.attach_deps.spawner = .{ .command = &local_sh };
 
     // A local source file: local, and the build is offered.
-    ed.runStr("open", "local.zig");
+    ed.runStr("file.open", "local.zig");
     ed.applyWindow();
     try t.expectEqualStrings("local", fact(&ed, "locality"));
-    try t.expect(ide.offered(&ed, "plugin.ide.build"));
+    try t.expect(ide.offered(&ed, "plugin.code.run"));
 
     // The shell's directory, by designation: a listing like any other,
     // through the shell's own filesystem provider.
@@ -89,8 +89,8 @@ test "e2e/remote: a shell place lists, the sidebar follows into it and reveals t
         try t.expectEqualStrings("pub fn main() void {}\n", text);
     }
     try t.expectEqualStrings("remote", fact(&ed, "locality"));
-    try t.expect(!ide.offered(&ed, "plugin.ide.build"));
-    try t.expect(ide.offered(&ed, "plugin.ide.format")); // source is still source
+    try t.expect(!ide.offered(&ed, "plugin.code.run"));
+    try t.expect(ide.offered(&ed, "plugin.code.format")); // source is still source
     var pbuf: [4096]u8 = undefined;
     const parent = try std.fmt.bufPrint(&pbuf, "weft://shell:box/dir{s}/box/src", .{proj.root});
     try t.expectEqualStrings(parent, fact(&ed, "place"));
@@ -109,10 +109,10 @@ test "e2e/remote: a shell place lists, the sidebar follows into it and reveals t
     try t.expect(core.place.realize(ed.buffers.active().place, ed.ctx.realizer) == .elsewhere);
 
     // Back to the local file: local again, the build offered again.
-    ed.runStr("open", "local.zig");
+    ed.runStr("file.open", "local.zig");
     ed.applyWindow();
     try t.expectEqualStrings("local", fact(&ed, "locality"));
-    try t.expect(ide.offered(&ed, "plugin.ide.build"));
+    try t.expect(ide.offered(&ed, "plugin.code.run"));
 }
 
 test "e2e/remote: a shell that is gone reads offline in the status line, and its directory refuses by name" {
@@ -131,7 +131,7 @@ test "e2e/remote: a shell that is gone reads offline in the status line, and its
     ed.prov.attach_deps.spawner = .{ .command = &dead };
 
     const dir = try std.fmt.bufPrint(&buf, "weft://shell:gone/dir{s}/box", .{proj.root});
-    const outcome = try core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = dir }});
+    const outcome = try core.command.run(ed.commands, ed.ctx, "file.open", &.{.{ .string = dir }});
     try t.expect(outcome == .string);
     try t.expectEqualStrings("open: the shell is not answering", outcome.string);
     const l = ed.ctx.loci.?.resolve(.{ .shell = "gone" }) orelse return error.NoLocus;
@@ -201,8 +201,8 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     try t.expectEqualStrings(pair.tree.root_designation, fact(b, "place"));
     try t.expectEqualStrings("remote", fact(b, "locality"));
     try t.expectEqualStrings("text", fact(b, "posture"));
-    try t.expect(!ide.offered(b, "plugin.ide.build"));
-    try t.expect(ide.offered(b, "plugin.ide.format"));
+    try t.expect(!ide.offered(b, "plugin.code.run"));
+    try t.expect(ide.offered(b, "plugin.code.format"));
 
     // R2 + R5: the locus is the fingerprint; whatever connection reaches it
     // is a binding, and the status line reads its liveness.
@@ -276,7 +276,7 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp").kind == core.file.Stat.absent.kind);
 
     // The peer's own edit is not ours to undo: undo takes back only "// mine".
-    b.run("undo");
+    b.run("edit.undo");
     {
         const text = try b.textAlloc();
         defer gpa.free(text);

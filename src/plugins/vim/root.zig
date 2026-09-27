@@ -3,7 +3,7 @@
 //! the `motions` and `operators` plugins BY LATE-BOUND NAME — it contains no
 //! motion or edit logic of its own. A motion returns a borrowed live `range`; in
 //! normal mode vim moves the cursor to the target, in operator-pending mode it
-//! hands the range to `op.delete` ([FIX 3] — no shared-cursor side channel).
+//! hands the range to `operators.delete` ([FIX 3] — no shared-cursor side channel).
 //! The core knows nothing of vim; delete it and weft is modeless.
 
 const std = @import("std");
@@ -15,7 +15,7 @@ const semantic_action = weft.semantic.action.standard;
 /// The `:` command line: vim's resting mode is `normal`, its command-line
 /// keymap mode is `ex`. Owns the classic abbreviated ex commands (w/q/s/…) and
 /// falls everything else through to the weft command registry (see ex.zig).
-const ex = ex_mod.Ex("normal", "ex");
+const ex = ex_mod.Ex("normal", "ex", "vim.ex");
 
 // ── Register (charwise/linewise) — now the CORE register (weft.zig), shared
 // with helix and any editor, so `dd`→`p` ferries a projection row's hidden id
@@ -42,7 +42,7 @@ const std_paste = "std.transfer.paste";
 // is whether to first yank the range into the register (d/c/y do, gc doesn't);
 // `op_after` is the mode to enter after. This trio lets ANY range-arg operator —
 // op.delete, op.comment, a plugin's own — ride the operator-pending machinery.
-var op_edit_cmd: ?[]const u8 = "op.delete";
+var op_edit_cmd: ?[]const u8 = "operators.delete";
 var op_copies: bool = true;
 var op_after: []const u8 = "normal"; // mode to enter after the operator
 
@@ -57,18 +57,16 @@ fn consumeCount() u32 {
     return c;
 }
 
-/// `vim-count-take`: hand the typed count to ANOTHER plugin's motion and
+/// `vim.count-take`: hand the typed count to ANOTHER plugin's motion and
 /// spend it — "" when none was typed. A motion that is not vim's (snipe's
 /// `3sab`) names this through its own config value, as it names
-/// `vim-operate` for the pending operator, so neither side names the other.
+/// `vim.operate` for the pending operator, so neither side names the other.
 fn countTake() void {
     var buf: [12]u8 = undefined;
     const n = pending_count;
     pending_count = 0;
     weft.setResultStr(if (n == 0) "" else std.fmt.bufPrint(&buf, "{d}", .{n}) catch "");
 }
-
-const file_pick = 0;
 
 fn lineStartOff() usize {
     return weft.lineAt(weft.cursor()).start;
@@ -93,21 +91,21 @@ const MB = struct {
     jump: bool = false,
 };
 const mtable = [_]MB{
-    .{ .key = "h", .motion = "motion.left", .in_op = false, .intention = "std.navigation.left" },
-    .{ .key = "l", .motion = "motion.right", .in_op = false, .intention = "std.navigation.right" },
-    .{ .key = "j", .motion = "motion.down", .in_op = false, .intention = "std.navigation.down" },
-    .{ .key = "k", .motion = "motion.up", .in_op = false, .intention = "std.navigation.up" },
-    .{ .key = "w", .motion = "motion.word-fwd", .in_op = true, .intention = "std.navigation.word-next" },
-    .{ .key = "b", .motion = "motion.word-back", .in_op = true, .intention = "std.navigation.word-previous" },
-    .{ .key = "e", .motion = "motion.word-end", .in_op = true, .intention = "std.navigation.word-end" },
-    .{ .key = "W", .motion = "motion.WORD-fwd", .in_op = true, .intention = "std.navigation.big-word-next" },
-    .{ .key = "B", .motion = "motion.WORD-back", .in_op = true, .intention = "std.navigation.big-word-previous" },
-    .{ .key = "E", .motion = "motion.WORD-end", .in_op = true, .intention = "std.navigation.big-word-end" },
-    .{ .key = "0", .motion = "motion.line-start", .in_op = true, .intention = "std.navigation.line-start" },
-    .{ .key = "dollar", .motion = "motion.line-end", .in_op = true, .intention = "std.navigation.line-end" },
-    .{ .key = "asciicircum", .motion = "motion.first-non-blank", .in_op = true, .intention = "std.navigation.first-non-blank" },
-    .{ .key = "G", .motion = "motion.doc-end", .in_op = true, .jump = true },
-    .{ .key = "percent", .motion = "motion.match-pair", .in_op = true, .jump = true },
+    .{ .key = "h", .motion = "motions.left", .in_op = false, .intention = "std.navigation.left" },
+    .{ .key = "l", .motion = "motions.right", .in_op = false, .intention = "std.navigation.right" },
+    .{ .key = "j", .motion = "motions.down", .in_op = false, .intention = "std.navigation.down" },
+    .{ .key = "k", .motion = "motions.up", .in_op = false, .intention = "std.navigation.up" },
+    .{ .key = "w", .motion = "motions.word-next", .in_op = true, .intention = "std.navigation.word-next" },
+    .{ .key = "b", .motion = "motions.word-prev", .in_op = true, .intention = "std.navigation.word-prev" },
+    .{ .key = "e", .motion = "motions.word-end", .in_op = true, .intention = "std.navigation.word-end" },
+    .{ .key = "W", .motion = "motions.big-word-next", .in_op = true, .intention = "std.navigation.big-word-next" },
+    .{ .key = "B", .motion = "motions.big-word-prev", .in_op = true, .intention = "std.navigation.big-word-prev" },
+    .{ .key = "E", .motion = "motions.big-word-end", .in_op = true, .intention = "std.navigation.big-word-end" },
+    .{ .key = "0", .motion = "motions.line-start", .in_op = true, .intention = "std.navigation.line-start" },
+    .{ .key = "dollar", .motion = "motions.line-end", .in_op = true, .intention = "std.navigation.line-end" },
+    .{ .key = "asciicircum", .motion = "motions.first-non-blank", .in_op = true, .intention = "std.navigation.first-non-blank" },
+    .{ .key = "G", .motion = "motions.doc-end", .in_op = true, .jump = true },
+    .{ .key = "percent", .motion = "motions.match-pair", .in_op = true, .jump = true },
 };
 
 /// Normal-mode motion: run the motion `count` times, jumping to each target (the
@@ -145,7 +143,7 @@ fn zeroKey() void {
     }
     if (weft.invokeIntention("std.navigation.line-start") == .invoked) return;
     const cur = weft.cursor();
-    const hnd = weft.runRange("motion.line-start") orelse return;
+    const hnd = weft.runRange("motions.line-start") orelse return;
     const r = weft.rangeEnds(hnd) orelse return;
     weft.jump(if (r.end == cur) r.start else r.end);
 }
@@ -153,7 +151,7 @@ fn zeroKey() void {
 /// `x` with a count: delete `count` characters forward.
 fn deleteCharFwd() void {
     var n = consumeCount();
-    while (n > 0) : (n -= 1) weft.run("delete-forward");
+    while (n > 0) : (n -= 1) weft.run("edit.delete-after");
 }
 /// The pending operator is a CHANGE (`c`) — its after-mode is insert. vim's
 /// `cw`/`cW` special-case keys off this.
@@ -175,8 +173,8 @@ fn cursorOnWord() bool {
 /// The word-END motion `cw`/`cW` should use in place of word-FORWARD, or "" if
 /// `motion` isn't a plain word-forward motion.
 fn changeWordEnd(comptime motion: []const u8) []const u8 {
-    if (std.mem.eql(u8, motion, "motion.word-fwd")) return "motion.word-end";
-    if (std.mem.eql(u8, motion, "motion.WORD-fwd")) return "motion.WORD-end";
+    if (std.mem.eql(u8, motion, "motions.word-next")) return "motions.word-end";
+    if (std.mem.eql(u8, motion, "motions.big-word-next")) return "motions.big-word-end";
     return "";
 }
 
@@ -185,7 +183,7 @@ fn changeWordEnd(comptime motion: []const u8) []const u8 {
 /// extended one byte — otherwise `de`/`ce` stop one char short (delete "cns" of
 /// "cnst"). Exclusive motions (`w`, `b`, `0`, `$`) already land past their span.
 fn isInclusiveMotion(m: []const u8) bool {
-    return std.mem.eql(u8, m, "motion.word-end") or std.mem.eql(u8, m, "motion.WORD-end");
+    return std.mem.eql(u8, m, "motions.word-end") or std.mem.eql(u8, m, "motions.big-word-end");
 }
 
 /// Extend an anchored range's end by one byte (clamped to the buffer) — the
@@ -276,7 +274,7 @@ fn operate() void {
 var to_variant: []const u8 = "inner";
 const OB = struct { key: []const u8, obj: []const u8 };
 const otable = [_]OB{
-    .{ .key = "w", .obj = "word" },                .{ .key = "W", .obj = "WORD" },
+    .{ .key = "w", .obj = "word" },                .{ .key = "W", .obj = "big-word" },
     .{ .key = "quotedbl", .obj = "quote-double" }, .{ .key = "apostrophe", .obj = "quote-single" },
     .{ .key = "grave", .obj = "quote-back" },      .{ .key = "parenleft", .obj = "paren" },
     .{ .key = "parenright", .obj = "paren" },      .{ .key = "b", .obj = "paren" },
@@ -286,15 +284,15 @@ const otable = [_]OB{
     .{ .key = "f", .obj = "function" },            .{ .key = "c", .obj = "class" },
     .{ .key = "m", .obj = "call" },
 };
-const to_objs = [_][]const u8{ "word", "WORD", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph", "function", "class", "call" };
+const to_objs = [_][]const u8{ "word", "big-word", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph", "function", "class", "call" };
 
-/// Run textobj.<variant>-<obj> (variant chosen by i/a) and apply the pending
+/// Run textobjects.<variant>-<obj> (variant chosen by i/a) and apply the pending
 /// operator over its range — the same path motions take.
 fn objWrap(comptime obj: []const u8) fn () void {
     return struct {
         fn h() void {
             var buf: [64]u8 = undefined;
-            const name = std.fmt.bufPrint(&buf, "textobj.{s}-{s}", .{ to_variant, obj }) catch return opCancel();
+            const name = std.fmt.bufPrint(&buf, "textobjects.{s}-{s}", .{ to_variant, obj }) catch return opCancel();
             const hnd = weft.runRange(name) orelse return opCancel();
             applyOpRange(hnd);
         }
@@ -305,7 +303,7 @@ fn enterOpInner() void {
     weft.setMode("op-to");
 }
 fn enterOpAround() void {
-    to_variant = "a";
+    to_variant = "around";
     weft.setMode("op-to");
 }
 
@@ -331,7 +329,7 @@ fn chooseClipboard() void {
 
 fn macroQ() void {
     if (weft.macroRecording() != null) {
-        weft.run("macro-record-stop");
+        weft.run("macro.record-stop");
         return;
     }
     weft.setMode("macro-record-pending");
@@ -341,7 +339,7 @@ fn macroRecordInto(comptime reg: u8) fn () void {
         fn h() void {
             weft.exitToResting();
             const name = [_]u8{reg};
-            weft.runStr("macro-record-start", &name);
+            weft.runStr("macro.record-start", &name);
         }
     }.h;
 }
@@ -358,7 +356,7 @@ fn macroPlay(comptime reg: u8) fn () void {
             var buf: [12]u8 = undefined;
             const count = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "1";
             const name = [_]u8{reg};
-            weft.runStr2("macro-play", if (reg == 0) "" else &name, count);
+            weft.runStr2("macro.play", if (reg == 0) "" else &name, count);
         }
     }.h;
 }
@@ -376,103 +374,86 @@ fn chooseRegister(comptime index: u8) fn () void {
 /// A vim verb is a one-cursor program: dispatch runs it once per selection.
 const each = weft.Arity.each_extent;
 const static_cmds = [_]weft.CommandEntry{
-    .{ .name = "vim-insert", .call = insert, .arity = each },
-    .{ .name = "vim-append", .call = append, .arity = each },
-    .{ .name = "vim-open-below", .call = openBelow, .arity = each },
-    .{ .name = "vim-open-above", .call = openAbove, .arity = each },
-    .{ .name = "vim-visual", .call = visual, .arity = each },
-    .{ .name = "vim-visual-delete", .call = visualDelete, .arity = .whole },
-    .{ .name = "vim-visual-delete-text", .call = visualDeleteText, .arity = each },
-    .{ .name = "vim-visual-yank", .call = visualYank, .arity = .whole },
-    .{ .name = "vim-visual-yank-text", .call = visualYankText, .arity = each },
-    .{ .name = "vim-visual-paste", .call = visualPaste(true), .arity = .whole },
-    .{ .name = "vim-visual-paste-before", .call = visualPaste(false), .arity = .whole },
-    .{ .name = "vim-visual-change", .call = visualChange, .arity = each },
-    .{ .name = "vim-visual-comment", .call = visualOp("op.comment"), .arity = each },
-    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase"), .arity = each },
-    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase"), .arity = each },
-    .{ .name = "vim-visual-indent", .call = visualOp("op.indent"), .arity = each },
-    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent"), .arity = each },
-    .{ .name = "enter-op-upcase", .call = enterOpUpcase, .arity = .whole },
-    .{ .name = "enter-op-lowercase", .call = enterOpLowercase, .arity = .whole },
-    .{ .name = "enter-op-indent", .call = enterOpIndent, .arity = .whole },
-    .{ .name = "enter-op-dedent", .call = enterOpDedent, .arity = .whole },
-    .{ .name = "vim-visual-line", .call = visualLine, .arity = each },
-    .{ .name = "vim-normal", .call = normal, .arity = .whole },
-    .{ .name = "vim-append-line", .call = appendLine, .arity = each },
-    .{ .name = "vim-insert-line", .call = insertLine, .arity = each },
-    .{ .name = "vim-delete-eol", .call = deleteEol, .arity = each },
-    .{ .name = "vim-change-eol", .call = changeEol, .arity = each },
-    .{ .name = "vim-change-line", .call = changeLine, .arity = each },
-    .{ .name = "yank-line", .call = yankLine, .arity = .whole },
-    .{ .name = "vim-yank-line-text", .call = yankLineText, .arity = each },
-    .{ .name = "paste", .call = paste, .arity = .whole },
-    .{ .name = "vim-paste-text", .call = pasteText(true), .arity = each },
-    .{ .name = "paste-before", .call = pasteBefore, .arity = .whole },
-    .{ .name = "vim-paste-before-text", .call = pasteText(false), .arity = each },
-    .{ .name = "vim-open-focused", .call = openFocused, .arity = .whole },
-    .{ .name = "vim-open-container", .call = openContainer, .arity = .whole },
-    .{ .name = "join-lines", .call = joinLines, .arity = each },
-    .{ .name = "enter-op-delete", .call = enterOpDelete, .arity = .whole },
-    .{ .name = "enter-op-change", .call = enterOpChange, .arity = .whole },
-    .{ .name = "enter-op-yank", .call = enterOpYank, .arity = .whole },
-    .{ .name = "enter-op-comment", .call = enterOpComment, .arity = .whole },
-    .{ .name = "op-cancel", .call = opCancel, .arity = .whole },
-    .{ .name = "vim-operate", .call = operate, .arity = each },
-    .{ .name = "op-line", .call = opLine, .arity = .whole },
-    .{ .name = "vim-op-line-text", .call = opLineText, .arity = each },
-    .{ .name = "enter-op-inner", .call = enterOpInner, .arity = .whole },
-    .{ .name = "enter-op-around", .call = enterOpAround, .arity = .whole },
-    .{ .name = "enter-register", .call = enterRegister, .arity = .whole },
-    .{ .name = "vim-register-plus", .call = chooseClipboard, .arity = .whole },
-    .{ .name = "vim-register-star", .call = chooseClipboard, .arity = .whole },
-    .{ .name = "vim-macro-q", .call = macroQ, .arity = .whole },
-    .{ .name = "vim-macro-at", .call = macroAt, .arity = .whole },
-    .{ .name = "vim-macro-play-last", .call = macroPlay(0), .arity = .whole },
+    .{ .name = "vim.insert", .call = insert, .arity = each },
+    .{ .name = "vim.append", .call = append, .arity = each },
+    .{ .name = "vim.open-below", .call = openBelow, .arity = each },
+    .{ .name = "vim.open-above", .call = openAbove, .arity = each },
+    .{ .name = "vim.visual", .call = visual, .arity = each },
+    .{ .name = "vim.visual-delete", .call = visualDelete, .arity = .whole },
+    .{ .name = "vim.visual-delete-text", .call = visualDeleteText, .arity = each },
+    .{ .name = "vim.visual-yank", .call = visualYank, .arity = .whole },
+    .{ .name = "vim.visual-yank-text", .call = visualYankText, .arity = each },
+    .{ .name = "vim.visual-paste", .call = visualPaste(true), .arity = .whole },
+    .{ .name = "vim.visual-paste-before", .call = visualPaste(false), .arity = .whole },
+    .{ .name = "vim.visual-change", .call = visualChange, .arity = each },
+    .{ .name = "vim.visual-comment", .call = visualOp("comment.toggle"), .arity = each },
+    .{ .name = "vim.visual-upcase", .call = visualOp("operators.upcase"), .arity = each },
+    .{ .name = "vim.visual-lowercase", .call = visualOp("operators.lowercase"), .arity = each },
+    .{ .name = "vim.visual-indent", .call = visualOp("indent.increase"), .arity = each },
+    .{ .name = "vim.visual-dedent", .call = visualOp("indent.decrease"), .arity = each },
+    .{ .name = "vim.upcase", .call = enterOpUpcase, .arity = .whole },
+    .{ .name = "vim.lowercase", .call = enterOpLowercase, .arity = .whole },
+    .{ .name = "vim.indent", .call = enterOpIndent, .arity = .whole },
+    .{ .name = "vim.dedent", .call = enterOpDedent, .arity = .whole },
+    .{ .name = "vim.visual-line", .call = visualLine, .arity = each },
+    .{ .name = "vim.normal", .call = normal, .arity = .whole },
+    .{ .name = "vim.append-line-end", .call = appendLine, .arity = each },
+    .{ .name = "vim.insert-line-start", .call = insertLine, .arity = each },
+    .{ .name = "vim.delete-line-end", .call = deleteEol, .arity = each },
+    .{ .name = "vim.change-line-end", .call = changeEol, .arity = each },
+    .{ .name = "vim.change-line", .call = changeLine, .arity = each },
+    .{ .name = "vim.yank-line", .call = yankLine, .arity = .whole },
+    .{ .name = "vim.yank-line-text", .call = yankLineText, .arity = each },
+    .{ .name = "vim.paste", .call = paste, .arity = .whole },
+    .{ .name = "vim.paste-text", .call = pasteText(true), .arity = each },
+    .{ .name = "vim.paste-before", .call = pasteBefore, .arity = .whole },
+    .{ .name = "vim.paste-before-text", .call = pasteText(false), .arity = each },
+    .{ .name = "vim.next-line", .call = openFocused, .arity = .whole },
+    .{ .name = "vim.prev-line", .call = openContainer, .arity = .whole },
+    .{ .name = "vim.join-lines", .call = joinLines, .arity = each },
+    .{ .name = "vim.delete", .call = enterOpDelete, .arity = .whole },
+    .{ .name = "vim.change", .call = enterOpChange, .arity = .whole },
+    .{ .name = "vim.yank", .call = enterOpYank, .arity = .whole },
+    .{ .name = "vim.comment", .call = enterOpComment, .arity = .whole },
+    .{ .name = "vim.cancel-operator", .call = opCancel, .arity = .whole },
+    .{ .name = "vim.operate", .call = operate, .arity = each },
+    .{ .name = "vim.operate-line", .call = opLine, .arity = .whole },
+    .{ .name = "vim.operate-line-text", .call = opLineText, .arity = each },
+    .{ .name = "vim.object-inner", .call = enterOpInner, .arity = .whole },
+    .{ .name = "vim.object-around", .call = enterOpAround, .arity = .whole },
+    .{ .name = "vim.select-register", .call = enterRegister, .arity = .whole },
+    .{ .name = "vim.register-plus", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim.register-star", .call = chooseClipboard, .arity = .whole },
+    .{ .name = "vim.macro-record", .call = macroQ, .arity = .whole },
+    .{ .name = "vim.macro-play", .call = macroAt, .arity = .whole },
+    .{ .name = "vim.macro-play-last", .call = macroPlay(0), .arity = .whole },
     // `"/`: the search register, the last pattern any grammar searched for.
-    .{ .name = "vim-register-search", .call = chooseRegister(weft.register_search), .arity = .whole },
-    .{ .name = "find-file", .call = findFile, .arity = .whole },
-    // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
+    .{ .name = "vim.register-search", .call = chooseRegister(weft.register_search), .arity = .whole },
+    // `vim.cancel-pending` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
     // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
-    .{ .name = "leader-cancel", .call = leaderCancel, .arity = .whole },
-    .{ .name = "vim-find-file", .call = vimFindFile, .arity = .whole },
-    .{ .name = "vim-share", .call = vimShare, .arity = .whole },
-    .{ .name = "vim-palette", .call = vimPalette, .arity = .whole },
-    .{ .name = "vim-split", .call = vimSplit, .arity = .whole },
-    .{ .name = "vim-vsplit", .call = vimVsplit, .arity = .whole },
-    .{ .name = "vim-focus-other", .call = vimFocusOther, .arity = .whole },
-    .{ .name = "vim-unsplit", .call = vimUnsplit, .arity = .whole },
-    .{ .name = "vim-win-left", .call = vimWinLeft, .arity = .whole },
-    .{ .name = "vim-win-right", .call = vimWinRight, .arity = .whole },
-    .{ .name = "vim-win-up", .call = vimWinUp, .arity = .whole },
-    .{ .name = "vim-win-down", .call = vimWinDown, .arity = .whole },
-    .{ .name = "vim-win-move-left", .call = vimWinMoveLeft, .arity = .whole },
-    .{ .name = "vim-win-move-right", .call = vimWinMoveRight, .arity = .whole },
-    .{ .name = "vim-win-move-up", .call = vimWinMoveUp, .arity = .whole },
-    .{ .name = "vim-win-move-down", .call = vimWinMoveDown, .arity = .whole },
-    .{ .name = "vim-goto-top", .call = vimGotoTop, .arity = each },
-    .{ .name = "vim-center", .call = vimCenter, .arity = .whole },
-    .{ .name = "find-f", .call = enterFindF, .arity = .whole },
-    .{ .name = "find-F", .call = enterFindBigF, .arity = .whole },
-    .{ .name = "find-t", .call = enterFindT, .arity = .whole },
-    .{ .name = "find-T", .call = enterFindBigT, .arity = .whole },
-    .{ .name = "vim-repeat-find", .call = repeatFind, .arity = each },
-    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev, .arity = each },
-    .{ .name = "vim-replace-char", .call = enterReplaceChar, .arity = .whole },
-    .{ .name = "do-replace-char", .call = doReplaceChar, .arity = each },
-    .{ .name = "vim-tilde", .call = tildeCase, .arity = each },
-    .{ .name = "do-find-f", .call = doFindF, .arity = each },
-    .{ .name = "do-find-F", .call = doFindBigF, .arity = each },
-    .{ .name = "do-find-t", .call = doFindT, .arity = each },
-    .{ .name = "do-find-T", .call = doFindBigT, .arity = each },
+    .{ .name = "vim.cancel-pending", .call = leaderCancel, .arity = .whole },
+    .{ .name = "vim.goto-top", .call = vimGotoTop, .arity = each },
+    .{ .name = "vim.find-next-char", .call = enterFindF, .arity = .whole },
+    .{ .name = "vim.find-prev-char", .call = enterFindBigF, .arity = .whole },
+    .{ .name = "vim.till-next-char", .call = enterFindT, .arity = .whole },
+    .{ .name = "vim.till-prev-char", .call = enterFindBigT, .arity = .whole },
+    .{ .name = "vim.repeat-find", .call = repeatFind, .arity = each },
+    .{ .name = "vim.repeat-find-reversed", .call = repeatFindRev, .arity = each },
+    .{ .name = "vim.replace-char", .call = enterReplaceChar, .arity = .whole },
+    .{ .name = "vim.do-replace-char", .call = doReplaceChar, .arity = each },
+    .{ .name = "vim.toggle-case", .call = tildeCase, .arity = each },
+    .{ .name = "vim.do-find-next-char", .call = doFindF, .arity = each },
+    .{ .name = "vim.do-find-prev-char", .call = doFindBigF, .arity = each },
+    .{ .name = "vim.do-till-next-char", .call = doFindT, .arity = each },
+    .{ .name = "vim.do-till-prev-char", .call = doFindBigT, .arity = each },
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
-    .{ .name = "vim-zero", .call = zeroKey, .arity = each },
-    .{ .name = "vim-delete-char", .call = deleteCharFwd, .arity = each },
-    .{ .name = "vim-count-take", .call = countTake, .arity = .whole },
+    .{ .name = "vim.zero", .call = zeroKey, .arity = each },
+    .{ .name = "vim.delete-char", .call = deleteCharFwd, .arity = each },
+    .{ .name = "vim.count-take", .call = countTake, .arity = .whole },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
-    .{ .name = "vim-ex", .call = ex.enter, .arity = .whole },
+    .{ .name = "vim.ex", .call = ex.enter, .arity = .whole },
 };
 
 /// The `:` line's own editing commands, from the shared `prompt` library —
@@ -484,8 +465,9 @@ const ex_cmds: [ex.commands.len]weft.CommandEntry = blk: {
     break :blk arr;
 };
 
-/// Generated normal- and op-mode motion commands (one `vim/n/*` per motion, plus
-/// a `vim/o/*` for operator-valid motions). Names are only for key binding.
+/// Generated normal- and op-mode motion commands (one `vim.move-*` per motion,
+/// plus a `vim.operate-to-*` for operator-valid motions, and a
+/// `vim.operate-on-*` per text object). Keymap machinery, never listed.
 const n_gen = blk: {
     var n: usize = to_objs.len; // one text-object wrapper per unique object
     for (mtable) |m| {
@@ -498,15 +480,15 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
     var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump), .arity = each };
+        arr[i] = .{ .name = "vim.move-" ++ motionWord(m.motion), .call = moveByMotion(m.motion, m.jump), .arity = each };
         i += 1;
         if (m.in_op) {
-            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion), .arity = each };
+            arr[i] = .{ .name = "vim.operate-to-" ++ motionWord(m.motion), .call = opByMotion(m.motion), .arity = each };
             i += 1;
         }
     }
     for (to_objs) |obj| {
-        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj), .arity = each };
+        arr[i] = .{ .name = "vim.operate-on-" ++ obj, .call = objWrap(obj), .arity = each };
         i += 1;
     }
     break :blk arr;
@@ -514,17 +496,17 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
 const register_cmds: [26]weft.CommandEntry = blk: {
     var arr: [26]weft.CommandEntry = undefined;
     for (0..26) |i| arr[i] = .{
-        .name = std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
+        .name = std.fmt.comptimePrint("vim.register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
         .call = chooseRegister(@intCast(i + 1)),
         .arity = .whole,
     };
     break :blk arr;
 };
-/// One command per count digit 1–9 (`vim-count-N`), bound to the digit keys.
+/// One command per count digit 1–9 (`vim.count-N`), bound to the digit keys.
 const count_cmds: [9]weft.CommandEntry = blk: {
     var arr: [9]weft.CommandEntry = undefined;
     for (0..9) |i| arr[i] = .{
-        .name = std.fmt.comptimePrint("vim-count-{d}", .{i + 1}),
+        .name = std.fmt.comptimePrint("vim.count-{d}", .{i + 1}),
         .call = countDigit(@intCast(i + 1)),
         .arity = .whole,
     };
@@ -535,25 +517,44 @@ const macro_cmds: [52]weft.CommandEntry = blk: {
     var arr: [52]weft.CommandEntry = undefined;
     for (0..26) |i| {
         const c: u8 = 'a' + @as(u8, @intCast(i));
-        arr[i] = .{ .name = std.fmt.comptimePrint("vim-macro-record-{c}", .{c}), .call = macroRecordInto(c), .arity = .whole };
-        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim-macro-play-{c}", .{c}), .call = macroPlay(c), .arity = .whole };
+        arr[i] = .{ .name = std.fmt.comptimePrint("vim.macro-record-{c}", .{c}), .call = macroRecordInto(c), .arity = .whole };
+        arr[26 + i] = .{ .name = std.fmt.comptimePrint("vim.macro-play-{c}", .{c}), .call = macroPlay(c), .arity = .whole };
     }
     break :blk arr;
 };
 const cmds = static_cmds ++ ex_cmds ++ register_cmds ++ gen_cmds ++ count_cmds ++ macro_cmds;
+
+/// The keys that ENTER operator-pending (`d`, `c`, `y`, `g c`, …) and pick a
+/// text object's extent (`i`, `a`): what a count and a register survive.
+const operator_entries = [_][]const u8{
+    "vim.change",    "vim.comment", "vim.dedent", "vim.delete",       "vim.indent",
+    "vim.lowercase", "vim.upcase",  "vim.yank",   "vim.object-inner", "vim.object-around",
+};
+fn isOperatorEntry(comptime name: []const u8) bool {
+    for (operator_entries) |e| if (std.mem.eql(u8, e, name)) return true;
+    return false;
+}
+
+/// `motions.big-word-next` → `big-word-next`: the motion a generated key
+/// command is named for.
+fn motionWord(comptime motion: []const u8) []const u8 {
+    const prefix = "motions.";
+    if (!std.mem.startsWith(u8, motion, prefix)) @compileError("not a motions command: " ++ motion);
+    return motion[prefix.len..];
+}
 
 /// Commands that PRESERVE a pending count instead of clearing it: the digit keys
 /// themselves, `0` (which may be a digit), and the operator entries (so `3dw`
 /// keeps the 3 through the `d`). Every other command clears the count in
 /// `on_command`, so a stray count can't leak into an unrelated later command.
 const preserve_count = blk: {
-    @setEvalBranchQuota(4000); // scanning every command name at comptime
+    @setEvalBranchQuota(40000); // scanning every command name at comptime
     var arr: [cmds.len]bool = .{false} ** cmds.len;
     for (cmds, 0..) |c, i| {
-        if (std.mem.startsWith(u8, c.name, "vim-count-") or
-            std.mem.eql(u8, c.name, "vim-zero") or
-            std.mem.eql(u8, c.name, "vim-macro-at") or
-            std.mem.startsWith(u8, c.name, "enter-op-")) arr[i] = true;
+        if (std.mem.startsWith(u8, c.name, "vim.count-") or
+            std.mem.eql(u8, c.name, "vim.zero") or
+            std.mem.eql(u8, c.name, "vim.macro-play") or
+            isOperatorEntry(c.name)) arr[i] = true;
     }
     break :blk arr;
 };
@@ -561,14 +562,14 @@ const preserve_count = blk: {
 /// the selector itself and an operator entry preserve it; ordinary motion or
 /// unrelated commands clear it, preventing a stale `"a` from leaking.
 const preserve_register = blk: {
-    @setEvalBranchQuota(4000);
+    @setEvalBranchQuota(40000);
     var arr: [cmds.len]bool = .{false} ** cmds.len;
     for (cmds, 0..) |c, i| {
-        // `vim-count-take` too: another plugin's motion reads the count
+        // `vim.count-take` too: another plugin's motion reads the count
         // mid-operator (`"a d 3 z a b`), and the slot is the operator's.
-        if (std.mem.startsWith(u8, c.name, "vim-register-") or
-            std.mem.startsWith(u8, c.name, "enter-op-") or
-            std.mem.eql(u8, c.name, "vim-count-take")) arr[i] = true;
+        if (std.mem.startsWith(u8, c.name, "vim.register-") or
+            isOperatorEntry(c.name) or
+            std.mem.eql(u8, c.name, "vim.count-take")) arr[i] = true;
     }
     break :blk arr;
 };
@@ -578,7 +579,7 @@ comptime {
     // nothing — only the config's `weft.grant("vim", "clipboard")` does.
     // Every entry says its arity: a verb is `each`; what only enters a mode,
     // picks a register or opens a window says `.whole`.
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .perms = &.{.clipboard} }).exportAll();
 }
 
 /// The dispatch epilogue: a stray count or a named slot must not leak into an
@@ -592,18 +593,6 @@ fn settle(index: usize) void {
         clip_register = false;
     }
 }
-fn onPickAccept(pick_id: u32) void {
-    if (pick_id != file_pick) return;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const path = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => return,
-    };
-    openChosen(path);
-}
-
 fn initExtra() void {
     weft.setFallback("normal", "default");
     // Source bindings layer over normal editing without changing the head's
@@ -618,7 +607,7 @@ fn initExtra() void {
     weft.setFallback("insert", "default");
     // Only insert commits typed text. `normal`/`visual` need no opt-out:
     // a mode commits text ONLY where it says so (architecture §10.1).
-    weft.textInput("insert", "insert-text");
+    weft.textInput("insert", "edit.insert-text");
 
     // §10.4: what each POSTURE means in vim's own vocabulary (and, implicitly,
     // that `normal` is a mode a buffer rests in — not visual/insert). Vim's
@@ -630,7 +619,7 @@ fn initExtra() void {
     weft.restingPosture(.text, "normal");
     weft.restingPosture(.structural, "normal");
     // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
-    weft.runStr("structural-focus", "text");
+    weft.runStr("mode.set-structural-focus", "text");
     // The break-out chord capture can never take away (§10.4), retained in
     // both the state vim rests in and the one it types in.
     for ([_][]const u8{ "normal", "insert" }) |m|
@@ -641,16 +630,16 @@ fn initExtra() void {
     // the motion as its fallback (architecture §10.2).
     inline for (mtable) |m| {
         if (m.intention) |intent| {
-            weft.bindKeys("normal", m.key, &.{ intent, "vim/n/" ++ m.motion });
-        } else weft.bindKey("normal", m.key, "vim/n/" ++ m.motion);
+            weft.bindKeys("normal", m.key, &.{ intent, "vim.move-" ++ comptime motionWord(m.motion) });
+        } else weft.bindKey("normal", m.key, "vim.move-" ++ comptime motionWord(m.motion));
     }
     // The arrows carry the same row/column intentions as h/j/k/l; their text
     // fallbacks are the modeless floor's own cursor commands.
     const arrows = [_][3][]const u8{
-        .{ "Left", "std.navigation.left", "cursor-left" },
-        .{ "Right", "std.navigation.right", "cursor-right" },
-        .{ "Up", "std.navigation.up", "cursor-up" },
-        .{ "Down", "std.navigation.down", "cursor-down" },
+        .{ "Left", "std.navigation.left", "cursor.left" },
+        .{ "Right", "std.navigation.right", "cursor.right" },
+        .{ "Up", "std.navigation.up", "cursor.up" },
+        .{ "Down", "std.navigation.down", "cursor.down" },
     };
     for (arrows) |a| weft.bindKeys("normal", a[0], &.{ a[1], a[2] });
 
@@ -661,123 +650,123 @@ fn initExtra() void {
     // buffer. Vim asks no view what it is — an unoffered intention simply
     // yields to the next entry.
     const intended = [_][3][]const u8{
-        .{ "Return", "std.target.activate", "vim-open-focused" },
-        .{ "KP_Enter", "std.target.activate", "vim-open-focused" },
-        .{ "u", "std.history.undo", "undo" },
-        .{ "C-r", "std.history.redo", "redo" },
+        .{ "Return", "std.target.activate", "vim.next-line" },
+        .{ "KP_Enter", "std.target.activate", "vim.next-line" },
+        .{ "u", "std.history.undo", "edit.undo" },
+        .{ "C-r", "std.history.redo", "edit.redo" },
     };
     for (intended) |b| weft.bindKeys("normal", b[0], &.{ b[1], b[2] });
     // Normal-mode Tab folds or nothing — it never inserts.
     weft.bindKeys("normal", "Tab", &.{"std.hierarchy.toggle-expanded"});
     // …and `q` then records a macro, where nothing offered workspace-back.
-    weft.bindKeys("normal", "q", &.{ "std.navigation.back", "vim-macro-q" });
+    weft.bindKeys("normal", "q", &.{ "std.navigation.back", "vim.macro-record" });
     // The line break is the other half of §10.2's `Return` list — vim commits
     // one from insert, never from normal, so the two entries live in the two
     // postures rather than in one list a mode would have to disambiguate.
-    weft.bindKeys("insert", "Return", &.{ "std.editing.insert-line-break", "insert-newline" });
-    weft.bindKeys("insert", "KP_Enter", &.{ "std.editing.insert-line-break", "insert-newline" });
+    weft.bindKeys("insert", "Return", &.{ "std.editing.insert-line-break", "edit.insert-newline" });
+    weft.bindKeys("insert", "KP_Enter", &.{ "std.editing.insert-line-break", "edit.insert-newline" });
 
     // Normal-mode non-motion keys (edit primitives + vim compounds).
     const nb = [_][2][]const u8{
-        .{ "i", "vim-insert" },      .{ "a", "vim-append" },
-        .{ "o", "vim-open-below" },  .{ "O", "vim-open-above" },
-        .{ "x", "delete-forward" },  .{ "X", "delete-backward" },
-        .{ "A", "vim-append-line" }, .{ "I", "vim-insert-line" },
-        .{ "D", "vim-delete-eol" },  .{ "C", "vim-change-eol" },
-        .{ "S", "vim-change-line" }, .{ "J", "join-lines" },
-        .{ "v", "vim-visual" },      .{ "Y", "yank-line" },
-        .{ "p", "paste" },           .{ "P", "paste-before" },
-        .{ "d", "enter-op-delete" }, .{ "c", "enter-op-change" },
-        .{ "y", "enter-op-yank" },   .{ "quotedbl", "enter-register" },
+        .{ "i", "vim.insert" },          .{ "a", "vim.append" },
+        .{ "o", "vim.open-below" },      .{ "O", "vim.open-above" },
+        .{ "x", "edit.delete-after" },   .{ "X", "edit.delete-before" },
+        .{ "A", "vim.append-line-end" }, .{ "I", "vim.insert-line-start" },
+        .{ "D", "vim.delete-line-end" }, .{ "C", "vim.change-line-end" },
+        .{ "S", "vim.change-line" },     .{ "J", "vim.join-lines" },
+        .{ "v", "vim.visual" },          .{ "Y", "vim.yank-line" },
+        .{ "p", "vim.paste" },           .{ "P", "vim.paste-before" },
+        .{ "d", "vim.delete" },          .{ "c", "vim.change" },
+        .{ "y", "vim.yank" },            .{ "quotedbl", "vim.select-register" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
     // `-` steps OUT of the focused container where something encloses it, and
     // is vim's previous-line/first-non-blank everywhere else.
-    weft.bindKeys("normal", "minus", &.{ "std.hierarchy.step-out", "vim-open-container" });
+    weft.bindKeys("normal", "minus", &.{ "std.hierarchy.step-out", "vim.prev-line" });
 
     // One operator-pending mode; d/c/y set the pending operator + enter it.
     weft.menuMode("op-pending");
     weft.setFallback("op-pending", "default");
-    weft.bindKey("op-pending", "Escape", "op-cancel");
-    inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim/o/" ++ m.motion);
+    weft.bindKey("op-pending", "Escape", "vim.cancel-operator");
+    inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim.operate-to-" ++ comptime motionWord(m.motion));
     // The doubled operator is linewise (dd, yy, cc, gUU, guu; gcc's second key
     // `c` is already here). Each maps to op-line, which applies whatever operator
     // is pending to the current line.
-    for ([_][]const u8{ "d", "c", "y", "u", "U", "greater", "less" }) |k| weft.bindKey("op-pending", k, "op-line");
+    for ([_][]const u8{ "d", "c", "y", "u", "U", "greater", "less" }) |k| weft.bindKey("op-pending", k, "vim.operate-line");
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
-    weft.bindKey("op-pending", "i", "enter-op-inner");
-    weft.bindKey("op-pending", "a", "enter-op-around");
+    weft.bindKey("op-pending", "i", "vim.object-inner");
+    weft.bindKey("op-pending", "a", "vim.object-around");
     weft.menuMode("op-to");
     weft.setFallback("op-to", "default");
-    weft.bindKey("op-to", "Escape", "op-cancel");
-    inline for (otable) |o| weft.bindKey("op-to", o.key, "vim/to/" ++ o.obj);
+    weft.bindKey("op-to", "Escape", "vim.cancel-operator");
+    inline for (otable) |o| weft.bindKey("op-to", o.key, "vim.operate-on-" ++ o.obj);
 
     // A register prefix is a generic input mode, not a files/editor special
     // case. The selected slot is consumed by the next semantic action.
     weft.menuMode("register-pending");
     weft.setFallback("register-pending", "default");
-    weft.bindKey("register-pending", "Escape", "op-cancel");
+    weft.bindKey("register-pending", "Escape", "vim.cancel-operator");
     inline for (0..26) |i| weft.bindKey(
         "register-pending",
         std.fmt.comptimePrint("{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
-        std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
+        std.fmt.comptimePrint("vim.register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
     );
-    weft.bindKey("register-pending", "plus", "vim-register-plus");
-    weft.bindKey("register-pending", "asterisk", "vim-register-star");
-    weft.bindKey("register-pending", "slash", "vim-register-search");
+    weft.bindKey("register-pending", "plus", "vim.register-plus");
+    weft.bindKey("register-pending", "asterisk", "vim.register-star");
+    weft.bindKey("register-pending", "slash", "vim.register-search");
 
     // Macros: `q` then a letter records, `@` then a letter plays, `@@` plays
     // the last one again. Both prompts are menus, like the register prefix.
-    weft.bindKey("normal", "at", "vim-macro-at");
+    weft.bindKey("normal", "at", "vim.macro-play");
     for ([_][]const u8{ "macro-record-pending", "macro-play-pending" }) |m| {
         weft.menuMode(m);
         weft.setFallback(m, "default");
-        weft.bindKey(m, "Escape", "op-cancel");
+        weft.bindKey(m, "Escape", "vim.cancel-operator");
     }
     for (0..26) |i| {
         const key = [_]u8{'a' + @as(u8, @intCast(i))};
         weft.bindKey("macro-record-pending", &key, macro_cmds[i].name);
         weft.bindKey("macro-play-pending", &key, macro_cmds[26 + i].name);
     }
-    weft.bindKey("macro-play-pending", "at", "vim-macro-play-last");
+    weft.bindKey("macro-play-pending", "at", "vim.macro-play-last");
 
     // Count prefix: digits 1-9 accumulate in normal AND operator-pending (so both
     // `3dw` and `d3w` work). `0` becomes digit-or-line-start; `x` becomes
     // count-aware. These override the plain bindings above (last-wins).
     inline for (1..10) |d| {
         const key = std.fmt.comptimePrint("{d}", .{d});
-        const cmd = std.fmt.comptimePrint("vim-count-{d}", .{d});
+        const cmd = std.fmt.comptimePrint("vim.count-{d}", .{d});
         weft.bindKey("normal", key, cmd);
         weft.bindKey("op-pending", key, cmd);
     }
-    weft.bindKey("normal", "0", "vim-zero");
-    weft.bindKey("normal", "x", "vim-delete-char");
-    weft.bindKey("normal", "V", "vim-visual-line"); // linewise visual
+    weft.bindKey("normal", "0", "vim.zero");
+    weft.bindKey("normal", "x", "vim.delete-char");
+    weft.bindKey("normal", "V", "vim.visual-line"); // linewise visual
 
-    weft.bindKey("visual", "d", "vim-visual-delete");
-    weft.bindKey("visual", "x", "vim-visual-delete");
-    weft.bindKey("visual", "y", "vim-visual-yank");
-    weft.bindKey("visual", "p", "vim-visual-paste");
-    weft.bindKey("visual", "P", "vim-visual-paste-before");
-    weft.bindKey("visual", "c", "vim-visual-change");
-    weft.bindKey("visual", "s", "vim-visual-change"); // `s` in visual = change too
-    weft.bindKey("visual", "Escape", "vim-normal");
-    weft.bindKey("insert", "Escape", "vim-normal");
+    weft.bindKey("visual", "d", "vim.visual-delete");
+    weft.bindKey("visual", "x", "vim.visual-delete");
+    weft.bindKey("visual", "y", "vim.visual-yank");
+    weft.bindKey("visual", "p", "vim.visual-paste");
+    weft.bindKey("visual", "P", "vim.visual-paste-before");
+    weft.bindKey("visual", "c", "vim.visual-change");
+    weft.bindKey("visual", "s", "vim.visual-change"); // `s` in visual = change too
+    weft.bindKey("visual", "Escape", "vim.normal");
+    weft.bindKey("insert", "Escape", "vim.normal");
 
     // No leader/window/goto/zed MODES: those trees are key sequences now (below).
     // Only the f/F/t/T single-char capture modes remain — genuinely dynamic (the
     // next key is arbitrary text), so they stay modes, not a static chord trie.
     const finds = [_][2][]const u8{
-        .{ "find-f", "do-find-f" }, .{ "find-F", "do-find-F" },
-        .{ "find-t", "do-find-t" }, .{ "find-T", "do-find-T" },
+        .{ "find-f", "vim.do-find-next-char" }, .{ "find-F", "vim.do-find-prev-char" },
+        .{ "find-t", "vim.do-till-next-char" }, .{ "find-T", "vim.do-till-prev-char" },
     };
     for (finds) |f| {
         weft.textInput(f[0], f[1]);
-        weft.bindKey(f[0], "Escape", "leader-cancel");
+        weft.bindKey(f[0], "Escape", "vim.cancel-pending");
     }
     // `r<char>` — same single-key capture shape as f/t (the next key is arbitrary).
-    weft.textInput("replace-char", "do-replace-char");
-    weft.bindKey("replace-char", "Escape", "leader-cancel");
+    weft.textInput("replace-char", "vim.do-replace-char");
+    weft.bindKey("replace-char", "Escape", "vim.cancel-pending");
 
     // The `:` command line. Its mode and keys are the shared prompt's — the
     // same Escape/C-c/C-u/Backspace that back out of git's branch name and
@@ -786,67 +775,67 @@ fn initExtra() void {
     ex.install();
 
     const np = [_][2][]const u8{
-        .{ "colon", "vim-ex" },
-        .{ "f", "find-f" },
-        .{ "F", "find-F" },
-        .{ "t", "find-t" },
-        .{ "T", "find-T" },
-        .{ "semicolon", "vim-repeat-find" }, // ; repeat last f/t
-        .{ "comma", "vim-repeat-find-rev" }, //  , repeat reversed
-        .{ "r", "vim-replace-char" }, // r<char> replace under cursor
-        .{ "asciitilde", "vim-tilde" }, // ~ toggle case under cursor
-        .{ "C-d", "scroll-half-down" },
-        .{ "C-u", "scroll-half-up" },
-        .{ "C-f", "scroll-page-down" },
-        .{ "C-b", "scroll-page-up" },
-        .{ "C-e", "scroll-line-down" },
-        .{ "C-y", "scroll-line-up" },
+        .{ "colon", "vim.ex" },
+        .{ "f", "vim.find-next-char" },
+        .{ "F", "vim.find-prev-char" },
+        .{ "t", "vim.till-next-char" },
+        .{ "T", "vim.till-prev-char" },
+        .{ "semicolon", "vim.repeat-find" }, // ; repeat last f/t
+        .{ "comma", "vim.repeat-find-reversed" }, //  , repeat reversed
+        .{ "r", "vim.replace-char" }, // r<char> replace under cursor
+        .{ "asciitilde", "vim.toggle-case" }, // ~ toggle case under cursor
+        .{ "C-d", "scroll.half-page-down" },
+        .{ "C-u", "scroll.half-page-up" },
+        .{ "C-f", "scroll.page-down" },
+        .{ "C-b", "scroll.page-up" },
+        .{ "C-e", "scroll.line-down" },
+        .{ "C-y", "scroll.line-up" },
     };
     for (np) |b| weft.bindKey("normal", b[0], b[1]);
-    weft.bindKey("normal-source", "C-bracketright", "goto-definition");
-    weft.bindKey("default", "C-g", "cancel");
-    weft.bindKey("insert", "C-n", "complete");
+    weft.bindKey("normal-source", "C-bracketright", "lsp.goto-definition");
+    weft.bindKey("default", "C-g", "collab.cancel");
+    weft.bindKey("insert", "C-n", "complete.show");
 
     // The leader tree, as SEQUENCES rooted at `space` — `space` is just the first
     // key of a chord (isPrefix holds it pending; which-key shows the next keys),
     // NOT a mode you enter. A user config (config.js) layers a fuller tree over
     // this minimal default at prio_config.
-    weft.bindKey("normal", "space space", "pick-commands"); // SPC SPC — M-x
-    weft.bindKey("normal", "space f f", "vim-find-file"); // SPC f f — find file
+    weft.bindKey("normal", "space space", "palette.open"); // SPC SPC — M-x
+    weft.bindKey("normal", "space f f", "files.find"); // SPC f f — find file
     // gg / zz as two-key sequences (goto-top / center).
-    weft.bindKey("normal", "g g", "vim-goto-top");
-    weft.bindKey("normal", "z z", "vim-center");
+    weft.bindKey("normal", "g g", "vim.goto-top");
+    weft.bindKey("normal", "z z", "scroll.center-line");
     // `gc` — the comment operator (vim-commentary idiom): `gc{motion}`, `gcip`,
     // `gcc` (line, via the doubled-operator path), and `gc` over a visual span.
     // Bound in the guest so EVERY vim-based config gets it out of the box.
-    weft.bindKey("normal", "g c", "enter-op-comment");
-    weft.bindKey("visual", "g c", "vim-visual-comment");
+    weft.bindKey("normal", "g c", "vim.comment");
+    weft.bindKey("visual", "g c", "vim.visual-comment");
     // `gU`/`gu` case operators (guu/gUU for the line; charwise over a motion).
-    weft.bindKey("normal", "g U", "enter-op-upcase");
-    weft.bindKey("normal", "g u", "enter-op-lowercase");
-    weft.bindKey("visual", "U", "vim-visual-upcase"); // vim: U/u case a selection
-    weft.bindKey("visual", "u", "vim-visual-lowercase");
+    weft.bindKey("normal", "g U", "vim.upcase");
+    weft.bindKey("normal", "g u", "vim.lowercase");
+    weft.bindKey("visual", "U", "vim.visual-upcase"); // vim: U/u case a selection
+    weft.bindKey("visual", "u", "vim.visual-lowercase");
     // `>`/`<` indent operators (>> / << for the line; >ip / <j over a motion).
-    weft.bindKey("normal", "greater", "enter-op-indent");
-    weft.bindKey("normal", "less", "enter-op-dedent");
-    weft.bindKey("visual", "greater", "vim-visual-indent"); // > / < on a selection
-    weft.bindKey("visual", "less", "vim-visual-dedent");
+    weft.bindKey("normal", "greater", "vim.indent");
+    weft.bindKey("normal", "less", "vim.dedent");
+    weft.bindKey("visual", "greater", "vim.visual-indent"); // > / < on a selection
+    weft.bindKey("visual", "less", "vim.visual-dedent");
     // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
     // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
     // arrows have no shifted keysym so they take an explicit `S-`.
     const win = [_][2][]const u8{
-        .{ "s", "vim-split" },                .{ "v", "vim-vsplit" },
-        .{ "c", "vim-unsplit" },              .{ "q", "vim-unsplit" },
-        .{ "o", "vim-unsplit" },              .{ "w", "vim-focus-other" },
-        .{ "C-w", "vim-focus-other" },        .{ "h", "vim-win-left" },
-        .{ "j", "vim-win-down" },             .{ "k", "vim-win-up" },
-        .{ "l", "vim-win-right" },            .{ "Left", "vim-win-left" },
-        .{ "Down", "vim-win-down" },          .{ "Up", "vim-win-up" },
-        .{ "Right", "vim-win-right" },        .{ "H", "vim-win-move-left" },
-        .{ "J", "vim-win-move-down" },        .{ "K", "vim-win-move-up" },
-        .{ "L", "vim-win-move-right" },       .{ "S-Left", "vim-win-move-left" },
-        .{ "S-Down", "vim-win-move-down" },   .{ "S-Up", "vim-win-move-up" },
-        .{ "S-Right", "vim-win-move-right" },
+        .{ "s", "window.split-below" },      .{ "v", "window.split-right" },
+        .{ "c", "window.close" },            .{ "q", "window.close" },
+        .{ "o", "window.close" },            .{ "w", "window.focus-next" },
+        .{ "C-w", "window.focus-next" },     .{ "h", "window.focus-left" },
+        .{ "j", "window.focus-down" },       .{ "k", "window.focus-up" },
+        .{ "l", "window.focus-right" },      .{ "Left", "window.focus-left" },
+        .{ "Down", "window.focus-down" },    .{ "Up", "window.focus-up" },
+        .{ "Right", "window.focus-right" },  .{ "H", "window.move-left" },
+        .{ "J", "window.move-down" },        .{ "K", "window.move-up" },
+        .{ "L", "window.move-right" },       .{ "S-Left", "window.move-left" },
+        .{ "S-Down", "window.move-down" },   .{ "S-Up", "window.move-up" },
+        .{ "S-Right", "window.move-right" },
     };
     // Bound in `global` as `C-w <key>` SEQUENCES, so the window prefix works
     // from EVERY mode (insert, structured views, mid-editing) — the same universal
@@ -859,16 +848,16 @@ fn initExtra() void {
         const seq = std.fmt.bufPrint(&buf, "C-w {s}", .{b[0]}) catch continue;
         weft.bindKey("global", seq, b[1]);
     }
-    weft.bindKey("pick", "M-n", "pick-narrow");
-    weft.bindKey("pick", "M-u", "pick-widen");
-    weft.bindKey("pick", "M-s", "pick-style-cycle");
+    weft.bindKey("pick", "M-n", "pick.narrow");
+    weft.bindKey("pick", "M-u", "pick.widen");
+    weft.bindKey("pick", "M-s", "pick.cycle-style");
 
     // Block caret in normal/visual (where the cursor sits ON a cell), bar in
     // insert (between cells) — the vim convention.
-    weft.runStr2("set-cursor", "normal", "block");
-    weft.runStr2("set-cursor", "visual", "block");
-    weft.runStr2("set-cursor", "insert", "bar");
-    weft.runStr2("cursor-blink", "insert", "on");
+    weft.runStr2("cursor.set-style", "normal", "block");
+    weft.runStr2("cursor.set-style", "visual", "block");
+    weft.runStr2("cursor.set-style", "insert", "bar");
+    weft.runStr2("cursor.set-blink", "insert", "on");
     // Language servers come from config now (weft.set("lsp","<lang>","<cmd>")),
     // read by the `lsp` plugin — no lsp-add registry.
 
@@ -899,7 +888,7 @@ fn insert() void {
     enterInsert();
 }
 fn append() void {
-    weft.run("cursor-right");
+    weft.run("cursor.right");
     enterInsert();
 }
 fn openBelow() void {
@@ -908,7 +897,7 @@ fn openBelow() void {
         return;
     }
     weft.jump(lineEndOff());
-    weft.run("insert-newline");
+    weft.run("edit.insert-newline");
     enterInsert();
 }
 fn openAbove() void {
@@ -917,8 +906,8 @@ fn openAbove() void {
         return;
     }
     weft.jump(lineStartOff());
-    weft.run("insert-newline");
-    weft.run("cursor-up");
+    weft.run("edit.insert-newline");
+    weft.run("cursor.up");
     enterInsert();
 }
 fn appendLine() void {
@@ -950,19 +939,19 @@ fn visualSpan(s: weft.Range) weft.Range {
 
 fn visual() void { // v — charwise
     visual_linewise = false;
-    weft.run("set-mark");
+    weft.run("selection.start");
     weft.setMode("visual");
 }
 fn visualLine() void { // V — linewise
     visual_linewise = true;
     // Over a listing's rows a line IS a row: the range is rows, whatever
     // part of the row is focused.
-    weft.run(if (weft.posture() == .text) "set-mark" else "mark-rows");
+    weft.run(if (weft.posture() == .text) "selection.start" else "selection.start-rows");
     weft.setMode("visual");
 }
 /// Leave visual mode: the selection is spent.
 fn endVisual() void {
-    weft.run("clear-selection");
+    weft.run("selection.clear");
     weft.exitToResting();
 }
 
@@ -971,17 +960,17 @@ fn endVisual() void {
 // as ONE request, else the text half maps per caret.
 fn visualDelete() void {
     if (visual_linewise and yankRows(true)) return endVisual();
-    weft.run("vim-visual-delete-text");
+    weft.run("vim.visual-delete-text");
 }
 fn visualYank() void {
     if (visual_linewise and yankRows(false)) return endVisual();
-    weft.run("vim-visual-yank-text");
+    weft.run("vim.visual-yank-text");
 }
 fn visualPaste(comptime after: bool) fn () void {
     return struct {
         fn h() void {
             if (pastedRows(after)) return endVisual();
-            weft.run(if (after) "vim-paste-text" else "vim-paste-before-text");
+            weft.run(if (after) "vim.paste-text" else "vim.paste-before-text");
         }
     }.h;
 }
@@ -991,7 +980,7 @@ fn visualDeleteText() void {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
             if (semanticDid(semantic_action.delete, 0)) {
-                weft.run("clear-selection");
+                weft.run("selection.clear");
                 weft.exitToResting();
                 return;
             }
@@ -1001,17 +990,17 @@ fn visualDeleteText() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
-        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(s.start);
     }
-    weft.run("clear-selection");
+    weft.run("selection.clear");
     weft.exitToResting();
 }
 fn visualYankText() void {
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
-            weft.run("clear-selection");
+            weft.run("selection.clear");
             weft.exitToResting();
             return;
         }
@@ -1022,7 +1011,7 @@ fn visualYankText() void {
         yankCurrent(s.start, s.end, visual_linewise);
         weft.flash(s.start, s.end); // vim-goggles
     }
-    weft.run("clear-selection");
+    weft.run("selection.clear");
     weft.exitToResting();
 }
 
@@ -1033,7 +1022,7 @@ fn visualChange() void {
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot) and semanticDid(semantic_action.delete, 0)) {
-            weft.run("clear-selection");
+            weft.run("selection.clear");
             enterInsert();
             return;
         }
@@ -1042,10 +1031,10 @@ fn visualChange() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
-        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(s.start);
     }
-    weft.run("clear-selection");
+    weft.run("selection.clear");
     enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (op.comment, op.upcase, …) over
@@ -1062,7 +1051,7 @@ fn visualOp(comptime cmd: []const u8) fn () void {
                 }
                 weft.jump(s.start);
             }
-            weft.run("clear-selection");
+            weft.run("selection.clear");
             weft.exitToResting();
         }
     }.h;
@@ -1072,8 +1061,8 @@ fn normal() void {
     // next normal-mode command (dd, x, …) is its own — `Esc` then `dd` then `u`
     // undoes just the delete, not the typing too. (Cursor motions already
     // barrier; this covers the mode-change boundary a motion doesn't.)
-    weft.run("undo-barrier");
-    weft.run("clear-selection");
+    weft.run("edit.seal-undo");
+    weft.run("selection.clear");
     // §10.4: Escape RETURNS to the entry's declared resting state — it never
     // picks one. Where that is comes from the posture pairing (vim declared
     // its answer for each posture in `init`), so this asks nothing about
@@ -1149,11 +1138,11 @@ fn transferred(intention: []const u8, action: []const u8) bool {
 /// `Return`'s fallback: vim's ordinary `+` — next line, first non-blank. The
 /// activation half is the `std.target.activate` entry bound ahead of it.
 fn openFocused() void {
-    const down = weft.runRange("motion.down") orelse return;
+    const down = weft.runRange("motions.down") orelse return;
     const down_range = weft.rangeEnds(down) orelse return;
     const current = weft.cursor();
     weft.jump(if (down_range.end == current) down_range.start else down_range.end);
-    const first = weft.runRange("motion.first-non-blank") orelse return;
+    const first = weft.runRange("motions.first-non-blank") orelse return;
     const first_range = weft.rangeEnds(first) orelse return;
     const after_down = weft.cursor();
     weft.jump(if (first_range.end == after_down) first_range.start else first_range.end);
@@ -1162,11 +1151,11 @@ fn openFocused() void {
 /// `-`'s fallback: vim's previous line, first non-blank. Stepping out of a
 /// container is the `std.hierarchy.step-out` arm bound ahead of it.
 fn openContainer() void {
-    const up = weft.runRange("motion.up") orelse return;
+    const up = weft.runRange("motions.up") orelse return;
     const up_range = weft.rangeEnds(up) orelse return;
     const current = weft.cursor();
     weft.jump(if (up_range.end == current) up_range.start else up_range.end);
-    const first = weft.runRange("motion.first-non-blank") orelse return;
+    const first = weft.runRange("motions.first-non-blank") orelse return;
     const first_range = weft.rangeEnds(first) orelse return;
     const after_up = weft.cursor();
     weft.jump(if (first_range.end == after_up) first_range.start else first_range.end);
@@ -1180,7 +1169,7 @@ fn openContainer() void {
 // its own that maps `each`.
 fn yankLine() void {
     if (yankRows(false)) return;
-    weft.run("vim-yank-line-text");
+    weft.run("vim.yank-line-text");
 }
 fn yankLineText() void {
     const l = weft.lineAt(weft.cursor());
@@ -1189,21 +1178,21 @@ fn yankLineText() void {
 }
 fn paste() void {
     if (pastedRows(true)) return;
-    weft.run("vim-paste-text");
+    weft.run("vim.paste-text");
 }
 fn pasteBefore() void {
     if (pastedRows(false)) return;
-    weft.run("vim-paste-before-text");
+    weft.run("vim.paste-before-text");
 }
 /// The row half of a yank or a delete (`yy`/`dd`/`cc`, visual `y`/`d`): ONE
 /// copy of every selected row, then for a delete the view's own
-/// `selection-delete` — the files view FLAGS the rows, a retained delete, not
+/// `selection.delete` — the files view FLAGS the rows, a retained delete, not
 /// a removal of the register's content — reached by the name a key would
 /// reach it by. False when nothing offers the transfer word: the caller's
 /// text half runs.
 fn yankRows(delete: bool) bool {
     if (!transferred(std_yank, semantic_action.copy)) return false;
-    if (delete) weft.run("selection-delete");
+    if (delete) weft.run("selection.delete");
     return true;
 }
 /// The row half of a put (`p`/`P`, visual too). `"+` names the desktop
@@ -1284,13 +1273,13 @@ fn joinLines() void {
 
 // ── Operators ─────────────────────────────────────────────────────────
 fn enterOpDelete() void {
-    op_edit_cmd = "op.delete";
+    op_edit_cmd = "operators.delete";
     op_copies = true;
     op_after = "normal";
     weft.setMode("op-pending");
 }
 fn enterOpChange() void {
-    op_edit_cmd = "op.delete";
+    op_edit_cmd = "operators.delete";
     op_copies = true;
     op_after = "insert";
     weft.setMode("op-pending");
@@ -1305,7 +1294,7 @@ fn enterOpYank() void {
 /// text object (or the current line, doubled as `gcc`). Doesn't touch the
 /// register (op_copies=false); composes with every motion like d/c/y.
 fn enterOpComment() void {
-    op_edit_cmd = "op.comment";
+    op_edit_cmd = "comment.toggle";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
@@ -1313,13 +1302,13 @@ fn enterOpComment() void {
 /// `gU` / `gu` — the case operators (uppercase / lowercase over a motion or text
 /// object; `gUU`/`guu` for the line). Charwise like vim; no register.
 fn enterOpUpcase() void {
-    op_edit_cmd = "op.upcase";
+    op_edit_cmd = "operators.upcase";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
 }
 fn enterOpLowercase() void {
-    op_edit_cmd = "op.lowercase";
+    op_edit_cmd = "operators.lowercase";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
@@ -1327,13 +1316,13 @@ fn enterOpLowercase() void {
 /// `>` / `<` — the indent operators (indent / dedent over a motion or text
 /// object; `>>`/`<<` for the line). Linewise; no register.
 fn enterOpIndent() void {
-    op_edit_cmd = "op.indent";
+    op_edit_cmd = "indent.increase";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
 }
 fn enterOpDedent() void {
-    op_edit_cmd = "op.dedent";
+    op_edit_cmd = "indent.decrease";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
@@ -1347,13 +1336,13 @@ fn opLine() void {
     // `yy`/`dd`/`cc` on a row that offers the transfer word (see `yankRows`).
     if (op_copies) {
         const edit = op_edit_cmd;
-        if (yankRows(if (edit) |e| std.mem.eql(u8, e, "op.delete") else false)) {
+        if (yankRows(if (edit) |e| std.mem.eql(u8, e, "operators.delete") else false)) {
             if (edit == null) weft.exitToResting() else enterAfterOp();
             return;
         }
     }
     // The text half, per caret (see `yankLine`).
-    weft.run("vim-op-line-text");
+    weft.run("vim.operate-line-text");
 }
 fn opLineText() void {
     const l = weft.lineAt(weft.cursor());
@@ -1363,7 +1352,7 @@ fn opLineText() void {
         return;
     };
     // A non-delete line operator (gcc) toggles over the line's content in place.
-    if (!std.mem.eql(u8, edit, "op.delete")) {
+    if (!std.mem.eql(u8, edit, "operators.delete")) {
         if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| {
             weft.runRangeArg(edit, h);
             flashAfter(h);
@@ -1374,26 +1363,16 @@ fn opLineText() void {
     }
     if (std.mem.eql(u8, op_after, "insert")) {
         // cc: clear the line's text, keep the line, enter insert at its start.
-        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(l.start);
         enterInsert();
     } else {
         // dd: delete the line and its trailing newline.
         const end = @min(l.end + 1, weft.byteLen());
-        if (weft.anchorRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(l.start);
         weft.exitToResting();
     }
-}
-
-// ── Files ──────────────────────────────────────────────────────────────
-fn findFile() void {
-    weft.pickCategory("file");
-    weft.openFilePick("open", file_pick);
-}
-fn openChosen(choice: []const u8) void {
-    if (choice.len == 0) return;
-    weft.openTyped(choice);
 }
 
 // ── Leader / prefix chords (bound as mode-preserving SEQUENCES) ──
@@ -1401,69 +1380,10 @@ fn openChosen(choice: []const u8) void {
 fn leaderCancel() void {
     weft.exitToResting();
 }
-/// Run a workspace command without changing the caller's resting mode.
-/// These commands used to be leaves of real leader/window menu modes, where
-/// forcing normal was the menu-exit mechanism. They are key sequences now;
-/// picker and buffer-switch lifecycles already preserve or select the right
-/// mode, and an inherited/global sequence may be invoked from a tool.
-fn runWorkspace(cmd: []const u8) void {
-    weft.run(cmd);
-}
-fn vimFindFile() void {
-    runWorkspace("find-file");
-}
-fn vimShare() void {
-    runWorkspace("share");
-}
-fn vimPalette() void {
-    runWorkspace("pick-commands");
-}
-fn vimSplit() void {
-    runWorkspace("window-split");
-}
-fn vimVsplit() void {
-    runWorkspace("window-vsplit");
-}
-fn vimFocusOther() void {
-    runWorkspace("focus-other"); // cycle to the next window
-}
-fn vimUnsplit() void {
-    runWorkspace("window-close");
-}
-// Directional focus (C-w h/j/k/l or the arrows) and move/swap (C-w H/J/K/L
-// or shifted arrows). These global sequences preserve the caller's mode.
-fn vimWinLeft() void {
-    runWorkspace("window-focus-left");
-}
-fn vimWinRight() void {
-    runWorkspace("window-focus-right");
-}
-fn vimWinUp() void {
-    runWorkspace("window-focus-up");
-}
-fn vimWinDown() void {
-    runWorkspace("window-focus-down");
-}
-fn vimWinMoveLeft() void {
-    runWorkspace("window-move-left");
-}
-fn vimWinMoveRight() void {
-    runWorkspace("window-move-right");
-}
-fn vimWinMoveUp() void {
-    runWorkspace("window-move-up");
-}
-fn vimWinMoveDown() void {
-    runWorkspace("window-move-down");
-}
 fn vimGotoTop() void {
     weft.jumpPush();
     weft.jump(0);
 }
-fn vimCenter() void {
-    runWorkspace("center-line");
-}
-
 // ── f/F/t/T target search ────────────────────────────────────────────
 fn enterFindF() void {
     weft.setMode("find-f");

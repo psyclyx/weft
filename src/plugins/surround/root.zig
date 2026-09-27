@@ -3,7 +3,7 @@
 //!
 //! `surround.add` is an OPERATOR in the `operators` sense: it awaits a live
 //! range (its single arg) and wraps it, so a grammar composes it the way it
-//! composes `op.delete` — helix hands it each selection (`ms`), vim could
+//! composes `operators.delete` — helix hands it each selection (`ms`), vim could
 //! hand it a motion's range (`ys`).
 //!
 //! `surround.delete` and `surround.replace` map over PAIRS: each declares
@@ -29,7 +29,7 @@ const weft = @import("weft");
 const each_pair: weft.Arity = .{ .each = .{ .over = "surround.find" } };
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "surround-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "choose the delimiters the next surround operator uses" },
+    .{ .name = "surround.choose-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "choose the delimiters the next surround operator uses" },
     .{ .name = "surround.add", .call = opAdd, .arity = weft.Arity.each_extent, .summary = "wrap the operator's range in the chosen pair" },
     .{ .name = "surround.delete", .call = opDelete, .arity = each_pair, .summary = "delete the chosen pair around each selection" },
     .{ .name = "surround.replace", .call = opReplace, .arity = each_pair, .summary = "replace the chosen pair around each selection" },

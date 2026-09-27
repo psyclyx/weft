@@ -211,8 +211,8 @@ As built (phase 4, `core/selection.zig`):
   node selection stays a text extent — nothing yet needs a node's identity to
   outlive an edit. A scene's selection is `Head.SceneSelection` (what was
   `semantic_focus`): the focus path is its primary extent, grown from
-  `anchor` (`mark-rows`, vim's `V`), and `others` are marked rows
-  (`pointer-add-selection`, C-click). Both kinds cross the same door record
+  `anchor` (`selection.start-rows`, vim's `V`), and `others` are marked rows
+  (`pointer.add-selection`, C-click). Both kinds cross the same door record
   (`wl_selections_get/set`: `[primary, kind, anchor, head, …]`; rows by their
   place in the view's focus order) and the same SDK `Selection`.
 - **Arity**, declared per command (`Command.arity`; guests through
@@ -323,7 +323,7 @@ shared tree.
   about — the key a pane's lookup names — is the designation.
 - **The problems list** hears its source's signal, not its documents: a
   diagnostic is an occurrence the source reports, not a function of the
-  text, so it does not watch subjects; `problems-refresh` stays for a source
+  text, so it does not watch subjects; `problems.refresh` stays for a source
   that raises no signal.
 - **A JS plugin** declares no capabilities (no `describe()`), so it claims
   projection kinds only in its own namespace; it registers its
@@ -400,7 +400,7 @@ kept alive past its phase.
    authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
    tree by the provider's own listing and is presented as every directory
    is; a peer's `doc` opens the offer carrying that id, across reconnects;
-   a peer's `file` is refused, see below); `peer-files` is now `open
+   a peer's `file` is refused, see below); `collab.peer-files` is now `open
    weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
    `wl_entry_designate` (only on an entry the plugin made — `Buffer.creator`,
    stamped from the guest call it was made in — only `proc` in its own
@@ -488,7 +488,7 @@ kept alive past its phase.
    the previous presentation made is closed through the shell's close once
    nothing shows it — the refusing close, so an entry holding unsaved work
    stays as a tab: a listing says it holds a draft by offering `view.apply`
-   enabled (`Services.holdsDraft`), which `buffer-close` refuses like a dirty
+   enabled (`Services.holdsDraft`), which `buffer.close-unmodified` refuses like a dirty
    file; and a presentation drops the placement an `open` from a
    tool entry asks for. `as` rides to `open` as the `?as=` view parameter:
    `designation.openHeld` routes `?as=<a claimed kind>` to that producer with

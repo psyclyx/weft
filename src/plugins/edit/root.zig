@@ -1,6 +1,6 @@
 //! edit — the edit domain's line operators, a `.wasm` plugin with NO core
-//! privilege beyond the edit door (perms `{}`). `duplicate-line` copies the
-//! current line and inserts the copy below it; `upcase-line` upper-cases it in
+//! privilege beyond the edit door (perms `{}`). `edit.duplicate-line` copies the
+//! current line and inserts the copy below it; `edit.upcase-line` upper-cases it in
 //! place as one undoable unit. Both read a read-only snapshot through
 //! `lineAt`/`slice` and write through the gated `edit` door, authored as this
 //! plugin's peer — a `view`-grade doc refuses inside the gate with zero
@@ -17,8 +17,8 @@ const weft = @import("weft");
 var buf: [1 << 16]u8 = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "duplicate-line", .arity = weft.Arity.each_extent, .call = duplicateLine, .summary = "copy this line below itself" },
-    .{ .name = "upcase-line", .arity = weft.Arity.each_extent, .call = upcaseLine, .summary = "upper-case this line" },
+    .{ .name = "edit.duplicate-line", .arity = weft.Arity.each_extent, .call = duplicateLine, .summary = "copy this line below itself" },
+    .{ .name = "edit.upcase-line", .arity = weft.Arity.each_extent, .call = upcaseLine, .summary = "upper-case this line" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();

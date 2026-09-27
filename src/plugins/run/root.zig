@@ -3,8 +3,8 @@
 //! an `*output*` buffer and fills it asynchronously with the command's stdout via
 //! the native `proc` surface — the output lands authored as this plugin's peer,
 //! off the frame thread. perms `{proc, timer}`; grant_max edit (it only writes
-//! its own tool buffer). The command line comes either as an arg (`run-command`)
-//! or from the current buffer line (`run-line`, for scratch/command notes).
+//! its own tool buffer). The command line comes either as an arg (`run.command`)
+//! or from the current buffer line (`run.line`, for scratch/command notes).
 //! Navigation is `output.zig`'s: each row's location is captured when the fill
 //! lands, and Return visits the focused row's location.
 
@@ -12,7 +12,7 @@ const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
 
-/// Scratch for the shell command line built from a buffer slice (`run-line`),
+/// Scratch for the shell command line built from a buffer slice (`run.line`),
 /// which borrows `weft`'s read scratch and so must be copied before use.
 var cmd_buf: [1 << 12]u8 = undefined;
 
@@ -29,9 +29,9 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "run-command", .call = runCommand, .arity = .whole, .params = "command", .summary = "run a shell command, streaming it into *output*" },
-    .{ .name = "run-line", .arity = .one, .call = runLine, .summary = "run the current line as a shell command" },
-    .{ .name = "output-visit", .call = output.visit, .arity = .one, .summary = "open the location the focused output row names" },
+    .{ .name = "run.command", .call = runCommand, .arity = .whole, .params = "command", .summary = "run a shell command, streaming it into *output*" },
+    .{ .name = "run.line", .arity = .one, .call = runLine, .summary = "run the current line as a shell command" },
+    .{ .name = "run.visit-output", .call = output.visit, .arity = .one, .summary = "open the location the focused output row names" },
 };
 
 fn describeExtra() void {
@@ -41,7 +41,7 @@ fn describeExtra() void {
 fn initExtra() void {
     // `*output*` is navigable: Return jumps to the stack frame or compile error
     // the focused row points at, j/k walk, q goes back.
-    output.installMode("output", "output-visit");
+    output.installMode("output", "run.visit-output");
 }
 
 // A shell, spelled out. `run` is the one consumer that genuinely wants one —

@@ -85,7 +85,7 @@ const baseline_path = "src/e2e/popup_layout_baseline.zon";
 /// covered elsewhere in this suite), so scenarios don't need to type every
 /// character through the keymap.
 fn openFixtureBuffer(gpa: std.mem.Allocator, ed: *Editor, name: []const u8, text: []const u8) !void {
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     try ed.buffers.active().textEditor().?.insertText(gpa, text);
 }
 
@@ -114,7 +114,7 @@ fn fireCompletion(ed: *Editor, items: *[]capability.CompletionItem, cursor_off: 
         .handler = fixtureCompletionHandler,
         .data = @ptrCast(items),
     });
-    ed.run("complete");
+    ed.run("complete.show");
 }
 
 const Frame = struct { v: *view.View, built: view.Built };
@@ -280,8 +280,8 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         try fireCompletion(ed, &items_slice, cur_off);
         try t.expect(ed.pick.active);
         try t.expect(ed.pick.caret_anchor != null);
-        ed.run("pick-next");
-        ed.run("pick-next"); // selected = 2, mid-list
+        ed.run("pick.next");
+        ed.run("pick.next"); // selected = 2, mid-list
 
         const fw: u32 = 800;
         const fh: u32 = 600;
@@ -503,7 +503,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         }
         var items_slice: []capability.CompletionItem = &items;
         try fireCompletion(ed, &items_slice, cur_off);
-        for (0..10) |_| ed.run("pick-next"); // 0 -> 10
+        for (0..10) |_| ed.run("pick.next"); // 0 -> 10
         try t.expectEqual(@as(usize, 10), ed.pick.selected);
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
@@ -519,8 +519,8 @@ test "e2e/popup-layout: caret-popup layout goldens" {
     }
 
     // ── 8. The picker DOCK: header row + item rows, selected mid-list ───
-    // A plain (non-caret) pick — `Pick.open`, the same door `find-file`/
-    // `buffer-switch`/the command palette use — has no `caret_anchor`, so
+    // A plain (non-caret) pick — `Pick.open`, the same door `files.find`/
+    // `buffer.switch`/the command palette use — has no `caret_anchor`, so
     // `Pick.buildSurface` takes the `.bottom` branch: the dock. Unlike the
     // caret popup's completion list, the dock never went through a caps
     // fixture (no LSP/completion involved), so this is `Pick.open` driven
@@ -539,8 +539,8 @@ test "e2e/popup-layout: caret-popup layout goldens" {
             .{ .text = "echo", .doc = "fifth" },
         };
         try ed.pick.open(ed.ctx, "find", &entries, .{ .handler = noopAccept });
-        ed.run("pick-next");
-        ed.run("pick-next"); // selected = 2 ("charlie")
+        ed.run("pick.next");
+        ed.run("pick.next"); // selected = 2 ("charlie")
         try t.expect(ed.pick.active);
         try t.expect(ed.pick.caret_anchor == null); // the dock, not a caret popup
 

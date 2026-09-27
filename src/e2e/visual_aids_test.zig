@@ -121,14 +121,14 @@ test "e2e/visual-aids: config.js numbers text entries relative to the caret, and
         "git init -q -b main && git config user.email e2e@weft.test && git config user.name weft-e2e",
         "git add numbers.txt && git commit -q -m numbers",
     }) |cmd| gpa.free(try app.proj.oracle(cmd));
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(ed, "*git*", "Branch:"));
     try t.expectEqualStrings("*git*", ed.bufferName());
     try t.expectEqualStrings("", try gutterText(ed, 0, &buf));
 
     // Nor is the file browser, opened from the text entry the way config.js
     // binds it.
-    ed.runStr("open", "numbers.txt");
+    ed.runStr("file.open", "numbers.txt");
     try t.expect((try gutterText(ed, 0, &buf)).len > 0);
     ed.chord("SPC f d");
     try t.expect(std.mem.startsWith(u8, ed.bufferName(), "files:"));

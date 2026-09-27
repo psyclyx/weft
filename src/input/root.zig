@@ -51,7 +51,7 @@ pub const TextCommit = struct {
 ///   nothing routes raw input today; what IS wired is the declaration, its
 ///   round trip, and the break-out that pairs with it. Capture is never a
 ///   one-way door: the grammar always retains a break-out chord
-///   (`std.input.break-out` / the `posture-break-out` command), and breaking
+///   (`std.input.break-out` / the `mode.break-out` command), and breaking
 ///   out restores the declaration capture displaced.
 ///
 /// DERIVED by default, from what the entry can do rather than from who owns

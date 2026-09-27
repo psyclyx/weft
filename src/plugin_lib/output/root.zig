@@ -45,11 +45,11 @@ var slot_count: usize = 0;
 pub fn installMode(mode: []const u8, visit_cmd: []const u8) void {
     weft.restingMode(mode);
     weft.bindKey(mode, "Return", visit_cmd);
-    weft.bindKey(mode, "j", "cursor-down");
-    weft.bindKey(mode, "k", "cursor-up");
-    weft.bindKey(mode, "Down", "cursor-down");
-    weft.bindKey(mode, "Up", "cursor-up");
-    weft.bindKey(mode, "q", "buffer-back");
+    weft.bindKey(mode, "j", "cursor.down");
+    weft.bindKey(mode, "k", "cursor.up");
+    weft.bindKey(mode, "Down", "cursor.down");
+    weft.bindKey(mode, "Up", "cursor.up");
+    weft.bindKey(mode, "q", "buffer.back");
 }
 
 /// What a producer may add to one row while the raw text is in hand: its own
@@ -72,7 +72,7 @@ const Request = struct {
     want_err: bool,
 };
 
-/// Focus the `name` tool buffer (reused across runs — `buffer-create` does NOT
+/// Focus the `name` tool buffer (reused across runs — `buffer.create` does NOT
 /// dedupe by name, so re-creating would pile up duplicates), put it in `mode`,
 /// and run `argv`, publishing its output as a projection when it lands.
 ///

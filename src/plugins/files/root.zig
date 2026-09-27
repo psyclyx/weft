@@ -21,13 +21,13 @@ const files_guest = @import("weft_files_adapter");
 
 var plugin: files_guest.Plugin = undefined;
 
+const file_pick = 0;
+
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "files", .arity = .whole, .call = browse, .summary = "browse a directory" },
-    .{ .name = "files-enter", .arity = .whole, .call = enterRow, .summary = "open the focused entry" },
-    .{ .name = "files-up", .arity = .whole, .call = stepOut, .summary = "browse the containing directory" },
-    .{ .name = "files-apply", .arity = .whole, .call = applyFocused, .summary = "apply this directory's draft" },
-    .{ .name = "files-places", .arity = .whole, .call = presentPlaces, .params = "designation", .summary = "list the places you are working in (weft://here/places/all)" },
-    .{ .name = "files-place-open", .arity = .whole, .call = openPlace, .params = "row" },
+    .{ .name = "files.browse", .arity = .whole, .call = browse, .summary = "browse a directory" },
+    .{ .name = "files.find", .arity = .whole, .call = find, .summary = "find a file to edit" },
+    .{ .name = "files.places", .arity = .whole, .call = presentPlaces, .params = "designation", .summary = "list the places you are working in (weft://here/places/all)" },
+    .{ .name = "files.open-place", .arity = .whole, .call = openPlace, .params = "row" },
 };
 
 comptime {
@@ -36,13 +36,14 @@ comptime {
         // The `places` projection is named for what it shows, not for us.
         .capabilities = &.{"designation/places"},
         .init = start,
+        .pick = onPickAccept,
     }).exportAll();
 }
 
 // ── The places projection ───────────────────────────────────────────
 
 const places_entry = "*places*";
-const place_action = "files.place.open";
+const place_action = "files.open-place";
 const place_row_base: u64 = 2;
 
 var places_arena: std.heap.ArenaAllocator = undefined;
@@ -95,7 +96,7 @@ fn publishPlaces() !void {
     places_view = try weft.semanticViewPublish(root, null, places_revision);
 }
 
-/// `files-place-open <row>`: that place's tree, where placement puts it.
+/// `files.open-place <row>`: that place's tree, where placement puts it.
 fn openPlace() void {
     const raw = weft.argStr(0) orelse return;
     const index = std.fmt.parseInt(usize, raw, 10) catch return;
@@ -120,7 +121,7 @@ fn placesAction() bool {
         }
         _ = weft.semanticActionHandled();
         var buf: [24]u8 = undefined;
-        weft.runStr("files-place-open", std.fmt.bufPrint(&buf, "{d}", .{raw - place_row_base}) catch return true);
+        weft.runStr("files.open-place", std.fmt.bufPrint(&buf, "{d}", .{raw - place_row_base}) catch return true);
         return true;
     }
     if (std.mem.eql(u8, action, weft.semantic.action.standard.reveal)) {
@@ -145,19 +146,29 @@ fn onContextChanged() callconv(.c) void {
     publishPlaces() catch {};
 }
 
-fn enterRow() void {
-    weft.run("target-open-focused");
+/// The one "open a file by name" picker every grammar and config binds: vim's
+/// `SPC f f`, helix's `SPC f`, ide's C-p and the dashboard's "Open file".
+fn find() void {
+    weft.pickCategory("file");
+    weft.openFilePick("open", file_pick);
 }
-fn stepOut() void {
-    weft.run("hierarchy-step-out");
-}
-fn applyFocused() void {
-    _ = weft.semanticAction(weft.semantic.action.standard.apply);
+
+fn onPickAccept(pick_id: u32) void {
+    if (pick_id != file_pick) return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const path = switch (outcome) {
+        .candidate => |candidate| candidate.text,
+        .input => |input| input,
+        .cancelled => return,
+    };
+    const trimmed = std.mem.trim(u8, path, " \t");
+    if (trimmed.len > 0) weft.openTyped(trimmed);
 }
 
 fn start() void {
     places_arena = std.heap.ArenaAllocator.init(weft.allocator);
-    _ = weft.designationOpener("places", "files-places");
+    _ = weft.designationOpener("places", "files.places");
     files_guest.Plugin.provideRowVerbs();
     plugin = .init(weft.allocator);
     // The launcher remains usable in a command-only host. Target callbacks

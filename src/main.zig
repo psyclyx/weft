@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     // the registry's, so the pool joins first and a queued grammar compile
     // can never outlive the `Runtime` it writes into (see `Runtime.warm`).
     defer pool.deinit();
-    // Where `grammar-add` resolves a grammar NAME. The environment wins so a
+    // Where `syntax.add-grammar` resolves a grammar NAME. The environment wins so a
     // user can point at their own tree; the build-time value is the fallback
     // that makes a nix build work unwrapped. Weft supplies the PATH and knows
     // nothing about what is on it.
@@ -180,8 +180,8 @@ pub fn main(init: std.process.Init) !void {
     // status line's peer trust; first contact is accepted but unverified).
     var known_peers = try core.known_peers.KnownPeers.load(gpa, init.minimal.environ);
     defer known_peers.deinit();
-    _ = try session.system.commands.bind(gpa, "identity", .{
-        .name = "identity",
+    _ = try session.system.commands.bind(gpa, "app.identity", .{
+        .name = "app.identity",
         .summary = "Show this machine's identity fingerprint.",
         .args = &.{},
         .handler = identityHandler,
@@ -203,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
     // that ever calls `initPlugins`/loads a plugin (a second hosted system
     // stays plugin-free). `plug` below is a convenience alias to
     // `session.system.plugins.?`, taken once, right after creation — it
-    // stays valid even across a LATER `system-swap` (a raw pointer into the
+    // stays valid even across a LATER `app.swap-system` (a raw pointer into the
     // editor System's heap-pinned allocation, not re-read through
     // `session.system`), which is exactly right: plugin ticking/streaming
     // is unconditionally editor-scoped regardless of which system the head
@@ -254,7 +254,7 @@ pub fn main(init: std.process.Init) !void {
         .js_list = &plug.js_list,
         .dir = plugin_dir,
     };
-    // The live `revoke`/`grants-show` debug commands
+    // The live `revoke`/`grants.show` debug commands
     // (doc/contextual-workspace-architecture.md §13.5 slice 4) — opt-in,
     // per-embedder wiring (see their own docs for why `builtins.install`
     // doesn't bind them unconditionally): bound onto the editor system now
@@ -273,7 +273,7 @@ pub fn main(init: std.process.Init) !void {
     // warning, never fatal.
     //
     // `config_session` outlives this block (held for the whole run) so
-    // `config-reload` can `Manifest.reconcile` against the manifest actually
+    // `app.reload-config` can `Manifest.reconcile` against the manifest actually
     // applied, rather than blindly re-running the JS program
     // (doc/configuration.md §5). Only wired when a config
     // path was given.
@@ -290,8 +290,8 @@ pub fn main(init: std.process.Init) !void {
         if (config_session) |*cs| cs.ui_bind = .{ .ctx = &session.system.container, .bind = view_mod.ui_mesh.bindManifestSegment };
         if (config_session) |*cs| cs.reload() catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
-        if (config_session) |*cs| _ = try session.system.commands.bind(gpa, "config-reload", .{
-            .name = "config-reload",
+        if (config_session) |*cs| _ = try session.system.commands.bind(gpa, "app.reload-config", .{
+            .name = "app.reload-config",
             .summary = "Reload config.js, reconciled against the manifest last applied.",
             .args = &.{},
             .handler = config_load.configReloadHandler,
@@ -305,8 +305,8 @@ pub fn main(init: std.process.Init) !void {
     // A no-file launch opens the welcome tool after config has chosen the
     // normal editing mode. File and collaboration launches keep their target.
     if (args.file == null and args.connect == null) {
-        if (session.system.commands.resolve("dashboard") == null) plugin_host.load("dashboard");
-        _ = core.command.run(&session.system.commands, &session.cmd_ctx, "dashboard", &.{}) catch |e|
+        if (session.system.commands.resolve("dashboard.open") == null) plugin_host.load("dashboard");
+        _ = core.command.run(&session.system.commands, &session.cmd_ctx, "dashboard.open", &.{}) catch |e|
             std.log.warn("dashboard: {t}", .{e});
     }
 
@@ -321,8 +321,8 @@ pub fn main(init: std.process.Init) !void {
     // the same `data` pointer.
     var swap_data: session_mod.Session.SwapCmdData = .{ .session = &session };
     for (session.host.systems.values()) |sys| {
-        _ = try sys.commands.bind(gpa, "system-swap", .{
-            .name = "system-swap",
+        _ = try sys.commands.bind(gpa, "app.swap-system", .{
+            .name = "app.swap-system",
             .summary = "Re-bind this head to another hosted system (refuses on an open transient/menu or a live collab connection).",
             .args = &.{.{ .name = "name", .type = .string }},
             .handler = session_mod.Session.systemSwapHandler,
@@ -361,6 +361,7 @@ pub fn main(init: std.process.Init) !void {
     };
     try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);
     session.file_opener = buffer_command_context.fileOpener();
+    session.cmd_ctx.entry_shell = buffer_command_context.entryShell();
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     // `Collab` owns the whole connection cluster (outbound conn/session/partial,
@@ -376,7 +377,7 @@ pub fn main(init: std.process.Init) !void {
     // command; Collab borrows them.)
     // W0b: swap-blocking — `ShareCtx.buffers`/`.caps` are long-lived borrows
     // of the EDITOR system, baked once here; NOT repointed on swap. This is
-    // exactly why `system-swap`'s refusal (task #19 item 2, wired below via
+    // exactly why `app.swap-system`'s refusal (task #19 item 2, wired below via
     // `Collab.isLiveOpaque`) exists: a swap while a connection is LIVE would
     // otherwise leave it silently bound to a system's buffers that stopped
     // being the one dispatch/rendering targets. While dormant (no
@@ -384,9 +385,9 @@ pub fn main(init: std.process.Init) !void {
 
     // This is the interactive editor, so sharing pre-selects presence and every
     // share path says so; `--no-share-presence`, `weft.set("collab",
-    // "share-presence", "off")`, and the `share-presence` command each opt out.
+    // "collab.share-presence", "off")`, and the `share-presence` command each opt out.
     const share_presence = collab.presenceDefault(args.share_presence, blk: {
-        const raw = session.system.config_kv.get("collab", "share-presence") orelse break :blk null;
+        const raw = session.system.config_kv.get("collab", "collab.share-presence") orelse break :blk null;
         break :blk core.framed.first(raw);
     });
     var collab_state: collab.Collab = undefined;
@@ -401,7 +402,7 @@ pub fn main(init: std.process.Init) !void {
     // reads by the name the person connected to it by.
     buffer_command_context.peers = .{ .context = &collab_state.share_ctx, .open = collab_cmds.openPeer };
     session.cmd_ctx.peer_names = .{ .context = &collab_state.share_ctx, .name = collab_cmds.peerName };
-    // `system-swap`'s live-collab refusal (task #19 item 2) — wired NOW that
+    // `app.swap-system`'s live-collab refusal (task #19 item 2) — wired NOW that
     // `collab_state` exists at a stable address; `swap_data` was bound onto
     // every hosted system's commands earlier with this predicate unset
     // (always-allow) because collab doesn't exist yet that early. Nothing
@@ -454,40 +455,26 @@ pub fn main(init: std.process.Init) !void {
     const win_layout = &whead.render.fb.win_layout;
     var font_control: font_size.Control = .{ .view = view, .default_size = configured_em };
     try font_control.register(gpa, &session.system.commands);
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-plus", "font-size-increase", core.Keymap.prio_core, "shell");
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-equal", "font-size-increase", core.Keymap.prio_core, "shell");
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-S-equal", "font-size-increase", core.Keymap.prio_core, "shell");
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-minus", "font-size-decrease", core.Keymap.prio_core, "shell");
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-0", "font-size-reset", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-plus", "font.increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-equal", "font.increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-S-equal", "font.increase", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-minus", "font.decrease", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "C-0", "font.reset", core.Keymap.prio_core, "shell");
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
     var scroll_ctx: scroll.ScrollCtx = .{ .view = view, .fb = &fb };
     try scroll.registerCommands(gpa, &session.system.commands, &scroll_ctx);
-
-    // Vertical motion + paging are view-computed (goal-x over rendered geometry,
-    // which the core can't see). Register them as commands carrying the live
-    // `view`: `cursor-up`/`cursor-down` SHADOW the core scalar versions by late
-    // binding, and `scroll-page-*` are ordinary commands — so key dispatch is
-    // pure keymap→command with no name special-case. Page binds in the GLOBAL
-    // layer, so it works in every mode as the old hardcoded keysym branch did.
-    const view_cmds = [_]core.command.Command{
-        .{ .name = "cursor-up", .summary = "Move up one visual line (goal-x).", .args = &.{}, .handler = dispatch.cursorUpHandler, .data = view },
-        .{ .name = "cursor-down", .summary = "Move down one visual line (goal-x).", .args = &.{}, .handler = dispatch.cursorDownHandler, .data = view },
-        .{ .name = "scroll-page-up", .summary = "Move up one page.", .args = &.{}, .handler = dispatch.scrollPageUpHandler, .data = view },
-        .{ .name = "scroll-page-down", .summary = "Move down one page.", .args = &.{}, .handler = dispatch.scrollPageDownHandler, .data = view },
-    };
-    for (view_cmds) |vc| _ = try session.system.commands.bind(gpa, vc.name, vc);
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll-page-up", core.Keymap.prio_core, "shell");
-    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll-page-down", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll.page-up", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll.page-down", core.Keymap.prio_core, "shell");
 
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
     // Re-linearized per-field on mutation (Theme.setColor), so the draw path
     // stays a plain lookup.
-    _ = try session.system.commands.bind(gpa, "set-color", .{
-        .name = "set-color",
+    _ = try session.system.commands.bind(gpa, "theme.set-color", .{
+        .name = "theme.set-color",
         .summary = "Set a theme color (name, #rrggbb).",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
         .handler = cursor_config.setColorHandler,

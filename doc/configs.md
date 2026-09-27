@@ -192,7 +192,7 @@ caret line's own number the way vim's `number relativenumber` does (`hybrid` is
 accepted as a synonym). config.js sets `relative`. The vim flashes are in place, `=` has
 no operator to flash yet. Snipe's operator-pending commands are `snipe-op-*`: the range
 goes to the command named by `weft.set("snipe", "operator", …)`, which config.js sets to
-vim's `vim-operate` (apply the pending operator over a range argument). A motion
+vim's `vim.operate` (apply the pending operator over a range argument). A motion
 that reads keys before it knows its target cannot be a synchronous range command like
 `motions`', so it hands the range back instead. The count comes the same way, from the
 command `weft.set("snipe", "count", …)` names (vim's `vim-count-take`), so snipe names no
@@ -268,13 +268,13 @@ Phases:
   once. (Until phase 4 this was `putEach`, a plan-and-claim library over the
   `run_range_arg_each` door; both are gone.)
 - Per-selection reads of other plugins are plain `runRange` calls inside a mapped verb:
-  `mi`/`ma` over `textobjects`, `mm` over `motion.match-pair`, and `A-o A-i A-n A-p ]f
+  `mi`/`ma` over `textobjects`, `mm` over `motions.match-pair`, and `A-o A-i A-n A-p ]f
   [f` over new range forms in `ts` (`ts.expand`, `ts.shrink`, `ts.sibling-next/prev`,
   `ts.function-next/prev`). `A-i` first retraces the sets `A-o` replaced (a whole-set
-  trail, so `A-o`/`A-i` are `.whole` around a mapped `hx-ts-expand`), then asks for a
+  trail, so `A-o`/`A-i` are `.whole` around a mapped `helix.ts-expand`), then asks for a
   child.
 - `surround` is a new plugin (`surround.add/delete/replace`), with the pair chosen by an
-  earlier `surround-pair <c> [r]`. helix captures the characters (`ms md mr`). vim's `ys
+  earlier `surround.choose-pair <c> [r]`. helix captures the characters (`ms md mr`). vim's `ys
   ds cs` are not bound: vim has no capture that feeds an operator yet.
   `surround.delete`/`.replace` declare their target: `surround.find`, the pair around
   the selection. Dispatch finds every selection's pair on the untouched text and runs
@@ -283,10 +283,10 @@ Phases:
   shared one (`f((a b))` → `fa b`). Until phase 4 surround planned and applied by hand.
 - Counts (`3w`, `5gg`, `2x`, `3C`) and registers (`"a`) live in the grammar and die with
   the command that used them (the manifest's `after` hook).
-- The new doors are commands, not ABI: `buffer-previous` (core) for `gp`, and
+- The new doors are commands, not ABI: `buffer.prev` (core) for `gp`, and
   `scroll-line-to-top/bottom` and `scroll-goto-view-top/middle/bottom` (app, beside the
-  scroll family) for `zt zb gt gc gb`. The lsp plugin grew `goto-type-definition` and
-  `goto-implementation` for `gy gi`.
+  scroll family) for `zt zb gt gc gb`. The lsp plugin grew `lsp.goto-type-definition` and
+  `lsp.goto-implementation` for `gy gi`.
 - Space mode is Helix's (`f F b e k s a r h c g / ? y p P R w`). weft's other groups moved
   to keys Helix leaves free: `SPC O` open & save, `SPC B` buffers, `SPC V` version control,
   `SPC l` project, `SPC i`/`SPC m` code, `SPC A` agents, `SPC G` debug, `SPC x` share.
@@ -313,7 +313,7 @@ settled:
   first, alternating after and before the cursor; the first key narrows the labels to the
   one still to type. The label machinery is a plugin library, `labels`; snipe linked it
   too until it was rebuilt as evil-snipe, which has no labels.
-- The caret door: `cursor-place <mode> head|inside` sits beside `set-cursor`, and the view
+- The caret door: `cursor.set-place <mode> head|inside` sits beside `cursor.set-style`, and the view
   draws every caret through `View.caretDrawOffset`. helix declares `inside` for its normal,
   select, capture, prompt and label modes; insert, vim, emacs and ide keep `head`.
 - The flash marks every selection (`flashAll`, one `flashRanges` over the set).
@@ -369,9 +369,9 @@ and chrome that changes with what is possible.
 Items 1-3 are done. The platform queues `PointerEvent`s through a shared
 gesture reducer (`platform/pointer.zig`: click counting, wheel steps). The
 shell names each one as a keyspec and dispatches it through `dispatchSpec`
-(`app/pointer.zig`). The grammar and the generic commands (`pointer-click`,
-`pointer-drag-select`, `pointer-extend-selection`, `pointer-activate`,
-`pointer-focus-pane`, `scroll-wheel-up/down`, `activate-focused-action`) live
+(`app/pointer.zig`). The grammar and the generic commands (`pointer.click`,
+`pointer.drag-select`, `pointer.extend-selection`, `pointer.activate`,
+`pointer.focus-pane`, `scroll-wheel-up/down`, `view.run-focused-action`) live
 in `core/pointer.zig`, and `config/defaults.js` binds them. The hit facts sit
 on `Head.pointer`, which guests read through `wl_pointer` / `weft.pointer()`.
 Every pane's geometry from the last frame is hit-testable (`View.pane_maps`),
@@ -400,7 +400,7 @@ each selection's text, or a caret's whole line, linewise — mapped over that TA
 two carets on one line take it once — and Tab/S-Tab, C-S-k and C-Return/C-S-Return map
 over line blocks. M-Up/Down alone take the whole set and collapse it first, since two
 moved blocks could swap into each other. C-click in a listing marks a row
-(`pointer-add-selection`), and Delete removes every marked row. Word characters everywhere (C-d, `\b`, the word
+(`pointer.add-selection`), and Delete removes every marked row. Word characters everywhere (C-d, `\b`, the word
 motions, text objects, helix's `*`) are the regex library's `isWordByte`: ASCII
 alphanumerics, `_`, and any byte of a non-ASCII character.
 
@@ -431,15 +431,15 @@ desktop with. ide's C-v, helix's `SPC p P R` and vim's `"+p` all paste by it.
 
 The jumplist and macros of §2 phase 5 are core too. Grammars call `weft.jumpPush()`
 before a jump (search, goto, big motion; core already records moves between entries)
-and bind `jump-back`/`jump-forward` (count as `runStr`), `jumplist-pick`. Macros are
-`macro-record-start <reg>`, `macro-record-stop`, `macro-record-toggle [reg]` (default
-`@`, helix's `Q`), `macro-play [reg] [count]` (default: the last played or recorded,
+and bind `jump.back`/`jump.forward` (count as `runStr`), `jump.pick`. Macros are
+`macro.record-start <reg>`, `macro.record-stop`, `macro.record-toggle [reg]` (default
+`@`, helix's `Q`), `macro.play [reg] [count]` (default: the last played or recorded,
 helix's `q`), and `weft.macroRecording()` for a status chip.
 
 ### 3.4 Find and replace — plugin `find`
 
 An incremental find bar (a bottom surface) on the 0.2 regex: C-f, F3/S-F3, C-h replace,
-and highlight of every match. Before 0.2 lands, C-f falls back to `consult-line`.
+and highlight of every match. Before 0.2 lands, C-f falls back to `consult.line`.
 
 **Built.** `src/plugins/find`: a `find` text-input mode plus a `.bottom` surface. Each
 keystroke re-searches and selects the first match at or after where the search began,
@@ -481,7 +481,7 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   `wl_provide` decodes. `when` takes `mode`, `lang`, `tool`, `role` and `locality`; a key
   no fact answers is refused with an echo rather than widening the provider. `opts` is
   `{priority, label, group, order}`. `posture` is sayable too (`text`, `structural`,
-  `field`, `capture`); the action facts and `explain-binding` carry it, so ide.js keys its
+  `field`, `capture`); the action facts and `action.explain` carry it, so ide.js keys its
   source-only actions on `{posture: "text", locality}`. ide.js's
   F2 listing provider keys on `{ tool: "files" }`: the sidebar is a scene entry, and
   `role` is only derived for text projections today.
@@ -509,12 +509,12 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   The label comes from `intentions.zig`'s new per-intention `label`, the group is the
   package segment, and the order is the table position. Non-standard node actions on
   the focus path are published by `core.view` as `plugin.<action id>` (for example
-  `plugin.fs.entry.create-file`, labelled "New file").
+  `plugin.fs.create-file`, labelled "New file").
 - Availability: core's table is computed from an entry `Shape`. Undo and redo are
   disabled with `nothing-to-undo` or `nothing-to-redo`. `std.persistence.save` is absent
-  unless some `save` provider is eligible. Core's `save-file` now excludes
+  unless some `save` provider is eligible. Core's `file.write` now excludes
   `locus == tool` (priority -1, so it is still the floor), so a git status listing isn't
-  offered save, and a files listing (which provides `files-apply`) is.
+  offered save, and a files listing (which provides `view.apply`) is.
 - ide: `C-d` selects the word, then adds the next literal occurrence. `C-S-l` selects
   every occurrence. Both flash what they select, and Escape collapses back to one caret.
 
@@ -546,13 +546,13 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   (`window_layout.Rows`), so a zoom keeps a one-row strip one row. A pane that takes no
   focus is skipped by the window commands and by focus recovery, and the pointer's
   pane-focus door refuses it.
-- A click on such a pane acts through it: `pointer-click` runs an `action` node there
+- A click on such a pane acts through it: `pointer.click` runs an `action` node there
   by reference (`Services.invokeActionNode`) and leaves the head's focus alone. An
   action node is clickable whether or not it is in the focus order.
 - `weft.present(v, {command})`: a viewport showed the entry a command left active.
   Retired by doc/model.md phase 3: every entry has a designation now, so a viewport
   presents `{subject, as, reveal}` (below).
-- `pointer-focus-point`: focus the pane and the node or caret under the pointer, and
+- `pointer.focus-point`: focus the pane and the node or caret under the pointer, and
   keep a selection the point is inside. It is what "the context under the pointer"
   means.
 - The bundled presenter hangs an interaction with `presentation: "pointer"` or
@@ -576,7 +576,7 @@ The chrome, since doc/model.md phase 3 — compositions, not plugins that own vi
   verbs with `provideAffordance`).
 - **The context menu** is mouse-3 presenting `weft://here/offers/at-pointer` `as:
   "menu"` (`offers-menu`; S-F10 and Menu present `offers/active` at the caret,
-  `offers-menu-at-caret`). It runs `pointer-focus-point`, then lists the active
+  `offers.menu-at-caret`). It runs `pointer.focus-point`, then lists the active
   context's offers as a head-local interaction, leaving out what cannot run and the
   key-only words (navigation, input, gesture, line break; `weft.set("offers", "hide",
   [...])` changes that). Its keys (Up, Down, Return, Escape) and its clicks are the
@@ -611,9 +611,9 @@ sidebar.
   glyph (`×`, drawn after every name), and each status segment
   (`View.PaneMap.chrome`). A point on one sets `Head.pointer.hit.chrome`
   (`core.pointer.Chrome`: tab or status, index, part, the tab's entry, the segment's
-  command) instead of an offset or node. `pointer-click` reads it: a tab's body shows
+  command) instead of an offset or node. `pointer.click` reads it: a tab's body shows
   that entry, its glyph closes it, a segment runs its command (`name [argument]`).
-  `pointer-close-tab` closes the tab under the pointer; defaults.js binds it to
+  `pointer.close-tab` closes the tab under the pointer; defaults.js binds it to
   mouse-2.
 - A docked viewport's entry is chrome, not a document: `Registry.holdsEntry`, from
   the entry each docked declaration last showed. The tab strip skips those entries,
@@ -623,7 +623,7 @@ sidebar.
   gutter. It is asked once per pane per built frame with the caret and whether the
   pane is focused, and it answers segments with a role, a side and a click command.
   The guest half is the `statusline` plugin library.
-- `viewport-take <name>`: the active entry goes into a declared viewport, which is
+- `viewport.take <name>`: the active entry goes into a declared viewport, which is
   shown and focused, replacing what it showed. `weft.viewport(..., {shown: false})`
   starts one hidden. A hidden viewport keeps its entry for when it is shown again.
 - Named signals: `wl_signal_emit(name)` and `wl_signal_subscribe(name)` →
@@ -637,7 +637,7 @@ sidebar.
 The plugins:
 
 - **`panel`** (`config/panel.js`) is a bottom viewport, 12 rows, persistent, out of
-  the cycle, not a focus source, hidden at start. `panel-toggle` is C-j.
+  the cycle, not a focus source, hidden at start. `panel.toggle` is C-j.
 - **`problems`** (C-S-m) reads a source command's rows (`path\tline\tcol\tseverity\t
   message`, default `diagnostics-list`, which `lsp` now answers from every session)
   into a semantic view of `action` rows under a heading per file. It re-reads on the
@@ -655,7 +655,7 @@ The plugins:
 - **`breadcrumbs`** is a status-line provider for text entries. It shows ` › outer ›
   inner` after the path, from the outline items over the caret's byte only (the caret's
   path through the tree, not the file), cached against the snapshot witness and caret. A
-  crumb's command is `breadcrumbs-jump <offset>`.
+  crumb's command is `breadcrumbs.jump <offset>`.
 - config.js loads all four (SPC o p, SPC o t, SPC o P). helix.js loads them with no
   keys.
 

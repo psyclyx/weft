@@ -22,7 +22,7 @@ const Argv = gather_mod.Argv;
 /// dispatch did not.
 const leave_keys: []const []const u8 = &.{ "Escape", "C-g", "q" };
 
-pub const push = weft.transient("git-push", .{
+pub const push = weft.transient("git.push", .{
     .title = "Push",
     .switches = &.{
         .{ .key = "f", .flag = "--force-with-lease" },
@@ -32,14 +32,14 @@ pub const push = weft.transient("git-push", .{
     .cancel_keys = leave_keys,
 });
 
-pub const pull = weft.transient("git-pull", .{
+pub const pull = weft.transient("git.pull", .{
     .title = "Pull",
     .switches = &.{.{ .key = "r", .flag = "--rebase" }},
     .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "pull", .run = doPull, .arity = .whole }},
     .cancel_keys = leave_keys,
 });
 
-pub const fetch = weft.transient("git-fetch", .{
+pub const fetch = weft.transient("git.fetch", .{
     .title = "Fetch",
     .switches = &.{
         .{ .key = "a", .flag = "--all" },
@@ -82,63 +82,63 @@ fn doFetch() void {
 // Every action here NAMES an existing command, so nothing is generated for it
 // and the key binds straight through. git's dispatch funnel sees the verb's own
 // table entry, with the route and scope it was declared with — a wrapper would
-// have taken the defaults and quietly routed `git-stash-drop` as if it were
+// have taken the defaults and quietly routed `git.stash-drop` as if it were
 // durable.
 
-pub const commit = weft.transient("git-commit-dispatch", .{
+pub const commit = weft.transient("git.commit-dispatch", .{
     .title = "Commit",
     .actions = &.{
         // An INTENTION, not a command: `c` means "commit here", and what that
         // resolves to is the intent plane's answer. A one-shot menu binds it
         // through untouched — the §5.1 spelling IS the reference.
         .{ .keys = &.{"c"}, .label = "commit", .command = "plugin.git.commit" },
-        .{ .keys = &.{"a"}, .label = "amend", .command = "git-amend" },
-        .{ .keys = &.{"e"}, .label = "extend", .command = "git-extend" },
-        .{ .keys = &.{"w"}, .label = "reword", .command = "git-reword" },
-        .{ .keys = &.{"f"}, .label = "fixup", .command = "git-fixup" },
-        .{ .keys = &.{"s"}, .label = "squash", .command = "git-squash" },
+        .{ .keys = &.{"a"}, .label = "amend", .command = "git.amend" },
+        .{ .keys = &.{"e"}, .label = "extend", .command = "git.extend" },
+        .{ .keys = &.{"w"}, .label = "reword", .command = "git.reword" },
+        .{ .keys = &.{"f"}, .label = "fixup", .command = "git.fixup" },
+        .{ .keys = &.{"s"}, .label = "squash", .command = "git.squash" },
     },
 });
 
-pub const reset = weft.transient("git-reset", .{
+pub const reset = weft.transient("git.reset", .{
     .title = "Reset",
     .actions = &.{
-        .{ .keys = &.{"s"}, .label = "soft", .command = "git-reset-soft" },
-        .{ .keys = &.{"m"}, .label = "mixed", .command = "git-reset-mixed" },
-        .{ .keys = &.{"h"}, .label = "hard", .command = "git-reset-hard" },
+        .{ .keys = &.{"s"}, .label = "soft", .command = "git.reset-soft" },
+        .{ .keys = &.{"m"}, .label = "mixed", .command = "git.reset-mixed" },
+        .{ .keys = &.{"h"}, .label = "hard", .command = "git.reset-hard" },
     },
 });
 
-pub const branch = weft.transient("git-branch", .{
+pub const branch = weft.transient("git.branch", .{
     .title = "Branch",
     .actions = &.{
-        .{ .keys = &.{"b"}, .label = "checkout", .command = "git-branch-checkout" },
-        .{ .keys = &.{"c"}, .label = "create", .command = "git-branch-create" },
-        .{ .keys = &.{"n"}, .label = "new", .command = "git-branch-new" },
-        .{ .keys = &.{"d"}, .label = "delete", .command = "git-branch-delete" },
-        .{ .keys = &.{"r"}, .label = "rename", .command = "git-branch-rename" },
+        .{ .keys = &.{"b"}, .label = "checkout", .command = "git.branch-checkout" },
+        .{ .keys = &.{"c"}, .label = "create", .command = "git.branch-create" },
+        .{ .keys = &.{"n"}, .label = "new", .command = "git.branch-new" },
+        .{ .keys = &.{"d"}, .label = "delete", .command = "git.branch-delete" },
+        .{ .keys = &.{"r"}, .label = "rename", .command = "git.branch-rename" },
     },
 });
 
-pub const stash = weft.transient("git-stash", .{
+pub const stash = weft.transient("git.stash", .{
     .title = "Stash",
     .actions = &.{
-        .{ .keys = &.{"z"}, .label = "save", .command = "git-stash-save" },
-        .{ .keys = &.{"p"}, .label = "pop", .command = "git-stash-pop" },
-        .{ .keys = &.{"a"}, .label = "apply", .command = "git-stash-apply" },
-        .{ .keys = &.{"l"}, .label = "list", .command = "git-stash-list" },
-        .{ .keys = &.{"k"}, .label = "drop", .command = "git-stash-drop" },
+        .{ .keys = &.{"z"}, .label = "save", .command = "git.stash-save" },
+        .{ .keys = &.{"p"}, .label = "pop", .command = "git.stash-pop" },
+        .{ .keys = &.{"a"}, .label = "apply", .command = "git.stash-apply" },
+        .{ .keys = &.{"l"}, .label = "list", .command = "git.stash-list" },
+        .{ .keys = &.{"k"}, .label = "drop", .command = "git.stash-drop" },
     },
 });
 
-// `git-log-choose`, not `git-log`: the derived open command would collide with
+// `git.log-choose`, not `git-log`: the derived open command would collide with
 // git's own `git-log` verb, which this menu's first key runs. The one place a
 // transient's name is not free is where the plugin already used it.
-pub const log = weft.transient("git-log-choose", .{
+pub const log = weft.transient("git.log-choose", .{
     .title = "Log",
     .actions = &.{
-        .{ .keys = &.{"l"}, .label = "this branch", .command = "git-log" },
-        .{ .keys = &.{"a"}, .label = "all branches", .command = "git-log-all" },
+        .{ .keys = &.{"l"}, .label = "this branch", .command = "git.log" },
+        .{ .keys = &.{"a"}, .label = "all branches", .command = "git.log-all" },
     },
 });
 

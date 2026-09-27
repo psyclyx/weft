@@ -44,7 +44,7 @@ pub const MenuOverlay = struct {
     open_ns: u64 = 0, // when the current menu was entered (idle timer)
     last_mode: [64]u8 = undefined,
     last_len: usize = 0,
-    /// The F1 "show the hint now" edge, set by the `which-key-now` command
+    /// The F1 "show the hint now" edge, set by the `which-key.show` command
     /// and consumed by `update` below. PER-HEAD, same reasoning as this
     /// struct's own doc: head A pressing F1 must not force head B's popup.
     /// Was a free-floating `main()`-local `bool` threaded through `Session.

@@ -63,7 +63,7 @@ fn expectText(ed: *Editor, want: []const u8) !void {
 /// Open `name` holding `body` as the focused text entry, resting in helix.
 fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     try t.expectEqualStrings("helix-normal", ed.mode());
 }
 
@@ -555,7 +555,7 @@ test "e2e/helix: the / register is shared — vim pastes the pattern helix searc
     // The same register, read by the other grammar: vim's `"/p`.
     try h.loadVimAlongside(ed);
     try t.expectEqualStrings("normal", ed.mode());
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.press("quotedbl", "");
     ed.press("slash", "");
     ed.press("p", ""); // weft's vim puts a fragment at the caret

@@ -469,7 +469,6 @@ const guests = [_]Guest{
     .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
     .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
     .{ .name = "dashboard", .import = "guest_dashboard_wasm", .install = true },
-    .{ .name = "windows", .import = "guest_windows_wasm", .install = true },
     .{ .name = "modes", .import = "guest_modes_wasm", .install = true },
     .{ .name = "snippets", .import = "guest_snippets_wasm", .install = true },
     .{ .name = "direnv", .import = "guest_direnv_wasm", .install = true },
@@ -893,6 +892,14 @@ pub fn build(b: *std.Build) void {
     // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
+    // `zig build test-only -Dtest-filter=<substring>`: the e2e/app binary
+    // alone, filtered — the iteration loop for one test, not a gate. (The
+    // core suite's twin, `test-core-only`, is declared beside it below.)
+    const test_filter = b.option([]const u8, "test-filter", "With `test-only`/`test-core-only`: run only tests whose name contains this");
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = test_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-only", "Run the e2e/app tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     const explorer_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "files:", "authoring/files:", "e2e/files:", "e2e/sidebar:", "e2e/grammar:", "e2e/dashboard:", "semantic view edits", "sidebar fragment", "e2e/spine:" } });
     b.step("test-explorer", "Run explorer object, navigation, grammar, and pane integration tests").dependOn(&b.addRunArtifact(explorer_tests).step);
 
@@ -927,6 +934,10 @@ pub fn build(b: *std.Build) void {
     addQuickjs(b, core_tests_mod);
     embedGuests(b, core_tests_mod);
     const core_tests = b.addTest(.{ .root_module = core_tests_mod });
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = core_tests_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-core-only", "Run the core tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
     test_step.dependOn(&b.addRunArtifact(gfx_tests).step);

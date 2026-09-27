@@ -413,7 +413,7 @@ pub fn hRangeRetain(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 }
 
 /// Run a command passing a live range (by handle) as its single arg — how
-/// vim hands a motion's range to an operator (`op.delete`, …).
+/// vim hands a motion's range to an operator (`operators.delete`, …).
 pub fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

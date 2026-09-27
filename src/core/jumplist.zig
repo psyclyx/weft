@@ -24,7 +24,7 @@
 //! part-way back drops the forward half (helix does the same). The first
 //! `back` from the tip records where you are, so `forward` can return there.
 //!
-//! **Not `navigate-back`.** `buffer-back` (a tool's `q`, `std.navigation.back`'s
+//! **Not `buffer.back`.** `buffer.back` (a tool's `q`, `std.navigation.back`'s
 //! core route) LEAVES the current entry for the one before it, always — that is
 //! what closing a tool means. The jumplist's previous position is often in the
 //! same entry (the search you ran in the git status buffer), which would make
@@ -327,9 +327,9 @@ pub fn describe(list: *const JumpList, gpa: Allocator, buffers: *Buffers, out: *
 
 // ── Commands ─────────────────────────────────────────────────────────
 //
-// `jump-back`/`jump-forward` take an optional count, as an integer or as the
+// `jump.back`/`jump.forward` take an optional count, as an integer or as the
 // digits a grammar accumulated (`runStr`), so a count prefix reaches them from
-// either plane. `jump-push` is the door a grammar with no guest code (a
+// either plane. `jump.push` is the door a grammar with no guest code (a
 // config's bound key) reaches `wl_jump_push` through.
 
 const command = @import("command.zig");
@@ -363,7 +363,7 @@ pub fn reopenWith(ctx: *Context) Reopen {
 
 fn openThroughCommand(raw: ?*anyopaque, text: []const u8) bool {
     const ctx: *Context = @ptrCast(@alignCast(raw.?));
-    const result = command.run(ctx.commands, ctx, "open", &.{.{ .string = text }}) catch return false;
+    const result = command.run(ctx.commands, ctx, "file.open", &.{.{ .string = text }}) catch return false;
     return switch (result) {
         .string => false, // a refusal, said in words
         else => true,
@@ -389,7 +389,7 @@ fn cJumpPush(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Val
     return .nil;
 }
 
-/// `jumplist-pick`: every entry, newest first, through the head's picker.
+/// `jump.pick`: every entry, newest first, through the head's picker.
 /// A row's key is its list index, so accepting lands on exactly that entry
 /// even when two rows read alike.
 fn cJumplistPick(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
@@ -451,10 +451,10 @@ fn pickCleanup(data: ?*anyopaque, gpa: Allocator) void {
 const count_arg: []const command.ArgSpec = &.{.{ .name = "count", .type = .nil, .optional = true }};
 
 const table = [_]command.Command{
-    .{ .name = "jump-back", .summary = "Go back along the jumplist (C-o).", .args = count_arg, .handler = travelCmd(.back) },
-    .{ .name = "jump-forward", .summary = "Go forward along the jumplist (C-i).", .args = count_arg, .handler = travelCmd(.forward) },
-    .{ .name = "jump-push", .summary = "Remember the caret as a jump.", .args = &.{}, .handler = cJumpPush },
-    .{ .name = "jumplist-pick", .summary = "Pick a position from the jumplist.", .args = &.{}, .handler = cJumplistPick },
+    .{ .name = "jump.back", .summary = "Go back along the jumplist (C-o).", .args = count_arg, .handler = travelCmd(.back) },
+    .{ .name = "jump.forward", .summary = "Go forward along the jumplist (C-i).", .args = count_arg, .handler = travelCmd(.forward) },
+    .{ .name = "jump.push", .summary = "Remember the caret as a jump.", .args = &.{}, .handler = cJumpPush },
+    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist.", .args = &.{}, .handler = cJumplistPick },
 };
 
 pub fn install(gpa: Allocator, commands: *command.Commands) !void {

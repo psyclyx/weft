@@ -14,7 +14,7 @@ const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
     .{
-        .name = "insert-shell",
+        .name = "shell.insert-output",
         .arity = .one,
         .call = weft.thunk(insertShell),
         .params = "command",

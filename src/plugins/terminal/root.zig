@@ -9,7 +9,7 @@
 //!
 //! `terminal` opens it — starting the shell the first time — and puts its
 //! entry in the viewport named by `viewport` (default `panel`) through core's
-//! generic `viewport-take`, focused there. `shell` names what runs (see
+//! generic `viewport.take`, focused there. `shell` names what runs (see
 //! `invocation`; default `$SHELL`, interactive, its own line editing off).
 //!
 //! A shell that exits (`exit`, a crash) is noticed on the next C-` or
@@ -53,12 +53,12 @@ fn describeExtra() void {
 fn init() void {
     // `weft://here/proc/terminal` is this plugin's: opening it with no entry
     // showing it brings the terminal back (and a shell with it).
-    _ = weft.designationOpener("proc.terminal", "terminal");
-    weft.textInput(mode, "terminal-type");
+    _ = weft.designationOpener("proc.terminal", "terminal.open");
+    weft.textInput(mode, "terminal.type");
     weft.setFallback(mode, "default");
     const keys = [_][2][]const u8{
-        .{ "Return", "terminal-send" },         .{ "KP_Enter", "terminal-send" },
-        .{ "BackSpace", "terminal-backspace" }, .{ "C-u", "terminal-clear" },
+        .{ "Return", "terminal.send" },         .{ "KP_Enter", "terminal.send" },
+        .{ "BackSpace", "terminal.backspace" }, .{ "C-u", "terminal.clear" },
     };
     for (keys) |k| weft.bindKey(mode, k[0], k[1]);
 }
@@ -155,7 +155,7 @@ fn open() void {
     weft.setMode(mode);
     // The caret rides the end, where output and the echoed input land.
     weft.jump(weft.byteLen());
-    weft.runStr("viewport-take", orDefault("viewport", "panel"));
+    weft.runStr("viewport.take", orDefault("viewport", "panel"));
 }
 
 fn echoAtEnd(text: []const u8) void {
@@ -208,7 +208,7 @@ fn send() void {
     input_len = 0;
 }
 
-/// `terminal-quit`: stop the shell; the buffer stays with what it printed.
+/// `terminal.quit`: stop the shell; the buffer stays with what it printed.
 fn quit() void {
     const handle = session orelse return;
     weft.replQuit(handle);
@@ -218,12 +218,12 @@ fn quit() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "terminal", .arity = .whole, .call = open, .summary = "open the shell in the panel (line-mode: no terminal emulation)" },
-    .{ .name = "terminal-type", .arity = .whole, .call = typeText, .params = "text", .summary = "add typed text to the terminal's input line" },
-    .{ .name = "terminal-send", .arity = .whole, .call = send, .summary = "send the terminal's input line to the shell" },
-    .{ .name = "terminal-backspace", .arity = .whole, .call = backspace, .summary = "delete the last character of the input line" },
-    .{ .name = "terminal-clear", .arity = .whole, .call = clearLine, .summary = "clear the input line" },
-    .{ .name = "terminal-quit", .arity = .whole, .call = quit, .summary = "stop the terminal's shell" },
+    .{ .name = "terminal.open", .arity = .whole, .call = open, .summary = "open the shell in the panel (line-mode: no terminal emulation)" },
+    .{ .name = "terminal.type", .arity = .whole, .call = typeText, .params = "text", .summary = "add typed text to the terminal's input line" },
+    .{ .name = "terminal.send", .arity = .whole, .call = send, .summary = "send the terminal's input line to the shell" },
+    .{ .name = "terminal.backspace", .arity = .whole, .call = backspace, .summary = "delete the last character of the input line" },
+    .{ .name = "terminal.clear", .arity = .whole, .call = clearLine, .summary = "clear the input line" },
+    .{ .name = "terminal.quit", .arity = .whole, .call = quit, .summary = "stop the terminal's shell" },
 };
 
 comptime {

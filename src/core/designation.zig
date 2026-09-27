@@ -326,7 +326,7 @@ fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u
         // kind, paths and peers included), then find it again.
         var subject_buf: [max_len]u8 = undefined;
         const subject_text = subject_d.render(&subject_buf) catch return .{ .refused = refuse_subject_unopened };
-        const opened = try command.run(ctx.commands, ctx, "open", &.{.{ .string = subject_text }});
+        const opened = try command.run(ctx.commands, ctx, "file.open", &.{.{ .string = subject_text }});
         const found = find(ctx.buffers, subject_d);
         if (opened == .string or found == null) {
             if (ctx.buffers.resolve(restore)) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
@@ -491,8 +491,8 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
     const gpa = t.allocator;
     var openers: Openers = .empty;
     defer openers.deinit(gpa);
-    try openers.claim(gpa, "git.status", "git-status-open", "git");
-    try t.expectEqualStrings("git-status-open", openers.find("git.status").?.command);
+    try openers.claim(gpa, "git.status", "git.status-open", "git");
+    try t.expectEqualStrings("git.status-open", openers.find("git.status").?.command);
     try t.expectError(error.ClaimedByAnother, openers.claim(gpa, "git.status", "mine", "other"));
     try openers.claim(gpa, "git.status", "git-status-again", "git");
     try t.expectEqualStrings("git-status-again", openers.find("git.status").?.command);
@@ -502,7 +502,7 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
     try t.expect(openers.find("git.status") == null);
     try t.expect(openers.wasReleased("git.status"));
     // A released kind is claimable again.
-    try openers.claim(gpa, "git.status", "git-status-open", "git");
+    try openers.claim(gpa, "git.status", "git.status-open", "git");
     try t.expect(openers.find("git.status") != null and !openers.wasReleased("git.status"));
 
     // A plugin's namespace is its name: the kind itself, under it, its
@@ -565,7 +565,7 @@ test "designation: a projection OF a subject runs with the subject open, and a r
     var openers: Openers = .empty;
     defer openers.deinit(gpa);
     env.ctx.designations = &openers;
-    _ = try env.commands.bind(gpa, "open", command.define("open", "", TestProducers.open));
+    _ = try env.commands.bind(gpa, "file.open", command.define("file.open", "", TestProducers.open));
     _ = try env.commands.bind(gpa, "t-project", command.define("t-project", "", TestProducers.project));
     _ = try env.commands.bind(gpa, "t-nothing", command.define("t-nothing", "", TestProducers.nothing));
     try openers.claim(gpa, "t.proj", "t-project", "t");

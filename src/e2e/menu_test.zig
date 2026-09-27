@@ -78,7 +78,7 @@ test "menu: F1 peek owns navigation in normal and insert until dismissed" {
         try ed.keymap.bind(gpa, "menu-nav", key, "test-page", core.Keymap.prio_config, "test");
         for ([_][]const u8{ "normal", "insert" }) |mode| {
             try ed.keymap.bind(gpa, mode, key, "test-edit", core.Keymap.prio_config, "test");
-            try ed.keymap.bind(gpa, mode, "F1", "which-key-now", core.Keymap.prio_config, "test");
+            try ed.keymap.bind(gpa, mode, "F1", "which-key.show", core.Keymap.prio_config, "test");
         }
     }
     for ([_][]const u8{ "normal", "insert" }) |mode| {
@@ -150,19 +150,19 @@ test "menu: menu-escape pops through the paired mechanism" {
     // menu-escape only exists as a command if bound; call the handler
     // directly (the same way the GLOBAL layer binds Escape/C-g in a real
     // config — see dispatch.zig's module doc).
-    _ = try ed.commands.bind(gpa, "menu-escape", .{ .name = "menu-escape", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
+    _ = try ed.commands.bind(gpa, "mode.leave-menu", .{ .name = "mode.leave-menu", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
 
     ed.press("m", "");
     try t.expectEqualStrings("test-menu", ed.mode());
     try t.expect(ed.head.hasOpenTransients());
 
-    ed.run("menu-escape");
+    ed.run("mode.leave-menu");
     try t.expectEqualStrings("normal", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
 
     // Outside a menu, menu-escape is a no-op (never forces a mode change —
     // dispatch.zig's module doc: the "wrong mode in a tool buffer" jank).
-    ed.run("menu-escape");
+    ed.run("mode.leave-menu");
     try t.expectEqualStrings("normal", ed.mode());
 }
 
@@ -172,7 +172,7 @@ test "menu: sticky re-enter is NOT a second push; a sticky leaf leaves the menu 
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try initMenuKeymap(gpa, &ed);
-    _ = try ed.commands.bind(gpa, "menu-escape", .{ .name = "menu-escape", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
+    _ = try ed.commands.bind(gpa, "mode.leave-menu", .{ .name = "mode.leave-menu", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
 
     // Both tags, as the sticky-menu door does — see `hStickyMenu`.
     try ed.keymap.tagMode(gpa, "sticky-menu", "menu");
@@ -199,7 +199,7 @@ test "menu: sticky re-enter is NOT a second push; a sticky leaf leaves the menu 
 
     // Only an explicit leave (menu-escape, here) pops it — through the SAME
     // paired mechanism as a plain menu.
-    ed.run("menu-escape");
+    ed.run("mode.leave-menu");
     try t.expectEqualStrings("normal", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
 }
@@ -210,7 +210,7 @@ test "menu: nested auto-entered menus pop LIFO (single hop) through the paired s
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try initMenuKeymap(gpa, &ed);
-    _ = try ed.commands.bind(gpa, "menu-escape", .{ .name = "menu-escape", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
+    _ = try ed.commands.bind(gpa, "mode.leave-menu", .{ .name = "mode.leave-menu", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
 
     // A menu entered FROM another dispatch-auto-entered menu — a shape no
     // REAL production config currently uses (every real markMenuMode/
@@ -243,11 +243,11 @@ test "menu: nested auto-entered menus pop LIFO (single hop) through the paired s
     try t.expectEqualStrings("menu-b", ed.head.transient_stack.items[1].mode);
     try t.expectEqualStrings("menu-a", ed.head.transient_stack.items[1].return_to);
 
-    ed.run("menu-escape"); // one hop: menu-b -> menu-a (not straight to normal)
+    ed.run("mode.leave-menu"); // one hop: menu-b -> menu-a (not straight to normal)
     try t.expectEqualStrings("menu-a", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
 
-    ed.run("menu-escape"); // menu-a -> normal
+    ed.run("mode.leave-menu"); // menu-a -> normal
     try t.expectEqualStrings("normal", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
 }
@@ -261,8 +261,8 @@ test "menu: a leaf's own buffer switch mid-menu drops the transient stack, match
 
     // A second buffer with its OWN resting mode, and a leaf command bound
     // INSIDE `test-menu` that switches to it directly — the same shape
-    // `src/plugins/git/root.zig`'s `git-commit-dispatch` -> `git-commit` leaf takes
-    // (opens/focuses a different buffer without going through `menu-escape`
+    // `src/plugins/git/root.zig`'s `git.commit-dispatch` -> `git-commit` leaf takes
+    // (opens/focuses a different buffer without going through `mode.leave-menu`
     // or an auto-pop). `Buffers.switchTo` bypasses the keymap dispatch site
     // entirely (its own doc) — legacy just overwrote `head.mode`; the
     // question this test answers is whether the NEW transient stack is left

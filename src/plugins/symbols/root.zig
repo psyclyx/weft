@@ -74,8 +74,8 @@ const Tree = struct {
 var trees: std.ArrayList(*Tree) = .empty;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "symbols-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
-    .{ .name = "symbols-jump", .arity = .one, .call = jump, .params = "offset" },
+    .{ .name = "symbols.present", .arity = .whole, .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
+    .{ .name = "symbols.jump", .arity = .one, .call = jump, .params = "offset" },
 };
 
 comptime {
@@ -86,7 +86,7 @@ comptime {
 
 fn init() void {
     _ = weft.semanticActionProvider();
-    _ = weft.designationOpener(kind, "symbols-present");
+    _ = weft.designationOpener(kind, "symbols.present");
 }
 
 /// The opener: `open <entry>?as=symbols`, run with that entry active.
@@ -262,13 +262,13 @@ fn onSemanticAction() callconv(.c) void {
     // The row's tree names its subject: `<offset>\t<subject>`.
     const arg = std.fmt.allocPrint(weft.allocator, "{d}\t{s}", .{ tree.symbols.items[@intCast(raw - row_base)].start, tree.subject }) catch return;
     defer weft.allocator.free(arg);
-    weft.runStr("symbols-jump", arg);
+    weft.runStr("symbols.jump", arg);
 }
 
 /// `symbols-jump <offset>\t<subject>`: the subject, the caret at the symbol.
 fn jump() void {
     const arg = weft.argStr(0) orelse return;
-    const tab = std.mem.indexOfScalar(u8, arg, '\t') orelse return weft.echo("symbols-jump: <offset>\\t<subject>");
+    const tab = std.mem.indexOfScalar(u8, arg, '\t') orelse return weft.echo("symbols.jump: <offset>\\t<subject>");
     const offset = std.fmt.parseInt(usize, std.mem.trim(u8, arg[0..tab], " "), 10) catch return;
     const subject = weft.allocator.dupe(u8, arg[tab + 1 ..]) catch return;
     defer weft.allocator.free(subject);

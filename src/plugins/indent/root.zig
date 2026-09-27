@@ -1,6 +1,6 @@
 //! indent — line indent/dedent operators, a `.wasm` plugin with NO core
-//! privilege beyond the edit door (perms `{}`, grant_max edit). `op.indent` adds
-//! one indent unit at the START of each line a range spans; `op.dedent` peels one
+//! privilege beyond the edit door (perms `{}`, grant_max edit). `indent.increase` adds
+//! one indent unit at the START of each line a range spans; `indent.decrease` peels one
 //! off. They ride vim's operator-pending machinery exactly like op.comment, so
 //! `>ip`, `>j`, `>>`, `<<` and visual `>`/`<` all compose. The unit is two spaces,
 //! hardcoded for now (a shiftwidth/expandtab config comes with the same work that
@@ -13,8 +13,8 @@ const weft = @import("weft");
 const unit = "  ";
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "op.indent", .arity = weft.Arity.each_extent, .call = opIndent },
-    .{ .name = "op.dedent", .arity = weft.Arity.each_extent, .call = opDedent },
+    .{ .name = "indent.increase", .arity = weft.Arity.each_extent, .call = opIndent },
+    .{ .name = "indent.decrease", .arity = weft.Arity.each_extent, .call = opDedent },
 };
 
 /// Whether the line has no non-whitespace content (indent skips blank lines, as

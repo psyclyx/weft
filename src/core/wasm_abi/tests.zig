@@ -643,14 +643,14 @@ test "wasm plugin: the edit plugin's duplicate-line lands through the membrane" 
     defer plugin.deinit();
 
     // Both commands declared in describe() bound through the handshake.
-    try t.expect(env.commands.resolve("duplicate-line") != null);
-    try t.expect(env.commands.resolve("upcase-line") != null);
+    try t.expect(env.commands.resolve("edit.duplicate-line") != null);
+    try t.expect(env.commands.resolve("edit.upcase-line") != null);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello\nworld");
     ed.placeCursor(2); // inside the first line
 
-    _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     // Same result the in-process edit.zig produces: the line copied below.
@@ -695,7 +695,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try env.keymap.tagMode(gpa, "leader", "menu");
     try env.keymap.tagMode(gpa, "leader-file", "menu");
     try env.keymap.bind(gpa, "leader", "f", "leader-file", Keymap.prio_plugin, "test");
-    try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
+    try env.keymap.bind(gpa, "leader", "g", "git.status", Keymap.prio_plugin, "test");
     try env.head.setModeRaw(gpa, "leader");
 
     // Core fires on_menu(open) at the frame boundary; the guest reads the
@@ -743,8 +743,8 @@ test "files wasm launcher: delegates to the ordinary open command with the place
 
     var open_probe = OpenCommandProbe{ .gpa = gpa };
     defer open_probe.deinit();
-    _ = try env.commands.bind(gpa, "open", .{
-        .name = "open",
+    _ = try env.commands.bind(gpa, "file.open", .{
+        .name = "file.open",
         .summary = "Open a target.",
         .args = &.{.{ .name = "target", .type = .string }},
         .handler = OpenCommandProbe.handle,
@@ -758,9 +758,9 @@ test "files wasm launcher: delegates to the ordinary open command with the place
     // authority, text buffer, mode, or filesystem implementation.
     const plugin = try loadPlugin(&engine, &env.ctx, "files", @embedFile("guest_files_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(env.commands.resolve("files") != null);
+    try t.expect(env.commands.resolve("files.browse") != null);
 
-    _ = try command.run(&env.commands, &env.ctx, "files", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "files.browse", &.{});
     try t.expectEqual(@as(usize, 1), open_probe.calls);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -786,24 +786,24 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     // helix.init sets its OWN initial mode and binds in its OWN namespace —
     // nothing here assumes vim's "normal". If core privileged vim, this breaks.
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
-    try t.expectEqualStrings("hx-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    try t.expectEqualStrings("helix.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
     // A motion leads with its navigation intention (a listing answers it) and
     // falls back to helix's own selecting motion (`hx/n/…`); select mode binds
     // the extending twin (`hx/x/…`) of the same key.
     const left = env.keymap.lookupArms(env.head.currentMode(), "h").?;
     try t.expectEqualStrings("std.navigation.left", left[0]);
-    try t.expectEqualStrings("hx/n/left", left[1]);
+    try t.expectEqualStrings("helix.move-left", left[1]);
     const word = env.keymap.lookupArms(env.head.currentMode(), "w").?;
     try t.expectEqualStrings("std.navigation.word-next", word[0]);
-    try t.expectEqualStrings("hx/n/word-next", word[1]);
-    try t.expectEqualStrings("hx/x/word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
+    try t.expectEqualStrings("helix.move-word-next", word[1]);
+    try t.expectEqualStrings("helix.extend-word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
     // No operator-pending mode: a verb acts on the selection. `Z` is the one
     // sticky menu; the leader is a key SEQUENCE — no `helix-leader` mode:
     // `space` opens a chord and `space g` completes to git-status.
     try t.expect(!env.keymap.modeHasTag("helix-leader", "menu"));
     try t.expect(env.keymap.modeHasTag("helix-view", "menu"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
-    try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
+    try t.expectEqualStrings("git.status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
 }
 
 test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a mode" {
@@ -819,19 +819,19 @@ test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a m
 
     // ONE resting mode; no modal posture. Its editing chords are bound directly.
     try t.expectEqualStrings("emacs", env.head.currentMode());
-    try t.expectEqualStrings("cursor-right", env.keymap.lookup(env.head.currentMode(), "C-f").?);
-    try t.expectEqualStrings("cursor-left", env.keymap.lookup(env.head.currentMode(), "C-b").?);
-    try t.expectEqualStrings("beginning-of-line", env.keymap.lookup(env.head.currentMode(), "C-a").?);
-    try t.expectEqualStrings("kill-line", env.keymap.lookup(env.head.currentMode(), "C-k").?);
+    try t.expectEqualStrings("cursor.right", env.keymap.lookup(env.head.currentMode(), "C-f").?);
+    try t.expectEqualStrings("cursor.left", env.keymap.lookup(env.head.currentMode(), "C-b").?);
+    try t.expectEqualStrings("emacs.line-start", env.keymap.lookup(env.head.currentMode(), "C-a").?);
+    try t.expectEqualStrings("emacs.kill-line", env.keymap.lookup(env.head.currentMode(), "C-k").?);
     // Kill/copy/yank lead with the standard transfer words and keep the
     // region commands as their fallback arms.
     const yank_arms = env.keymap.resolveExactArms(env.head.currentMode(), "C-y").?;
     try t.expectEqualStrings("std.transfer.paste", yank_arms[0]);
-    try t.expectEqualStrings("yank", yank_arms[1]);
+    try t.expectEqualStrings("emacs.yank", yank_arms[1]);
     // Word motion drives the shared `motions` plugin (like vim/helix).
-    try t.expectEqualStrings("forward-word", env.keymap.lookup(env.head.currentMode(), "M-f").?);
+    try t.expectEqualStrings("emacs.word-next", env.keymap.lookup(env.head.currentMode(), "M-f").?);
     // M-< normalized to M-less at bind time.
-    try t.expectEqualStrings("beginning-of-buffer", env.keymap.lookup(env.head.currentMode(), "M-less").?);
+    try t.expectEqualStrings("emacs.doc-start", env.keymap.lookup(env.head.currentMode(), "M-less").?);
     // `emacs` is NOT a menu mode — the C-x/C-c trees are key sequences (config).
     try t.expect(!env.keymap.modeHasTag("emacs", "menu"));
 }
@@ -848,25 +848,25 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     defer plugin.deinit();
 
     // `:` is now the ex command line (the palette moved to SPC :), and `ex` is a
-    // text-input mode routing keystrokes to `ex-type`.
-    try t.expectEqualStrings("vim-ex", env.keymap.lookup(env.head.currentMode(), "colon").?);
+    // text-input mode routing keystrokes to `vim.ex-type`.
+    try t.expectEqualStrings("vim.ex", env.keymap.lookup(env.head.currentMode(), "colon").?);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "l1\nl2\nl3\nl4\nl5");
     ed.placeCursor(0);
 
     // `:3` — open the command line, type "3", Enter → cursor at the start of L3.
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
     try t.expectEqualStrings("ex", env.head.currentMode());
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "3" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "3" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode()); // back in normal
     try t.expectEqual(@as(usize, 6), ed.cursorOffset());
 
     // `:%s/l/X/g` — a whole-file literal substitute, one user edit.
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "%s/l/X/g" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "%s/l/X/g" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -876,9 +876,9 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     // Composition: an unknown `:name` falls through to the registry and, when no
     // such command exists, reports it (vim's E492) rather than silently no-op.
     env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "definitely-not-a-command" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "definitely-not-a-command" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "not an editor command") != null);
 }
 
@@ -896,7 +896,7 @@ test "wasm plugin: upcase-line edits in place across the membrane" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "abc\ndef");
     ed.placeCursor(5); // inside "def"
-    _ = try command.run(&env.commands, &env.ctx, "upcase-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "edit.upcase-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("abc\nDEF", s);
@@ -1133,10 +1133,10 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     // must unbind and the store drop with no residue.
     {
         const v1 = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
-        _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
         v1.deinit();
         // After teardown the command is gone — nothing dangles behind it.
-        try t.expect(env.commands.resolve("duplicate-line") == null);
+        try t.expect(env.commands.resolve("edit.duplicate-line") == null);
     }
 
     // Re-instantiate from scratch (a fresh store, no shared mutable state):
@@ -1144,9 +1144,9 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     {
         const v2 = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
         defer v2.deinit();
-        try t.expect(env.commands.resolve("duplicate-line") != null);
+        try t.expect(env.commands.resolve("edit.duplicate-line") != null);
         ed.placeCursor(0);
-        _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
     }
     // Two duplications of "x" across two independent instances: "x\nx\nx".
     const s = try ed.text().toOwnedSlice(gpa);
@@ -1375,7 +1375,7 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
 
     // `project` declares NO filesystem capability. Its one use of `fs_read`
     // was a VCS-marker climb duplicating the root the host already detects at
-    // open time; `project-root` reads that place instead (doc/place.md §4.2).
+    // open time; `project.show-root` reads that place instead (doc/place.md §4.2).
     // Asserted here so a regrant of either fs capability is loud.
     try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
@@ -1383,12 +1383,12 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
     // Seed the recent list host-side (namespaced to the plugin); the guest
     // reads it back through kv and returns it as a string result.
     try store.put(gpa, "project", "recent", "a.zig\nb.zig");
-    const r = try command.run(&env.commands, &env.ctx, "project-recent", &.{});
+    const r = try command.run(&env.commands, &env.ctx, "project.recent", &.{});
     try t.expectEqualStrings("a.zig\nb.zig", r.string);
 
     // The scratch buffer has no backing path → remember returns -1 (the
     // integer result crosses the membrane).
-    const r2 = try command.run(&env.commands, &env.ctx, "project-remember", &.{});
+    const r2 = try command.run(&env.commands, &env.ctx, "project.remember", &.{});
     try t.expectEqual(command.Value{ .integer = -1 }, r2);
 }
 
@@ -1405,7 +1405,7 @@ test "wasm plugin: palette status echoes the active buffer (introspection)" {
 
     // status walks the buffers (bufferCount/bufferAt) and echoes the active
     // one's name — the whole introspection surface across the membrane.
-    _ = try command.run(&env.commands, &env.ctx, "status", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "palette.show-status", &.{});
     try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
 }
 
@@ -1423,13 +1423,13 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     defer plugin.deinit();
 
     // pick-commands builds a pick over the whole registry and opens it.
-    _ = try command.run(&env.commands, &env.ctx, "pick-commands", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "palette.open", &.{});
     try t.expect(env.head.pick.active);
 
     // Narrow to "status" and accept: the accept crosses back into the guest's
     // on_pick_accept, which runs the chosen command — which echoes the buffer.
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "status" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "status" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active); // accept closed the pick
     try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
 }
@@ -1454,11 +1454,11 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // evidence lands after its indentation. Move the document after the pick
     // has captured candidates: the row's CRDT anchors advance with the merge,
     // while immutable picker evidence stays presentation-only.
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "ccc" }});
     try ed.doc.insert(gpa, 0, "prefix\n");
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 15), ed.cursorOffset()); // exact "ccc", not shifted line start 11
 
@@ -1466,22 +1466,22 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // anchored range. Acceptance fails closed: it must not jump to the row or
     // EOF which happened to inherit the old byte coordinate.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "ccc" }});
     try ed.doc.delete(gpa, .{ .start = 11, .end = 18 });
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 
     // Reopening the same tool while its picker is live cancels the old
     // interaction before replacing its retained target table. The old
     // cancellation callback must not release the new picker's anchors.
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 7), ed.cursorOffset());
 
@@ -1489,10 +1489,10 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // endpoint. Full-row evidence still detects it and acceptance fails
     // closed rather than treating anchors alone as proof of unchanged text.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
     try ed.doc.replaceAll(gpa, &.{.{ .range = .{ .start = 7, .end = 10 }, .bytes = "AAA" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 }
@@ -1516,7 +1516,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
     try ed.insertText(gpa, line);
     ed.placeCursor(0);
 
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
     // Change bytes after the 64-KiB candidate/display window without changing
     // the row length or its anchor endpoints.
@@ -1524,7 +1524,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
         .range = .{ .start = 68 * 1024, .end = 68 * 1024 + 1 },
         .bytes = "b",
     }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 }
@@ -1559,10 +1559,10 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     defer plugin.deinit();
 
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-imenu", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.imenu", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "bar" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "bar" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqual(std.mem.indexOf(u8, src, "fn bar").?, ed.cursorOffset());
 }
 
@@ -1583,7 +1583,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.pick", &.{});
     try t.expect(env.head.pick.active);
     // The active buffer is intentionally the least convenient fallback: it
     // stays available at the end while the other buffers keep their stable
@@ -1593,13 +1593,13 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     try t.expectEqualStrings("alpha", env.head.pick.items.items[0]);
     try t.expectEqualStrings("beta", env.head.pick.items.items[1]);
     try t.expectEqualStrings("*scratch*", env.head.pick.items.items[2]);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     // The accepted row resolved to beta's id → it is now the active buffer.
     try t.expectEqualStrings("beta", env.buffers.active().name);
 }
 
-test "wasm plugin: structural node-kind/delete-node degrade honestly with no grammar" {
+test "wasm plugin: ts node-kind and structural delete-node degrade honestly with no grammar" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1610,12 +1610,14 @@ test "wasm plugin: structural node-kind/delete-node degrade honestly with no gra
     // No syntax service wired → nodeAt reports "no node" across the membrane.
     const plugin = try loadPlugin(&engine, &env.ctx, "structural", @embedFile("guest_structural_wasm"), .{});
     defer plugin.deinit();
+    const ts = try loadPlugin(&engine, &env.ctx, "ts", @embedFile("guest_ts_wasm"), .{});
+    defer ts.deinit();
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo");
-    const r1 = try command.run(&env.commands, &env.ctx, "node-kind", &.{});
+    const r1 = try command.run(&env.commands, &env.ctx, "ts.node-kind", &.{});
     try t.expect(r1 == .nil); // no grammar → nil
-    const r2 = try command.run(&env.commands, &env.ctx, "delete-node", &.{});
+    const r2 = try command.run(&env.commands, &env.ctx, "structural.delete-node", &.{});
     try t.expectEqual(command.Value{ .integer = 0 }, r2);
     try t.expect(ed.text().byteLen() == 3); // nothing deleted
 }
@@ -1654,15 +1656,15 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     // Cursor on "42": select-node selects the literal; expand grows to a
     // strictly larger enclosing node (design §6.2, via native syntax reads).
     ed.placeCursor(std.mem.indexOf(u8, src, "42").?);
-    _ = try command.run(&env.commands, &env.ctx, "ts-select-node", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ts.select-node", &.{});
     const leaf = ed.selectedRange().?;
-    _ = try command.run(&env.commands, &env.ctx, "ts-expand-selection", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ts.expand-selection", &.{});
     const parent = ed.selectedRange().?;
     try t.expect(parent.end - parent.start > leaf.end - leaf.start);
 
     // A query over the buffer materializes captures across the membrane: the
     // identifier "x" is found (>= 1 capture).
-    const n = try command.run(&env.commands, &env.ctx, "ts-query", &.{.{ .string = "(identifier) @i" }});
+    const n = try command.run(&env.commands, &env.ctx, "ts.query", &.{.{ .string = "(identifier) @i" }});
     try t.expect(n == .integer and n.integer >= 1);
 }
 
@@ -1700,9 +1702,9 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
     // Cursor inside the function; a-function selects the whole function node,
     // the operator deletes it — a tree object composed with the SAME operator.
     ed.placeCursor(std.mem.indexOf(u8, src, "foo").?);
-    const rv = try command.run(&env.commands, &env.ctx, "textobj.a-function", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "textobjects.around-function", &.{});
     try t.expect(rv == .range);
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expect(std.mem.indexOf(u8, s, "foo") == null); // the function is gone
@@ -1726,7 +1728,7 @@ test "wasm plugin: region claims a subbuffer + attaches a fact across the membra
     try ed.insertText(gpa, "line one\nline two");
     ed.placeCursor(2); // inside the first line ("line one" — 8 bytes)
 
-    const r = try command.run(&env.commands, &env.ctx, "mark-region", &.{.{ .string = "js" }});
+    const r = try command.run(&env.commands, &env.ctx, "region.mark", &.{.{ .string = "js" }});
     try t.expectEqual(command.Value{ .integer = 8 }, r);
     // The claimed subbuffer (handle 0) carries the language fact the guest set.
     try t.expectEqualStrings("js", plugin.subs.items[0].fact("language").?);
@@ -1749,7 +1751,7 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts at i
     try ed.insertText(gpa, "X");
     ed.placeCursor(1); // capture the insert point at offset 1
 
-    _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
+    _ = try command.run(&env.commands, &env.ctx, "shell.insert-output", &.{.{ .string = "printf hi" }});
 
     // Concurrently insert at the head: the deferred insert's identity anchor
     // must resolve to 3 before "hi" lands.
@@ -1784,7 +1786,7 @@ test "wasm plugin: shell insert is a no-op when the async service is absent" {
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "Z");
-    _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
+    _ = try command.run(&env.commands, &env.ctx, "shell.insert-output", &.{.{ .string = "printf hi" }});
     try t.expect(ed.text().byteLen() == 1); // nothing inserted
 }
 
@@ -1818,12 +1820,12 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
     // keymap state, but each terminal action is a real command).
     for ([_][]const u8{
-        "git-amend",            "git-fixup",         "git-cherry-pick", "git-revert",
-        "git-reset-hard",       "git-branch-create", "git-stash-pop",   "git-push-do",
-        "git-fetch-toggle-all", "git-rebase-save",   "git-commit-save",
+        "git.amend",            "git.fixup",         "git.cherry-pick", "git.revert",
+        "git.reset-hard",       "git.branch-create", "git.stash-pop",   "git.push-do",
+        "git.fetch-toggle-all", "git.rebase-save",   "git.commit-save",
     }) |name| try t.expect(env.commands.find(name) != null);
 
-    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "git.status", &.{});
     // The git model buffer was created + focused synchronously (before output).
     const buf = blk: {
         var it = env.buffers.iterator();
@@ -1871,7 +1873,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     defer plugin.deinit();
 
     // A deterministic command (echo) — proves the proc→buffer path end to end.
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo weft-ok" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo weft-ok" }});
     const buf = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*output*")) break :blk b;
@@ -1913,7 +1915,7 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
     const before = ed.doc.commitCount();
     // Filter the whole buffer through sed (in /usr/bin — no nix PATH needed):
     // rewrite the temp file in place, then the result replaces the range.
-    _ = try command.run(&env.commands, &env.ctx, "filter", &.{.{ .string = "sed -i s/foo/bar/g {}" }});
+    _ = try command.run(&env.commands, &env.ctx, "fmt.filter", &.{.{ .string = "sed -i s/foo/bar/g {}" }});
     var rounds: usize = 0;
     while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
         _ = loop.tick();
@@ -1946,14 +1948,14 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
 
     // A shell read-loop is a persistent echo REPL whose `echo` flushes
     // immediately (unlike `cat`, which block-buffers stdout on a pipe).
-    _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = "while read l; do echo \"$l\"; done" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.start", &.{.{ .string = "while read l; do echo \"$l\"; done" }});
     const buf = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*repl*")) break :blk b;
         break :blk null;
     };
     try t.expect(buf != null);
-    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.send", &.{.{ .string = "ping" }});
 
     // Drive the frame drain until cat's echo streams into *repl* (bounded — a
     // timeout fails the assert rather than hanging).
@@ -1981,11 +1983,11 @@ test "wasm plugin: console-send runs the current line and appends output" {
     const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "console-open", &.{}); // focus *console*
+    _ = try command.run(&env.commands, &env.ctx, "console.open", &.{}); // focus *console*
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "echo con-ok"); // type a command line
     const before = ed.doc.commitCount();
-    _ = try command.run(&env.commands, &env.ctx, "console-send", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "console.send", &.{});
     var rounds: usize = 0;
     while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
         _ = loop.tick();
@@ -2014,21 +2016,21 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     // init() booted into normal and wired the whole keymap through the config
     // surface — motions, operators, insert entries — all across the membrane.
     try t.expectEqualStrings("normal", env.head.currentMode());
-    try t.expectEqualStrings("vim-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
-    try t.expectEqualStrings("enter-op-delete", env.keymap.lookup(env.head.currentMode(), "d").?);
+    try t.expectEqualStrings("vim.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    try t.expectEqualStrings("vim.delete", env.keymap.lookup(env.head.currentMode(), "d").?);
 
     // Mode switches: i → insert, Escape (vim-normal) → normal.
-    _ = try command.run(&env.commands, &env.ctx, "vim-insert", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.insert", &.{});
     try t.expectEqualStrings("insert", env.head.currentMode());
-    _ = try command.run(&env.commands, &env.ctx, "vim-normal", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.normal", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
     // yank-line + paste duplicates the current line (through the core register).
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.yank-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.paste", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hello\nhello", s);
@@ -2060,8 +2062,8 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     // yy then p: the id must ride the CORE register onto the pasted line — a
     // move — not vanish into a delete+create. The whole thesis, end to end
     // across the wasm membrane: yankRange snapshots it, pasteAt re-stamps it.
-    _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.yank-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.paste", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("row-a\nrow-a", s);
@@ -2088,12 +2090,12 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
 
     // The motion returns a borrowed pair of document-owned live anchors —
     // never a bare offset. Cursor is one end (0), the target the other (4).
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
 
     // The operator awaits that range (as its arg) and applies the gated edit —
     // authored as the operators plugin's peer, not the user.
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("bar", s);
@@ -2118,7 +2120,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     ed.placeCursor(0);
 
     // Compute a word-forward range [0,4) as document-owned live anchors.
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
 
     // A concurrent edit lands BEFORE the operator applies: insert "XX" at 0.
@@ -2126,7 +2128,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     ed.placeCursor(0);
     try ed.insertText(gpa, "XX");
 
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("XXbar", s); // "foo " deleted at its anchored site
@@ -2153,9 +2155,9 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
 
     // `d` enters operator-pending; the `w` binding there is vim's op wrapper,
     // which runs motion.word-fwd and hands its range to op.delete.
-    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     try t.expectEqualStrings("op-pending", env.head.currentMode());
-    try t.expectEqualStrings("vim/o/motion.word-fwd", env.keymap.lookup(env.head.currentMode(), "w").?);
+    try t.expectEqualStrings("vim.operate-to-word-next", env.keymap.lookup(env.head.currentMode(), "w").?);
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "w").?, &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
@@ -2183,9 +2185,9 @@ test "wasm plugins: a text object returns a range an operator applies (di\")" {
 
     // inner-quote-double yields the span between the quotes ("hi"); the operator
     // deletes it — the range is absolute (the construct), not cursor-relative.
-    const rv = try command.run(&env.commands, &env.ctx, "textobj.inner-quote-double", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "textobjects.inner-quote-double", &.{});
     try t.expect(rv == .range);
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("say \"\" ok", s);
@@ -2211,7 +2213,7 @@ test "wasm plugins: vim di( through the keymap (operator + text object)" {
     ed.placeCursor(4); // inside the parens
 
     // di( : d → op-pending, i → op-to (inner), ( → the paren object.
-    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "i").?, &.{});
     try t.expectEqualStrings("op-to", env.head.currentMode());
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "parenleft").?, &.{});
@@ -2241,13 +2243,13 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     ed.doc.my_grant = .view; // the document is read-only for us
 
     // The motion (read-only) still computes a range — reads are never gated.
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
     // But the operator's edit dies at the gate: the buffer is unchanged, and no
     // ghost commit was authored.
     const before = ed.doc.commitCount();
     env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
@@ -2275,9 +2277,9 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     ed.placeCursor(0);
     env.buffers.active().read_only = @import("../Buffers.zig").produced;
 
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
@@ -2297,13 +2299,13 @@ test "wasm plugin: comment toggles a line comment, preserving indent" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "  hi");
     ed.placeCursor(4);
-    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "comment.toggle-line", &.{});
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("  // hi", s);
     }
-    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "comment.toggle-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("  hi", s);
@@ -2322,7 +2324,7 @@ test "wasm plugin: whitespace trims trailing spaces on the line" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hi   \nok");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "trim-trailing-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "whitespace.trim-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hi\nok", s);
@@ -2341,7 +2343,7 @@ test "wasm plugin: numbers increments the integer under the cursor" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "x 41 y");
     ed.placeCursor(2); // on the '4'
-    _ = try command.run(&env.commands, &env.ctx, "increment-number", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "numbers.increment", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("x 42 y", s);
@@ -2360,7 +2362,7 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "pair-paren", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "autopair.open-paren", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("()ab", s);
@@ -2387,9 +2389,9 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     try t.expect(plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
 
     // Two captures append to the file; open opens the note target itself.
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
-    _ = try command.run(&env.commands, &env.ctx, "notes-open", &.{.{ .string = tmp }});
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.open", &.{.{ .string = tmp }});
 
     // No scratch "*notes*" buffer — the opened buffer is path-backed.
     const scratch = blk: {
@@ -2443,7 +2445,7 @@ test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps i
 
     // Live and working, exactly like the ungated test — the migration is
     // behavior-identical for a granted plugin.
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "before" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "before" }, .{ .string = tmp } });
 
     // Revoke fs_write from the RUNNING plugin — no reload, no re-describe,
     // no new load at all: the SAME `*WasmPlugin` the first capture already
@@ -2457,7 +2459,7 @@ test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps i
 
     // The VERY NEXT fs.write-backed call traps — command.run surfaces it as
     // error.Trap (the membrane's one deny path), never a normal return.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "after" }, .{ .string = tmp } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "after" }, .{ .string = tmp } }));
 }
 
 test "wasm plugin: modes reacts to the activation event by language, without touching the head (task #19 item 4)" {
@@ -2507,7 +2509,7 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
 
     const ed = env.buffers.active().textEditor().?;
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "snippets-expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "snippets.expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("fn foo() {\n}", s); // literal \n expanded to a newline
@@ -3062,12 +3064,12 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
     const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo captured" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo captured" }});
     const out = namedBuffer(&env.buffers, "*output*") orelse return error.TestExpectedEqual;
 
     // Focus moves on while the command is still running — the ordinary case
     // the old "deliver to whoever is active" routing got wrong.
-    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.create", &.{.{ .string = "*elsewhere*" }});
     const elsewhere = env.buffers.active();
     try t.expectEqualStrings("*elsewhere*", elsewhere.name);
 
@@ -3094,11 +3096,11 @@ test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" 
     const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo vanished" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo vanished" }});
     try t.expect(namedBuffer(&env.buffers, "*output*") != null);
 
     // Close it while the command runs: the captured generation is now dead.
-    _ = try command.run(&env.commands, &env.ctx, "buffer-close", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.close-unmodified", &.{});
     try t.expect(namedBuffer(&env.buffers, "*output*") == null);
 
     drainJobs(&loop);
@@ -3129,9 +3131,9 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "git.status", &.{});
     const model = namedBuffer(&env.buffers, "*git*") orelse return error.TestExpectedEqual;
-    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.create", &.{.{ .string = "*elsewhere*" }});
 
     drainJobs(&loop);
 
@@ -3630,8 +3632,8 @@ test "wasm plugin: a second net-open takes its own buffer, not the first's" {
     const plugin = try loadPlugin(&engine, &env.ctx, "net", @embedFile("guest_net_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.com:80" }});
-    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.org:80" }});
+    _ = try command.run(&env.commands, &env.ctx, "net.open", &.{.{ .string = "example.com:80" }});
+    _ = try command.run(&env.commands, &env.ctx, "net.open", &.{.{ .string = "example.org:80" }});
 
     try t.expect(env.buffers.findByName("*net*") != null);
     try t.expect(env.buffers.findByName("*net:2*") != null);
@@ -3649,8 +3651,8 @@ test "wasm plugin: a second http-get takes its own response buffer" {
     const plugin = try loadPlugin(&engine, &env.ctx, "http", @embedFile("guest_http_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.com/a" }});
-    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.org/b" }});
+    _ = try command.run(&env.commands, &env.ctx, "http.get", &.{.{ .string = "http://example.com/a" }});
+    _ = try command.run(&env.commands, &env.ctx, "http.get", &.{.{ .string = "http://example.org/b" }});
 
     try t.expect(env.buffers.findByName("*http*") != null);
     try t.expect(env.buffers.findByName("*http:2*") != null);
@@ -3690,7 +3692,7 @@ test "wasm plugin: twelve REPLs run at once, and the first one still answers for
     for (1..count + 1) |n| {
         var cmd_buf: [96]u8 = undefined;
         const cmd = try std.fmt.bufPrint(&cmd_buf, "while read l; do echo \"r{d} $l\"; done", .{n});
-        _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = cmd }});
+        _ = try command.run(&env.commands, &env.ctx, "repl.start", &.{.{ .string = cmd }});
     }
 
     // Every one of them is live at once, in its own buffer.
@@ -3705,7 +3707,7 @@ test "wasm plugin: twelve REPLs run at once, and the first one still answers for
     // instance at all.
     const first = env.buffers.findByName("*repl*") orelse return error.TestExpectedEqual;
     try env.buffers.switchTo(gpa, first, &env.head, &env.keymap);
-    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.send", &.{.{ .string = "ping" }});
 
     const buf = env.buffers.get(first) orelse return error.TestExpectedEqual;
     var rounds: usize = 0;
@@ -3743,9 +3745,9 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
     const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.pick", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
 
     // beta closes while the picker is open, and a new buffer takes its SLOT.
     try env.buffers.close(gpa, beta, &env.head, &env.keymap);
@@ -3753,7 +3755,7 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
     try t.expectEqual(beta, gamma); // the same id, a different buffer
 
     const before = env.buffers.active().id;
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     // Refused: the accept did not land on gamma, and did not move at all.
     try t.expectEqual(before, env.buffers.active().id);
     try t.expect(!std.mem.eql(u8, env.buffers.active().name, "gamma"));
@@ -3890,7 +3892,7 @@ test "wasm plugin: direnv holds the env capability, and nothing wider" {
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
     try t.expect(!plugin.perms[wasm_host.perm_net]);
 
-    for ([_][]const u8{ "direnv-status", "direnv-allow", "direnv-reload", "direnv-apply" }) |name| {
+    for ([_][]const u8{ "direnv.status", "direnv.allow", "direnv.reload", "direnv.apply" }) |name| {
         try t.expect(env.commands.find(name) != null);
     }
 }
@@ -3920,14 +3922,14 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     // A keymap the annotator can reverse-index. `git-status` is bound behind
     // a chord, which is exactly the case an indexed binding door could not
     // have answered as one row.
-    try env.keymap.bind(gpa, "normal", "space g s", "git-status", 0, "test");
+    try env.keymap.bind(gpa, "normal", "space g s", "git.status", 0, "test");
     try env.keymap.bind(gpa, "normal", "d", "delete-line", 0, "test");
 
     const Sink = struct {
         fn accept(_: *command.Context, _: ?*anyopaque, _: pick_mod.Outcome) anyerror!void {}
     };
     try env.head.pick.openWith(&env.ctx, "command", &.{
-        .{ .text = "git-status", .doc = "Show the repo status." },
+        .{ .text = "git.status", .doc = "Show the repo status." },
         .{ .text = "delete-line", .doc = "" },
         .{ .text = "unbound-command", .doc = "" },
     }, .{ .handler = Sink.accept }, .{ .category = "command" });

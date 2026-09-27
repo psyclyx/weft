@@ -47,7 +47,7 @@ slots: std.ArrayList(?*Buffer) = .empty,
 /// default/zeroed `Ref` can never accidentally resolve.
 next_generation: u64 = 1,
 active_id: Id = 0,
-/// The buffer active before the current one — where `buffer-back` returns (so
+/// The buffer active before the current one — where `buffer.back` returns (so
 /// leaving a tool lands you where you came from, not a fresh scratch). Updated
 /// on every `switchTo`, so it toggles between the two most recent buffers.
 prev_id: Id = 0,
@@ -87,7 +87,7 @@ documents: DocStore = .{},
 /// The plugin whose code is running right now, or empty for the user and
 /// core: what a new entry's `creator` is stamped with. A bracket the plugin
 /// host sets around every call into a guest (`actAs`), so an entry a guest
-/// makes — by `buffer-create`, `open`, a door that spawns — is that guest's,
+/// makes — by `buffer.create`, `open`, a door that spawns — is that guest's,
 /// however it came to be made. Borrowed for the bracket's duration.
 acting: []const u8 = "",
 /// Generations of entries closed since the last `drainClosed` — what the
@@ -863,7 +863,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
 /// Borrow entry `id` for one call that is NOT navigation — a toolbar verb
 /// acting on the editor it describes, a tab's close glyph: bring it to
 /// `head`, run `f(args)`, and put the head back. Neither switch records a
-/// jump, and the entry `buffer-back` returns to is left as it was, so the
+/// jump, and the entry `buffer.back` returns to is left as it was, so the
 /// round trip leaves no trace in the head's history. The head goes back
 /// unless `f` moved it on from the borrowed entry to another live one (an
 /// open the verb performed stands, and records its own jump); when `f`
@@ -967,7 +967,7 @@ pub fn back(self: *Buffers, gpa: Allocator, head: *Head, keymap: *const Keymap) 
     try self.switchTo(gpa, id, head, keymap);
 }
 
-/// Next live buffer after the active one (cyclic) — `buffer-next`.
+/// Next live buffer after the active one (cyclic) — `buffer.next`.
 pub fn nextId(self: *const Buffers) Id {
     const n = self.slots.items.len;
     var i = (self.active_id + 1) % n;

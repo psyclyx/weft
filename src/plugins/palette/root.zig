@@ -5,7 +5,7 @@
 //! on_pick_accept. No core privilege; the same door a user's config uses.
 //!
 //! ARGUMENTS. A palette that can only run a command with none is a palette
-//! that cannot run half the editor: `listen`, `connect`, `grant`, `share-fs`
+//! that cannot run half the editor: `listen`, `connect`, `grant`, `collab.share-fs`
 //! and every other command with a parameter refused on arity into a discarded
 //! error, which from the outside is indistinguishable from a dead command.
 //! Two ways in, now, and they are the two ways people already try:
@@ -24,11 +24,6 @@ const std = @import("std");
 const weft = @import("weft");
 const invoke = @import("weft_invoke");
 const offers_lib = @import("weft_offers");
-
-var id_palette: u32 = 0;
-var id_help: u32 = 0;
-var id_buffers: u32 = 0;
-var id_status: u32 = 0;
 
 /// Scratch for building a buffer label / status message.
 var label_buf: [512]u8 = undefined;
@@ -59,31 +54,26 @@ var list_all: bool = false;
 /// you and the verb you were looking for.
 ///
 /// The std vocabulary is here too (`selection-*`, `hierarchy-*`,
-/// `target-open-focused`) because the OFFERS half already lists exactly those,
+/// `target.open`) because the OFFERS half already lists exactly those,
 /// contextually and attributed to whoever answers them here — a second row for
 /// the same act, minus the context, is worse than no row.
 const default_hide =
-    "cursor-* row-* pick-* insert-* delete-* selection-* hierarchy-* " ++
-    "set-mark set-mode set-cursor cursor-blink clear-selection undo-barrier " ++
-    "posture-break-out menu-escape which-key-* repeat-change field-edit field-edit-* structural-focus " ++
-    "target-open-focused echo save close split vsplit unsplit focus-other";
+    "cursor.* pick.* edit.insert-* edit.delete-* selection.* hierarchy.* target.* item.* " ++
+    "mode.* app.echo edit.seal-undo edit.repeat field.* which-key.* file.save buffer.close";
 
 /// `hide = <patterns>` — read once at init, defaulting to `default_hide`.
 var hide_patterns: []const u8 = default_hide;
 
 const pick_commands = 0;
-const pick_buffers = 1;
 
 /// Missing arguments are asked for in the entry's own resting mode — the
 /// palette is a service, not a grammar, so it must not strand a helix or
 /// emacs user in someone else's `normal` (see `weft_prompt`'s `resting`).
-const asker = invoke.Invoker(.{ .name = "palette-arg" });
+const asker = invoke.Invoker(.{ .name = "palette.arg" });
 
 const own_cmds = [_]weft.CommandEntry{
-    .{ .name = "pick-commands", .arity = .whole, .call = palette, .summary = "run a command by name" },
-    .{ .name = "help", .arity = .whole, .call = palette, .summary = "browse every command with its summary" },
-    .{ .name = "buffers", .arity = .whole, .call = buffers, .summary = "switch to another open buffer" },
-    .{ .name = "status", .arity = .whole, .call = status, .summary = "say what the status line is showing" },
+    .{ .name = "palette.open", .arity = .whole, .call = palette, .summary = "run a command by name" },
+    .{ .name = "palette.show-status", .arity = .whole, .call = status, .summary = "say what the status line is showing" },
 };
 /// The argument prompt's five editing commands, spliced into this plugin's
 /// one flat table so `on_command`'s id indexing stays a single array.
@@ -96,12 +86,6 @@ const arg_cmds: [asker.commands.len]weft.CommandEntry = blk: {
 const cmds = own_cmds ++ arg_cmds;
 
 fn initExtra() void {
-    // The manifest registered these; ask it what the host called them, rather
-    // than registering a second time and keeping a parallel index by position.
-    id_palette = manifest.idOf("pick-commands");
-    id_help = manifest.idOf("help");
-    id_buffers = manifest.idOf("buffers");
-    id_status = manifest.idOf("status");
     asker.install();
     asker.setAsk(!std.mem.eql(u8, weft.config("arguments"), "off"));
     show_signature = !std.mem.eql(u8, weft.config("signature"), "off");
@@ -139,9 +123,9 @@ fn palette() void {
 ///
 /// WHAT IS LISTED. A command earns a row by being DOCUMENTED — by having a
 /// summary its author wrote. Before this the palette listed the whole registry,
-/// which is ~330 rows of which most are keystrokes (`vim-append`,
-/// `motion.doc-end`, `pair-paren`) or trampolines one plugin runs on another's
-/// behalf (`git-commit-settle`). None of those are things a
+/// which is ~330 rows of which most are keystrokes (`vim.append`,
+/// `motions.doc-end`, `autopair.open-paren`) or trampolines one plugin runs on another's
+/// behalf (`git.commit-settle`). None of those are things a
 /// person looks up by name, and a list that contains them is a list you scroll
 /// past rather than read. The default is silence, which is the right default:
 /// a new internal command stays out without anyone remembering to hide it.
@@ -152,7 +136,7 @@ fn palette() void {
 ///
 /// IN WHAT ORDER. By owner, then by name, so the list reads grouped even
 /// though a fuzzy pick has no headings. The owner leads each row's annotation
-/// for the same reason: `goto-definition` and `rename` do not say `lsp` in
+/// for the same reason: `lsp.goto-definition` and `rename` do not say `lsp` in
 /// their names, and knowing whose a command is is most of knowing what it is.
 fn commands() void {
     var owners = ownerList() orelse return listUnordered();
@@ -180,7 +164,7 @@ fn commands() void {
 /// are for and leaves its internals bare, so "documented" sorts vim's
 /// seventy-seven keystrokes from git's forty verbs by itself. CORE cannot say
 /// it that way — `command.define` takes a summary and every core command has
-/// one — so `cursor-down` and `save-file` are equally documented and only one
+/// one — so `cursor.down` and `file.write` are equally documented and only one
 /// of them is something you look up by name.
 ///
 /// So the second rule is a PATTERN LIST, and it is deliberately the user's
@@ -271,7 +255,7 @@ fn rowDoc(i: usize) []const u8 {
     // scratches, but the shape has to be copied out regardless: rendering it
     // walks every parameter, and each walk reuses the same one.
     const shape = if (show_signature) asker.params(&shape_buf, i) else "";
-    // The OWNER LEADS. `goto-definition` does not say `lsp` and `pair-paren`
+    // The OWNER LEADS. `lsp.goto-definition` does not say `lsp` and `autopair.open-paren`
     // does not say `autopair`; whose a command is is most of what a row has to
     // tell you before you run it.
     return std.fmt.bufPrint(&doc_buf, "{s}{s}{s}{s}{s}", .{
@@ -302,25 +286,6 @@ fn offers() void {
             std.fmt.bufPrint(&label_buf, "offer · {s}", .{item.provider}) catch continue;
         weft.pickAdd(item.name, doc);
     }
-}
-
-/// Pick over the open buffers ("id: name"); accept switches to that buffer.
-fn buffers() void {
-    weft.pickBegin("buffer", pick_buffers);
-    weft.pickCategory("buffer");
-    const n = weft.bufferCount();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const bid = weft.bufferId(i) orelse continue;
-        const name = weft.bufferName(i) orelse continue;
-        const label = std.fmt.bufPrint(&label_buf, "{d}: {s}{s}{s}", .{
-            bid,                                         name,
-            if (weft.bufferReadOnly(i)) " [ro]" else "", if (weft.bufferActive(i)) " *" else "",
-        }) catch continue;
-        // The candidate carries the buffer's identity; the label is display.
-        weft.pickAddBuffer(label, "", i);
-    }
-    weft.pickEnd();
 }
 
 /// Echo the active buffer's name + read-only state (the status line).
@@ -356,15 +321,6 @@ fn onPickAccept(pick_id: u32) void {
             .input => |input| asker.invokeLine(input),
             .cancelled => {},
         }
-    } else if (pick_id == pick_buffers) {
-        // The row NAMES a buffer; its label is display text, never an id to
-        // parse back out — a buffer closed mid-pick refuses instead of
-        // switching to whatever took its slot.
-        const id = switch (outcome) {
-            .candidate => |candidate| candidate.buffer orelse return weft.echo("that buffer is closed"),
-            .input, .cancelled => return,
-        };
-        weft.runInt("buffer-switch", @intCast(id));
     }
 }
 

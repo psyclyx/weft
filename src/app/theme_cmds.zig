@@ -1,7 +1,7 @@
 //! Live chrome-style switching (doc/chrome.md §3.2): `theme.set-chrome
 //! <text|text-icons|widget>` and `theme.cycle-chrome`, the palette's toggle.
 //!
-//! Like `set-color`, a command here is a BINDING at the transient tier, not
+//! Like `theme.set-color`, a command here is a BINDING at the transient tier, not
 //! a poke at the view: it binds `theme/chrome` over whatever the config
 //! said, and the view reads the slot at the top of the next frame
 //! (`View.resolveChrome`). So a config's `weft.set("theme", "chrome", ...)`

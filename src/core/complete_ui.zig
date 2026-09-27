@@ -39,7 +39,7 @@ pub const CompletionUi = struct {
 
     pub fn commandSpec(self: *CompletionUi) command.Command {
         return .{
-            .name = "complete",
+            .name = "complete.show",
             .summary = "Completion at the cursor (all providers, race-and-refine).",
             .args = &.{},
             .handler = fireHandler,

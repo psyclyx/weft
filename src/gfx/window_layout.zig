@@ -514,7 +514,7 @@ pub const Layout = struct {
     }
 
     /// The next CYCLING leaf after `focused` in tree order (wraps) — the
-    /// legacy `focus-other` with more than two panes. Null if fewer than two
+    /// legacy `window.focus-next` with more than two panes. Null if fewer than two
     /// panes take part.
     ///
     /// Panes whose `cycles` attribute is false are not in the rotation, which
@@ -947,7 +947,7 @@ test "dock: the workspace enforces the attributes the panel declares" {
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     // Cycling never lands IN the companion, but always lets you back OUT of
-    // one: `focus-other` from the editor has nowhere to go, and from the
+    // one: `window.focus-next` from the editor has nowhere to go, and from the
     // sidebar returns to the editor.
     try t.expectEqual(@as(?*Node, null), l.focusNext(editor));
     try t.expectEqual(editor, l.focusNext(panel).?);

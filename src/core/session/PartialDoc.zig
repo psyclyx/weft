@@ -29,7 +29,7 @@ state: enum { idle, opening, open, unsupported, failed } = .idle,
 /// A batch that bounced off unrealized spans; retried after every
 /// realization (idempotent — duplicate events are no-ops).
 pending_batch: ?[]u8 = null,
-/// Fetch everything (`realize-all`): pump keeps requesting until
+/// Fetch everything (`collab.realize-all`): pump keeps requesting until
 /// the base is fully realized.
 fetch_all: bool = false,
 

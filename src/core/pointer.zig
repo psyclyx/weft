@@ -151,7 +151,7 @@ pub const Gesture = struct {
     /// Where the button of the gesture in progress went down.
     origin: Hit = .{},
     /// Whether a drag has already anchored its selection at `origin`.
-    /// Cleared by every press; set by `pointer-drag-select`.
+    /// Cleared by every press; set by `pointer.drag-select`.
     selecting: bool = false,
 };
 
@@ -167,6 +167,12 @@ pub const Panes = struct {
     /// Scroll `pane` by `rows` (negative is up), keeping what the pane
     /// focuses — the caret, a scene's focused row — inside the new view.
     scroll: *const fn (*anyopaque, *Context, PaneRef, i32) void,
+    /// Move the focused pane's caret one VISUAL line (`dir` < 0 is up),
+    /// holding its goal column over the geometry the pane rendered. False
+    /// when there is nothing to measure against, and `cursor.up`/`down`
+    /// then move by logical line. One command, a door for what core cannot
+    /// see — not a second registration shadowing the first.
+    vertical: ?*const fn (*anyopaque, *Context, i32) bool = null,
 };
 
 // ── Keyspecs ────────────────────────────────────────────────────────
@@ -368,7 +374,7 @@ fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
         .tab => {
             const entry = chrome.entry orelse return ok;
             if (chrome.part == .close) return closeEntry(ctx, entry);
-            _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = entry }});
+            _ = try command.run(ctx.commands, ctx, "buffer.switch", &.{.{ .integer = entry }});
         },
         .status => try runLine(ctx, chrome.command()),
     }
@@ -386,7 +392,7 @@ fn runLine(ctx: *Context, line: []const u8) !void {
     _ = try command.run(ctx.commands, ctx, name, if (rest.len > 0) &.{.{ .string = rest }} else &.{});
 }
 
-/// Close `entry` through the ordinary `buffer-close` (which refuses a dirty
+/// Close `entry` through the ordinary `buffer.close-unmodified` (which refuses a dirty
 /// one), coming back to the entry that was active when it was another one —
 /// a borrow (`Buffers.withEntry`), so the round trip records no jump.
 fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
@@ -395,7 +401,7 @@ fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
 }
 
 fn closeActive(ctx: *Context) anyerror!Value {
-    return command.run(ctx.commands, ctx, "buffer-close", &.{});
+    return command.run(ctx.commands, ctx, "buffer.close-unmodified", &.{});
 }
 
 /// Close the tab under the pointer, wherever on the tab it is (a middle
@@ -453,7 +459,7 @@ fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     try focusNode(ctx, node);
     if (isActionNode(ctx, node)) return activateActionNode(ctx);
     // Opening a row's target is what a double click on a listing is FOR.
-    _ = try command.run(ctx.commands, ctx, "target-open-focused", &.{});
+    _ = try command.run(ctx.commands, ctx, "target.open", &.{});
     return ok;
 }
 
@@ -510,7 +516,7 @@ fn isActionNode(ctx: *Context, node: NodeRef) bool {
 }
 
 /// Activate the focused scene node when it is an `action` node. The same
-/// reference answers a click (`pointer-click`) and a key
+/// reference answers a click (`pointer.click`) and a key
 /// (`std.target.activate`, derived for action nodes by `view_offers.zig`),
 /// so the two cannot disagree.
 pub fn activateFocusedAction(ctx: *Context) anyerror!Value {
@@ -530,17 +536,17 @@ fn cActivateFocusedAction(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 pub const table = [_]command.Command{
-    command.define("pointer-focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
-    command.define("pointer-focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
-    command.define("pointer-click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
-    command.define("pointer-add-selection", "Add a caret (in text) or the row (in a scene) under the pointer to the selection.", cPointerAddSelection),
-    command.define("pointer-drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
-    command.define("pointer-extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
-    command.define("pointer-activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),
-    command.define("pointer-close-tab", "Close the tab under the pointer.", cPointerCloseTab),
-    command.define("scroll-wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp),
-    command.define("scroll-wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown),
-    command.define("activate-focused-action", "Run the action the focused action node names.", cActivateFocusedAction),
+    command.define("pointer.focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
+    command.define("pointer.focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
+    command.define("pointer.click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
+    command.define("pointer.add-selection", "Add a caret (in text) or the row (in a scene) under the pointer to the selection.", cPointerAddSelection),
+    command.define("pointer.drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
+    command.define("pointer.extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
+    command.define("pointer.activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),
+    command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab),
+    command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp),
+    command.define("scroll.wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown),
+    command.define("view.run-focused-action", "Run the action the focused action node names.", cActivateFocusedAction),
 };
 
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands) !void {

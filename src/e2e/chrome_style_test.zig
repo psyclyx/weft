@@ -142,8 +142,8 @@ test "e2e/chrome-style: config.js draws text chrome, and theme.set-chrome switch
     var loader: ConfigLoader = .{ .ed = &ed };
     defer loader.deinit();
     try h.bootConfig(&ed, config_dir, &loader);
-    ed.runStr("open", "alpha.zig");
-    ed.runStr("open", "bravo.txt");
+    ed.runStr("file.open", "alpha.zig");
+    ed.runStr("file.open", "bravo.txt");
 
     const text = try ed.renderComposite();
     defer gpa.free(text);

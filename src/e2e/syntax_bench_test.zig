@@ -252,7 +252,7 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
         // Open: a fresh buffer each time, so the initial parse is paid again.
         var t0 = nowNs();
         var bench_at: [std.fs.max_path_bytes]u8 = undefined;
-        command(ed, "open", &.{.{ .string = h.Editor.asTyped("bench.js", &bench_at) }});
+        command(ed, "file.open", &.{.{ .string = h.Editor.asTyped("bench.js", &bench_at) }});
         results[@intFromEnum(Scenario.open)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
         const syn = lang.attachedSyntax(ed) orelse return error.SyntaxDidNotAttach;
         const te = ed.buffers.active().textEditor().?;
@@ -267,7 +267,7 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
         ed.applyWindow();
 
         t0 = nowNs();
-        command(ed, "scroll-page-down", &.{});
+        command(ed, "scroll.page-down", &.{});
         results[@intFromEnum(Scenario.page_down)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
 
         t0 = nowNs();
@@ -293,7 +293,7 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
         t0 = nowNs();
         results[@intFromEnum(Scenario.redraw)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
 
-        command(ed, "buffer-close-force", &.{});
+        command(ed, "buffer.close-force", &.{});
         ed.application.noteInput();
         ed.applyWindow();
     }

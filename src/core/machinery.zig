@@ -74,7 +74,7 @@ pub const Location = enum {
     /// code every OTHER plugin runs next launch.
     module_cache,
     /// `kv_file.stateDir` — the persisted plugin kv store (matcher frecency,
-    /// the recent/kill/mark rings, `project-recent`): one plugin's private
+    /// the recent/kill/mark rings, `project.recent`): one plugin's private
     /// state, readable by all of them if this were reachable. Also where the
     /// scratch documents kept across restarts live (`DocStore`): the user's
     /// own unsaved text.

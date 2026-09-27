@@ -21,14 +21,14 @@
 //!
 //! **Where the rows come from is configuration.** `source` names a command
 //! whose string result is one `path\tline\tcol\tseverity\tmessage` row per
-//! diagnostic (default `diagnostics-list`, the `lsp` plugin's), and `signal`
+//! diagnostic (default `lsp.list-diagnostics`, the `lsp` plugin's), and `signal`
 //! the named signal that says they moved (default `diagnostics`, which `lsp`
 //! raises). Nothing here knows a language server exists: a linter plugin
 //! answering the same shape is a `weft.set` away.
 //!
 //! **Where the list shows is configuration too.** `problems` puts its entry in
 //! the viewport named by `viewport` (default `panel`, declared by
-//! `config/panel.js`) through core's generic `viewport-take`, replacing what
+//! `config/panel.js`) through core's generic `viewport.take`, replacing what
 //! the panel showed. Without such a viewport it opens where it is run.
 
 const std = @import("std");
@@ -83,7 +83,7 @@ fn init() void {
     // The signal name is read ONCE, here: a subscription is for the life of
     // the plugin.
     _ = weft.signalSubscribe(orDefault("signal", "diagnostics"));
-    _ = weft.designationOpener("diagnostics", "problems-present");
+    _ = weft.designationOpener("diagnostics", "problems.present");
 }
 
 /// `problems`: the list of the place this runs in, shown in the panel and
@@ -93,7 +93,7 @@ fn open() void {
     const root = weft.placeRoot();
     if (root.len == 0) return weft.echo("problems: this place has no local directory");
     show(root);
-    weft.runStr("viewport-take", orDefault("viewport", "panel"));
+    weft.runStr("viewport.take", orDefault("viewport", "panel"));
 }
 
 /// The opener: `open weft://here/diagnostics/<place>`, or a place's
@@ -184,10 +184,10 @@ fn inScope(l: *const List, path: []const u8) bool {
 
 /// The source's rows now, borrowed until the next call into the host.
 fn source() []const u8 {
-    return weft.callString(orDefault("source", "diagnostics-list")) orelse "";
+    return weft.callString(orDefault("source", "lsp.list-diagnostics")) orelse "";
 }
 
-/// `problems-refresh`, and the signal: every open list, re-read from one
+/// `problems.refresh`, and the signal: every open list, re-read from one
 /// answer of the source. Only lists that exist are refreshed — hearing about
 /// diagnostics never opens one.
 fn refresh() void {
@@ -308,9 +308,9 @@ fn jumpTo(row: Row) void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "problems", .arity = .whole, .call = open, .summary = "list this place's diagnostics in the panel" },
-    .{ .name = "problems-present", .arity = .whole, .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
-    .{ .name = "problems-refresh", .arity = .whole, .call = refresh, .summary = "re-read the problems lists' source now" },
+    .{ .name = "problems.open", .arity = .whole, .call = open, .summary = "list this place's diagnostics in the panel" },
+    .{ .name = "problems.present", .arity = .whole, .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
+    .{ .name = "problems.refresh", .arity = .whole, .call = refresh, .summary = "re-read the problems lists' source now" },
 };
 
 comptime {

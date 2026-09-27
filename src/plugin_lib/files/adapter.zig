@@ -250,7 +250,7 @@ pub const Plugin = struct {
     }
 
     pub fn provideRowVerbs() void {
-        weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
+        weft.provide("file.save", .{ .tool = "files" }, "view.apply", 0);
     }
 
     fn sessionForView(self: *Plugin, ref: semantic.view.Ref) ?*Session {

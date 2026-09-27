@@ -618,7 +618,7 @@ pub const Host = struct {
     pub fn swap(self: *Host, gpa: Allocator, c: *command.Context, head: *Head, target: []const u8) SwapError!void {
         const to = self.get(target) orelse return error.UnknownSystem;
         if (head.hasOpenTransients()) {
-            std.log.warn("system-swap: refused — head has an open transient/menu (mode '{s}'); pop it before swapping systems", .{head.currentMode()});
+            std.log.warn("app.swap-system: refused — head has an open transient/menu (mode '{s}'); pop it before swapping systems", .{head.currentMode()});
             return error.OpenTransient;
         }
         if (self.systemOf(c)) |from| {
@@ -661,8 +661,8 @@ pub fn systemSwapHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
 }
 
 pub fn registerSwapCommand(gpa: Allocator, commands: *command.Commands, host: *Host) !void {
-    _ = try commands.bind(gpa, "system-swap", .{
-        .name = "system-swap",
+    _ = try commands.bind(gpa, "app.swap-system", .{
+        .name = "app.swap-system",
         .summary = "Re-bind this head to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = systemSwapHandler,
@@ -689,8 +689,8 @@ pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const com
 /// — optional, per-embedder wiring): a system that wants the live `revoke`
 /// debug command binds it explicitly against itself.
 pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
-    _ = try commands.bind(gpa, "revoke", .{
-        .name = "revoke",
+    _ = try commands.bind(gpa, "grants.revoke", .{
+        .name = "grants.revoke",
         .summary = "Revoke a capability from a principal/plugin — its next matching use traps.",
         .args = &.{ .{ .name = "principal", .type = .string }, .{ .name = "capability", .type = .string } },
         .handler = revokeHandler,
@@ -718,7 +718,7 @@ fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
     };
 }
 
-/// The `grants-show` debug command (§6 W4 slice 4: "the INSPECTION surface"
+/// The `grants.show` debug command (§6 W4 slice 4: "the INSPECTION surface"
 /// half of the approval-as-manifest-diff residual — a blocking approve/deny
 /// prompt is explicitly NOT v1; this is). `data` is the owning `*System`.
 /// Lists EVERY row this System's `HandleTable` has ever minted (alive or
@@ -750,11 +750,11 @@ pub fn grantsShowHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
 }
 
 /// Not installed by `builtins.install` (same rationale as `registerRevokeCommand`
-/// above): a system that wants the live `grants-show` inspection command
+/// above): a system that wants the live `grants.show` inspection command
 /// binds it explicitly against itself.
 pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
-    _ = try commands.bind(gpa, "grants-show", .{
-        .name = "grants-show",
+    _ = try commands.bind(gpa, "grants.show", .{
+        .name = "grants.show",
         .summary = "List every row in the grant table: principal, capability, limit, state.",
         .args = &.{},
         .handler = grantsShowHandler,
@@ -780,7 +780,7 @@ test "system: create/destroy — a fresh headless system services command.run im
 
     var c = sys.contextFor(&sys.default_head);
     try sys.default_head.setModeRaw(gpa, "default");
-    _ = try command.run(&sys.commands, &c, "insert-text", &.{.{ .string = "hi" }});
+    _ = try command.run(&sys.commands, &c, "edit.insert-text", &.{.{ .string = "hi" }});
     const rope = (try c.textEditor()).text();
     const got = try rope.toOwnedSlice(gpa);
     defer gpa.free(got);
@@ -805,13 +805,13 @@ test "system: GATE (a) — the container hosts TWO systems concurrently, one hea
     try editor_sys.attachHead(gpa, &editor_head);
     var ec = editor_sys.contextFor(&editor_head);
     try editor_head.setModeRaw(gpa, "default");
-    _ = try command.run(&editor_sys.commands, &ec, "insert-text", &.{.{ .string = "editor text" }});
+    _ = try command.run(&editor_sys.commands, &ec, "edit.insert-text", &.{.{ .string = "editor text" }});
 
     // The agent-ux system is HEADLESS: no head ever attaches to it, but its
     // OWN default_head lets a direct command.run edit its buffer anyway.
     var ac = agent_sys.contextFor(&agent_sys.default_head);
     try agent_sys.default_head.setModeRaw(gpa, "default");
-    _ = try command.run(&agent_sys.commands, &ac, "insert-text", &.{.{ .string = "agent text" }});
+    _ = try command.run(&agent_sys.commands, &ac, "edit.insert-text", &.{.{ .string = "agent text" }});
 
     // Both landed on their OWN buffer, entirely independent of the other.
     const editor_got = try (try ec.textEditor()).text().toOwnedSlice(gpa);
@@ -919,7 +919,7 @@ test "system: GATE (b) via the system-swap COMMAND — same mechanism, real comm
     var c = editor_sys.contextFor(&head);
     try registerSwapCommand(gpa, &editor_sys.commands, &host);
 
-    _ = try command.run(&editor_sys.commands, &c, "system-swap", &.{.{ .string = "agent-ux" }});
+    _ = try command.run(&editor_sys.commands, &c, "app.swap-system", &.{.{ .string = "agent-ux" }});
     try t.expect(c.buffers == &agent_sys.buffers);
 }
 
@@ -1103,7 +1103,7 @@ test "system: W4 slice 1 — the System-owned grant table, capture-time resoluti
     // The live `revoke` debug command (§6 W4 gate) invalidates the row —
     // through the ordinary command surface, exactly as a keybinding would.
     try registerRevokeCommand(gpa, &sys.commands, sys);
-    _ = try command.run(&sys.commands, &c, "revoke", &.{ .{ .string = "notes" }, .{ .string = "fs_read" } });
+    _ = try command.run(&sys.commands, &c, "grants.revoke", &.{ .{ .string = "notes" }, .{ .string = "fs_read" } });
 
     try t.expect(!sys.grants.check(h));
     try t.expectEqual(grants_mod.Reason.revoked, sys.grants.reasonFor(h));
@@ -1126,7 +1126,7 @@ test "system: W4 slice 4 — grants-show lists every row, alive and dead, with i
 
     try registerGrantsShowCommand(gpa, &sys.commands, sys);
     var c = sys.contextFor(&sys.default_head);
-    _ = try command.run(&sys.commands, &c, "grants-show", &.{});
+    _ = try command.run(&sys.commands, &c, "grants.show", &.{});
 
     const echoed = sys.default_head.echo.items;
     try t.expect(std.mem.indexOf(u8, echoed, "notes/fs_read limit=none state=revoked") != null);

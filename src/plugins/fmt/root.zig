@@ -1,5 +1,5 @@
 //! fmt — format + external filters (design §6.2), a `.wasm` plugin over the
-//! native `proc` FILTER surface. `format-buffer` picks a formatter by file
+//! native `proc` FILTER surface. `fmt.format-buffer` picks a formatter by file
 //! extension and rewrites the buffer through it; `filter` runs any command over
 //! the selection (vim `!`). Both land as async, CRDT-anchored, plugin-authored edits
 //! that merge like a concurrent editor. perms `{proc, timer}`.
@@ -18,8 +18,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "format-buffer", .call = formatBuffer, .arity = .whole, .summary = "format the buffer with the formatter configured for its language" },
-    .{ .name = "filter", .arity = .one, .call = filter, .params = "command", .summary = "pipe the selection (or buffer) through a shell command" },
+    .{ .name = "fmt.format-buffer", .call = formatBuffer, .arity = .whole, .summary = "format the buffer with the formatter configured for its language" },
+    .{ .name = "fmt.filter", .arity = .one, .call = filter, .params = "command", .summary = "pipe the selection (or buffer) through a shell command" },
 };
 
 fn describeExtra() void {

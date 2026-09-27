@@ -85,7 +85,7 @@ pub const Source = struct {
 
 pub const Options = struct {
     /// Accept the typed query itself (new filename, rename, freeform),
-    /// not only an existing candidate. See `pick-accept-input`.
+    /// not only an existing candidate. See `pick.accept-input`.
     allow_free_text: bool = false,
     source: ?Source = null,
     /// Completion style for this pick (default orderless).

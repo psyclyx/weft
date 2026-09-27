@@ -156,7 +156,7 @@ const ConfigActions = struct {
             self.plugin_actions += 1;
             return .handled;
         }
-        if (std.mem.eql(u8, action, "fs.permissions.edit")) {
+        if (std.mem.eql(u8, action, "fs.edit-permissions")) {
             self.permission_edits += 1;
             return .{ .focus = self.permission_target };
         }
@@ -168,11 +168,11 @@ const ConfigActions = struct {
             self.workspace_cds += 1;
             return .handled;
         }
-        if (std.mem.eql(u8, action, "fs.entry.create-file")) {
+        if (std.mem.eql(u8, action, "fs.create-file")) {
             self.file_creates += 1;
             return .handled;
         }
-        if (std.mem.eql(u8, action, "fs.entry.create-directory")) {
+        if (std.mem.eql(u8, action, "fs.create-directory")) {
             self.directory_creates += 1;
             return .handled;
         }
@@ -374,9 +374,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         semantic.action.standard.set_working_target,
         semantic.action.standard.edit,
         semantic.action.standard.delete,
-        "fs.permissions.edit",
-        "fs.entry.create-file",
-        "fs.entry.create-directory",
+        "fs.edit-permissions",
+        "fs.create-file",
+        "fs.create-directory",
         semantic.action.standard.paste_before,
         semantic.action.standard.refresh,
         semantic.action.standard.revert,
@@ -390,7 +390,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqualStrings("normal", ed.ctx.bindingMode());
     try t.expect(ed.keymap.resolveExact("normal", "space c d") == null);
     try t.expect(!ed.keymap.isPrefix("normal", "space c"));
-    try t.expectEqualStrings("goto-definition", ed.keymap.resolveExact("normal-source", "space c d").?);
+    try t.expectEqualStrings("lsp.goto-definition", ed.keymap.resolveExact("normal-source", "space c d").?);
 
     // A user who forgets the git keys reaches for the leader and READS the
     // which-key overlay — so we assert on what the which_key plugin actually
@@ -407,8 +407,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqualStrings("space g", ed.head.pending);
     // The overlay now shows the git leaves BY THEIR COMMAND NAMES — what a user
     // reads to discover the binding we added.
-    try t.expect(whichKeyShows(&ed, "git-init"));
-    try t.expect(whichKeyShows(&ed, "git-status"));
+    try t.expect(whichKeyShows(&ed, "git.init"));
+    try t.expect(whichKeyShows(&ed, "git.status"));
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.head.pending);
 
@@ -420,14 +420,14 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // integration contract: config can name every intent as an ordinary
     // command, while the focused scene/provider decides whether to handle it.
     const structured_view_bindings = [_]struct { sequence: []const u8, command: []const u8 }{
-        .{ .sequence = "space v j", .command = "cursor-down" },
-        .{ .sequence = "space v k", .command = "cursor-up" },
+        .{ .sequence = "space v j", .command = "cursor.down" },
+        .{ .sequence = "space v k", .command = "cursor.up" },
         .{ .sequence = "space v c", .command = semantic.action.standard.set_working_target },
         .{ .sequence = "space v e", .command = semantic.action.standard.edit },
         .{ .sequence = "space v d", .command = semantic.action.standard.delete },
-        .{ .sequence = "space v m", .command = "fs.permissions.edit" },
-        .{ .sequence = "space v n", .command = "fs.entry.create-file" },
-        .{ .sequence = "space v N", .command = "fs.entry.create-directory" },
+        .{ .sequence = "space v m", .command = "fs.edit-permissions" },
+        .{ .sequence = "space v n", .command = "fs.create-file" },
+        .{ .sequence = "space v N", .command = "fs.create-directory" },
         .{ .sequence = "space v P", .command = semantic.action.standard.paste_before },
         .{ .sequence = "space v r", .command = semantic.action.standard.refresh },
         .{ .sequence = "space v R", .command = semantic.action.standard.revert },
@@ -453,8 +453,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expectEqual(@as(usize, 1), arms.len);
         try t.expectEqualStrings(binding.intention, arms[0]);
     }
-    try t.expect(ed.commands.resolve(semantic.action.standard.open) == null);
-    try t.expect(ed.commands.resolve(semantic.action.standard.copy) == null);
+    // The standard semantic actions ARE commands, each under its own dotted
+    // name and nothing else (no `target-open-focused` beside `target.open`):
+    // the keys above reach them through intentions, and a palette or `:`
+    // line reaches them by that one name.
+    try t.expect(ed.commands.resolve(semantic.action.standard.open) != null);
+    try t.expect(ed.commands.resolve(semantic.action.standard.copy) != null);
 
     // Seed both capability-varying row kinds so the real files scene has
     // concrete rows whose advertised target/actions can be checked below.
@@ -492,8 +496,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // with entering insert mode. Their action remains reachable through the
     // compound command even though the key does not name the intention alone.
     const compound_view_bindings = [_]struct { sequence: []const u8, command: []const u8, action: []const u8, intention: []const u8 }{
-        .{ .sequence = "o", .command = "vim-open-below", .action = semantic.action.standard.insert_after, .intention = "std.editing.insert-after" },
-        .{ .sequence = "O", .command = "vim-open-above", .action = semantic.action.standard.insert_before, .intention = "std.editing.insert-before" },
+        .{ .sequence = "o", .command = "vim.open-below", .action = semantic.action.standard.insert_after, .intention = "std.editing.insert-after" },
+        .{ .sequence = "O", .command = "vim.open-above", .action = semantic.action.standard.insert_before, .intention = "std.editing.insert-before" },
     };
 
     // First walk the actual scene and reject any newly advertised action that
@@ -512,8 +516,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         }
         // Reachable EITHER as its own command name, or — where the view
         // adapter publishes the action under a standard intention — through
-        // the key that binds that intention. Both are config surface; only
-        // the second needs no trampoline command to exist.
+        // the key that binds that intention. A standard action is also core's
+        // command under its own dotted name: one id, never a second spelling.
         if (intentionFor(action)) |intention| {
             var sequence: ?[]const u8 = null;
             for (intention_bindings) |binding| {
@@ -523,7 +527,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
                 }
             }
             try t.expect(sequence != null);
-            try t.expect(ed.commands.resolve(action) == null); // no trampoline left
+            try t.expect(ed.commands.resolve(action) != null); // its one id
             try t.expectEqualStrings(intention, ed.keymap.resolveExact("normal-structural", sequence.?).?);
             continue;
         }
@@ -552,7 +556,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expect(found);
     }
     for (structured_view_bindings) |binding| {
-        if (std.mem.eql(u8, binding.command, "cursor-down") or std.mem.eql(u8, binding.command, "cursor-up")) continue;
+        if (std.mem.eql(u8, binding.command, "cursor.down") or std.mem.eql(u8, binding.command, "cursor.up")) continue;
         var found = false;
         for (advertised_actions.items) |action| {
             if (std.mem.eql(u8, action, binding.command)) {
@@ -579,8 +583,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     }
     try t.expect(sceneNodeWithFact(files_scene, "files.row", "kind", "regular") != null);
     const directory_row = sceneNodeWithFact(files_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
-    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal-structural", "space v j").?);
-    try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal-structural", "space v k").?);
+    try t.expectEqualStrings("cursor.down", ed.keymap.resolveExact("normal-structural", "space v j").?);
+    try t.expectEqualStrings("cursor.up", ed.keymap.resolveExact("normal-structural", "space v k").?);
     // Return/minus are generic Vim input policy, not files bindings. Keep the
     // two gates adjacent so config coverage includes the ordinary navigation
     // path into and out of a focused semantic target. Return leads with the
@@ -589,11 +593,11 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const activate = ed.keymap.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 2), activate.len);
     try t.expectEqualStrings("std.target.activate", activate[0]);
-    try t.expectEqualStrings("vim-open-focused", activate[1]);
+    try t.expectEqualStrings("vim.next-line", activate[1]);
     const step_out = ed.keymap.resolveExactArms("normal", "minus").?;
     try t.expectEqual(@as(usize, 2), step_out.len);
     try t.expectEqualStrings("std.hierarchy.step-out", step_out[0]);
-    try t.expectEqualStrings("vim-open-container", step_out[1]);
+    try t.expectEqualStrings("vim.prev-line", step_out[1]);
 
     // Exercise that policy against the real row: Return opens the child target
     // through generic target resolution, and minus follows its generic
@@ -658,12 +662,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .id = semantic.action.standard.copy },
         .{ .id = semantic.action.standard.cut },
         .{ .id = semantic.action.standard.delete },
-        .{ .id = "fs.permissions.edit" },
+        .{ .id = "fs.edit-permissions" },
         .{ .id = semantic.action.standard.paste_before },
         .{ .id = semantic.action.standard.paste_after },
         .{ .id = "fixture.plugin-action" },
-        .{ .id = "fs.entry.create-file" },
-        .{ .id = "fs.entry.create-directory" },
+        .{ .id = "fs.create-file" },
+        .{ .id = "fs.create-directory" },
     };
     const first_row: semantic.scene.Node = .{
         .id = @enumFromInt(2),
@@ -758,7 +762,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // `y` is also Vim's normal-mode operator prefix. The active dialog owns
     // the input locally, while the global keymap remains untouched; this is
     // the contract that keeps confirmation out of which-key/global modes.
-    try t.expectEqualStrings("enter-op-yank", ed.keymap.resolveExact("normal", "y").?);
+    try t.expectEqualStrings("vim.yank", ed.keymap.resolveExact("normal", "y").?);
     try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
     ed.press("y", "y");
     try t.expectEqual(@as(usize, 1), actions.confirms);
@@ -844,8 +848,8 @@ test "e2e/config: SPC , keeps stable order and places the active buffer last" {
     defer loader_state.deinit();
     try bootConfig(&ed, config_dir, &loader_state);
 
-    ed.runStr("open", "alpha.txt");
-    ed.runStr("open", "bravo.txt");
+    ed.runStr("file.open", "alpha.txt");
+    ed.runStr("file.open", "bravo.txt");
     try t.expectEqualStrings("bravo.txt", ed.bufferName());
 
     // This is the real config binding and the real resident buffers plugin;
@@ -974,25 +978,25 @@ test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
     defer loader_state.deinit();
     try bootShowcase(gpa, &proj, &ed, &loader_state);
 
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(2);
 
     // DOCUMENTED IS LISTED. Each of these is a thing a person looks up by
     // name, and each is a different plugin — so this is the namespace working,
     // not one plugin's table.
-    for ([_][]const u8{ "git-log", "goto-definition", "grep", "buffers", "ts-raise" }) |want| {
+    for ([_][]const u8{ "git.log", "lsp.goto-definition", "grep.search", "buffer.pick", "ts.raise" }) |want| {
         if (pickRow(&ed, want) == null) {
             std.debug.print("\n[e2e/config] documented command missing from the palette: '{s}'\n", .{want});
             return error.DocumentedCommandNotListed;
         }
     }
 
-    // UNDOCUMENTED IS NOT. A keystroke (`vim-append`), a motion
-    // (`motion.doc-end`) and a trampoline one plugin runs on another's behalf
-    // (`git-commit-settle`) are not things anyone looks up by name, and a list that
+    // UNDOCUMENTED IS NOT. A keystroke (`vim.append`), a motion
+    // (`motions.doc-end`) and a trampoline one plugin runs on another's behalf
+    // (`git.commit-settle`) are not things anyone looks up by name, and a list that
     // holds them is a list you scroll past. Silence is the DEFAULT, so a new
     // internal command stays out without anyone remembering to hide it.
-    for ([_][]const u8{ "vim-append", "motion.doc-end", "git-commit-settle" }) |hidden| {
+    for ([_][]const u8{ "vim.append", "motions.doc-end", "git.commit-settle" }) |hidden| {
         if (pickRow(&ed, hidden) != null) {
             std.debug.print("\n[e2e/config] undocumented command listed: '{s}'\n", .{hidden});
             return error.UndocumentedCommandListed;
@@ -1002,15 +1006,15 @@ test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
     // A REFUSAL TO LIST IS NOT A REFUSAL TO RUN. The pick is free-text, so an
     // undocumented command still runs when you type its name — which is what
     // keeps this a matter of presentation rather than of authority.
-    try t.expect(ed.commands.resolve("vim-append") != null);
+    try t.expect(ed.commands.resolve("vim.append") != null);
 
     // EVERY ROW SAYS WHOSE IT IS, and the rows arrive grouped by that owner —
     // a fuzzy pick has no headings, so the order is the grouping.
     var seen: std.ArrayList([]const u8) = .empty;
     defer seen.deinit(gpa);
     var last: []const u8 = "";
-    for (ed.pick.items.items, ed.pick.docs.items) |item, doc| {
-        if (std.mem.indexOfScalar(u8, item, '.') != null) continue; // a dotted offer
+    for (ed.pick.docs.items) |doc| {
+        if (std.mem.startsWith(u8, doc, "offer · ")) continue; // a live offer, not a command
         const cut = std.mem.indexOf(u8, doc, " · ") orelse doc.len;
         const owner = doc[0..cut];
         try t.expect(owner.len > 0);
@@ -1035,7 +1039,7 @@ test "e2e/config: the palette lists what plugins DOCUMENTED, grouped by owner" {
 
 /// Open the palette, narrow to one row, and accept it.
 fn paletteAccept(ed: *Editor, text: []const u8) void {
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(2);
     ed.typeText(text);
     ed.settle(2);
@@ -1059,8 +1063,8 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     defer loader_state.deinit();
     try bootConfig(&ed, config_dir, &loader_state);
 
-    ed.runStr("open", "alpha.txt");
-    ed.runStr("insert-text", "x");
+    ed.runStr("file.open", "alpha.txt");
+    ed.runStr("edit.insert-text", "x");
     {
         const edited = try ed.textAlloc();
         defer gpa.free(edited);
@@ -1068,11 +1072,11 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     }
 
     // The offer is LISTED, beside the raw commands, attributed to its provider.
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(2);
     const row = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
     try t.expectEqualStrings("offer · core.editing", ed.pick.docs.items[row]);
-    try t.expect(pickRow(&ed, "buffers") != null); // commands still there
+    try t.expect(pickRow(&ed, "buffer.pick") != null); // commands still there
     ed.press("Escape", "");
     ed.settle(2);
 
@@ -1088,7 +1092,7 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     // absence would mean nonapplicable, and this is relevant-but-impossible.
     const view = try ed.buffers.createView(gpa, "files: .", "files");
     try ed.buffers.switchTo(gpa, view, ed.head, ed.keymap);
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(2);
     const disabled = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
     try t.expectEqualStrings("offer · core.editing · no-text", ed.pick.docs.items[disabled]);
@@ -1128,23 +1132,23 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
 
     // 1. The row SAYS WHOSE IT IS AND WHAT IT TAKES. A person reads both
     //    before committing to the row, which is the point of showing them.
-    //    The owner leads because `goto-definition` and `rename` do not carry
+    //    The owner leads because `lsp.goto-definition` and `rename` do not carry
     //    their plugin in their names and the shape is meaningless until you
     //    know what you are looking at.
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(2);
-    const row = pickRow(&ed, "listen") orelse return error.ListenNotListed;
+    const row = pickRow(&ed, "collab.listen") orelse return error.ListenNotListed;
     try t.expect(std.mem.startsWith(u8, ed.pick.docs.items[row], "core · "));
     try t.expect(std.mem.indexOf(u8, ed.pick.docs.items[row], "<port> <access>") != null);
 
     // Every row still NAMES something runnable. Rendering a row's shape reads
     // the registry three times (name, summary, parameters) and each read lands
     // in the guest shim's scratch: sharing one buffer between them wrote
-    // `<slot>` over the front of `explain-binding` and listed a row called
+    // `<slot>` over the front of `action.explain` and listed a row called
     // `slotain-binding`. A row you cannot run is not a cosmetic defect, so the
     // sweep is here rather than trusting one spot check.
-    for (ed.pick.items.items) |item| {
-        if (std.mem.indexOfScalar(u8, item, '.') != null) continue; // a dotted offer
+    for (ed.pick.items.items, ed.pick.docs.items) |item, doc| {
+        if (std.mem.startsWith(u8, doc, "offer · ")) continue; // a live offer, not a command
         if (ed.commands.resolve(item) == null) {
             std.debug.print("\n[e2e/config] palette row names no command: '{s}'\n", .{item});
             return error.PaletteRowNamesNoCommand;
@@ -1156,7 +1160,7 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     // 2. TYPED next to the name. `listen 7777 edit` matches no row (every
     //    completion style splits on whitespace), so this rides the free-text
     //    accept — which is exactly why the pick has to allow it.
-    paletteAccept(&ed, "listen 7777 edit");
+    paletteAccept(&ed, "collab.listen 7777 edit");
     try t.expectEqual(@as(?u16, 7777), ed.share_ctx.pending_listen);
     try t.expectEqual(core.session.Access.edit, ed.share_ctx.pending_access);
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "listening") != null);
@@ -1165,13 +1169,13 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     //    with the command and the parameter it is filling.
     ed.share_ctx.pending_listen = null;
     ed.share_ctx.pending_access = .view;
-    paletteAccept(&ed, "listen");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <port>") != null);
+    paletteAccept(&ed, "collab.listen");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <port>") != null);
     try t.expectEqual(@as(?u16, null), ed.share_ctx.pending_listen); // nothing ran yet
     ed.typeText("7000");
     ed.press("Return", "");
     ed.settle(2);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <access>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <access>") != null);
     ed.typeText("own");
     ed.press("Return", "");
     ed.settle(2);
@@ -1211,22 +1215,22 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
     // — so the shape of the call is visible while you make it.
     ed.press("colon", "");
     ed.settle(2);
-    ed.typeText("listen");
+    ed.typeText("collab.listen");
     ed.settle(2);
-    try t.expectEqualStrings(":listen <port> <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen <port> <access>", ed.echoText());
 
     // It advances as arguments land, naming what comes NEXT rather than
     // repeating the one under the cursor — and the line supplies its own
     // separator, so a trailing space does not double up.
     ed.typeText(" 777");
     ed.settle(2);
-    try t.expectEqualStrings(":listen 777 <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 777 <access>", ed.echoText());
     ed.typeText("7 ");
     ed.settle(2);
-    try t.expectEqualStrings(":listen 7777 <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 7777 <access>", ed.echoText());
     ed.typeText("edit");
     ed.settle(2);
-    try t.expectEqualStrings(":listen 7777 edit", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 7777 edit", ed.echoText());
 
     // A word ex owns is not a registered command, so the registry has nothing
     // to say about it — no keyword list to keep in step with the parser.
@@ -1241,7 +1245,7 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
 
     // And the whole call, said at once, still runs as one.
     ed.press("colon", "");
-    ed.typeText("listen 7100 edit");
+    ed.typeText("collab.listen 7100 edit");
     ed.press("Return", "");
     ed.settle(2);
     try t.expectEqual(@as(?u16, 7100), ed.share_ctx.pending_listen);
@@ -1250,10 +1254,10 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
     // `:listen` alone is a legal thing to type now: it asks for the rest.
     ed.share_ctx.pending_listen = null;
     ed.press("colon", "");
-    ed.typeText("listen");
+    ed.typeText("collab.listen");
     ed.press("Return", "");
     ed.settle(2);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "listen <port>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <port>") != null);
 }
 
 // An agent process is its conversation's LIFETIME (doc/agents.md
@@ -1277,9 +1281,9 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     // #1 asks for permission and DIES. #2 asks and stays (`exec`, so the pid
     // weft holds is the live process).
     try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' doomed 'doomed tool'");
-    ed.run("agent-start");
+    ed.run("agent.start");
     try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' alive 'surviving tool'; exec sleep 30");
-    ed.run("agent-start");
+    ed.run("agent.start");
 
     // Whichever order the two land in, the settled state is the same: #1's
     // pick resolved cancelled with #1, and #2's took the screen.
@@ -1301,7 +1305,7 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     // The freed slot is REUSED: a third conversation takes ordinal 1 back and
     // streams into `*agent*`, which only a released slot allows.
     try ed.setConfig("acp", "cmd", "printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"text\":\"third-turn\"}}}}\\n'");
-    ed.run("agent-start");
+    ed.run("agent.start");
     try t.expect(drainToolContains(&ed, "*agent*", "third-turn"));
 
     // #2 is untouched throughout: its pick is still the one on screen, so its
@@ -1327,14 +1331,13 @@ fn bootShowcase(gpa: std.mem.Allocator, proj: *Project, ed: *Editor, loader: *Co
     try t.expect(loader.failed.items.len == 0);
 }
 
-/// Commands only a WINDOWED embedder registers: `grants-show` wants the live
+/// Commands only a WINDOWED embedder registers: `grants.show` wants the live
 /// System, and the scroll family wants the view that owns the focused pane's
 /// viewport (`app/scroll.zig`). A headless editor has neither, so a keymap
 /// sweep asserts their BINDING and leaves the command to main().
 fn embedderOwned(command: []const u8) bool {
-    return std.mem.eql(u8, command, "grants-show") or
-        std.mem.eql(u8, command, "center-line") or
-        std.mem.startsWith(u8, command, "scroll-");
+    return std.mem.eql(u8, command, "grants.show") or
+        std.mem.startsWith(u8, command, "scroll.");
 }
 
 /// The resident JS plugin under `name` (its config namespace), or null.
@@ -1474,52 +1477,52 @@ test "e2e/config: every showcased binding names a command that exists" {
 
     const showcased = [_]struct { sequence: []const u8, command: []const u8 }{
         // Instanced sessions: lowercase starts one, uppercase talks to it.
-        .{ .sequence = "space o r", .command = "repl-start" },
-        .{ .sequence = "space o R", .command = "repl-send-line" },
-        .{ .sequence = "space o q", .command = "repl-quit" },
-        .{ .sequence = "space o c", .command = "console-open" },
-        .{ .sequence = "space o C", .command = "console-send" },
-        .{ .sequence = "space o a", .command = "llm-ask-line" },
-        .{ .sequence = "space o d", .command = "files" },
-        .{ .sequence = "space o e", .command = "direnv-status" },
+        .{ .sequence = "space o r", .command = "repl.start" },
+        .{ .sequence = "space o R", .command = "repl.send-line" },
+        .{ .sequence = "space o q", .command = "repl.quit" },
+        .{ .sequence = "space o c", .command = "console.open" },
+        .{ .sequence = "space o C", .command = "console.send" },
+        .{ .sequence = "space o a", .command = "llm.ask-line" },
+        .{ .sequence = "space o d", .command = "files.browse" },
+        .{ .sequence = "space o e", .command = "direnv.status" },
         // Coding agents (acp.js) — an instanced conversation apiece.
-        .{ .sequence = "space a a", .command = "agent-start" },
-        .{ .sequence = "space a s", .command = "agent-send" },
-        .{ .sequence = "space a f", .command = "agent-focus" },
+        .{ .sequence = "space a a", .command = "agent.start" },
+        .{ .sequence = "space a s", .command = "agent.send" },
+        .{ .sequence = "space a f", .command = "agent.focus" },
         // The debugger: breakpoints (wasm) and the DAP session (dap.js).
-        .{ .sequence = "space d b", .command = "debug-toggle-breakpoint" },
-        .{ .sequence = "space d d", .command = "debug-start" },
-        .{ .sequence = "space d o", .command = "debug-step-out" },
-        .{ .sequence = "F5", .command = "debug-continue" },
+        .{ .sequence = "space d b", .command = "debug.toggle-breakpoint" },
+        .{ .sequence = "space d d", .command = "debug.start" },
+        .{ .sequence = "space d o", .command = "debug.step-out" },
+        .{ .sequence = "F5", .command = "debug.continue" },
         // Notes + embeds.
-        .{ .sequence = "space n n", .command = "notes-open" },
-        .{ .sequence = "space n c", .command = "notes-capture" },
-        .{ .sequence = "space n h", .command = "notes-capture-here" },
-        .{ .sequence = "space n e", .command = "notes-embeds" },
-        .{ .sequence = "space n E", .command = "notes-embeds-off" },
+        .{ .sequence = "space n n", .command = "notes.open" },
+        .{ .sequence = "space n c", .command = "notes.capture" },
+        .{ .sequence = "space n h", .command = "notes.capture-here" },
+        .{ .sequence = "space n e", .command = "notes.show-embeds" },
+        .{ .sequence = "space n E", .command = "notes.hide-embeds" },
         // Collaboration: the zero-argument verbs get keys; presets and export
         // selections take an argument and ride the `:` line.
-        .{ .sequence = "space C s", .command = "share" },
-        .{ .sequence = "space C o", .command = "open-shared" },
-        .{ .sequence = "space C f", .command = "peer-files" },
-        .{ .sequence = "space C p", .command = "peers" },
-        .{ .sequence = "space C x", .command = "disconnect" },
+        .{ .sequence = "space C s", .command = "collab.share" },
+        .{ .sequence = "space C o", .command = "collab.open-shared" },
+        .{ .sequence = "space C f", .command = "collab.peer-files" },
+        .{ .sequence = "space C p", .command = "collab.peers" },
+        .{ .sequence = "space C x", .command = "collab.disconnect" },
         // The palette, and the authority-inspection surface beside it.
-        .{ .sequence = "space h h", .command = "pick-commands" },
-        .{ .sequence = "space colon", .command = "pick-commands" }, // config writes `SPC :`
+        .{ .sequence = "space h h", .command = "palette.open" },
+        .{ .sequence = "space colon", .command = "palette.open" }, // config writes `SPC :`
     };
     for (showcased) |row| {
-        const mode: []const u8 = if (std.mem.eql(u8, row.command, "debug-toggle-breakpoint")) "normal-source" else "normal";
+        const mode: []const u8 = if (std.mem.eql(u8, row.command, "debug.toggle-breakpoint")) "normal-source" else "normal";
         try t.expectEqualStrings(row.command, ed.keymap.resolveExact(mode, row.sequence).?);
         if (ed.commands.resolve(row.command) == null) {
             std.debug.print("[e2e/config] bound but unregistered: {s} -> {s}\n", .{ row.sequence, row.command });
             return error.BoundCommandMissing;
         }
     }
-    // `grants-show` is bound by the config and registered by main() against
+    // `grants.show` is bound by the config and registered by main() against
     // the live System (an embedder choice, not a builtin), so assert the
     // BINDING here and leave the command to `core/System.zig`'s own gate.
-    try t.expectEqualStrings("grants-show", ed.keymap.resolveExact("normal", "space h g").?);
+    try t.expectEqualStrings("grants.show", ed.keymap.resolveExact("normal", "space h g").?);
 
     // The rest of the file, swept — the header's promise holds for EVERY
     // section, not just the ones named above, and for the grammars the config
@@ -1558,11 +1561,11 @@ test "e2e/config: the showcased intention binds resolve to what answers them" {
     const save_arms = ed.keymap.resolveExactArms("normal", "space f s").?;
     try t.expectEqual(@as(usize, 2), save_arms.len);
     try t.expectEqualStrings("std.persistence.save", save_arms[0]);
-    try t.expectEqualStrings("save", save_arms[1]);
+    try t.expectEqualStrings("file.save", save_arms[1]);
     const back_arms = ed.keymap.resolveExactArms("normal", "C-o").?;
     try t.expectEqual(@as(usize, 2), back_arms.len);
     try t.expectEqualStrings("std.navigation.back", back_arms[0]);
-    try t.expectEqualStrings("jump-back", back_arms[1]);
+    try t.expectEqualStrings("jump.back", back_arms[1]);
 
     // Grammar tier, observed through the booted config: the arms the config's
     // comments send the reader to are really there.
@@ -1589,7 +1592,7 @@ test "e2e/config: the showcased intention binds resolve to what answers them" {
     // navigation intention here, so the second arm — the jumplist, which the
     // switch between entries filled — answers, which is exactly what a
     // fallback list is for.
-    ed.runStr("open", "note.txt");
+    ed.runStr("file.open", "note.txt");
     const first = try gpa.dupe(u8, ed.bufferName());
     defer gpa.free(first);
     authorFile(ed, "other.txt", "second\n");
@@ -1619,7 +1622,7 @@ test "e2e/config: the showcased weft.set values land under their owners" {
         .{ .owner = "which_key", .key = "delay-ms", .value = "200" },
         .{ .owner = "which_key", .key = "placement", .value = "corner" },
         .{ .owner = "editor", .key = "flash-ms", .value = "150" }, // core knobs
-        .{ .owner = "collab", .key = "share-presence", .value = "on" }, // the app service
+        .{ .owner = "collab", .key = "collab.share-presence", .value = "on" }, // the app service
         .{ .owner = "palette", .key = "accent", .value = "#8ec07c" }, // the colour family
     };
     for (values) |v| {
@@ -1658,7 +1661,7 @@ test "e2e/config: the shipped config annotates palette rows — the whole chain,
     defer loader.deinit();
     try bootShowcase(gpa, &proj, ed, &loader);
 
-    ed.run("pick-commands");
+    ed.run("palette.open");
     ed.settle(4); // the annotation round rides the ordinary frame advance
 
     try t.expect(ed.pick.active);
@@ -1746,56 +1749,56 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
     }
 
     // The keys that used to be dead under helix, by name.
-    try t.expectEqualStrings("find-file", ed.keymap.resolveExact("helix-normal", "space space").?);
-    try t.expectEqualStrings("hx/n/goto-line", ed.keymap.resolveExact("helix-normal", "g g").?);
-    try t.expectEqualStrings("hx/n/last-line", ed.keymap.resolveExact("helix-normal", "g e").?);
-    try t.expectEqualStrings("hx-select-line", ed.keymap.resolveExact("helix-normal", "x").?);
+    try t.expectEqualStrings("files.find", ed.keymap.resolveExact("helix-normal", "space space").?);
+    try t.expectEqualStrings("helix.move-goto-line", ed.keymap.resolveExact("helix-normal", "g g").?);
+    try t.expectEqualStrings("helix.move-last-line", ed.keymap.resolveExact("helix-normal", "g e").?);
+    try t.expectEqualStrings("helix.select-line", ed.keymap.resolveExact("helix-normal", "x").?);
     // Helix's minor modes, laid out as Helix's own: space mode's leaves, `[`/`]`
     // pairs, `z` view and the sticky `Z`, `m` match.
     const Key = struct { mode: []const u8 = "helix-normal", key: []const u8, cmd: []const u8 };
     const minor = [_]Key{
-        .{ .key = "space f", .cmd = "find-file" },
-        .{ .key = "space b", .cmd = "buf-pick" },
-        .{ .key = "space s", .cmd = "symbols" },
-        .{ .key = "space a", .cmd = "code-actions" },
-        .{ .key = "space k", .cmd = "hover" },
-        .{ .key = "space r", .cmd = "rename" },
-        .{ .key = "space slash", .cmd = "grep" },
-        .{ .key = "space question", .cmd = "pick-commands" },
-        .{ .key = "space w v", .cmd = "window-vsplit" },
-        .{ .key = "bracketright d", .cmd = "next-diagnostic" },
-        .{ .key = "bracketleft d", .cmd = "prev-diagnostic" },
-        .{ .key = "bracketright f", .cmd = "hx-function-next" },
-        .{ .key = "space d", .cmd = "diagnostics" },
-        .{ .key = "space j", .cmd = "jumplist-pick" },
-        .{ .key = "space y", .cmd = "hx-yank-clipboard" },
-        .{ .key = "g d", .cmd = "hx-goto-definition" },
-        .{ .key = "g y", .cmd = "hx-goto-type-definition" },
-        .{ .key = "g i", .cmd = "hx-goto-implementation" },
-        .{ .key = "g r", .cmd = "hx-goto-references" },
-        .{ .key = "g p", .cmd = "buffer-previous" },
-        .{ .key = "g w", .cmd = "hx/n/goto-word" },
-        .{ .key = "g m", .cmd = "hx-goto-last-modified" },
-        .{ .key = "slash", .cmd = "hx/n/search" },
-        .{ .key = "n", .cmd = "hx/n/search-next" },
-        .{ .key = "s", .cmd = "hx-select-regex" },
-        .{ .key = "M-K", .cmd = "hx-remove-regex" },
-        .{ .key = "asterisk", .cmd = "hx-search-selection" },
-        .{ .key = "ampersand", .cmd = "hx-align" },
-        .{ .key = "Q", .cmd = "hx-macro-record" },
-        .{ .key = "q", .cmd = "hx-macro-play" },
-        .{ .key = "m i a", .cmd = "hx/mi/argument" },
-        .{ .mode = "helix-select", .key = "n", .cmd = "hx/x/search-next" },
-        .{ .key = "z z", .cmd = "center-line" },
-        .{ .key = "z t", .cmd = "scroll-line-to-top" },
-        .{ .key = "z j", .cmd = "scroll-line-down" },
-        .{ .key = "Z", .cmd = "hx-view-sticky" },
-        .{ .mode = "helix-view", .key = "j", .cmd = "scroll-line-down" },
-        .{ .key = "m m", .cmd = "hx/n/match" },
-        .{ .key = "m i parenleft", .cmd = "hx/mi/paren" },
-        .{ .key = "m s", .cmd = "hx-surround-add" },
-        .{ .key = "M-o", .cmd = "hx-expand" },
-        .{ .mode = "helix-select", .key = "w", .cmd = "hx/x/word-next" },
+        .{ .key = "space f", .cmd = "files.find" },
+        .{ .key = "space b", .cmd = "buffer.pick" },
+        .{ .key = "space s", .cmd = "lsp.pick-symbol" },
+        .{ .key = "space a", .cmd = "lsp.code-actions" },
+        .{ .key = "space k", .cmd = "lsp.hover" },
+        .{ .key = "space r", .cmd = "lsp.rename" },
+        .{ .key = "space slash", .cmd = "grep.search" },
+        .{ .key = "space question", .cmd = "palette.open" },
+        .{ .key = "space w v", .cmd = "window.split-right" },
+        .{ .key = "bracketright d", .cmd = "lsp.next-diagnostic" },
+        .{ .key = "bracketleft d", .cmd = "lsp.prev-diagnostic" },
+        .{ .key = "bracketright f", .cmd = "helix.function-next" },
+        .{ .key = "space d", .cmd = "lsp.pick-diagnostic" },
+        .{ .key = "space j", .cmd = "jump.pick" },
+        .{ .key = "space y", .cmd = "helix.yank-clipboard" },
+        .{ .key = "g d", .cmd = "lsp.goto-definition" },
+        .{ .key = "g y", .cmd = "lsp.goto-type-definition" },
+        .{ .key = "g i", .cmd = "lsp.goto-implementation" },
+        .{ .key = "g r", .cmd = "lsp.references" },
+        .{ .key = "g p", .cmd = "buffer.prev" },
+        .{ .key = "g w", .cmd = "helix.move-goto-word" },
+        .{ .key = "g m", .cmd = "helix.goto-last-modified" },
+        .{ .key = "slash", .cmd = "helix.move-search" },
+        .{ .key = "n", .cmd = "helix.move-search-next" },
+        .{ .key = "s", .cmd = "helix.select-regex" },
+        .{ .key = "M-K", .cmd = "helix.remove-regex" },
+        .{ .key = "asterisk", .cmd = "helix.search-selection" },
+        .{ .key = "ampersand", .cmd = "helix.align" },
+        .{ .key = "Q", .cmd = "helix.macro-record" },
+        .{ .key = "q", .cmd = "helix.macro-play" },
+        .{ .key = "m i a", .cmd = "helix.select-inner-argument" },
+        .{ .mode = "helix-select", .key = "n", .cmd = "helix.extend-search-next" },
+        .{ .key = "z z", .cmd = "scroll.center-line" },
+        .{ .key = "z t", .cmd = "scroll.line-to-top" },
+        .{ .key = "z j", .cmd = "scroll.line-down" },
+        .{ .key = "Z", .cmd = "helix.view-sticky" },
+        .{ .mode = "helix-view", .key = "j", .cmd = "scroll.line-down" },
+        .{ .key = "m m", .cmd = "helix.move-match" },
+        .{ .key = "m i parenleft", .cmd = "helix.select-inner-paren" },
+        .{ .key = "m s", .cmd = "helix.surround-add" },
+        .{ .key = "M-o", .cmd = "helix.expand" },
+        .{ .mode = "helix-select", .key = "w", .cmd = "helix.extend-word-next" },
     };
     for (minor) |row| {
         const arms = ed.keymap.resolveExactArms(row.mode, row.key) orelse {
@@ -1807,15 +1810,15 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
     try t.expect(ed.keymap.modeHasTag("helix-view", "menu"));
     const Arms = struct { key: []const u8, arms: []const []const u8 };
     const intended = [_]Arms{
-        .{ .key = "y", .arms = &.{ "std.transfer.yank", "hx-yank" } },
-        .{ .key = "p", .arms = &.{ "std.transfer.paste", "hx-paste" } },
-        .{ .key = "d", .arms = &.{ "std.transfer.delete-to-register", "hx-delete" } },
-        .{ .key = "u", .arms = &.{ "std.history.undo", "undo" } },
-        .{ .key = "U", .arms = &.{ "std.history.redo", "redo" } },
-        .{ .key = "j", .arms = &.{ "std.navigation.down", "hx/n/down" } },
-        .{ .key = "k", .arms = &.{ "std.navigation.up", "hx/n/up" } },
-        .{ .key = "space O s", .arms = &.{ "std.persistence.save", "save" } },
-        .{ .key = "C-o", .arms = &.{ "std.navigation.back", "hx-jump-back" } },
+        .{ .key = "y", .arms = &.{ "std.transfer.yank", "helix.yank" } },
+        .{ .key = "p", .arms = &.{ "std.transfer.paste", "helix.paste" } },
+        .{ .key = "d", .arms = &.{ "std.transfer.delete-to-register", "helix.delete" } },
+        .{ .key = "u", .arms = &.{ "std.history.undo", "edit.undo" } },
+        .{ .key = "U", .arms = &.{ "std.history.redo", "edit.redo" } },
+        .{ .key = "j", .arms = &.{ "std.navigation.down", "helix.move-down" } },
+        .{ .key = "k", .arms = &.{ "std.navigation.up", "helix.move-up" } },
+        .{ .key = "space O s", .arms = &.{ "std.persistence.save", "file.save" } },
+        .{ .key = "C-o", .arms = &.{ "std.navigation.back", "helix.jump-back" } },
     };
     for (intended) |row| {
         const arms = ed.keymap.resolveExactArms("helix-normal", row.key).?;
@@ -1828,14 +1831,14 @@ test "e2e/config: helix.js boots whole, and every key it binds names something t
     try t.expect(!ed.keymap.isPrefix("helix-normal", "space v"));
     try t.expectEqualStrings("field.edit", ed.keymap.resolveExact("helix-structural", "space v e").?);
     try t.expectEqualStrings("std.transfer.yank", ed.keymap.resolveExact("helix-structural", "space v y").?);
-    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("helix-structural", "space v j").?);
+    try t.expectEqualStrings("cursor.down", ed.keymap.resolveExact("helix-structural", "space v j").?);
 
     // The layers are chosen by declaration: a document binds through
     // helix-source (its code chords live there), a scratch through nothing.
     try t.expectEqualStrings("helix-normal", ed.ctx.bindingMode());
     authorFile(&ed, "main.zig", "const x = 1;\n");
     try t.expectEqualStrings("helix-source", ed.ctx.bindingMode());
-    try t.expectEqualStrings("format", ed.keymap.resolveExact("helix-source", "space i f").?);
+    try t.expectEqualStrings("plugin.code.format", ed.keymap.resolveExact("helix-source", "space i f").?);
 }
 
 /// The generic retained scene config.js's structured-view gate drives, as a
@@ -1895,11 +1898,11 @@ const SceneFixture = struct {
             .{ .id = semantic.action.standard.copy },
             .{ .id = semantic.action.standard.cut },
             .{ .id = semantic.action.standard.delete },
-            .{ .id = "fs.permissions.edit" },
+            .{ .id = "fs.edit-permissions" },
             .{ .id = semantic.action.standard.paste_before },
             .{ .id = semantic.action.standard.paste_after },
-            .{ .id = "fs.entry.create-file" },
-            .{ .id = "fs.entry.create-directory" },
+            .{ .id = "fs.create-file" },
+            .{ .id = "fs.create-directory" },
         };
         const first_row: semantic.scene.Node = .{
             .id = @enumFromInt(2),

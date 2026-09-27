@@ -266,14 +266,14 @@ test "e2e/chrome: the toolbar adapts to the primary context — source, a files 
     // standard `std.editing.begin` now (doc/chrome.md §5.2), which the
     // toolbar leaves to Rename. Nothing is drafted yet, so Apply draft is
     // greyed.
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
     app.proj.shot(ed, "chrome-toolbar-files");
 
     // A git status buffer: git's verbs. Nothing durable to save here, so the
     // pinned Save is greyed and says so.
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(h.drainToolContains(ed, "*git*", "f.txt"));
     ed.applyWindow();
     try expectStrip(ed, "Save~ Undo~ Redo~ Palette | Stage Diff Commit Push Pull Fetch Refresh");
@@ -362,8 +362,8 @@ test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, wit
 
     // The repl plugin publishes `repl.session` on the place its interpreter
     // runs in. Its own buffer takes the pane; come back to the source.
-    ed.runStr("repl-start", "cat");
-    ed.runStr("open", "a.txt");
+    ed.runStr("repl.start", "cat");
+    ed.runStr("file.open", "a.txt");
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line Send to REPL | Format Rename");
@@ -376,7 +376,7 @@ test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, wit
     try t.expectEqual(source, ed.buffers.active_id);
 
     // Quitting the last REPL retracts the key, and the strip drops the button.
-    ed.run("repl-quit");
+    ed.run("repl.quit");
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
 }

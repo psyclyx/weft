@@ -18,7 +18,7 @@ pub const WindowCtx = struct {
     close: bool = false,
     focus_dir: ?window_layout.Dir = null,
     move_dir: ?window_layout.Dir = null,
-    focus_next: bool = false, // cycle focus (legacy `focus-other`)
+    focus_next: bool = false, // cycle focus (`window.focus-next`)
 };
 
 /// Which window operation a bound command requests (mapped to a WindowCtx
@@ -44,25 +44,21 @@ pub const WindowAction = enum {
 pub const WindowActionCtx = struct { win: *WindowCtx, action: WindowAction };
 
 /// The window-layout command surface: each entry binds a name to a
-/// `WindowAction`. The legacy names (split/vsplit/unsplit/focus-other) alias
-/// onto the same intents so the prebuilt `windows` .wasm plugin and older
-/// configs keep working. Registration order is last-wins; keep it stable.
+/// `WindowAction`. One name per operation: the `windows` plugin that
+/// re-registered these under its own names is gone, and so is every alias.
 pub const cmd_table = [_]struct { name: []const u8, action: WindowAction, summary: []const u8 }{
-    .{ .name = "window-split", .action = .split, .summary = "Split the focused window horizontally (a pane below)." },
-    .{ .name = "window-vsplit", .action = .vsplit, .summary = "Split the focused window vertically (a pane beside)." },
-    .{ .name = "window-close", .action = .close, .summary = "Close the focused window, collapsing its split." },
-    .{ .name = "window-focus-left", .action = .focus_left, .summary = "Focus the window to the left." },
-    .{ .name = "window-focus-right", .action = .focus_right, .summary = "Focus the window to the right." },
-    .{ .name = "window-focus-up", .action = .focus_up, .summary = "Focus the window above." },
-    .{ .name = "window-focus-down", .action = .focus_down, .summary = "Focus the window below." },
-    .{ .name = "window-move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbor." },
-    .{ .name = "window-move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbor." },
-    .{ .name = "window-move-up", .action = .move_up, .summary = "Swap the focused window with the one above." },
-    .{ .name = "window-move-down", .action = .move_down, .summary = "Swap the focused window with the one below." },
-    .{ .name = "split", .action = .split, .summary = "Split the focused window horizontally." },
-    .{ .name = "vsplit", .action = .vsplit, .summary = "Split the focused window vertically." },
-    .{ .name = "unsplit", .action = .close, .summary = "Close the focused window." },
-    .{ .name = "focus-other", .action = .focus_next, .summary = "Focus the next window." },
+    .{ .name = "window.split-below", .action = .split, .summary = "Split the focused window horizontally (a pane below)." },
+    .{ .name = "window.split-right", .action = .vsplit, .summary = "Split the focused window vertically (a pane beside)." },
+    .{ .name = "window.close", .action = .close, .summary = "Close the focused window, collapsing its split." },
+    .{ .name = "window.focus-left", .action = .focus_left, .summary = "Focus the window to the left." },
+    .{ .name = "window.focus-right", .action = .focus_right, .summary = "Focus the window to the right." },
+    .{ .name = "window.focus-up", .action = .focus_up, .summary = "Focus the window above." },
+    .{ .name = "window.focus-down", .action = .focus_down, .summary = "Focus the window below." },
+    .{ .name = "window.move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbor." },
+    .{ .name = "window.move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbor." },
+    .{ .name = "window.move-up", .action = .move_up, .summary = "Swap the focused window with the one above." },
+    .{ .name = "window.move-down", .action = .move_down, .summary = "Swap the focused window with the one below." },
+    .{ .name = "window.focus-next", .action = .focus_next, .summary = "Focus the next window." },
 };
 
 /// Count of window commands; `main()` sizes the stable `WindowActionCtx`
@@ -438,7 +434,7 @@ fn presentDeclared(
     if (target) |t| {
         const owned = gpa.dupe(u8, t) catch return false;
         defer gpa.free(owned);
-        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, "open", owned);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, "file.open", owned);
     } else presentEmpty(ctx, buffers, gpa, registry, decl, node);
     const shown = buffers.get(node.pane().buffer_id);
     // What the previous presentation made, and nothing shows any more.
@@ -485,10 +481,10 @@ fn retireEmpty(
 }
 
 /// The shell's refusing close: a viewport retiring what it made never
-/// discards work the user did in it (`buffer-close` refuses a dirty file or
+/// discards work the user did in it (`buffer.close-unmodified` refuses a dirty file or
 /// an unapplied draft, and the entry stays).
 fn closeEntry(ctx: *core.command.Context) void {
-    _ = core.command.run(ctx.commands, ctx, "buffer-close", &.{}) catch {};
+    _ = core.command.run(ctx.commands, ctx, "buffer.close-unmodified", &.{}) catch {};
 }
 
 fn paneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
@@ -612,7 +608,7 @@ fn reopenInto(
         buffers.switchTo(gpa, restore, head, keymap) catch {};
         buffers.prev_id = prev;
     };
-    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = designation }}) catch return false;
+    _ = core.command.run(ctx.commands, ctx, "file.open", &.{.{ .string = designation }}) catch return false;
     const opened = core.designation.findText(buffers, designation) orelse return false;
     node.pane().buffer_id = opened.id;
     node.pane().top_row = 0;
@@ -632,7 +628,7 @@ fn hold(gpa: std.mem.Allocator, buffers: *core.Buffers, decl: *core.viewport.Dec
     core.viewport.Registry.hold(gpa, &decl.entry, held) catch {};
 }
 
-/// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`
+/// Realize a `viewport.take` (`core.viewport.Registry.takeEntry`): `node`
 /// shows `entry`, and the head's focus moves there when the pane takes focus.
 /// The pane the head leaves keeps its OWN entry — the command that made
 /// `entry` active ran in it, but the focused-pane mirror has not run yet
@@ -677,7 +673,7 @@ pub fn presentIn(
     pane: window_layout.PaneId,
     subject: []const u8,
 ) void {
-    presentBy(ctx, win_layout, buffers, gpa, head, keymap, pane, "open", subject);
+    presentBy(ctx, win_layout, buffers, gpa, head, keymap, pane, "file.open", subject);
 }
 
 /// `presentIn` through any presenting command, not only `open`: whatever
@@ -698,7 +694,7 @@ pub fn presentBy(
 ) void {
     const node = win_layout.paneById(pane) orelse return;
     // The head goes and comes back: a presentation, not navigation, so
-    // neither switch is a jump (nor is `buffer-back`'s entry disturbed).
+    // neither switch is a jump (nor is `buffer.back`'s entry disturbed).
     const here = window_layout.headFocus(win_layout, head) == node;
     core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject, here });
 }

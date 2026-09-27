@@ -20,9 +20,9 @@ pub const Control = struct {
     pub fn register(self: *Control, gpa: std.mem.Allocator, commands: *core.command.Commands) !void {
         const entries = [_]core.command.Command{
             .{ .name = "font-size-set", .summary = "Set the text size in pixels (8–72).", .args = &.{.{ .name = "size", .type = .string }}, .handler = set, .data = self },
-            .{ .name = "font-size-increase", .summary = "Increase the text size by one pixel.", .args = &.{}, .handler = increase, .data = self },
-            .{ .name = "font-size-decrease", .summary = "Decrease the text size by one pixel.", .args = &.{}, .handler = decrease, .data = self },
-            .{ .name = "font-size-reset", .summary = "Restore the configured text size.", .args = &.{}, .handler = reset, .data = self },
+            .{ .name = "font.increase", .summary = "Increase the text size by one pixel.", .args = &.{}, .handler = increase, .data = self },
+            .{ .name = "font.decrease", .summary = "Decrease the text size by one pixel.", .args = &.{}, .handler = decrease, .data = self },
+            .{ .name = "font.reset", .summary = "Restore the configured text size.", .args = &.{}, .handler = reset, .data = self },
         };
         for (entries) |entry| _ = try commands.bind(gpa, entry.name, entry);
     }

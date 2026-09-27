@@ -47,7 +47,7 @@ const ConfigApp = struct {
         // Mirror main.zig: the grammar's resting mode is where fresh buffers
         // open, and a no-file launch shows the dashboard.
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
-        self.ed.run("dashboard");
+        self.ed.run("dashboard.open");
         self.ed.applyWindow();
     }
 
@@ -121,7 +121,7 @@ const Listing = union(enum) {
 
     fn focus(self: Listing, ed: *Editor) void {
         switch (self) {
-            .sidebar => ed.run("window-focus-left"),
+            .sidebar => ed.run("window.focus-left"),
             .entry => |id| ed.buffers.switchTo(ed.gpa, id, ed.head, ed.keymap) catch {},
         }
         ed.applyWindow();
@@ -154,7 +154,7 @@ fn keyboardWalk(ed: *Editor, keys: Keys, listing: Listing) !void {
 
     deeper.focus(ed);
     // Back up to sub/.
-    if (keys.step_out) |key| ed.press(key, "") else ed.run("hierarchy-step-out");
+    if (keys.step_out) |key| ed.press(key, "") else ed.run("target.open-container");
     try goToRow(ed, keys, "inner.txt");
     ed.press("Return", "");
     try expectPrimaryText(ed, "INNER\n");
@@ -173,7 +173,7 @@ test "e2e/files: helix.js — Return opens a file from the listing, at its root 
     var app: ConfigApp = undefined;
     try app.init(t.allocator, "helix.js");
     defer app.deinit();
-    app.ed.run("files");
+    app.ed.run("files.browse");
     app.ed.applyWindow();
     try keyboardWalk(&app.ed, vim_keys, .here(&app.ed));
 }
@@ -184,7 +184,7 @@ test "e2e/files: ide.js — Return opens a file from a listing in the main pane,
     defer app.deinit();
     // The sidebar shows `.` already; a listing in the main pane is an ordinary
     // `open` of a directory.
-    app.ed.runStr("open", "sub");
+    app.ed.runStr("file.open", "sub");
     app.ed.applyWindow();
     const ed = &app.ed;
     const listing: Listing = .here(ed);
@@ -292,7 +292,7 @@ test "e2e/files: a row whose file was swapped for a link after listing opens wha
     defer app.deinit();
     const ed = &app.ed;
     try core.file.writeBytesMakingDirs(gpa, "private", "private/secret.txt", "SECRET\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
     // Between the listing and the activation, the leaf becomes a link to a
@@ -316,7 +316,7 @@ test "e2e/files: config.js — V j d over rows removes every row of the range, a
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
 
@@ -348,7 +348,7 @@ test "e2e/files: config.js — `yy` over two marked rows copies both, as one tra
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
     const alpha = try primaryRowIndex(ed);
@@ -379,7 +379,7 @@ test "e2e/files: config.js — `V j y` over rows copies the range as one transfe
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
 
@@ -403,7 +403,7 @@ test "e2e/files: config.js — `V j d` over rows cuts the range as one transfer:
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
 
@@ -424,7 +424,7 @@ test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lin
     defer app.deinit();
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "lines.txt", "one\ntwo\nthree");
-    ed.runStr("open", "lines.txt");
+    ed.runStr("file.open", "lines.txt");
     ed.applyWindow();
 
     ed.chord("g g");
@@ -462,7 +462,7 @@ test "e2e/files: config.js — `V` then `d` over two carets deletes both lines: 
     defer app.deinit();
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "carets.txt", "a1\nb1\nc1\na2\nb2\nc2\n");
-    ed.runStr("open", "carets.txt");
+    ed.runStr("file.open", "carets.txt");
     ed.applyWindow();
     ed.chord("g g");
     // A second caret on `a2`: `V j` grows a line range from each, and `d`

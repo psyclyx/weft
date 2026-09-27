@@ -48,11 +48,11 @@ pub fn waitForTree(ed: *h.Editor, syn: *h.core.syntax.Syntax) bool {
 }
 
 pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
-    ed.runStr("open", c.path);
+    ed.runStr("file.open", c.path);
     ed.press("i", "");
     ed.typeText(c.source);
     ed.press("Escape", "");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     const syn = attachedSyntax(ed) orelse return error.SyntaxDidNotAttach;
     try std.testing.expectEqualStrings(c.name, syn.spec.name);
@@ -219,9 +219,9 @@ pub fn assertLsp(proj: *h.Project, ed: *h.Editor, c: Case, peer: Peer) !void {
     // session is keyed by the command it was spawned for, so the open then
     // mints one for the hermetic peer rather than reusing whatever served this
     // language before the config above.
-    ed.runStr("open", ".lsp-activation-switch.txt");
+    ed.runStr("file.open", ".lsp-activation-switch.txt");
     ed.settle(2);
-    ed.runStr("open", c.path);
+    ed.runStr("file.open", c.path);
     var saw_lsp = false;
     for (ed.caps.providers.items) |provider| {
         if (std.mem.eql(u8, provider.capability, "edit/completion") and

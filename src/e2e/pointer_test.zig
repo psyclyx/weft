@@ -23,7 +23,7 @@ fn activeEditor(ed: *Editor) *core.Editor {
 
 fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     ed.applyWindow();
 }
 
@@ -116,7 +116,7 @@ test "e2e/pointer: a double click is its own key — bound here to select a word
     try t.expectEqual(@as(usize, 16), sel.end);
 
     // The third quick click is `triple-mouse-1`, which defaults.js leaves
-    // on `pointer-click`: the caret goes back to the point.
+    // on `pointer.click`: the caret goes back to the point.
     ed.clickAgain(at);
     try t.expectEqual(@as(u8, 3), ed.head.pointer.clicks);
     try t.expect(activeEditor(ed).selectedRange() == null);
@@ -158,7 +158,7 @@ test "e2e/pointer: a click in an unfocused pane focuses it and acts there" {
 
     try openFile(ed, "left.txt", "left pane text\n");
     const left_entry = ed.buffers.active_id;
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
     try openFile(ed, "right.txt", "right pane text\n");
     try t.expectEqual(@as(usize, 2), ed.paneCount());

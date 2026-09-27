@@ -10,7 +10,7 @@
 //! **What is persisted: two stores, each its own file in one directory.**
 //!
 //!   - `plugins_file`: the PLUGIN kv store. `System.Plugins.kv` (matcher
-//!     frecency, recent/kill/mark rings, `project-recent`) is state a plugin
+//!     frecency, recent/kill/mark rings, `project.recent`) is state a plugin
 //!     authored at runtime and nothing else can reproduce, so losing it at
 //!     exit loses information.
 //!   - `documents_file`: the DOCUMENT store (`DocStore`, owned by
@@ -278,7 +278,7 @@ test "kv_file: a Binding's close is the save its open is the load" {
 
     // A SECOND "run" over the same directory sees the first one's state —
     // the whole point: the store outlives the process that wrote it. This is
-    // exactly what `project-recent` silently lost on every restart.
+    // exactly what `project.recent` silently lost on every restart.
     var next: kv.Store = .empty;
     defer next.deinit(gpa);
     var binding = Binding.openIn(gpa, &next, try gpa.dupe(u8, dir), plugins_file);

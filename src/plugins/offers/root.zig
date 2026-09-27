@@ -5,7 +5,7 @@
 //!                                   a docked companion that holds focus)
 //!   weft://here/offers/active       the focused context
 //!   weft://here/offers/at-pointer   the context under the pointer — made the
-//!                                   focused one first (`pointer-focus-point`)
+//!                                   focused one first (`pointer.focus-point`)
 //!
 //! presented `as` one of
 //!
@@ -20,7 +20,7 @@
 //! This is what the toolbar and the context menu were. Neither owns a
 //! viewport any more: a toolbar is a config viewport presenting
 //! `weft://here/offers/primary` as a strip (config/toolbar.js), and mouse-3
-//! presents `offers/at-pointer` as a menu (`offers-menu`). What each lists is
+//! presents `offers/at-pointer` as a menu (`offers.menu`). What each lists is
 //! the shared `weft_offers` reading — pinned entries (`weft.set("offers",
 //! "pinned", [...])`) then the context's offers arranged by their own
 //! `group`/`order` — the same reading the palette's offer rows come from.
@@ -113,11 +113,11 @@ const Menu = struct {
 var menu: ?Menu = null;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "offers-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
-    .{ .name = "offers-menu", .arity = .whole, .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
-    .{ .name = "offers-menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
-    .{ .name = "offers-press", .arity = .whole, .call = press, .params = "button" },
-    .{ .name = "offers-menu-key", .arity = .whole, .call = menuKey, .params = "input" },
+    .{ .name = "offers.present", .arity = .whole, .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
+    .{ .name = "offers.menu", .arity = .whole, .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
+    .{ .name = "offers.menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
+    .{ .name = "offers.press", .arity = .whole, .call = press, .params = "button" },
+    .{ .name = "offers.menu-key", .arity = .whole, .call = menuKey, .params = "input" },
 };
 
 comptime {
@@ -128,7 +128,7 @@ comptime {
 
 fn init() void {
     _ = weft.semanticActionProvider();
-    _ = weft.designationOpener(kind, "offers-present");
+    _ = weft.designationOpener(kind, "offers.present");
 }
 
 /// The opener: `open weft://here/offers/<context>?as=<layout>` lands here,
@@ -264,7 +264,7 @@ fn openMenu(ref: Ref) void {
     closeMenu();
     // Make the context under the pointer the active one first: the pane
     // there takes focus, and the row or the caret moves to the point.
-    if (ref == .at_pointer) weft.run("pointer-focus-point");
+    if (ref == .at_pointer) weft.run("pointer.focus-point");
     menu = .{ .ref = ref, .arena = .init(weft.allocator) };
     const m = &menu.?;
     const a = m.arena.allocator();
@@ -432,7 +432,7 @@ fn onSemanticAction() callconv(.c) void {
             if (raw < item_base or raw >= item_base + b.items.len) break;
             _ = weft.semanticActionHandled();
             var buf: [48]u8 = undefined;
-            weft.runStr("offers-press", std.fmt.bufPrint(&buf, "{d} {d}", .{ which, raw - item_base }) catch return);
+            weft.runStr("offers.press", std.fmt.bufPrint(&buf, "{d} {d}", .{ which, raw - item_base }) catch return);
             return;
         }
         _ = weft.semanticActionDecline();
@@ -457,5 +457,5 @@ fn onSemanticAction() callconv(.c) void {
         return;
     };
     _ = weft.semanticActionHandled();
-    if (verb.len > 0) weft.runStr("offers-menu-key", verb);
+    if (verb.len > 0) weft.runStr("offers.menu-key", verb);
 }

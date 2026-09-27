@@ -19,9 +19,9 @@ const token = "// ";
 /// carets on one line toggle it once.
 const over_lines: weft.Arity = .{ .each = .{ .over = "comment.lines", .merge = true } };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "comment-line", .call = commentLine, .arity = over_lines, .summary = "toggle this line's comment" },
-    .{ .name = "comment-selection", .call = commentSelection, .arity = over_lines, .summary = "toggle the selection's comments" },
-    .{ .name = "op.comment", .call = opComment, .arity = weft.Arity.each_extent, .summary = "comment the operator's range" },
+    .{ .name = "comment.toggle-line", .call = commentLine, .arity = over_lines, .summary = "toggle this line's comment" },
+    .{ .name = "comment.toggle-selection", .call = commentSelection, .arity = over_lines, .summary = "toggle the selection's comments" },
+    .{ .name = "comment.toggle", .call = opComment, .arity = weft.Arity.each_extent, .summary = "comment the operator's range" },
     .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "the selection's lines, or the caret's" },
 };
 comptime {
@@ -111,7 +111,7 @@ var starts: [1 << 12]usize = undefined;
 
 /// Toggle every line overlapping `[start, end)` with one uniform decision:
 /// remove iff EVERY non-blank line in the span is already commented, else add.
-/// The shared core of `comment-selection` and the `gc` operator `op.comment`.
+/// The shared core of `comment.toggle-selection` and the `gc` operator `comment.toggle`.
 fn commentSpan(start: usize, end: usize) void {
     // Collect the start of each line the span touches.
     var count: usize = 0;

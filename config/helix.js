@@ -36,12 +36,12 @@ weft.set("languages", "query-root", "assets");
 weft.plugin("languages.js"); // parser packages + explicit query paths
 [
   "comment", "indent", "whitespace", "numbers", "autopair", "consult", "git",
-  "grep", "run", "make", "notes", "fmt", "buffers", "windows", "modes",
+  "grep", "run", "make", "notes", "fmt", "buffers", "modes",
   "snippets", "direnv", "llm", "console", "repl", "net", "http", "which_key",
   "files", "lsp", "debug", "marginalia", "linenumbers",
   // The bottom panel and what shows in it (config/panel.js), and the caret's
   // symbol trail on the status line. No keys: the palette reaches
-  // `problems`, `terminal` and `panel-toggle`.
+  // `problems`, `terminal` and `panel.toggle`.
   "panel", "problems", "terminal", "breadcrumbs",
 ].forEach((p) => weft.plugin(p));
 
@@ -75,12 +75,12 @@ weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
 weft.set("linenumbers", "style", "relative");
 weft.set("dashboard", "sections", [
   "start\tStart\t\t\t0",
-  "files\tRecent files\tproject-recent\topen\t5",
-  "projects\tProjects\tproject-recent-roots\topen\t4",
+  "files\tRecent files\tproject.recent\tfile.open\t5",
+  "projects\tProjects\tproject.recent-roots\tfile.open\t4",
 ]);
 weft.set("dashboard", "items", [
-  "start\tOpen file\tdashboard-open-file",
-  "start\tNew buffer\tdashboard-new",
+  "start\tOpen file\tfiles.find",
+  "start\tNew buffer\tbuffer.scratch",
 ]);
 weft.set("palette", "arguments", "ask");
 weft.set("palette", "signature", "on");
@@ -99,15 +99,15 @@ weft.set("palette", "status", "#a89984");
 weft.set("theme", "chrome", "text");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
-weft.action("eval");
-weft.provide("eval", {}, "run-line"); //             default: run the current line
-weft.provide("eval", { lang: "zig" }, "make-build"); // .zig builds the project
-weft.provide("eval", { lang: "py" }, "lang-run");
-weft.action("format");
-weft.provide("format", {}, "format-buffer");
+weft.action("plugin.code.run");
+weft.provide("plugin.code.run", {}, "run.line"); //             default: run the current line
+weft.provide("plugin.code.run", { lang: "zig" }, "make.build"); // .zig builds the project
+weft.provide("plugin.code.run", { lang: "py" }, "modes.run");
+weft.action("plugin.code.format");
+weft.provide("plugin.code.format", {}, "fmt.format-buffer");
 
 // ── Keys ─────────────────────────────────────────────────────────────
-weft.bind("global", "F1", "which-key-now");
+weft.bind("global", "F1", "which-key.show");
 
 // The helix plugin binds Helix's own keymap: motions that select, `v` select
 // mode, the verbs, and the minor modes `g` `m` `z`/`Z` `[` `]` and `space`,
@@ -146,131 +146,131 @@ weft.group("helix-normal", "SPC q", "Quit editor");
 weft.group("helix-normal", "SPC H", "Help & permissions");
 weft.group("helix-normal", "SPC t", "Text toggles");
 
-weft.bind("helix-normal", "SPC SPC", "find-file");
-weft.bind("helix-normal", "SPC :", "pick-commands");
-weft.bind("helix-normal", "SPC ,", "buf-pick");
+weft.bind("helix-normal", "SPC SPC", "files.find");
+weft.bind("helix-normal", "SPC :", "palette.open");
+weft.bind("helix-normal", "SPC ,", "buffer.pick");
 
 // SPC O — `O s` asks the focused entry for the persistence intention first:
 // in a *git-commit* draft that commits, in a note it saves.
-weft.bind("helix-normal", "SPC O f", "find-file");
-weft.bind("helix-normal", "SPC O s", ["std.persistence.save", "save"]);
-weft.bind("helix-normal", "SPC O S", "save-as");
-weft.bind("helix-normal", "SPC O r", "project-recent");
-weft.bind("helix-normal", "SPC O d", "files");
+weft.bind("helix-normal", "SPC O f", "files.find");
+weft.bind("helix-normal", "SPC O s", ["std.persistence.save", "file.save"]);
+weft.bind("helix-normal", "SPC O S", "file.save-as");
+weft.bind("helix-normal", "SPC O r", "project.recent");
+weft.bind("helix-normal", "SPC O d", "files.browse");
 
-weft.bind("helix-normal", "SPC B d", "close");
-weft.bind("helix-normal", "SPC B D", "buffer-close-force");
-weft.bind("helix-normal", "SPC B n", "buffer-next");
-weft.bind("helix-normal", "SPC B p", "buffer-previous");
-weft.bind("helix-normal", "SPC B N", "buf-scratch");
+weft.bind("helix-normal", "SPC B d", "buffer.close");
+weft.bind("helix-normal", "SPC B D", "buffer.close-force");
+weft.bind("helix-normal", "SPC B n", "buffer.next");
+weft.bind("helix-normal", "SPC B p", "buffer.prev");
+weft.bind("helix-normal", "SPC B N", "buffer.scratch");
 
-weft.bind("helix-normal", "SPC V g", "git-status");
-weft.bind("helix-normal", "SPC V i", "git-init");
-weft.bind("helix-normal", "SPC V l", "git-log");
-weft.bind("helix-normal", "SPC V d", "git-diff");
-weft.bind("helix-normal", "SPC V D", "git-diff-staged");
-weft.bind("helix-source", "SPC V b", "git-blame");
+weft.bind("helix-normal", "SPC V g", "git.status");
+weft.bind("helix-normal", "SPC V i", "git.init");
+weft.bind("helix-normal", "SPC V l", "git.log");
+weft.bind("helix-normal", "SPC V d", "git.diff");
+weft.bind("helix-normal", "SPC V D", "git.diff-staged");
+weft.bind("helix-source", "SPC V b", "git.blame");
 
-weft.bind("helix-normal", ".", "repeat-change");
+weft.bind("helix-normal", ".", "edit.repeat");
 // `/ ? n N *` are helix's own search (the plugin binds them); the pattern
 // lands in the `/` register vim reads too. `C-o`/`C-i` walk the jumplist, a
 // focused view's own history first — the plugin binds those as well.
 
-weft.bind("helix-normal", "SPC l p", "project-recent");
-weft.bind("helix-normal", "SPC l f", "find-file");
-weft.bind("helix-normal", "SPC l R", "project-root");
-weft.bind("helix-normal", "SPC l /", "grep");
-weft.bind("helix-normal", "SPC l w", "grep-word");
-weft.bind("helix-source", "SPC l i", "consult-imenu");
+weft.bind("helix-normal", "SPC l p", "project.recent");
+weft.bind("helix-normal", "SPC l f", "files.find");
+weft.bind("helix-normal", "SPC l R", "project.show-root");
+weft.bind("helix-normal", "SPC l /", "grep.search");
+weft.bind("helix-normal", "SPC l w", "grep.search-word");
+weft.bind("helix-source", "SPC l i", "consult.imenu");
 
 // SPC i / SPC m — code, in documents only.
-weft.bind("helix-source", "SPC i f", "format");
-weft.bind("helix-source", "SPC i F", "lsp-format");
-weft.bind("helix-source", "SPC i k", "signature-help");
-weft.bind("helix-source", "SPC i i", "inlay-hints");
-weft.bind("helix-source", "SPC i n", "ts-select-node");
-weft.bind("helix-source", "SPC m b", "make-build");
-weft.bind("helix-source", "SPC m t", "make-test");
-weft.bind("helix-source", "SPC m r", "lang-run");
-weft.bind("helix-source", "SPC m x", "run-line");
-weft.bind("helix-source", "SPC m e", "eval");
+weft.bind("helix-source", "SPC i f", "plugin.code.format");
+weft.bind("helix-source", "SPC i F", "lsp.format");
+weft.bind("helix-source", "SPC i k", "lsp.signature-help");
+weft.bind("helix-source", "SPC i i", "lsp.toggle-inlay-hints");
+weft.bind("helix-source", "SPC i n", "ts.select-node");
+weft.bind("helix-source", "SPC m b", "make.build");
+weft.bind("helix-source", "SPC m t", "make.test");
+weft.bind("helix-source", "SPC m r", "modes.run");
+weft.bind("helix-source", "SPC m x", "run.line");
+weft.bind("helix-source", "SPC m e", "plugin.code.run");
 
 // Completion — the at-caret popup (buffer-word + LSP race + merge-rank).
-weft.bind("helix-insert", "C-SPC", "complete");
-weft.bind("helix-normal", "C-SPC", "complete");
+weft.bind("helix-insert", "C-SPC", "complete.show");
+weft.bind("helix-normal", "C-SPC", "complete.show");
 
-weft.bind("helix-normal", "SPC o e", "direnv-status");
-weft.bind("helix-normal", "SPC o r", "repl-start");
-weft.bind("helix-normal", "SPC o R", "repl-send-line");
-weft.bind("helix-normal", "SPC o q", "repl-quit");
-weft.bind("helix-normal", "SPC o c", "console-open");
-weft.bind("helix-normal", "SPC o C", "console-send");
-weft.bind("helix-normal", "SPC o a", "llm-ask-line");
-weft.bind("helix-normal", "SPC o h", "http-get");
+weft.bind("helix-normal", "SPC o e", "direnv.status");
+weft.bind("helix-normal", "SPC o r", "repl.start");
+weft.bind("helix-normal", "SPC o R", "repl.send-line");
+weft.bind("helix-normal", "SPC o q", "repl.quit");
+weft.bind("helix-normal", "SPC o c", "console.open");
+weft.bind("helix-normal", "SPC o C", "console.send");
+weft.bind("helix-normal", "SPC o a", "llm.ask-line");
+weft.bind("helix-normal", "SPC o h", "http.get");
 
-weft.bind("helix-normal", "SPC A a", "agent-start");
-weft.bind("helix-normal", "SPC A s", "agent-send");
-weft.bind("helix-normal", "SPC A f", "agent-focus");
+weft.bind("helix-normal", "SPC A a", "agent.start");
+weft.bind("helix-normal", "SPC A s", "agent.send");
+weft.bind("helix-normal", "SPC A f", "agent.focus");
 
-weft.bind("helix-source", "SPC G b", "debug-toggle-breakpoint");
-weft.bind("helix-normal", "SPC G c", "debug-clear-breakpoints");
-weft.bind("helix-normal", "SPC G l", "debug-list-breakpoints");
-weft.bind("helix-normal", "SPC G d", "debug-start");
-weft.bind("helix-normal", "SPC G r", "debug-continue");
-weft.bind("helix-normal", "SPC G n", "debug-step-over");
-weft.bind("helix-normal", "SPC G i", "debug-step-into");
-weft.bind("helix-normal", "SPC G o", "debug-step-out");
-weft.bind("helix-normal", "SPC G q", "debug-stop");
-weft.bind("helix-normal", "F5", "debug-continue");
-weft.bind("helix-source", "F9", "debug-toggle-breakpoint");
-weft.bind("helix-normal", "F10", "debug-step-over");
-weft.bind("helix-normal", "F11", "debug-step-into");
+weft.bind("helix-source", "SPC G b", "debug.toggle-breakpoint");
+weft.bind("helix-normal", "SPC G c", "debug.clear-breakpoints");
+weft.bind("helix-normal", "SPC G l", "debug.list-breakpoints");
+weft.bind("helix-normal", "SPC G d", "debug.start");
+weft.bind("helix-normal", "SPC G r", "debug.continue");
+weft.bind("helix-normal", "SPC G n", "debug.step-over");
+weft.bind("helix-normal", "SPC G i", "debug.step-into");
+weft.bind("helix-normal", "SPC G o", "debug.step-out");
+weft.bind("helix-normal", "SPC G q", "debug.stop");
+weft.bind("helix-normal", "F5", "debug.continue");
+weft.bind("helix-source", "F9", "debug.toggle-breakpoint");
+weft.bind("helix-normal", "F10", "debug.step-over");
+weft.bind("helix-normal", "F11", "debug.step-into");
 
-weft.bind("helix-normal", "SPC n n", "notes-open");
-weft.bind("helix-normal", "SPC n c", "notes-capture");
-weft.bind("helix-normal", "SPC n h", "notes-capture-here");
-weft.bind("helix-normal", "SPC n e", "notes-embeds");
-weft.bind("helix-normal", "SPC n E", "notes-embeds-off");
+weft.bind("helix-normal", "SPC n n", "notes.open");
+weft.bind("helix-normal", "SPC n c", "notes.capture");
+weft.bind("helix-normal", "SPC n h", "notes.capture-here");
+weft.bind("helix-normal", "SPC n e", "notes.show-embeds");
+weft.bind("helix-normal", "SPC n E", "notes.hide-embeds");
 
-weft.bind("helix-normal", "SPC x s", "share");
-weft.bind("helix-normal", "SPC x o", "open-shared");
-weft.bind("helix-normal", "SPC x f", "peer-files");
-weft.bind("helix-normal", "SPC x p", "peers");
-weft.bind("helix-normal", "SPC x l", "listen");
-weft.bind("helix-normal", "SPC x c", "connect");
-weft.bind("helix-normal", "SPC x x", "disconnect");
+weft.bind("helix-normal", "SPC x s", "collab.share");
+weft.bind("helix-normal", "SPC x o", "collab.open-shared");
+weft.bind("helix-normal", "SPC x f", "collab.peer-files");
+weft.bind("helix-normal", "SPC x p", "collab.peers");
+weft.bind("helix-normal", "SPC x l", "collab.listen");
+weft.bind("helix-normal", "SPC x c", "collab.connect");
+weft.bind("helix-normal", "SPC x x", "collab.disconnect");
 
 // Windows: helix's `C-w` window mode, and the same keys under `SPC w` —
 // both straight to the core window-layout commands.
 [
-  ["v", "window-vsplit"], ["s", "window-split"], ["w", "focus-other"],
-  ["C-w", "focus-other"], ["q", "window-close"], ["o", "win-close"],
-  ["h", "window-focus-left"], ["j", "window-focus-down"],
-  ["k", "window-focus-up"], ["l", "window-focus-right"],
-  ["H", "window-move-left"], ["J", "window-move-down"],
-  ["K", "window-move-up"], ["L", "window-move-right"],
+  ["v", "window.split-right"], ["s", "window.split-below"], ["w", "window.focus-next"],
+  ["C-w", "window.focus-next"], ["q", "window.close"], ["o", "window.close"],
+  ["h", "window.focus-left"], ["j", "window.focus-down"],
+  ["k", "window.focus-up"], ["l", "window.focus-right"],
+  ["H", "window.move-left"], ["J", "window.move-down"],
+  ["K", "window.move-up"], ["L", "window.move-right"],
 ].forEach((b) => {
   weft.bind("helix-normal", "C-w " + b[0], b[1]);
   weft.bind("helix-normal", "SPC w " + b[0], b[1]);
 });
 
-weft.bind("helix-normal", "SPC q q", "quit");
-weft.bind("helix-normal", "SPC H h", "pick-commands");
-weft.bind("helix-normal", "SPC H g", "grants-show");
-weft.bind("helix-normal", "SPC t w", "trim-trailing-buffer");
+weft.bind("helix-normal", "SPC q q", "app.quit");
+weft.bind("helix-normal", "SPC H h", "palette.open");
+weft.bind("helix-normal", "SPC H g", "grants.show");
+weft.bind("helix-normal", "SPC t w", "whitespace.trim-buffer");
 
 // Numbers: helix's own increment/decrement keys.
-weft.bind("helix-normal", "C-a", "increment-number");
-weft.bind("helix-normal", "C-x", "decrement-number");
+weft.bind("helix-normal", "C-a", "numbers.increment");
+weft.bind("helix-normal", "C-x", "numbers.decrement");
 
 // Autopair (in helix's insert mode).
-weft.bind("helix-insert", "parenleft", "pair-paren");
-weft.bind("helix-insert", "braceleft", "pair-brace");
-weft.bind("helix-insert", "bracketleft", "pair-bracket");
-weft.bind("helix-insert", "quotedbl", "pair-quote");
-weft.bind("helix-insert", "apostrophe", "pair-quote-single");
-weft.bind("helix-insert", "parenright", "pair-close-paren");
-weft.bind("helix-insert", "braceright", "pair-close-brace");
-weft.bind("helix-insert", "bracketright", "pair-close-bracket");
+weft.bind("helix-insert", "parenleft", "autopair.open-paren");
+weft.bind("helix-insert", "braceleft", "autopair.open-brace");
+weft.bind("helix-insert", "bracketleft", "autopair.open-bracket");
+weft.bind("helix-insert", "quotedbl", "autopair.quote-double");
+weft.bind("helix-insert", "apostrophe", "autopair.quote-single");
+weft.bind("helix-insert", "parenright", "autopair.close-paren");
+weft.bind("helix-insert", "braceright", "autopair.close-brace");
+weft.bind("helix-insert", "bracketright", "autopair.close-bracket");
 
 weft.echo("weft: helix.js loaded");

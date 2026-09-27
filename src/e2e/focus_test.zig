@@ -121,7 +121,7 @@ fn sidebarApp(app: *IdeApp) !void {
     const ed = &app.ed;
     for ([_][]const u8{ "m.txt", "main.zig" }) |name| try core.file.writeBytes(ed.gpa, name, "x\n");
     try ide.openFile(ed, "zeta.txt", "zeta\n");
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expectEqualStrings("ide-structural", ed.mode());
 }
@@ -267,7 +267,7 @@ test "e2e/focus: ide.js — a status listing and the problems list show a focuse
     // on it, and the frame shows the row, not a caret, under `row`
     // granularity.
     try ide.openFile(ed, "q.txt", "one\n");
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(h.drainToolContains(ed, "*git*", "f.txt"));
     ed.applyWindow();
     try frame(ed);
@@ -316,8 +316,8 @@ fn configSidebar(app: *h.App, config: []const u8) !void {
     try core.quickjs.evalConfig(&app.ed.engine, app.ed.ctx, null, &app.ed.config_kv, config_dir, "weft.use(\"sidebar\");");
     try core.file.writeBytes(gpa, "m.txt", "x\n");
     try core.file.writeBytes(gpa, "zeta.txt", "zeta\n");
-    app.ed.runStr("open", "zeta.txt");
-    app.ed.run("window-focus-left");
+    app.ed.runStr("file.open", "zeta.txt");
+    app.ed.run("window.focus-left");
     app.ed.applyWindow();
 }
 

@@ -363,9 +363,9 @@ test "harness: which-key panel does not collide with the status line" {
     defer ed.deinit(gpa);
 
     const hints = [_]core.Keymap.Binding{
-        .{ .key = "f", .command = "find-file" },
+        .{ .key = "f", .command = "files.find" },
         .{ .key = "c", .command = "collab" },
-        .{ .key = "space", .command = "palette" },
+        .{ .key = "space", .command = "palette.open" },
     };
     const w: u32 = 320;
     const h: u32 = 240;

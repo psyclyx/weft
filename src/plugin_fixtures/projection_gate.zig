@@ -71,7 +71,7 @@ fn tree(b: weft.ProjectionBuilder, extra_first: bool) void {
 }
 
 fn build() void {
-    weft.runStr("buffer-create", view);
+    weft.runStr("buffer.create", view);
     const b = weft.project(view) orelse return;
     tree(b, false);
     _ = b.commit();
@@ -100,7 +100,7 @@ fn report() void {
         sel_hi = @intCast(lines.hi);
     }
     const line = std.fmt.bufPrint(&out, "at={s} sel={d},{d}", .{ at, sel_lo, sel_hi }) catch return;
-    weft.runStr("buffer-create", "*proj-report*");
+    weft.runStr("buffer.create", "*proj-report*");
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, line);
 }
 

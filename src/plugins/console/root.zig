@@ -1,6 +1,6 @@
 //! console — command consoles (design §6.3, comint-flavored), a `.wasm` plugin
-//! (perms `{proc, timer}`). `console-open` opens a console buffer; typing a
-//! command and running `console-send` appends its output below via the native
+//! (perms `{proc, timer}`). `console.open` opens a console buffer; typing a
+//! command and running `console.send` appends its output below via the native
 //! `proc` APPEND surface. This is the STATELESS end of the REPL story — each
 //! line is an independent command. A stateful REPL (python -i, nREPL, keeping
 //! session state) is the `repl` plugin's persistent interactive-proc session.
@@ -28,8 +28,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "console-open", .call = open, .arity = .whole, .summary = "open a command console of its own" },
-    .{ .name = "console-send", .arity = .one, .call = send, .summary = "run the current line in this console" },
+    .{ .name = "console.open", .call = open, .arity = .whole, .summary = "open a command console of its own" },
+    .{ .name = "console.send", .arity = .one, .call = send, .summary = "run the current line in this console" },
 };
 
 fn describeExtra() void {

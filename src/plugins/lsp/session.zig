@@ -64,7 +64,7 @@ pub fn releasePickTargets() void {
 pub fn resetPickTargets() void {
     // End the old interaction before releasing its guest-side resources. The
     // Head owns one picker, so this also makes replacing results reentrant.
-    weft.run("pick-cancel");
+    weft.run("pick.cancel");
     releasePickTargets();
 }
 
@@ -81,7 +81,7 @@ pub fn addPickTarget(offset: usize) bool {
 // belonging to the document that session has open.
 pub const MAX_DIAG = 256;
 /// The signal raised whenever a session's diagnostics change (`weft.signalEmit`);
-/// a listener re-reads them with the `diagnostics-list` command.
+/// a listener re-reads them with the `lsp.list-diagnostics` command.
 pub const diagnostics_signal = "diagnostics";
 pub const DiagnosticProvenance = enum { versioned, legacy_unversioned };
 

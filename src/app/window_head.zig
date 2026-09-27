@@ -113,7 +113,7 @@ pub const WindowHead = struct {
     /// every keypress uses (`app/dispatch.zig:dispatchKey`), bracketed by
     /// this window-head's `in_dispatch` — see module doc. `ctx` is the LIVE
     /// `command.Context` to dispatch through (passed explicitly rather than
-    /// always reading `self.client.active_ctx`, since a `system-swap` may
+    /// always reading `self.client.active_ctx`, since a `app.swap-system` may
     /// have repointed which system `main()`'s `cmd_ctx` targets by the time
     /// this runs — see `core/System.zig`'s `Host.swap`).
     pub fn dispatchKey(self: *WindowHead, ctx: *command.Context, ev: wayland.KeyEvent) !void {

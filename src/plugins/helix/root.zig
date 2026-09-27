@@ -52,7 +52,7 @@ const goto_word = @import("goto_word.zig");
 /// `helix-ex` the command line). Same shared engine vim uses: helix gets the
 /// classic builtins (write/quit/open/vsplit/hsplit + w/q/wq/s abbrevs) and the
 /// SAME fall-through to the weft registry (`:name arg…`).
-const ex = ex_mod.Ex("helix-normal", "helix-ex");
+const ex = ex_mod.Ex("helix-normal", "helix-ex", "helix.ex");
 
 const file_pick = 0;
 
@@ -106,9 +106,9 @@ const motion_defs = [_]MotionDef{
     .{ .name = "word-next", .motion = word(text.nextWordStart, false) },
     .{ .name = "word-prev", .motion = word(text.prevWordStart, false) },
     .{ .name = "word-end", .motion = word(text.nextWordEnd, false) },
-    .{ .name = "WORD-next", .motion = word(text.nextWordStart, true) },
-    .{ .name = "WORD-prev", .motion = word(text.prevWordStart, true) },
-    .{ .name = "WORD-end", .motion = word(text.nextWordEnd, true) },
+    .{ .name = "big-word-next", .motion = word(text.nextWordStart, true) },
+    .{ .name = "big-word-prev", .motion = word(text.prevWordStart, true) },
+    .{ .name = "big-word-end", .motion = word(text.nextWordEnd, true) },
     .{ .name = "line-start", .motion = sel.point(lineStart) },
     .{ .name = "line-end", .motion = sel.point(lineEnd) },
     .{ .name = "first-non-blank", .motion = sel.point(firstNonBlank) },
@@ -131,11 +131,11 @@ const motion_keys = [_]MotionKey{
     .{ .key = "Down", .motion = "down", .intention = "std.navigation.down" },
     .{ .key = "Up", .motion = "up", .intention = "std.navigation.up" },
     .{ .key = "w", .motion = "word-next", .intention = "std.navigation.word-next" },
-    .{ .key = "b", .motion = "word-prev", .intention = "std.navigation.word-previous" },
+    .{ .key = "b", .motion = "word-prev", .intention = "std.navigation.word-prev" },
     .{ .key = "e", .motion = "word-end", .intention = "std.navigation.word-end" },
-    .{ .key = "W", .motion = "WORD-next", .intention = "std.navigation.big-word-next" },
-    .{ .key = "B", .motion = "WORD-prev", .intention = "std.navigation.big-word-previous" },
-    .{ .key = "E", .motion = "WORD-end", .intention = "std.navigation.big-word-end" },
+    .{ .key = "W", .motion = "big-word-next", .intention = "std.navigation.big-word-next" },
+    .{ .key = "B", .motion = "big-word-prev", .intention = "std.navigation.big-word-prev" },
+    .{ .key = "E", .motion = "big-word-end", .intention = "std.navigation.big-word-end" },
     .{ .key = "Home", .motion = "line-start", .intention = "std.navigation.line-start" },
     .{ .key = "End", .motion = "line-end", .intention = "std.navigation.line-end" },
     .{ .key = "g h", .motion = "line-start", .intention = "std.navigation.line-start" },
@@ -157,12 +157,12 @@ fn motionCmd(comptime m: sel.Motion, comptime mode: sel.Mode, comptime jump: boo
     }.h;
 }
 
-/// `hx/n/<motion>` (move) and `hx/x/<motion>` (extend) for every motion.
+/// `helix.move-<motion>` and `helix.extend-<motion>` for every motion.
 const motion_cmds = blk: {
     var arr: [motion_defs.len * 2]weft.CommandEntry = undefined;
     for (motion_defs, 0..) |d, i| {
-        arr[2 * i] = .{ .name = "hx/n/" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each };
-        arr[2 * i + 1] = .{ .name = "hx/x/" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each };
+        arr[2 * i] = .{ .name = "helix.move-" ++ d.name, .call = motionCmd(d.motion, .move, d.jump), .arity = each };
+        arr[2 * i + 1] = .{ .name = "helix.extend-" ++ d.name, .call = motionCmd(d.motion, .extend, d.jump), .arity = each };
     }
     break :blk arr;
 };
@@ -190,7 +190,7 @@ fn gotoLine(comptime mode: sel.Mode) fn () void {
 fn matchPair(comptime mode: sel.Mode) fn () void {
     return struct {
         fn h() void {
-            sel.applyCursorMotion("motion.match-pair", mode);
+            sel.applyCursorMotion("motions.match-pair", mode);
         }
     }.h;
 }
@@ -235,19 +235,19 @@ fn findChar() void {
 }
 
 const find_cmds = [_]weft.CommandEntry{
-    .{ .name = "hx/n/find-to", .call = findEnter(.to, .move), .arity = .whole },
-    .{ .name = "hx/n/find-till", .call = findEnter(.till, .move), .arity = .whole },
-    .{ .name = "hx/n/find-back-to", .call = findEnter(.back_to, .move), .arity = .whole },
-    .{ .name = "hx/n/find-back-till", .call = findEnter(.back_till, .move), .arity = .whole },
-    .{ .name = "hx/x/find-to", .call = findEnter(.to, .extend), .arity = .whole },
-    .{ .name = "hx/x/find-till", .call = findEnter(.till, .extend), .arity = .whole },
-    .{ .name = "hx/x/find-back-to", .call = findEnter(.back_to, .extend), .arity = .whole },
-    .{ .name = "hx/x/find-back-till", .call = findEnter(.back_till, .extend), .arity = .whole },
-    .{ .name = "hx-find-char", .call = findChar, .arity = each },
-    .{ .name = "hx/n/goto-line", .call = gotoLine(.move), .arity = each },
-    .{ .name = "hx/x/goto-line", .call = gotoLine(.extend), .arity = each },
-    .{ .name = "hx/n/match", .call = matchPair(.move), .arity = each },
-    .{ .name = "hx/x/match", .call = matchPair(.extend), .arity = each },
+    .{ .name = "helix.move-find-next-char", .call = findEnter(.to, .move), .arity = .whole },
+    .{ .name = "helix.move-till-next-char", .call = findEnter(.till, .move), .arity = .whole },
+    .{ .name = "helix.move-find-prev-char", .call = findEnter(.back_to, .move), .arity = .whole },
+    .{ .name = "helix.move-till-prev-char", .call = findEnter(.back_till, .move), .arity = .whole },
+    .{ .name = "helix.extend-find-next-char", .call = findEnter(.to, .extend), .arity = .whole },
+    .{ .name = "helix.extend-till-next-char", .call = findEnter(.till, .extend), .arity = .whole },
+    .{ .name = "helix.extend-find-prev-char", .call = findEnter(.back_to, .extend), .arity = .whole },
+    .{ .name = "helix.extend-till-prev-char", .call = findEnter(.back_till, .extend), .arity = .whole },
+    .{ .name = "helix.find-char", .call = findChar, .arity = each },
+    .{ .name = "helix.move-goto-line", .call = gotoLine(.move), .arity = each },
+    .{ .name = "helix.extend-goto-line", .call = gotoLine(.extend), .arity = each },
+    .{ .name = "helix.move-match", .call = matchPair(.move), .arity = each },
+    .{ .name = "helix.extend-match", .call = matchPair(.extend), .arity = each },
 };
 
 // ── `mi` / `ma`: text objects, per selection ────────────────────────────
@@ -256,7 +256,7 @@ const find_cmds = [_]weft.CommandEntry{
 const Obj = struct { keys: []const []const u8, obj: []const u8 };
 const objects = [_]Obj{
     .{ .keys = &.{"w"}, .obj = "word" },
-    .{ .keys = &.{"W"}, .obj = "WORD" },
+    .{ .keys = &.{"W"}, .obj = "big-word" },
     .{ .keys = &.{"p"}, .obj = "paragraph" },
     .{ .keys = &.{ "parenleft", "parenright" }, .obj = "paren" },
     .{ .keys = &.{ "bracketleft", "bracketright" }, .obj = "bracket" },
@@ -284,8 +284,8 @@ fn rangeCmd(comptime cmd: []const u8) fn () void {
 const object_cmds = blk: {
     var arr: [objects.len * 2]weft.CommandEntry = undefined;
     for (objects, 0..) |o, i| {
-        arr[2 * i] = .{ .name = "hx/mi/" ++ o.obj, .call = rangeCmd("textobj.inner-" ++ o.obj), .arity = each };
-        arr[2 * i + 1] = .{ .name = "hx/ma/" ++ o.obj, .call = rangeCmd("textobj.a-" ++ o.obj), .arity = each };
+        arr[2 * i] = .{ .name = "helix.select-inner-" ++ o.obj, .call = rangeCmd("textobjects.inner-" ++ o.obj), .arity = each };
+        arr[2 * i + 1] = .{ .name = "helix.select-around-" ++ o.obj, .call = rangeCmd("textobjects.around-" ++ o.obj), .arity = each };
     }
     break :blk arr;
 };
@@ -346,13 +346,13 @@ fn surroundTo() void {
 }
 
 const captures = [_][2][]const u8{
-    .{ "helix-replace", "hx-replace-with" },
-    .{ "helix-find", "hx-find-char" },
-    .{ "helix-register", "hx-register-char" },
-    .{ "helix-surround-add", "hx-surround-add-char" },
-    .{ "helix-surround-delete", "hx-surround-delete-char" },
-    .{ "helix-surround-from", "hx-surround-from-char" },
-    .{ "helix-surround-to", "hx-surround-to-char" },
+    .{ "helix-replace", "helix.replace-with" },
+    .{ "helix-find", "helix.find-char" },
+    .{ "helix-register", "helix.register-char" },
+    .{ "helix-surround-add", "helix.surround-add-char" },
+    .{ "helix-surround-delete", "helix.surround-delete-char" },
+    .{ "helix-surround-from", "helix.surround-from-char" },
+    .{ "helix-surround-to", "helix.surround-to-char" },
 };
 
 // ── Regex, search, goto word ────────────────────────────────────────────
@@ -392,40 +392,25 @@ fn gotoWord(comptime mode: sel.Mode) fn () void {
     }.h;
 }
 
-/// A goto some other plugin answers (`gd` through LSP): the old place goes
-/// on the jumplist first.
-fn jumpThen(comptime cmd: []const u8) fn () void {
-    return struct {
-        fn h() void {
-            weft.jumpPush();
-            weft.run(cmd);
-        }
-    }.h;
-}
-
 const pattern_cmds = [_]weft.CommandEntry{
-    .{ .name = "hx-select-regex", .call = regexOp(.select, .move), .arity = .whole },
-    .{ .name = "hx-split-regex", .call = regexOp(.split, .move), .arity = .whole },
-    .{ .name = "hx-keep-regex", .call = regexOp(.keep, .move), .arity = .whole },
-    .{ .name = "hx-remove-regex", .call = regexOp(.remove, .move), .arity = .whole },
-    .{ .name = "hx/n/search", .call = regexOp(.search_forward, .move), .arity = .whole },
-    .{ .name = "hx/x/search", .call = regexOp(.search_forward, .extend), .arity = .whole },
-    .{ .name = "hx/n/rsearch", .call = regexOp(.search_backward, .move), .arity = .whole },
-    .{ .name = "hx/x/rsearch", .call = regexOp(.search_backward, .extend), .arity = .whole },
-    .{ .name = "hx/n/search-next", .call = searchAgain(true, .move), .arity = .whole },
-    .{ .name = "hx/x/search-next", .call = searchAgain(true, .extend), .arity = .whole },
-    .{ .name = "hx/n/search-prev", .call = searchAgain(false, .move), .arity = .whole },
-    .{ .name = "hx/x/search-prev", .call = searchAgain(false, .extend), .arity = .whole },
-    .{ .name = "hx-search-selection", .call = searchSelection(true), .arity = .whole },
-    .{ .name = "hx-search-selection-raw", .call = searchSelection(false), .arity = .whole },
-    .{ .name = "hx/n/goto-word", .call = gotoWord(.move), .arity = .whole },
-    .{ .name = "hx/x/goto-word", .call = gotoWord(.extend), .arity = .whole },
-    .{ .name = "hx-goto-word-key", .call = goto_word.key, .arity = .whole },
-    .{ .name = "hx-goto-word-cancel", .call = goto_word.cancel, .arity = .whole },
-    .{ .name = "hx-goto-definition", .arity = .one, .call = jumpThen("goto-definition") },
-    .{ .name = "hx-goto-type-definition", .arity = .one, .call = jumpThen("goto-type-definition") },
-    .{ .name = "hx-goto-references", .arity = .one, .call = jumpThen("references") },
-    .{ .name = "hx-goto-implementation", .arity = .one, .call = jumpThen("goto-implementation") },
+    .{ .name = "helix.select-regex", .call = regexOp(.select, .move), .arity = .whole },
+    .{ .name = "helix.split-regex", .call = regexOp(.split, .move), .arity = .whole },
+    .{ .name = "helix.keep-regex", .call = regexOp(.keep, .move), .arity = .whole },
+    .{ .name = "helix.remove-regex", .call = regexOp(.remove, .move), .arity = .whole },
+    .{ .name = "helix.move-search", .call = regexOp(.search_forward, .move), .arity = .whole },
+    .{ .name = "helix.extend-search", .call = regexOp(.search_forward, .extend), .arity = .whole },
+    .{ .name = "helix.move-search-reverse", .call = regexOp(.search_backward, .move), .arity = .whole },
+    .{ .name = "helix.extend-search-reverse", .call = regexOp(.search_backward, .extend), .arity = .whole },
+    .{ .name = "helix.move-search-next", .call = searchAgain(true, .move), .arity = .whole },
+    .{ .name = "helix.extend-search-next", .call = searchAgain(true, .extend), .arity = .whole },
+    .{ .name = "helix.move-search-prev", .call = searchAgain(false, .move), .arity = .whole },
+    .{ .name = "helix.extend-search-prev", .call = searchAgain(false, .extend), .arity = .whole },
+    .{ .name = "helix.search-selection", .call = searchSelection(true), .arity = .whole },
+    .{ .name = "helix.search-selection-raw", .call = searchSelection(false), .arity = .whole },
+    .{ .name = "helix.move-goto-word", .call = gotoWord(.move), .arity = .whole },
+    .{ .name = "helix.extend-goto-word", .call = gotoWord(.extend), .arity = .whole },
+    .{ .name = "helix.goto-word-key", .call = goto_word.key, .arity = .whole },
+    .{ .name = "helix.goto-word-cancel", .call = goto_word.cancel, .arity = .whole },
 };
 
 /// The regex prompt's five editing commands, from the shared `prompt`
@@ -451,7 +436,7 @@ fn jumpWalk(comptime cmd: []const u8) fn () void {
 /// `Q`: start (or stop) recording into the typed register, `@` by default.
 fn macroRecord() void {
     const reg = [_]u8{state.takeRegisterChar('@')};
-    weft.runStr("macro-record-toggle", &reg);
+    weft.runStr("macro.record-toggle", &reg);
 }
 
 /// `q`: play the typed register (`@` by default), count times.
@@ -459,15 +444,14 @@ fn macroPlay() void {
     const reg = [_]u8{state.takeRegisterChar('@')};
     var buf: [12]u8 = undefined;
     const count = std.fmt.bufPrint(&buf, "{d}", .{state.takeCount()}) catch "1";
-    weft.runStr2("macro-play", &reg, count);
+    weft.runStr2("macro.play", &reg, count);
 }
 
 const history_cmds = [_]weft.CommandEntry{
-    .{ .name = "hx-jump-back", .call = jumpWalk("jump-back"), .arity = .whole },
-    .{ .name = "hx-jump-forward", .call = jumpWalk("jump-forward"), .arity = .whole },
-    .{ .name = "hx-jump-save", .call = weft.jumpPush, .arity = .whole },
-    .{ .name = "hx-macro-record", .call = macroRecord, .arity = .whole },
-    .{ .name = "hx-macro-play", .call = macroPlay, .arity = .whole },
+    .{ .name = "helix.jump-back", .call = jumpWalk("jump.back"), .arity = .whole },
+    .{ .name = "helix.jump-forward", .call = jumpWalk("jump.forward"), .arity = .whole },
+    .{ .name = "helix.macro-record", .call = macroRecord, .arity = .whole },
+    .{ .name = "helix.macro-play", .call = macroPlay, .arity = .whole },
 };
 
 // ── Counts ──────────────────────────────────────────────────────────────
@@ -482,7 +466,7 @@ fn countDigit(comptime d: u32) fn () void {
 
 const count_cmds = blk: {
     var arr: [10]weft.CommandEntry = undefined;
-    for (0..10) |d| arr[d] = .{ .name = std.fmt.comptimePrint("hx-count-{d}", .{d}), .call = countDigit(d), .arity = .whole };
+    for (0..10) |d| arr[d] = .{ .name = std.fmt.comptimePrint("helix.count-{d}", .{d}), .call = countDigit(d), .arity = .whole };
     break :blk arr;
 };
 
@@ -522,93 +506,93 @@ fn eachOver(comptime over: []const u8) weft.Arity {
 // reshapes the set, or never reads it), or refused on several (`.one`: a
 // goto from the primary's word, which has no per-selection reading).
 const base_cmds = [_]weft.CommandEntry{
-    .{ .name = "helix-mode", .call = enterHelix, .arity = .whole },
-    .{ .name = "hx-normal", .call = hxNormal, .arity = .whole },
-    .{ .name = "hx-insert-exit", .call = hxInsertExit, .arity = .whole },
-    .{ .name = "hx-select", .call = enter("helix-select"), .arity = .whole },
-    .{ .name = "hx-insert", .call = thunk(edit.insertAt, .before), .arity = each },
-    .{ .name = "hx-append", .call = thunk(edit.insertAt, .after), .arity = each },
-    .{ .name = "hx-insert-line-start", .call = thunk(edit.insertAt, .line_start), .arity = each },
-    .{ .name = "hx-append-line-end", .call = thunk(edit.insertAt, .line_end), .arity = each },
-    .{ .name = "hx-open-below", .call = thunk(edit.openLine, true), .arity = each },
-    .{ .name = "hx-open-above", .call = thunk(edit.openLine, false), .arity = each },
+    .{ .name = "helix.enter", .call = enterHelix, .arity = .whole },
+    .{ .name = "helix.normal", .call = hxNormal, .arity = .whole },
+    .{ .name = "helix.insert-exit", .call = hxInsertExit, .arity = .whole },
+    .{ .name = "helix.select", .call = enter("helix-select"), .arity = .whole },
+    .{ .name = "helix.insert", .call = thunk(edit.insertAt, .before), .arity = each },
+    .{ .name = "helix.append", .call = thunk(edit.insertAt, .after), .arity = each },
+    .{ .name = "helix.insert-line-start", .call = thunk(edit.insertAt, .line_start), .arity = each },
+    .{ .name = "helix.append-line-end", .call = thunk(edit.insertAt, .line_end), .arity = each },
+    .{ .name = "helix.open-below", .call = thunk(edit.openLine, true), .arity = each },
+    .{ .name = "helix.open-above", .call = thunk(edit.openLine, false), .arity = each },
     // Reshaping the selections.
-    .{ .name = "hx-select-line", .call = selectLines, .arity = each },
-    .{ .name = "hx-line-bounds", .call = sel.toLineBounds, .arity = each },
-    .{ .name = "hx-select-all", .call = sel.selectAll, .arity = .whole },
-    .{ .name = "hx-collapse", .call = sel.collapse, .arity = each },
-    .{ .name = "hx-flip", .call = sel.flip, .arity = each },
-    .{ .name = "hx-forward", .call = sel.ensureForward, .arity = each },
-    .{ .name = "hx-keep-primary", .call = sel.keepPrimary, .arity = .whole },
-    .{ .name = "hx-remove-primary", .call = sel.removePrimary, .arity = .whole },
-    .{ .name = "hx-rotate-next", .call = thunk(sel.rotate, true), .arity = .whole },
-    .{ .name = "hx-rotate-prev", .call = thunk(sel.rotate, false), .arity = .whole },
-    .{ .name = "hx-copy-next-line", .call = withCount(sel.copyToLine, true), .arity = .whole },
-    .{ .name = "hx-copy-prev-line", .call = withCount(sel.copyToLine, false), .arity = .whole },
-    .{ .name = "hx-trim", .call = sel.trim, .arity = each },
-    .{ .name = "hx-split-lines", .call = sel.splitLines, .arity = each },
-    .{ .name = "hx-expand", .call = sel.expand, .arity = .whole },
-    .{ .name = "hx-shrink", .call = sel.shrink, .arity = .whole },
-    .{ .name = "hx-ts-expand", .call = sel.tsExpand, .arity = each },
-    .{ .name = "hx-ts-shrink", .call = sel.tsShrink, .arity = each },
-    .{ .name = "hx-sibling-next", .call = rangeCmd("ts.sibling-next"), .arity = each },
-    .{ .name = "hx-sibling-prev", .call = rangeCmd("ts.sibling-prev"), .arity = each },
-    .{ .name = "hx-function-next", .call = rangeCmd("ts.function-next"), .arity = each },
-    .{ .name = "hx-function-prev", .call = rangeCmd("ts.function-prev"), .arity = each },
+    .{ .name = "helix.select-line", .call = selectLines, .arity = each },
+    .{ .name = "helix.line-bounds", .call = sel.toLineBounds, .arity = each },
+    .{ .name = "helix.select-all", .call = sel.selectAll, .arity = .whole },
+    .{ .name = "helix.collapse", .call = sel.collapse, .arity = each },
+    .{ .name = "helix.flip", .call = sel.flip, .arity = each },
+    .{ .name = "helix.head-at-end", .call = sel.ensureForward, .arity = each },
+    .{ .name = "helix.keep-primary", .call = sel.keepPrimary, .arity = .whole },
+    .{ .name = "helix.remove-primary", .call = sel.removePrimary, .arity = .whole },
+    .{ .name = "helix.rotate-next", .call = thunk(sel.rotate, true), .arity = .whole },
+    .{ .name = "helix.rotate-prev", .call = thunk(sel.rotate, false), .arity = .whole },
+    .{ .name = "helix.copy-next-line", .call = withCount(sel.copyToLine, true), .arity = .whole },
+    .{ .name = "helix.copy-prev-line", .call = withCount(sel.copyToLine, false), .arity = .whole },
+    .{ .name = "helix.trim", .call = sel.trim, .arity = each },
+    .{ .name = "helix.split-lines", .call = sel.splitLines, .arity = each },
+    .{ .name = "helix.expand", .call = sel.expand, .arity = .whole },
+    .{ .name = "helix.shrink", .call = sel.shrink, .arity = .whole },
+    .{ .name = "helix.ts-expand", .call = sel.tsExpand, .arity = each },
+    .{ .name = "helix.ts-shrink", .call = sel.tsShrink, .arity = each },
+    .{ .name = "helix.sibling-next", .call = rangeCmd("ts.sibling-next"), .arity = each },
+    .{ .name = "helix.sibling-prev", .call = rangeCmd("ts.sibling-prev"), .arity = each },
+    .{ .name = "helix.function-next", .call = rangeCmd("ts.function-next"), .arity = each },
+    .{ .name = "helix.function-prev", .call = rangeCmd("ts.function-prev"), .arity = each },
     // Editing the selections.
-    .{ .name = "hx-delete", .call = thunk(edit.delete, false), .arity = each },
-    .{ .name = "hx-delete-keep", .call = thunk(edit.delete, true), .arity = each },
-    .{ .name = "hx-change", .call = thunk(edit.change, false), .arity = each },
-    .{ .name = "hx-change-keep", .call = thunk(edit.change, true), .arity = each },
-    .{ .name = "hx-yank", .call = edit.yank, .arity = each },
-    .{ .name = "hx-paste", .call = thunk(edit.paste, true), .arity = each },
-    .{ .name = "hx-paste-before", .call = thunk(edit.paste, false), .arity = each },
-    .{ .name = "hx-paste-text", .call = weft.thunk(edit.pasteClipboardText), .arity = each, .params = "where text" },
-    .{ .name = "hx-replace-register", .call = edit.replaceWithRegister, .arity = each },
-    .{ .name = "hx-replace-text", .call = weft.thunk(edit.replaceText), .arity = each, .params = "text" },
-    .{ .name = "hx-replace", .call = enter("helix-replace"), .arity = .whole },
-    .{ .name = "hx-replace-with", .call = replaceChar, .arity = each },
-    .{ .name = "hx-case-toggle", .call = thunk(edit.setCase, .toggle), .arity = each },
-    .{ .name = "hx-case-lower", .call = thunk(edit.setCase, .lower), .arity = each },
-    .{ .name = "hx-case-upper", .call = thunk(edit.setCase, .upper), .arity = each },
-    .{ .name = "hx-join", .call = edit.join, .arity = eachOver("hx-join-target") },
-    .{ .name = "hx-indent", .call = thunk(edit.onLines, "op.indent"), .arity = eachOver("hx-line-block") },
-    .{ .name = "hx-dedent", .call = thunk(edit.onLines, "op.dedent"), .arity = eachOver("hx-line-block") },
-    .{ .name = "hx-comment", .call = thunk(edit.onLines, "op.comment"), .arity = eachOver("hx-line-block") },
-    .{ .name = "hx-add-line-below", .call = edit.addBlankLine, .arity = eachOver("hx-blank-below") },
-    .{ .name = "hx-add-line-above", .call = edit.addBlankLine, .arity = eachOver("hx-blank-above") },
-    .{ .name = "hx-goto-last-edit", .call = edit.gotoLastEdit, .arity = .whole },
-    .{ .name = "hx-goto-last-modified", .call = edit.gotoLastModified, .arity = .whole },
-    .{ .name = "hx-align", .call = edit.alignSelections, .arity = .whole },
-    .{ .name = "hx-yank-clipboard", .call = edit.yankToClipboard, .arity = .whole },
-    .{ .name = "hx-paste-clipboard", .call = thunk(edit.pasteClipboard, true), .arity = .whole },
-    .{ .name = "hx-paste-clipboard-before", .call = thunk(edit.pasteClipboard, false), .arity = .whole },
-    .{ .name = "hx-replace-clipboard", .call = edit.replaceWithClipboard, .arity = .whole },
-    .{ .name = "hx-goto-file", .arity = .one, .call = gotoFile },
-    .{ .name = "hx-view-sticky", .call = enter("helix-view"), .arity = .whole },
+    .{ .name = "helix.delete", .call = thunk(edit.delete, false), .arity = each },
+    .{ .name = "helix.delete-keep", .call = thunk(edit.delete, true), .arity = each },
+    .{ .name = "helix.change", .call = thunk(edit.change, false), .arity = each },
+    .{ .name = "helix.change-keep", .call = thunk(edit.change, true), .arity = each },
+    .{ .name = "helix.yank", .call = edit.yank, .arity = each },
+    .{ .name = "helix.paste", .call = thunk(edit.paste, true), .arity = each },
+    .{ .name = "helix.paste-before", .call = thunk(edit.paste, false), .arity = each },
+    .{ .name = "helix.paste-text", .call = weft.thunk(edit.pasteClipboardText), .arity = each, .params = "where text" },
+    .{ .name = "helix.replace-register", .call = edit.replaceWithRegister, .arity = each },
+    .{ .name = "helix.replace-text", .call = weft.thunk(edit.replaceText), .arity = each, .params = "text" },
+    .{ .name = "helix.replace", .call = enter("helix-replace"), .arity = .whole },
+    .{ .name = "helix.replace-with", .call = replaceChar, .arity = each },
+    .{ .name = "helix.case-toggle", .call = thunk(edit.setCase, .toggle), .arity = each },
+    .{ .name = "helix.case-lower", .call = thunk(edit.setCase, .lower), .arity = each },
+    .{ .name = "helix.case-upper", .call = thunk(edit.setCase, .upper), .arity = each },
+    .{ .name = "helix.join", .call = edit.join, .arity = eachOver("helix.join-target") },
+    .{ .name = "helix.indent", .call = thunk(edit.onLines, "indent.increase"), .arity = eachOver("helix.line-block") },
+    .{ .name = "helix.dedent", .call = thunk(edit.onLines, "indent.decrease"), .arity = eachOver("helix.line-block") },
+    .{ .name = "helix.comment", .call = thunk(edit.onLines, "comment.toggle"), .arity = eachOver("helix.line-block") },
+    .{ .name = "helix.add-line-below", .call = edit.addBlankLine, .arity = eachOver("helix.blank-below") },
+    .{ .name = "helix.add-line-above", .call = edit.addBlankLine, .arity = eachOver("helix.blank-above") },
+    .{ .name = "helix.goto-last-edit", .call = edit.gotoLastEdit, .arity = .whole },
+    .{ .name = "helix.goto-last-modified", .call = edit.gotoLastModified, .arity = .whole },
+    .{ .name = "helix.align", .call = edit.alignSelections, .arity = .whole },
+    .{ .name = "helix.yank-clipboard", .call = edit.yankToClipboard, .arity = .whole },
+    .{ .name = "helix.paste-clipboard", .call = thunk(edit.pasteClipboard, true), .arity = .whole },
+    .{ .name = "helix.paste-clipboard-before", .call = thunk(edit.pasteClipboard, false), .arity = .whole },
+    .{ .name = "helix.replace-clipboard", .call = edit.replaceWithClipboard, .arity = .whole },
+    .{ .name = "helix.goto-file", .arity = .one, .call = gotoFile },
+    .{ .name = "helix.view-sticky", .call = enter("helix-view"), .arity = .whole },
     // Captures.
-    .{ .name = "hx-register", .call = enter("helix-register"), .arity = .whole },
-    .{ .name = "hx-register-char", .call = registerChar, .arity = .whole },
-    .{ .name = "hx-surround-add", .call = enter("helix-surround-add"), .arity = .whole },
-    .{ .name = "hx-surround-add-char", .call = surroundAdd, .arity = .whole },
-    .{ .name = "hx-surround-delete", .call = enter("helix-surround-delete"), .arity = .whole },
-    .{ .name = "hx-surround-delete-char", .call = surroundDelete, .arity = .whole },
-    .{ .name = "hx-surround-replace", .call = enter("helix-surround-from"), .arity = .whole },
-    .{ .name = "hx-surround-from-char", .call = surroundFrom, .arity = .whole },
-    .{ .name = "hx-surround-to-char", .call = surroundTo, .arity = .whole },
-    .{ .name = "hx-surround-wrap", .call = edit.surroundWrap, .arity = each },
+    .{ .name = "helix.register", .call = enter("helix-register"), .arity = .whole },
+    .{ .name = "helix.register-char", .call = registerChar, .arity = .whole },
+    .{ .name = "helix.surround-add", .call = enter("helix-surround-add"), .arity = .whole },
+    .{ .name = "helix.surround-add-char", .call = surroundAdd, .arity = .whole },
+    .{ .name = "helix.surround-delete", .call = enter("helix-surround-delete"), .arity = .whole },
+    .{ .name = "helix.surround-delete-char", .call = surroundDelete, .arity = .whole },
+    .{ .name = "helix.surround-replace", .call = enter("helix-surround-from"), .arity = .whole },
+    .{ .name = "helix.surround-from-char", .call = surroundFrom, .arity = .whole },
+    .{ .name = "helix.surround-to-char", .call = surroundTo, .arity = .whole },
+    .{ .name = "helix.surround-wrap", .call = edit.surroundWrap, .arity = each },
     // The targets the line verbs map over (range commands, not for binding).
-    .{ .name = "hx-line-block", .call = edit.lineBlock, .arity = each },
-    .{ .name = "hx-join-target", .call = edit.joinTarget, .arity = each },
-    .{ .name = "hx-blank-below", .call = thunk(edit.blankPoint, true), .arity = each },
-    .{ .name = "hx-blank-above", .call = thunk(edit.blankPoint, false), .arity = each },
+    .{ .name = "helix.line-block", .call = edit.lineBlock, .arity = each },
+    .{ .name = "helix.join-target", .call = edit.joinTarget, .arity = each },
+    .{ .name = "helix.blank-below", .call = thunk(edit.blankPoint, true), .arity = each },
+    .{ .name = "helix.blank-above", .call = thunk(edit.blankPoint, false), .arity = each },
     // The same file picker vim and emacs register under this name, so a
-    // config's `find-file` bind means the same thing under every grammar.
-    .{ .name = "find-file", .call = findFile, .arity = .whole },
+    // config's `files.find` bind means the same thing under every grammar.
+    .{ .name = "files.find", .call = findFile, .arity = .whole },
     // The `:` ex command line — the key that OPENS it (shared engine; helix
     // mode namespace). Its five editing commands come from the shared
     // prompt, spliced in as `ex_cmds` below.
-    .{ .name = "helix-ex", .call = ex.enter, .arity = .whole },
+    .{ .name = "helix.ex", .call = ex.enter, .arity = .whole },
 };
 
 /// The `:` line's editing commands, from the shared `prompt` library, mapped
@@ -630,8 +614,8 @@ const preserves = blk: {
     @setEvalBranchQuota(20000);
     var arr: [cmds.len]bool = @splat(false);
     for (cmds, 0..) |c, i| {
-        arr[i] = std.mem.startsWith(u8, c.name, "hx-count-") or
-            std.mem.startsWith(u8, c.name, "hx-register");
+        arr[i] = std.mem.startsWith(u8, c.name, "helix.count-") or
+            std.mem.startsWith(u8, c.name, "helix.register");
     }
     break :blk arr;
 };
@@ -658,7 +642,7 @@ fn initExtra() void {
     // way vim's `insert` mode does. Typing inserts at every caret (core's
     // `editEach`), so `i` after `C` types on both lines.
     weft.setFallback("helix-insert", "default");
-    weft.textInput("helix-insert", "insert-text");
+    weft.textInput("helix-insert", "edit.insert-text");
 
     // Select mode: helix-normal with motions that EXTEND. Everything else
     // falls through to helix-normal.
@@ -666,40 +650,40 @@ fn initExtra() void {
 
     // Motions: move in normal, extend in select.
     inline for (motion_keys) |m| {
-        bindMotion("helix-normal", m.key, m.intention, "hx/n/" ++ m.motion);
-        bindMotion("helix-select", m.key, m.intention, "hx/x/" ++ m.motion);
+        bindMotion("helix-normal", m.key, m.intention, "helix.move-" ++ m.motion);
+        bindMotion("helix-select", m.key, m.intention, "helix.extend-" ++ m.motion);
     }
-    const finds = [_][2][]const u8{ .{ "f", "find-to" }, .{ "t", "find-till" }, .{ "F", "find-back-to" }, .{ "T", "find-back-till" } };
+    const finds = [_][2][]const u8{ .{ "f", "find-next-char" }, .{ "t", "till-next-char" }, .{ "F", "find-prev-char" }, .{ "T", "till-prev-char" } };
     for (finds) |f| {
         var nb: [32]u8 = undefined;
         var xb: [32]u8 = undefined;
-        weft.bindKey("helix-normal", f[0], std.fmt.bufPrint(&nb, "hx/n/{s}", .{f[1]}) catch continue);
-        weft.bindKey("helix-select", f[0], std.fmt.bufPrint(&xb, "hx/x/{s}", .{f[1]}) catch continue);
+        weft.bindKey("helix-normal", f[0], std.fmt.bufPrint(&nb, "helix.move-{s}", .{f[1]}) catch continue);
+        weft.bindKey("helix-select", f[0], std.fmt.bufPrint(&xb, "helix.extend-{s}", .{f[1]}) catch continue);
     }
-    weft.bindKey("helix-normal", "g g", "hx/n/goto-line");
-    weft.bindKey("helix-select", "g g", "hx/x/goto-line");
-    weft.bindKey("helix-normal", "m m", "hx/n/match");
-    weft.bindKey("helix-select", "m m", "hx/x/match");
+    weft.bindKey("helix-normal", "g g", "helix.move-goto-line");
+    weft.bindKey("helix-select", "g g", "helix.extend-goto-line");
+    weft.bindKey("helix-normal", "m m", "helix.move-match");
+    weft.bindKey("helix-select", "m m", "helix.extend-match");
 
     // Search and goto-word: a move in normal, an extend (a new selection,
     // for a search) in select.
     const searches = [_][2][]const u8{
-        .{ "slash", "search" },  .{ "question", "rsearch" },
+        .{ "slash", "search" },  .{ "question", "search-reverse" },
         .{ "n", "search-next" }, .{ "N", "search-prev" },
         .{ "g w", "goto-word" },
     };
     for (searches) |b| {
         var nb: [32]u8 = undefined;
         var xb: [32]u8 = undefined;
-        weft.bindKey("helix-normal", b[0], std.fmt.bufPrint(&nb, "hx/n/{s}", .{b[1]}) catch continue);
-        weft.bindKey("helix-select", b[0], std.fmt.bufPrint(&xb, "hx/x/{s}", .{b[1]}) catch continue);
+        weft.bindKey("helix-normal", b[0], std.fmt.bufPrint(&nb, "helix.move-{s}", .{b[1]}) catch continue);
+        weft.bindKey("helix-select", b[0], std.fmt.bufPrint(&xb, "helix.extend-{s}", .{b[1]}) catch continue);
     }
 
     // Counts: digits accumulate, the next verb or motion repeats.
     for (0..10) |d| {
         var kb: [2]u8 = .{ '0' + @as(u8, @intCast(d)), 0 };
         var cb: [16]u8 = undefined;
-        weft.bindKey("helix-normal", kb[0..1], std.fmt.bufPrint(&cb, "hx-count-{d}", .{d}) catch continue);
+        weft.bindKey("helix-normal", kb[0..1], std.fmt.bufPrint(&cb, "helix.count-{d}", .{d}) catch continue);
     }
 
     // Shared intentions (doc/contextual-workspace-architecture.md §10.2), same
@@ -710,9 +694,9 @@ fn initExtra() void {
     // line-break arm of Return lives in `helix-insert`, via `default`.) `q`
     // keeps NO binding: real Helix records macros there (phase 5).
     const intended = [_][3][]const u8{
-        .{ "u", "std.history.undo", "undo" },
-        .{ "U", "std.history.redo", "redo" },
-        .{ "C-r", "std.history.redo", "redo" },
+        .{ "u", "std.history.undo", "edit.undo" },
+        .{ "U", "std.history.redo", "edit.redo" },
+        .{ "C-r", "std.history.redo", "edit.redo" },
     };
     for (intended) |b| weft.bindKeys("helix-normal", b[0], &.{ b[1], b[2] });
     weft.bindKeys("helix-normal", "Tab", &.{"std.hierarchy.toggle-expanded"});
@@ -723,101 +707,101 @@ fn initExtra() void {
     // Transfer: `y` captures, `p` places, and `d` takes the selection WITH it.
     // Each leads with the standard word and keeps its text behaviour as the
     // fallback arm.
-    weft.bindKeys("helix-normal", "y", &.{ "std.transfer.yank", "hx-yank" });
-    weft.bindKeys("helix-normal", "p", &.{ "std.transfer.paste", "hx-paste" });
-    weft.bindKeys("helix-normal", "d", &.{ "std.transfer.delete-to-register", "hx-delete" });
+    weft.bindKeys("helix-normal", "y", &.{ "std.transfer.yank", "helix.yank" });
+    weft.bindKeys("helix-normal", "p", &.{ "std.transfer.paste", "helix.paste" });
+    weft.bindKeys("helix-normal", "d", &.{ "std.transfer.delete-to-register", "helix.delete" });
 
     const normal = [_][2][]const u8{
-        .{ "i", "hx-insert" },                  .{ "a", "hx-append" },
-        .{ "I", "hx-insert-line-start" },       .{ "A", "hx-append-line-end" },
-        .{ "o", "hx-open-below" },              .{ "O", "hx-open-above" },
-        .{ "v", "hx-select" },                  .{ "colon", "helix-ex" },
-        .{ "x", "hx-select-line" },             .{ "X", "hx-line-bounds" },
-        .{ "percent", "hx-select-all" },        .{ "semicolon", "hx-collapse" },
-        .{ "M-semicolon", "hx-flip" },          .{ "M-colon", "hx-forward" },
-        .{ "comma", "hx-keep-primary" },        .{ "M-comma", "hx-remove-primary" },
-        .{ "parenright", "hx-rotate-next" },    .{ "parenleft", "hx-rotate-prev" },
-        .{ "C", "hx-copy-next-line" },          .{ "M-C", "hx-copy-prev-line" },
-        .{ "underscore", "hx-trim" },           .{ "M-s", "hx-split-lines" },
-        .{ "M-d", "hx-delete-keep" },           .{ "c", "hx-change" },
-        .{ "M-c", "hx-change-keep" },           .{ "P", "hx-paste-before" },
-        .{ "R", "hx-replace-register" },        .{ "r", "hx-replace" },
-        .{ "asciitilde", "hx-case-toggle" },    .{ "grave", "hx-case-lower" },
-        .{ "M-grave", "hx-case-upper" },        .{ "J", "hx-join" },
-        .{ "greater", "hx-indent" },            .{ "less", "hx-dedent" },
-        .{ "quotedbl", "hx-register" },         .{ "Z", "hx-view-sticky" },
+        .{ "i", "helix.insert" },                  .{ "a", "helix.append" },
+        .{ "I", "helix.insert-line-start" },       .{ "A", "helix.append-line-end" },
+        .{ "o", "helix.open-below" },              .{ "O", "helix.open-above" },
+        .{ "v", "helix.select" },                  .{ "colon", "helix.ex" },
+        .{ "x", "helix.select-line" },             .{ "X", "helix.line-bounds" },
+        .{ "percent", "helix.select-all" },        .{ "semicolon", "helix.collapse" },
+        .{ "M-semicolon", "helix.flip" },          .{ "M-colon", "helix.head-at-end" },
+        .{ "comma", "helix.keep-primary" },        .{ "M-comma", "helix.remove-primary" },
+        .{ "parenright", "helix.rotate-next" },    .{ "parenleft", "helix.rotate-prev" },
+        .{ "C", "helix.copy-next-line" },          .{ "M-C", "helix.copy-prev-line" },
+        .{ "underscore", "helix.trim" },           .{ "M-s", "helix.split-lines" },
+        .{ "M-d", "helix.delete-keep" },           .{ "c", "helix.change" },
+        .{ "M-c", "helix.change-keep" },           .{ "P", "helix.paste-before" },
+        .{ "R", "helix.replace-register" },        .{ "r", "helix.replace" },
+        .{ "asciitilde", "helix.case-toggle" },    .{ "grave", "helix.case-lower" },
+        .{ "M-grave", "helix.case-upper" },        .{ "J", "helix.join" },
+        .{ "greater", "helix.indent" },            .{ "less", "helix.dedent" },
+        .{ "quotedbl", "helix.register" },         .{ "Z", "helix.view-sticky" },
         // Tree-sitter selection (phase 6), per selection over the `ts` plugin.
-        .{ "M-o", "hx-expand" },                .{ "M-Up", "hx-expand" },
-        .{ "M-i", "hx-shrink" },                .{ "M-Down", "hx-shrink" },
-        .{ "M-n", "hx-sibling-next" },          .{ "M-Right", "hx-sibling-next" },
-        .{ "M-p", "hx-sibling-prev" },          .{ "M-Left", "hx-sibling-prev" },
+        .{ "M-o", "helix.expand" },                .{ "M-Up", "helix.expand" },
+        .{ "M-i", "helix.shrink" },                .{ "M-Down", "helix.shrink" },
+        .{ "M-n", "helix.sibling-next" },          .{ "M-Right", "helix.sibling-next" },
+        .{ "M-p", "helix.sibling-prev" },          .{ "M-Left", "helix.sibling-prev" },
         // Scrolling, straight to core's viewport commands.
-        .{ "C-d", "scroll-half-down" },         .{ "C-u", "scroll-half-up" },
-        .{ "C-f", "scroll-page-down" },         .{ "C-b", "scroll-page-up" },
+        .{ "C-d", "scroll.half-page-down" },       .{ "C-u", "scroll.half-page-up" },
+        .{ "C-f", "scroll.page-down" },            .{ "C-b", "scroll.page-up" },
         // Regex over the selections, and the search pattern.
-        .{ "s", "hx-select-regex" },            .{ "S", "hx-split-regex" },
-        .{ "K", "hx-keep-regex" },              .{ "M-K", "hx-remove-regex" },
-        .{ "asterisk", "hx-search-selection" }, .{ "M-asterisk", "hx-search-selection-raw" },
-        .{ "ampersand", "hx-align" },
+        .{ "s", "helix.select-regex" },            .{ "S", "helix.split-regex" },
+        .{ "K", "helix.keep-regex" },              .{ "M-K", "helix.remove-regex" },
+        .{ "asterisk", "helix.search-selection" }, .{ "M-asterisk", "helix.search-selection-raw" },
+        .{ "ampersand", "helix.align" },
         // The jumplist and macros.
-                  .{ "C-i", "hx-jump-forward" },
-        .{ "C-s", "hx-jump-save" },             .{ "Q", "hx-macro-record" },
-        .{ "q", "hx-macro-play" },
+                  .{ "C-i", "helix.jump-forward" },
+        .{ "C-s", "jump.push" },                   .{ "Q", "helix.macro-record" },
+        .{ "q", "helix.macro-play" },
     };
     for (normal) |b| weft.bindKey("helix-normal", b[0], b[1]);
     // `C-o` asks the focused view for its own history first (a listing's
     // back), then walks the jumplist.
-    weft.bindKeys("helix-normal", "C-o", &.{ "std.navigation.back", "hx-jump-back" });
-    weft.bindKey("helix-select", "v", "hx-normal");
-    weft.bindKey("helix-select", "Escape", "hx-normal");
-    weft.bindKey("helix-insert", "Escape", "hx-insert-exit");
+    weft.bindKeys("helix-normal", "C-o", &.{ "std.navigation.back", "helix.jump-back" });
+    weft.bindKey("helix-select", "v", "helix.normal");
+    weft.bindKey("helix-select", "Escape", "helix.normal");
+    weft.bindKey("helix-insert", "Escape", "helix.insert-exit");
 
     // `g` goto: the motions above, plus the places that are not motions.
     const goto = [_][2][]const u8{
-        .{ "g f", "hx-goto-file" },            .{ "g period", "hx-goto-last-edit" },
-        .{ "g t", "scroll-goto-view-top" },    .{ "g c", "scroll-goto-view-middle" },
-        .{ "g b", "scroll-goto-view-bottom" }, .{ "g d", "hx-goto-definition" },
-        .{ "g y", "hx-goto-type-definition" }, .{ "g r", "hx-goto-references" },
-        .{ "g i", "hx-goto-implementation" },  .{ "g a", "buffer-back" },
-        .{ "g n", "buffer-next" },             .{ "g p", "buffer-previous" },
-        .{ "g m", "hx-goto-last-modified" },
+        .{ "g f", "helix.goto-file" },          .{ "g period", "helix.goto-last-edit" },
+        .{ "g t", "scroll.cursor-to-top" },     .{ "g c", "scroll.cursor-to-middle" },
+        .{ "g b", "scroll.cursor-to-bottom" },  .{ "g d", "lsp.goto-definition" },
+        .{ "g y", "lsp.goto-type-definition" }, .{ "g r", "lsp.references" },
+        .{ "g i", "lsp.goto-implementation" },  .{ "g a", "buffer.back" },
+        .{ "g n", "buffer.next" },              .{ "g p", "buffer.prev" },
+        .{ "g m", "helix.goto-last-modified" },
     };
     for (goto) |b| weft.bindKey("helix-normal", b[0], b[1]);
 
     // `m` match: `mm` above; `mi`/`ma` + an object over `textobjects`; and
     // `ms`/`md`/`mr` + characters over the `surround` plugin.
     inline for (objects) |o| inline for (o.keys) |k| {
-        weft.bindKey("helix-normal", "m i " ++ k, "hx/mi/" ++ o.obj);
-        weft.bindKey("helix-normal", "m a " ++ k, "hx/ma/" ++ o.obj);
+        weft.bindKey("helix-normal", "m i " ++ k, "helix.select-inner-" ++ o.obj);
+        weft.bindKey("helix-normal", "m a " ++ k, "helix.select-around-" ++ o.obj);
     };
-    weft.bindKey("helix-normal", "m s", "hx-surround-add");
-    weft.bindKey("helix-normal", "m d", "hx-surround-delete");
-    weft.bindKey("helix-normal", "m r", "hx-surround-replace");
+    weft.bindKey("helix-normal", "m s", "helix.surround-add");
+    weft.bindKey("helix-normal", "m d", "helix.surround-delete");
+    weft.bindKey("helix-normal", "m r", "helix.surround-replace");
 
     // Single-key captures: the next key is the argument, whatever it is.
     for (captures) |c| {
         weft.textInput(c[0], c[1]);
-        weft.bindKey(c[0], "Escape", "hx-normal");
+        weft.bindKey(c[0], "Escape", "helix.normal");
     }
 
     // `[` / `]` pairs (paragraph motions are in the motion table).
     const pairs = [_][2][]const u8{
-        .{ "bracketright d", "next-diagnostic" },       .{ "bracketleft d", "prev-diagnostic" },
-        .{ "bracketright f", "hx-function-next" },      .{ "bracketleft f", "hx-function-prev" },
-        .{ "bracketright space", "hx-add-line-below" }, .{ "bracketleft space", "hx-add-line-above" },
+        .{ "bracketright d", "lsp.next-diagnostic" },      .{ "bracketleft d", "lsp.prev-diagnostic" },
+        .{ "bracketright f", "helix.function-next" },      .{ "bracketleft f", "helix.function-prev" },
+        .{ "bracketright space", "helix.add-line-below" }, .{ "bracketleft space", "helix.add-line-above" },
     };
     for (pairs) |b| weft.bindKey("helix-normal", b[0], b[1]);
 
     // `z` view (one key, then back) and `Z` (sticky: stays until Escape).
     weft.stickyMenu("helix-view");
     const view = [_][2][]const u8{
-        .{ "z", "center-line" },              .{ "c", "center-line" },
-        .{ "t", "scroll-line-to-top" },       .{ "b", "scroll-line-to-bottom" },
-        .{ "j", "scroll-line-down" },         .{ "k", "scroll-line-up" },
-        .{ "Down", "scroll-line-down" },      .{ "Up", "scroll-line-up" },
-        .{ "C-f", "scroll-page-down" },       .{ "C-b", "scroll-page-up" },
-        .{ "Page_Down", "scroll-page-down" }, .{ "Page_Up", "scroll-page-up" },
-        .{ "C-d", "scroll-half-down" },       .{ "C-u", "scroll-half-up" },
+        .{ "z", "scroll.center-line" },       .{ "c", "scroll.center-line" },
+        .{ "t", "scroll.line-to-top" },       .{ "b", "scroll.line-to-bottom" },
+        .{ "j", "scroll.line-down" },         .{ "k", "scroll.line-up" },
+        .{ "Down", "scroll.line-down" },      .{ "Up", "scroll.line-up" },
+        .{ "C-f", "scroll.page-down" },       .{ "C-b", "scroll.page-up" },
+        .{ "Page_Down", "scroll.page-down" }, .{ "Page_Up", "scroll.page-up" },
+        .{ "C-d", "scroll.half-page-down" },  .{ "C-u", "scroll.half-page-up" },
     };
     for (view) |b| {
         var kb: [32]u8 = undefined;
@@ -829,16 +813,16 @@ fn initExtra() void {
     // rest of its leader over it at prio_config. `SPC y p P R` are the system
     // clipboard, mirrored by the unnamed register (`edit.zig`).
     const space = [_][2][]const u8{
-        .{ "space f", "find-file" },            .{ "space F", "find-file" },
-        .{ "space b", "buf-pick" },             .{ "space e", "files" },
-        .{ "space k", "hover" },                .{ "space s", "symbols" },
-        .{ "space a", "code-actions" },         .{ "space r", "rename" },
-        .{ "space h", "references" },           .{ "space c", "hx-comment" },
-        .{ "space g", "git-status" },           .{ "space slash", "grep" },
-        .{ "space question", "pick-commands" }, .{ "space y", "hx-yank-clipboard" },
-        .{ "space p", "hx-paste-clipboard" },   .{ "space P", "hx-paste-clipboard-before" },
-        .{ "space R", "hx-replace-clipboard" }, .{ "space j", "jumplist-pick" },
-        .{ "space d", "diagnostics" },
+        .{ "space f", "files.find" },              .{ "space F", "files.find" },
+        .{ "space b", "buffer.pick" },             .{ "space e", "files.browse" },
+        .{ "space k", "lsp.hover" },               .{ "space s", "lsp.pick-symbol" },
+        .{ "space a", "lsp.code-actions" },        .{ "space r", "lsp.rename" },
+        .{ "space h", "lsp.references" },          .{ "space c", "helix.comment" },
+        .{ "space g", "git.status" },              .{ "space slash", "grep.search" },
+        .{ "space question", "palette.open" },     .{ "space y", "helix.yank-clipboard" },
+        .{ "space p", "helix.paste-clipboard" },   .{ "space P", "helix.paste-clipboard-before" },
+        .{ "space R", "helix.replace-clipboard" }, .{ "space j", "jump.pick" },
+        .{ "space d", "lsp.pick-diagnostic" },
     };
     for (space) |b| weft.bindKey("helix-normal", b[0], b[1]);
 
@@ -847,22 +831,22 @@ fn initExtra() void {
     ex.install();
     // The regex prompt of `s S K A-K / ?`, and `gw`'s label keys.
     pattern.prompt.install();
-    weft.textInput(goto_word.mode, "hx-goto-word-key");
-    weft.bindKey(goto_word.mode, "Escape", "hx-goto-word-cancel");
+    weft.textInput(goto_word.mode, "helix.goto-word-key");
+    weft.bindKey(goto_word.mode, "Escape", "helix.goto-word-cancel");
 
     // Cursor: block in normal and select, bar in insert — helix's own config,
     // by ITS mode names (proving set-cursor doesn't assume vim's).
-    weft.runStr2("set-cursor", "helix-normal", "block");
-    weft.runStr2("set-cursor", "helix-select", "block");
-    weft.runStr2("set-cursor", "helix-insert", "bar");
-    weft.runStr2("cursor-blink", "helix-insert", "on");
-    for (captures) |c| weft.runStr2("set-cursor", c[0], "underline");
+    weft.runStr2("cursor.set-style", "helix-normal", "block");
+    weft.runStr2("cursor.set-style", "helix-select", "block");
+    weft.runStr2("cursor.set-style", "helix-insert", "bar");
+    weft.runStr2("cursor.set-blink", "helix-insert", "on");
+    for (captures) |c| weft.runStr2("cursor.set-style", c[0], "underline");
     // …and where it draws: ON the last selected character, as helix's does,
     // wherever a selection is what the keys act on. Insert types at the head,
     // so its bar stays there.
     for ([_][]const u8{ "helix-normal", "helix-select", "helix-regex", goto_word.mode }) |m|
-        weft.runStr2("cursor-place", m, "inside");
-    for (captures) |c| weft.runStr2("cursor-place", c[0], "inside");
+        weft.runStr2("cursor.set-place", m, "inside");
+    for (captures) |c| weft.runStr2("cursor.set-place", c[0], "inside");
 
     // §10.4: helix's answer for each posture (and, implicitly, that
     // `helix-normal` is a mode a buffer rests in). Like vim's `normal`,
@@ -873,7 +857,7 @@ fn initExtra() void {
     weft.restingPosture(.structural, "helix-normal");
     // A listing row IS its name to a modal grammar: focusing it edits the
     // name, and `helix-normal` keeps every key (doc/chrome.md §5.2).
-    weft.runStr("structural-focus", "text");
+    weft.runStr("mode.set-structural-focus", "text");
     // The key layers over `helix-normal`, declared rather than named in core:
     // a document's code chords, and a listing's structured-view group. The
     // head stays in `helix-normal` either way.
@@ -895,7 +879,7 @@ fn enterHelix() void {
 /// Escape RETURNS to the entry's declared resting state (§10.4) — it never
 /// picks one, so a projection's own resting mode survives an edit + Escape.
 fn hxNormal() void {
-    weft.run("undo-barrier");
+    weft.run("edit.seal-undo");
     weft.exitToResting();
 }
 

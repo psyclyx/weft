@@ -152,16 +152,16 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
     defer engine.deinit();
 
     const cfg =
-        \\weft.bind("normal", "j", "cursor-down");
-        \\weft.bind("normal", "k", "cursor-up");
+        \\weft.bind("normal", "j", "cursor.down");
+        \\weft.bind("normal", "k", "cursor.up");
         \\weft.echo("config loaded (" + (1 + 1) + " keys)");
     ;
     try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
     try env.head.setModeRaw(gpa, "normal");
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
-    try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?);
+    try t.expectEqualStrings("cursor.down", env.keymap.lookup(env.head.currentMode(), "j").?);
+    try t.expectEqualStrings("cursor.up", env.keymap.lookup(env.head.currentMode(), "k").?);
     try t.expectEqualStrings("config loaded (2 keys)", env.head.echo.items);
 }
 
@@ -179,8 +179,8 @@ test "quickjs: weft.use includes a shared bindings module from the config dir" {
     const dir = ".zig-cache/tmp/weft-use-test";
     const defaults_path = dir ++ "/shared.js";
     try @import("../file.zig").writeBytesMakingDirs(gpa, dir, defaults_path,
-        \\weft.bind("pick", "Down", "pick-next");
-        \\weft.bind("pick", "Return", "pick-accept");
+        \\weft.bind("pick", "Down", "pick.next");
+        \\weft.bind("pick", "Return", "pick.accept");
     );
     defer @import("../file.zig").deleteFile(gpa, defaults_path);
 
@@ -188,13 +188,13 @@ test "quickjs: weft.use includes a shared bindings module from the config dir" {
     // including config wins over the shared defaults.
     const cfg =
         \\weft.use("shared");
-        \\weft.bind("pick", "Down", "pick-prev");
+        \\weft.bind("pick", "Down", "pick.prev");
     ;
     try evalConfig(&engine, &env.ctx, null, null, dir, cfg);
 
     try env.head.setModeRaw(gpa, "pick");
-    try t.expectEqualStrings("pick-accept", env.keymap.lookup(env.head.currentMode(), "Return").?); // from the include
-    try t.expectEqualStrings("pick-prev", env.keymap.lookup(env.head.currentMode(), "Down").?); // config override won
+    try t.expectEqualStrings("pick.accept", env.keymap.lookup(env.head.currentMode(), "Return").?); // from the include
+    try t.expectEqualStrings("pick.prev", env.keymap.lookup(env.head.currentMode(), "Down").?); // config override won
 }
 
 test "quickjs: config.js can run a registered command through weft.run" {
@@ -427,21 +427,21 @@ test "quickjs: weft.pick delivers structured acceptance and cancellation" {
 
     _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqualStrings("candidate|2|beta|beta|0|4", env.head.echo.items);
 
     // The live query is not bounded by the original option payload. Preserve
     // it exactly without sizing guest memory from that unrelated input.
     const long_query = "                    beta";
     _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = long_query }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = long_query }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqualStrings("candidate|2|beta|                    beta|0|4", env.head.echo.items);
 
     _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-cancel", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.cancel", &.{});
     try t.expectEqualStrings("cancelled", env.head.echo.items);
 }
 
@@ -1212,20 +1212,20 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     // time it returns the plugin is registered and the (late-bound) bind resolves.
     const cfg =
         \\weft.plugin("edit");
-        \\weft.bind("normal", "D", "duplicate-line");
+        \\weft.bind("normal", "D", "edit.duplicate-line");
     ;
     try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, null, null, cfg);
 
     // The plugin loaded and registered its command; the config's bind took.
     try t.expect(loader.held != null);
-    try t.expect(env.commands.find("duplicate-line") != null);
+    try t.expect(env.commands.find("edit.duplicate-line") != null);
     try env.head.setModeRaw(gpa, "normal");
-    try t.expectEqualStrings("duplicate-line", env.keymap.lookup(env.head.currentMode(), "D").?);
+    try t.expectEqualStrings("edit.duplicate-line", env.keymap.lookup(env.head.currentMode(), "D").?);
 
     // And the command actually runs through the membrane: duplicate a line.
     try env.buffers.active().textEditor().?.insertText(gpa, "hi");
     env.buffers.active().textEditor().?.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
     const s = try env.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hi\nhi", s);
@@ -1301,7 +1301,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     // not the shipped defaults.
     try t.expect(loader.held != null);
     try t.expect(env.commands.find("pair-tick") != null);
-    try t.expect(env.commands.find("pair-paren") == null);
+    try t.expect(env.commands.find("autopair.open-paren") == null);
     try env.head.setModeRaw(gpa, "insert");
     try t.expectEqualStrings("pair-tick", env.keymap.lookup(env.head.currentMode(), "grave").?);
 
@@ -1347,8 +1347,8 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     // asserted core's opinion about which keys leave a menu. What core owns is
     // the inheritance; which keys ride it is `config/defaults.js`'s business,
     // and the binding below stands in for that file.
-    try env.keymap.bind(gpa, Keymap.menu_mode, "Escape", "menu-escape", Keymap.prio_config, "test");
-    try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "Escape").?);
+    try env.keymap.bind(gpa, Keymap.menu_mode, "Escape", "mode.leave-menu", Keymap.prio_config, "test");
+    try t.expectEqualStrings("mode.leave-menu", env.keymap.lookup(env.head.currentMode(), "Escape").?);
 }
 
 test "quickjs: every shipped example config evals without a JS error" {
@@ -1387,7 +1387,7 @@ test "quickjs: sealed eval — two evals of the same config produce identical ma
 
     const cfg =
         \\weft.plugin("edit");
-        \\weft.bind("normal", "j", "cursor-down");
+        \\weft.bind("normal", "j", "cursor.down");
         \\weft.action("eval");
         \\weft.provide("eval", { lang: "zig" }, "zig-eval");
         \\weft.set("theme", "accent", "#8ec07c");
@@ -1600,7 +1600,7 @@ test "quickjs: weft.use produces a real imported sub-manifest at the imported ti
     const dir = ".zig-cache/tmp/weft-use-manifest-test";
     const defaults_path = dir ++ "/shared.js";
     try @import("../file.zig").writeBytesMakingDirs(gpa, dir, defaults_path,
-        \\weft.bind("pick", "Down", "pick-next");
+        \\weft.bind("pick", "Down", "pick.next");
     );
     defer @import("../file.zig").deleteFile(gpa, defaults_path);
 
@@ -1613,7 +1613,7 @@ test "quickjs: weft.use produces a real imported sub-manifest at the imported ti
     try t.expectEqual(manifest_mod.Tier.imported, sub.tier);
     try t.expectEqualStrings("import:shared", sub.owner);
     try t.expectEqual(@as(usize, 1), sub.binds.items.len);
-    try t.expectEqualStrings("pick-next", sub.binds.items[0].commands[0]);
+    try t.expectEqualStrings("pick.next", sub.binds.items[0].commands[0]);
 }
 
 test "quickjs: reconcile — reapplying the identical config is a verified no-op" {
@@ -1625,7 +1625,7 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     defer engine.deinit();
 
     const cfg =
-        \\weft.bind("normal", "j", "cursor-down");
+        \\weft.bind("normal", "j", "cursor.down");
         \\weft.echo("hello");
     ;
     const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
@@ -1633,7 +1633,7 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
     try m1.apply(gpa, &actx);
     try env.head.setModeRaw(gpa, "normal");
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
+    try t.expectEqualStrings("cursor.down", env.keymap.lookup(env.head.currentMode(), "j").?);
     try t.expectEqualStrings("hello", env.head.echo.items);
 
     // A second eval of the SAME source, reconciled against m1: same hash,
@@ -1644,19 +1644,19 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     defer m2.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
     try t.expectEqualStrings("", env.head.echo.items); // no-op: nothing re-fired
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?); // still bound
+    try t.expectEqualStrings("cursor.down", env.keymap.lookup(env.head.currentMode(), "j").?); // still bound
 
     // A CHANGED config removes the old bind and adds a new one — reconcile
     // tears down the removed decl and applies the added one.
     const cfg3 =
-        \\weft.bind("normal", "k", "cursor-up");
+        \\weft.bind("normal", "k", "cursor.up");
         \\weft.echo("hello");
     ;
     const m3 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg3, .config, "config");
     defer m3.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m2, m3, &actx);
     try t.expectEqual(@as(?[]const u8, null), env.keymap.lookup(env.head.currentMode(), "j")); // removed
-    try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?); // added
+    try t.expectEqualStrings("cursor.up", env.keymap.lookup(env.head.currentMode(), "k").?); // added
 }
 
 test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves COHERENT state, no baseline fallback" {
@@ -1705,7 +1705,7 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
 
     const cfg1 =
         \\weft.grant("git", "fs_write", { root: "repo" });
-        \\weft.bind("normal", "j", "cursor-down");
+        \\weft.bind("normal", "j", "cursor.down");
     ;
     const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg1, .config, "config");
     defer m1.destroy();
@@ -1721,7 +1721,7 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
     // that didn't touch ITS grant).
     const cfg2 =
         \\weft.grant("git", "fs_write", { root: "repo" });
-        \\weft.bind("normal", "k", "cursor-up");
+        \\weft.bind("normal", "k", "cursor.up");
     ;
     const m2 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg2, .config, "config");
     defer m2.destroy();
@@ -1888,7 +1888,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     // A bail with a request still open must not leave the head's pick session
     // live — teardown asserts every acceptor was answered.
     defer if (env.head.pick.active) {
-        _ = command.run(&env.commands, &env.ctx, "pick-cancel", &.{}) catch {};
+        _ = command.run(&env.commands, &env.ctx, "pick.cancel", &.{}) catch {};
     };
 
     const H = struct {
@@ -2000,14 +2000,14 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
 
     // Answer the OPEN pick — agent one's. Only agent one unblocks: agent two
     // is still waiting for the answer to ITS own tool call.
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(H.until(plugin, &env, gpa, "*agent*", "alpha ack"));
     try t.expect(H.absent(plugin, &env, gpa, "*agent:2*", "beta ack"));
 
     // Agent two's queued request opened on the freed head; answering IT
     // resolves ITS call, and its ack lands in ITS transcript.
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(H.until(plugin, &env, gpa, "*agent:2*", "beta ack"));
     {
         const a = H.text(&env, gpa, "*agent*").?;

@@ -232,7 +232,7 @@ pub fn hRunArgv(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 
 /// Arguments one `wl_run_argv` call may carry — and a SECURITY BOUND, not a
 /// buffer size. `app/providers.zig`'s census gate turns on the fact that no
-/// guest command runner passes three arguments: `grammar-add` needs three, and
+/// guest command runner passes three arguments: `syntax.add-grammar` needs three, and
 /// what it does with them is `std.DynLib.open` on a caller-named directory.
 /// Arity is the gate. A wider door here would open that one, which is why the
 /// census lists this runner with the number below and the test fails if they
@@ -272,8 +272,8 @@ pub fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 ///
 /// A palette that wants to group by producer had exactly one way to guess
 /// before this: parse the name. That is a convention nobody enforces, and it
-/// is wrong for the cases grouping exists to fix — `motion.line-start` is
-/// vim's, `zig` is `modes`', `pair-paren` is `autopair`'s, and none of them
+/// is wrong for the cases grouping exists to fix — `motions.line-start` is
+/// vim's, `zig` is `modes`', `autopair.open-paren` is `autopair`'s, and none of them
 /// say so. The registry knew all three at bind time.
 ///
 /// A fact, not a policy: what to DO with a namespace is the asker's.

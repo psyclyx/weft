@@ -525,7 +525,7 @@ test "action: a provider's presentation travels with the binding it won, and its
     defer acts.deinit();
 
     try acts.provide(.{ .action = "rename", .command = "lsp-rename", .owner = "lsp", .affordance = .{ .label = "Rename symbol" } });
-    try acts.provide(.{ .action = "rename", .predicate = .{ .tool = "files" }, .command = "field-edit", .owner = "files" });
+    try acts.provide(.{ .action = "rename", .predicate = .{ .tool = "files" }, .command = "field.edit", .owner = "files" });
 
     const text = container.resolveOne("rename", .{}).?;
     try t.expectEqualStrings("Rename symbol", acts.affordanceOf("rename", text).label);
@@ -551,7 +551,7 @@ test "action: a projection scopes save by its tool identity, in any mode" {
     defer acts.deinit();
 
     // Core's default save (file write), and a projection's save provider.
-    try acts.provide(.{ .action = "save", .command = "save-file" });
+    try acts.provide(.{ .action = "save", .command = "file.write" });
     try acts.provide(.{ .action = "save", .predicate = .{ .tool = "projection" }, .command = "projection-save" });
 
     // In the projection, its provider wins — REGARDLESS of mode
@@ -559,9 +559,9 @@ test "action: a projection scopes save by its tool identity, in any mode" {
     try t.expectEqualStrings("projection-save", acts.resolve("save", .{ .mode = "normal", .tool = "projection" }).?);
     try t.expectEqualStrings("projection-save", acts.resolve("save", .{ .mode = "insert", .tool = "projection" }).?);
     // A normal file buffer (no tool) falls to the default file write.
-    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .lang = "zig", .tool = "" }).?);
+    try t.expectEqualStrings("file.write", acts.resolve("save", .{ .mode = "normal", .lang = "zig", .tool = "" }).?);
     // A different projection doesn't get the first projection's save.
-    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .tool = "other" }).?);
+    try t.expectEqualStrings("file.write", acts.resolve("save", .{ .mode = "normal", .tool = "other" }).?);
 }
 
 test "action: declare is idempotent and provider load-order-independent" {

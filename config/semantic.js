@@ -39,8 +39,8 @@ function bindIntentionGroup(mode, prefix, bindings) {
 
 layers.forEach(function (mode) {
   weft.group(mode, "SPC v", "Structured actions");
-  weft.bind(mode, "SPC v j", "cursor-down");
-  weft.bind(mode, "SPC v k", "cursor-up");
+  weft.bind(mode, "SPC v j", "cursor.down");
+  weft.bind(mode, "SPC v k", "cursor.up");
   bindIntentionGroup(mode, "SPC v", [
     ["o", "std.target.activate"],
     ["-", "std.hierarchy.step-out"],
@@ -55,9 +55,9 @@ layers.forEach(function (mode) {
     ["c", "workspace.set-working-target"],
     ["e", "field.edit"],
     ["d", "selection.delete"],
-    ["m", "fs.permissions.edit"],
-    ["n", "fs.entry.create-file"],
-    ["N", "fs.entry.create-directory"],
+    ["m", "fs.edit-permissions"],
+    ["n", "fs.create-file"],
+    ["N", "fs.create-directory"],
     ["P", "selection.paste-before"],
     ["r", "view.refresh"],
     ["R", "view.revert"],

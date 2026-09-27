@@ -179,7 +179,7 @@ test "surface: begin/row/span/end retains rows; close clears; rebuild is atomic"
     s.begin(gpa, .corner);
     s.addRow(gpa);
     s.addSpan(gpa, "f", .group);
-    s.addSpan(gpa, "find-file", .leaf);
+    s.addSpan(gpa, "files.find", .leaf);
     s.addRow(gpa);
     s.addSpan(gpa, "g", .group);
     // Not visible until end.
@@ -192,7 +192,7 @@ test "surface: begin/row/span/end retains rows; close clears; rebuild is atomic"
     try t.expectEqual(@as(?usize, 1), s.selected);
     try t.expectEqualStrings("f", s.rows.items[0].spans.items[0].text);
     try t.expectEqual(Role.group, s.rows.items[0].spans.items[0].role);
-    try t.expectEqualStrings("find-file", s.rows.items[0].spans.items[1].text);
+    try t.expectEqualStrings("files.find", s.rows.items[0].spans.items[1].text);
 
     // A rebuild swaps atomically; the old rows are gone, new ones live.
     s.begin(gpa, .bottom);

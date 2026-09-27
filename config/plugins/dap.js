@@ -19,7 +19,7 @@
 // owning its own buffer: `*debug*`, `*debug:2*`, … The buffer name IS the
 // session's identity (the repl/console/llm and git-repo idiom, weft.zig's
 // `Instances`). A command routes to the session whose buffer is FOCUSED, else
-// the most recent, so `debug-stop` stops the one you are looking at and leaves
+// the most recent, so `debug.stop` stops the one you are looking at and leaves
 // the other running. `program`/`source`/`line` are snapshotted from config at
 // START, never re-read: a session's target cannot change under it.
 
@@ -154,7 +154,7 @@ weft.onOutput((h) => {
 });
 
 // ── Commands ──────────────────────────────────────────────────────────
-weft.command("debug-start", () => {
+weft.command("debug.start", () => {
   const cmd = weft.config("cmd");
   if (!cmd) {
     weft.echo('debug: set an adapter — weft.set("dap","cmd","…")');
@@ -202,13 +202,13 @@ function stepCmd(name, command, summary) {
     send(s, command, { threadId: s.thread });
   }, summary, undefined, "whole");
 }
-stepCmd("debug-continue", "continue", "let the program run on");
-stepCmd("debug-step-over", "next", "step over this line");
-stepCmd("debug-step-into", "stepIn", "step into the call");
-stepCmd("debug-step-out", "stepOut", "run to the end of this frame");
+stepCmd("debug.continue", "continue", "let the program run on");
+stepCmd("debug.step-over", "next", "step over this line");
+stepCmd("debug.step-into", "stepIn", "step into the call");
+stepCmd("debug.step-out", "stepOut", "run to the end of this frame");
 
 // Stop the FOCUSED session only — a second debugger keeps running.
-weft.command("debug-stop", () => {
+weft.command("debug.stop", () => {
   const s = current();
   if (!s) {
     weft.echo("debug: no session");

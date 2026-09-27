@@ -6,7 +6,7 @@
 //! the same door files/git use. A colorscheme restyles it for free (spans
 //! carry a semantic Role, not a color): the KEY reads in the group/accent color
 //! so it pops from the plain command text. When there are more bindings than fit
-//! a page, it PAGINATES — `which-key-page-down`/`-up` (bound in `menu-nav`, which
+//! a page, it PAGINATES — `which-key.page-down`/`-up` (bound in `menu-nav`, which
 //! menus fall back to) scroll it, and a footer shows the position.
 //!
 //! A binding whose arms name INTENTIONS has no command name worth printing —
@@ -36,8 +36,8 @@ const PAGE_STEP: usize = 12;
 var scroll_off: usize = 0;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "which-key-page-down", .arity = .whole, .call = pageDown },
-    .{ .name = "which-key-page-up", .arity = .whole, .call = pageUp },
+    .{ .name = "which-key.page-down", .arity = .whole, .call = pageDown },
+    .{ .name = "which-key.page-up", .arity = .whole, .call = pageUp },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -61,9 +61,9 @@ fn pageUp() void {
 /// whole-mode peek, exactly where the clutter is.)
 fn isBaselineEdit(cmd: []const u8) bool {
     const floor = [_][]const u8{
-        "insert-text",    "insert-newline", "insert-tab",   "delete-backward",
-        "delete-forward", "cursor-left",    "cursor-right", "cursor-up",
-        "cursor-down",
+        "edit.insert-text",  "edit.insert-newline", "edit.insert-tab", "edit.delete-before",
+        "edit.delete-after", "cursor.left",         "cursor.right",    "cursor.up",
+        "cursor.down",
     };
     for (floor) |c| if (std.mem.eql(u8, cmd, c)) return true;
     return false;
@@ -74,10 +74,10 @@ fn isBaselineEdit(cmd: []const u8) bool {
 /// the baseline editing floor (see `isBaselineEdit`).
 fn isNoise(key: []const u8, cmd: []const u8) bool {
     return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
-        std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key-now") or
-        std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
-        std.mem.eql(u8, cmd, "op-cancel") or
-        std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up") or
+        std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key.show") or
+        std.mem.eql(u8, cmd, "mode.leave-menu") or std.mem.eql(u8, cmd, "vim.cancel-pending") or
+        std.mem.eql(u8, cmd, "vim.cancel-operator") or
+        std.mem.eql(u8, cmd, "which-key.page-down") or std.mem.eql(u8, cmd, "which-key.page-up") or
         isBaselineEdit(cmd);
 }
 

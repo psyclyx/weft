@@ -87,7 +87,7 @@ fn enterNormal(ctx: *command.Context, data: ?*anyopaque, args: []const command.V
 }
 
 /// A minimal modal keymap — "normal" (resting: commits no text) / "insert"
-/// (self-inserts via core's `insert-text`, the same builtin the modeless
+/// (self-inserts via core's `edit.insert-text`, the same builtin the modeless
 /// `default` floor uses) — built from plain core commands, no guest plugin.
 /// Mirrors vim's normal/insert shape just enough to exercise dot-repeat's
 /// rest-point logic (`dispatch.dotAtRest`) without touching the wasm host.
@@ -95,13 +95,13 @@ fn initModal(gpa: std.mem.Allocator, ed: *Editor) !void {
     _ = try ed.commands.bind(gpa, "enter-insert", .{ .name = "enter-insert", .summary = "test: enter insert", .args = &.{}, .handler = enterInsert });
     _ = try ed.commands.bind(gpa, "enter-normal", .{ .name = "enter-normal", .summary = "test: enter normal", .args = &.{}, .handler = enterNormal });
     try ed.keymap.bind(gpa, "normal", "i", "enter-insert", core.Keymap.prio_config, "test");
-    // A bare MOTION (no edit) — "cursor-right" is a real core builtin
+    // A bare MOTION (no edit) — "cursor.right" is a real core builtin
     // (`core.builtins`' modeless `default`-floor binding, reused here) —
     // for exercising dot-repeat's "did this dispatch actually change
     // anything" distinction without needing any guest plugin.
-    try ed.keymap.bind(gpa, "normal", "l", "cursor-right", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "normal", "l", "cursor.right", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "insert", "Escape", "enter-normal", core.Keymap.prio_config, "test");
-    try ed.keymap.setCommitCommand(gpa, "insert", "insert-text");
+    try ed.keymap.setCommitCommand(gpa, "insert", "edit.insert-text");
     try ed.head.setModeRaw(gpa, "normal");
 }
 
@@ -203,10 +203,11 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // Both open the command palette — a real, builtin pick session (core
-    // builtins install it; no plugin needed) — through the real command path.
-    ed.run("palette");
-    b.run("palette");
+    // Both open the command palette — a real pick session, the palette
+    // plugin's — through the real command path.
+    try ed.load("palette", @embedFile("guest_palette_wasm"));
+    ed.run("palette.open");
+    b.run("palette.open");
     try t.expect(ed.pick.active);
     try t.expect(b.head.pick.active);
     try t.expectEqualStrings("pick", ed.mode());
@@ -223,10 +224,10 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try t.expectEqualStrings("no", ed.pick.query.items); // untouched by B's typing
 
     // Closing A's picker leaves B's open.
-    ed.run("pick-cancel");
+    ed.run("pick.cancel");
     try t.expect(!ed.pick.active);
     try t.expect(b.head.pick.active);
-    b.run("pick-cancel");
+    b.run("pick.cancel");
     try t.expect(!b.head.pick.active);
 }
 
@@ -242,8 +243,8 @@ test "two heads: distinct dot-repeat registers — B's `.` never replays A's cha
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try initModal(gpa, &ed);
-    _ = try ed.commands.bind(gpa, "repeat-change", .{ .name = "repeat-change", .summary = "test: repeat", .args = &.{}, .handler = h.dispatch.repeatChangeHandler });
-    try ed.keymap.bind(gpa, "normal", ".", "repeat-change", core.Keymap.prio_config, "test");
+    _ = try ed.commands.bind(gpa, "edit.repeat", .{ .name = "edit.repeat", .summary = "test: repeat", .args = &.{}, .handler = h.dispatch.repeatChangeHandler });
+    try ed.keymap.bind(gpa, "normal", ".", "edit.repeat", core.Keymap.prio_config, "test");
 
     // Seed some prior edits/commits on A BEFORE B ever attaches — the exact
     // shape the two-head gap (`DotRepeat.synced`) exists for: a head that
@@ -321,7 +322,7 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
     defer ed.deinit();
 
     // A vsplits: left (A's pane, kept) | right (a new sibling peek).
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.paneCount());
 
@@ -332,15 +333,15 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
     // Move B's focus onto the RIGHT (sibling) pane — a real window command,
     // applied explicitly AS head B (`SecondHead.applyWindow`) — so A and B
     // now hold handles to two DIFFERENT, sibling leaves of one shared tree.
-    b.run("window-focus-right");
+    b.run("window.focus-right");
     b.applyWindow(&ed);
 
     // A closes ITS OWN (left) pane. `Layout.closeFocused`'s doc: this frees
     // TWO node addresses — the closed leaf (A's) AND its sibling's node
     // shell (B's pane's OLD address; the sibling's CONTENT survives, moved
     // to the parent's address, but that specific struct does not). B never
-    // touched `window-close` — this is entirely A's action.
-    ed.run("window-close");
+    // touched `window.close` — this is entirely A's action.
+    ed.run("window.close");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.paneCount());
 
@@ -354,7 +355,7 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
 
     // And B can keep dispatching real window commands from its RECOVERED
     // focus — no invalid access, no stuck state.
-    b.run("window-vsplit");
+    b.run("window.split-right");
     b.applyWindow(&ed);
     try t.expectEqual(@as(usize, 2), ed.paneCount());
 }

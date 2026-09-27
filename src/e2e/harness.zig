@@ -260,6 +260,7 @@ pub const Editor = struct {
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
         self.session.file_opener = self.buffer_commands.fileOpener();
+        self.session.cmd_ctx.entry_shell = self.buffer_commands.entryShell();
     }
 
     pub fn deinit(self: *Editor) void {
@@ -494,7 +495,7 @@ pub const Editor = struct {
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
         var at_shell: [std.fs.max_path_bytes]u8 = undefined;
-        const value = if (std.mem.eql(u8, cmd, "open")) asTyped(arg, &at_shell) else arg;
+        const value = if (std.mem.eql(u8, cmd, "file.open")) asTyped(arg, &at_shell) else arg;
         _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = value }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
@@ -2220,7 +2221,6 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "notes", @embedFile("guest_notes_wasm") },
     .{ "fmt", @embedFile("guest_fmt_wasm") },
     .{ "buffers", @embedFile("guest_buffers_wasm") },
-    .{ "windows", @embedFile("guest_windows_wasm") },
     .{ "modes", @embedFile("guest_modes_wasm") },
     .{ "snippets", @embedFile("guest_snippets_wasm") },
     .{ "direnv", @embedFile("guest_direnv_wasm") },
@@ -2443,11 +2443,11 @@ pub fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
 /// motion — `open` then `i…Esc` then `save`. Assumes a normal-editing resting
 /// mode (call before entering any tool buffer, so no tool mode swallows typing).
 pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     ed.press("i", "");
     ed.typeText(body);
     ed.press("Escape", "");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 }
 

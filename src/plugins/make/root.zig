@@ -13,11 +13,11 @@ const weft = @import("weft");
 const output = @import("weft_output");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "make-build", .arity = .whole, .call = makeBuild, .summary = "build this project" },
-    .{ .name = "make-test", .arity = .whole, .call = makeTest, .summary = "run this project's tests" },
-    .{ .name = "make-run", .arity = .whole, .call = makeRun, .summary = "run this project" },
-    .{ .name = "make-visit", .arity = .one, .call = output.visit, .summary = "open the location the focused build row names" },
-    .{ .name = "make-open", .arity = .whole, .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
+    .{ .name = "make.build", .arity = .whole, .call = makeBuild, .summary = "build this project" },
+    .{ .name = "make.test", .arity = .whole, .call = makeTest, .summary = "run this project's tests" },
+    .{ .name = "make.run", .arity = .whole, .call = makeRun, .summary = "run this project" },
+    .{ .name = "make.visit", .arity = .one, .call = output.visit, .summary = "open the location the focused build row names" },
+    .{ .name = "make.open", .arity = .whole, .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
 };
 
 fn describeExtra() void {
@@ -26,9 +26,9 @@ fn describeExtra() void {
 }
 fn initExtra() void {
     // Return jumps to the compiler error the focused row points at.
-    output.installMode("build", "make-visit");
+    output.installMode("build", "make.visit");
     // A build is a projection this plugin re-runs by designation.
-    _ = weft.designationOpener(kind, "make-open");
+    _ = weft.designationOpener(kind, "make.open");
 }
 
 /// The projection kind a build is (doc/model.md §2.1):
@@ -37,7 +37,7 @@ const kind = "make";
 
 // A build says what went wrong on STDERR, which is the whole reason to have a
 // navigable build buffer — and which the stdout-only fill door dropped on the
-// floor. `want_err` is what makes `make-build` on a broken tree show the
+// floor. `want_err` is what makes `make.build` on a broken tree show the
 // errors rather than an empty window.
 fn makeBuild() void {
     output.show(&.{ "zig", "build" }, "*build*", "build", .{ .want_err = true });

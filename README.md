@@ -100,8 +100,8 @@ Debian package recipes use the same build; see [packaging/README.md](packaging/R
 Set the startup text size with `weft.set("editor", "font-size", "16")` in your
 config, or use `--em 16` without a config. `Ctrl++` (or `Ctrl+=`) and `Ctrl+-`
 adjust it while editing; `Ctrl+0` restores the configured size. The command
-palette also offers `font-size-set <size>`, `font-size-increase`,
-`font-size-decrease`, and `font-size-reset`.
+palette also offers `font-size-set <size>`, `font.increase`,
+`font.decrease`, and `font.reset`.
 
 ## Share a session
 
@@ -122,7 +122,7 @@ In the other editor, replace `HOST` with the host's address:
 
 The host's document opens as a new buffer. To share another document, focus it
 and run `:share pair`. Use `:peers` to see connected peers and their identity
-fingerprints and verification words. `:share-presence off` hides your cursor;
+fingerprints and verification words. `:collab.share-presence off` hides your cursor;
 `:disconnect` leaves the host while keeping the shared buffers locally.
 
 Connections are encrypted and use the token supplied at startup with `--token`;

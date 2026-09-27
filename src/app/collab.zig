@@ -95,7 +95,7 @@ pub const ShareCtx = struct {
     /// collab emits our caret. False ⇒ sharing text emits no presence — the
     /// mechanism default, kept by hubs and programmatic shares. The
     /// interactive editor sets it from `presenceDefault` at startup and the
-    /// `share-presence` command flips it at runtime.
+    /// `collab.share-presence` command flips it at runtime.
     publish_presence: bool = false,
     /// Which endpoint surfaces a newly shared quad EXPORTS (§13.2) — the
     /// typed export set, distinct from `publish_presence`, which only

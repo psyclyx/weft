@@ -10,9 +10,10 @@
 //! focused it, a click in a scene focused the row, and none of it was
 //! rebindable.
 //!
-//! Also here: the `core.pointer.Panes` door, the two layout operations the
-//! generic pointer commands need and core cannot see (focus a pane, scroll a
-//! pane), implemented over the frame driver's layout and view.
+//! Also here: the `core.pointer.Panes` door, the layout operations the
+//! generic pointer and caret commands need and core cannot see (focus a pane,
+//! scroll a pane, move a caret by visual line), implemented over the frame
+//! driver's layout and view.
 //!
 //! Hit-testing reads the geometry of the last BUILT frame, every pane's
 //! (`View.pane_maps`), so a click lands where the user saw the thing it
@@ -215,7 +216,15 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
 // ── The Panes door ──────────────────────────────────────────────────
 
 pub fn panesDoor(driver: *frame.Driver) Pointer.Panes {
-    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane };
+    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane, .vertical = verticalMove };
+}
+
+/// `cursor.up`/`cursor.down` in a text pane: one visual line, goal column
+/// held, over the view the frame last built.
+fn verticalMove(raw: *anyopaque, ctx: *core.command.Context, dir: i32) bool {
+    const ed = ctx.textEditor() catch return false;
+    dispatch.visualVertical(ed, driverOf(raw).view, dir) catch return false;
+    return true;
 }
 
 fn driverOf(raw: *anyopaque) *frame.Driver {

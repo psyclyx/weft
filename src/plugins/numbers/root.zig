@@ -11,8 +11,8 @@ const weft = @import("weft");
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "increment-number", .arity = weft.Arity.each_extent, .call = increment, .summary = "increment the number under the cursor" },
-    .{ .name = "decrement-number", .arity = weft.Arity.each_extent, .call = decrement, .summary = "decrement the number under the cursor" },
+    .{ .name = "numbers.increment", .arity = weft.Arity.each_extent, .call = increment, .summary = "increment the number under the cursor" },
+    .{ .name = "numbers.decrement", .arity = weft.Arity.each_extent, .call = decrement, .summary = "decrement the number under the cursor" },
 };
 
 fn increment() void {

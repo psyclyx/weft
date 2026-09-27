@@ -64,7 +64,7 @@ pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 ///
 /// A guest command used to register with `.summary = ""` and `.args = &.{}` —
 /// a name and nothing else. That is why the palette listed every plugin
-/// command undocumented, and why nothing could tell that `net-open` takes a
+/// command undocumented, and why nothing could tell that `net.open` takes a
 /// host: a plugin command was, to the rest of the editor, shapeless. A
 /// `describeCommand` declaration fills both in, so a plugin's commands are
 /// first-class in the palette, on the `:` line, and in a refusal message —
@@ -201,12 +201,12 @@ in_dispatch: bool = false,
 /// that didn't exist a moment ago, so a head-gated call here can only ever
 /// set the SAME (single, load-time) head's starting state, never hijack a
 /// second one. NUANCE (review of #19 item 4): at STARTUP that head is fresh;
-/// on a RUNTIME `config-reload` that loads a NEW plugin, the load-time head
+/// on a RUNTIME `app.reload-config` that loads a NEW plugin, the load-time head
 /// is the LIVE editing head — a modal plugin's `init` `setMode("normal")`
 /// then stomps the live mode. That is pre-existing reload behavior this
 /// exemption PRESERVES (necessary — trapping it would break every modal
 /// guest's load), not a new hole it opens; a mid-chord stomp is unreachable
-/// (dispatching `config-reload` consumed the chord). The argument stops
+/// (dispatching `app.reload-config` consumed the chord). The argument stops
 /// holding the instant load finishes — every
 /// LATER background entry (`on_poll`/`on_fill_token`/`on_activate`/
 /// `on_complete`/`on_menu`) still traps, exactly as `in_dispatch` would. Set

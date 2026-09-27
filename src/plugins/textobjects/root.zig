@@ -18,9 +18,9 @@ fn retObj(o: ?Obj) void {
 }
 
 // One command per (variant, object). Registration order == on_command id; the
-// table is generated so vim can name `textobj.inner-<obj>` / `textobj.a-<obj>`.
+// table is generated so vim can name `textobjects.inner-<obj>` / `textobjects.around-<obj>`.
 const object_names = [_][]const u8{
-    "word",       "WORD",     "quote-double", "quote-single",
+    "word",       "big-word", "quote-double", "quote-single",
     "quote-back", "paren",    "bracket",      "brace",
     "paragraph",  "function", "class",        "call",
     "angle",      "pair",     "argument",     "comment",
@@ -30,9 +30,9 @@ const cmds = blk: {
     var arr: [object_names.len * 2]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (object_names) |obj| {
-        arr[i] = .{ .name = "textobj.inner-" ++ obj, .call = objHandler(obj, false), .arity = weft.Arity.each_extent };
+        arr[i] = .{ .name = "textobjects.inner-" ++ obj, .call = objHandler(obj, false), .arity = weft.Arity.each_extent };
         i += 1;
-        arr[i] = .{ .name = "textobj.a-" ++ obj, .call = objHandler(obj, true), .arity = weft.Arity.each_extent };
+        arr[i] = .{ .name = "textobjects.around-" ++ obj, .call = objHandler(obj, true), .arity = weft.Arity.each_extent };
         i += 1;
     }
     break :blk arr;
@@ -49,7 +49,7 @@ fn objHandler(comptime obj: []const u8, comptime around: bool) fn () void {
 /// Dispatch a comptime object name to its scanner.
 fn compute(comptime obj: []const u8, around: bool) ?Obj {
     if (comptime std.mem.eql(u8, obj, "word")) return wordObj(false, around);
-    if (comptime std.mem.eql(u8, obj, "WORD")) return wordObj(true, around);
+    if (comptime std.mem.eql(u8, obj, "big-word")) return wordObj(true, around);
     if (comptime std.mem.eql(u8, obj, "quote-double")) return quoteObj('"', around);
     if (comptime std.mem.eql(u8, obj, "quote-single")) return quoteObj('\'', around);
     if (comptime std.mem.eql(u8, obj, "quote-back")) return quoteObj('`', around);

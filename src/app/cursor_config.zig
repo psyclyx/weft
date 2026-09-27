@@ -1,7 +1,7 @@
-//! Per-mode caret style + blink, set from config via `set-cursor` and
-//! `cursor-blink` and read into the Hud each frame. Blink is per mode so
+//! Per-mode caret style + blink, set from config via `cursor.set-style` and
+//! `cursor.set-blink` and read into the Hud each frame. Blink is per mode so
 //! the sample config can blink in insert and stay solid in normal. Also
-//! the runtime `set-color` theme command and the markdown-path test.
+//! the runtime `theme.set-color` theme command and the markdown-path test.
 
 const std = @import("std");
 const core = @import("weft_core");
@@ -82,7 +82,7 @@ pub fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []co
         .provider = .{ .value = args[1].string },
         .predicate = .{ .all = &.{} },
         .tier = .transient,
-        .owner = "set-color",
+        .owner = "theme.set-color",
     }) catch return error.InvalidArgument;
     v.theme.resolve(ctx.actions.container, ctx.capturedCtx().mergedFacts());
     return .nil;

@@ -54,7 +54,7 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     const req = weft.payloadRead(@bitCast(session));
     if (std.mem.eql(u8, req, "act-edit")) weft.edit(.{ .start = 0, .end = 0 }, "ACTED");
     if (std.mem.eql(u8, req, "act-flash")) weft.flash(0, 1);
-    if (std.mem.eql(u8, req, "act-run")) weft.run("undo");
+    if (std.mem.eql(u8, req, "act-run")) weft.run("edit.undo");
     const vals = [_]schema.Value{
         .{ .str = "3 failing" },
         .{ .scalar = .{ .u32 = 3 } },

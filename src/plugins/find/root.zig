@@ -3,7 +3,7 @@
 //! pattern and draws no bar.
 //!
 //! THE BAR is a `.bottom` surface this plugin repaints, and a `textInput`
-//! mode (`find`) whose printable keys route to `find-type` — the prompt
+//! mode (`find`) whose printable keys route to `find.type` — the prompt
 //! library's idiom, with the keys a find bar needs on top of it. Every
 //! keystroke re-runs the search:
 //!
@@ -126,25 +126,25 @@ var history_at: ?usize = null;
 var draft: Field = .{};
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "find", .arity = .whole, .call = openFind, .summary = "search this buffer as you type" },
-    .{ .name = "find-replace", .arity = .whole, .call = openReplace, .summary = "search and replace in this buffer" },
-    .{ .name = "find-next", .arity = .whole, .call = findNext, .summary = "go to the next match of the last search" },
-    .{ .name = "find-prev", .arity = .whole, .call = findPrev, .summary = "go to the previous match of the last search" },
-    .{ .name = "find-select-all", .arity = .whole, .call = selectAll, .summary = "select every match of the last search" },
-    .{ .name = "find-replace-all", .arity = .whole, .call = replaceAll, .summary = "replace every match, as one undo step" },
-    .{ .name = "find-replace-one", .arity = .whole, .call = replaceOne },
-    .{ .name = "find-accept", .arity = .whole, .call = accept },
-    .{ .name = "find-close", .arity = .whole, .call = close },
-    .{ .name = "find-type", .arity = .whole, .call = typeText },
-    .{ .name = "find-backspace", .arity = .whole, .call = backspace },
-    .{ .name = "find-clear", .arity = .whole, .call = clearField },
-    .{ .name = "find-paste", .arity = .whole, .call = paste },
-    .{ .name = "find-switch-field", .arity = .whole, .call = switchField },
-    .{ .name = "find-history-prev", .arity = .whole, .call = historyOlder },
-    .{ .name = "find-history-next", .arity = .whole, .call = historyNewer },
-    .{ .name = "find-toggle-regex", .arity = .whole, .call = toggleRegex },
-    .{ .name = "find-toggle-case", .arity = .whole, .call = toggleCase },
-    .{ .name = "find-toggle-word", .arity = .whole, .call = toggleWord },
+    .{ .name = "find.open", .arity = .whole, .call = openFind, .summary = "search this buffer as you type" },
+    .{ .name = "find.replace", .arity = .whole, .call = openReplace, .summary = "search and replace in this buffer" },
+    .{ .name = "find.next", .arity = .whole, .call = findNext, .summary = "go to the next match of the last search" },
+    .{ .name = "find.prev", .arity = .whole, .call = findPrev, .summary = "go to the previous match of the last search" },
+    .{ .name = "find.select-all", .arity = .whole, .call = selectAll, .summary = "select every match of the last search" },
+    .{ .name = "find.replace-all", .arity = .whole, .call = replaceAll, .summary = "replace every match, as one undo step" },
+    .{ .name = "find.replace-one", .arity = .whole, .call = replaceOne },
+    .{ .name = "find.accept", .arity = .whole, .call = accept },
+    .{ .name = "find.close", .arity = .whole, .call = close },
+    .{ .name = "find.type", .arity = .whole, .call = typeText },
+    .{ .name = "find.backspace", .arity = .whole, .call = backspace },
+    .{ .name = "find.clear", .arity = .whole, .call = clearField },
+    .{ .name = "find.paste", .arity = .whole, .call = paste },
+    .{ .name = "find.switch-field", .arity = .whole, .call = switchField },
+    .{ .name = "find.history-prev", .arity = .whole, .call = historyOlder },
+    .{ .name = "find.history-next", .arity = .whole, .call = historyNewer },
+    .{ .name = "find.toggle-regex", .arity = .whole, .call = toggleRegex },
+    .{ .name = "find.toggle-case", .arity = .whole, .call = toggleCase },
+    .{ .name = "find.toggle-word", .arity = .whole, .call = toggleWord },
 };
 
 comptime {
@@ -159,18 +159,18 @@ comptime {
 /// bar's own grammar, the same under vim, helix or ide; a config that
 /// disagrees rebinds the `find` mode.
 fn init() void {
-    weft.textInput(mode, "find-type");
+    weft.textInput(mode, "find.type");
     const keys = [_][2][]const u8{
-        .{ "Return", "find-accept" },          .{ "KP_Enter", "find-accept" },
-        .{ "S-Return", "find-prev" },          .{ "F3", "find-next" },
-        .{ "S-F3", "find-prev" },              .{ "Escape", "find-close" },
-        .{ "BackSpace", "find-backspace" },    .{ "C-u", "find-clear" },
-        .{ "C-v", "find-paste" },              .{ "Tab", "find-switch-field" },
-        .{ "Up", "find-history-prev" },        .{ "Down", "find-history-next" },
-        .{ "M-r", "find-toggle-regex" },       .{ "M-c", "find-toggle-case" },
-        .{ "M-w", "find-toggle-word" },        .{ "C-f", "find" },
-        .{ "C-h", "find-replace" },            .{ "M-Return", "find-select-all" },
-        .{ "C-M-Return", "find-replace-all" },
+        .{ "Return", "find.accept" },          .{ "KP_Enter", "find.accept" },
+        .{ "S-Return", "find.prev" },          .{ "F3", "find.next" },
+        .{ "S-F3", "find.prev" },              .{ "Escape", "find.close" },
+        .{ "BackSpace", "find.backspace" },    .{ "C-u", "find.clear" },
+        .{ "C-v", "find.paste" },              .{ "Tab", "find.switch-field" },
+        .{ "Up", "find.history-prev" },        .{ "Down", "find.history-next" },
+        .{ "M-r", "find.toggle-regex" },       .{ "M-c", "find.toggle-case" },
+        .{ "M-w", "find.toggle-word" },        .{ "C-f", "find.open" },
+        .{ "C-h", "find.replace" },            .{ "M-Return", "find.select-all" },
+        .{ "C-M-Return", "find.replace-all" },
     };
     for (keys) |k| weft.bindKey(mode, k[0], k[1]);
 }

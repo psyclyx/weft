@@ -38,11 +38,11 @@ var report: [4096]u8 = undefined;
 
 /// Write what the delivery said into a buffer of its own, which is the only
 /// channel a guest has back to the host-side gate. One buffer PER command:
-/// `buffer-create` does not dedupe by name, so a shared report entry would be
+/// `buffer.create` does not dedupe by name, so a shared report entry would be
 /// a fresh empty buffer each time and the gate would read the first one.
 fn note(name: []const u8, comptime fmt: []const u8, args: anytype) void {
     const line = std.fmt.bufPrint(&report, fmt, args) catch return;
-    weft.runStr("buffer-create", name);
+    weft.runStr("buffer.create", name);
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, line);
 }
 

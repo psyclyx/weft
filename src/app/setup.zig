@@ -24,24 +24,24 @@ pub fn registerCapabilityConsumers(
     completion_ui: *core.complete_ui.CompletionUi,
     grammars: *core.syntax.Runtime,
 ) !void {
-    _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
+    _ = try commands.bind(gpa, "complete.show", completion_ui.commandSpec());
     // Grammars are data: builtins seeded, config extends via command.
-    _ = try commands.bind(gpa, "grammar-add", providers.grammarAddCommand(grammars));
+    _ = try commands.bind(gpa, "syntax.add-grammar", providers.grammarAddCommand(grammars));
 }
 
 const reg_arg: core.command.ArgSpec = .{ .name = "register", .type = .string, .optional = true };
 const count_arg: core.command.ArgSpec = .{ .name = "count", .type = .nil, .optional = true };
 const macro_cmds = [_]core.command.Command{
-    .{ .name = "macro-record-start", .summary = "Record keystrokes into a macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler },
-    .{ .name = "macro-record-stop", .summary = "Stop recording; the macro is filed under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler },
-    .{ .name = "macro-record-toggle", .summary = "Start recording into a register (default @), or stop.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler },
-    .{ .name = "macro-play", .summary = "Replay a macro register [count] times (default: the last played).", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler },
+    .{ .name = "macro.record-start", .summary = "Record keystrokes into a macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler },
+    .{ .name = "macro.record-stop", .summary = "Stop recording; the macro is filed under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler },
+    .{ .name = "macro.record-toggle", .summary = "Start recording into a register (default @), or stop.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler },
+    .{ .name = "macro.play", .summary = "Replay a macro register [count] times (default: the last played).", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler },
 };
 
 /// Bind the caret/which-key/menu commands, registered before the config runs
 /// so it can set per-mode styles at load time. `cursor_cfg` and the
-/// `which_key_now` flag are caller-owned; `which-key-now` and `menu-escape`
-/// use the dispatch handlers, `set-cursor`/`cursor-blink` the cursor-config
+/// `which_key_now` flag are caller-owned; `which-key.show` and `mode.leave-menu`
+/// use the dispatch handlers, `cursor.set-style`/`cursor.set-blink` the cursor-config
 /// ones.
 pub fn registerCursorCommands(
     gpa: std.mem.Allocator,
@@ -49,8 +49,8 @@ pub fn registerCursorCommands(
     cursor_cfg: *cursor_config.CursorConfig,
     which_key_now: *bool,
 ) !void {
-    _ = try commands.bind(gpa, "menu-escape", .{
-        .name = "menu-escape",
+    _ = try commands.bind(gpa, "mode.leave-menu", .{
+        .name = "mode.leave-menu",
         .summary = "Leave a menu, back to its return mode.",
         .args = &.{},
         .handler = dispatch.menuEscapeHandler,
@@ -59,8 +59,8 @@ pub fn registerCursorCommands(
     // Dot-repeat: replay the last change's keystrokes (vim `.`). The recorder
     // lives in dispatch (it records through the one keypress interface), so this
     // composes with every plugin out of the box.
-    _ = try commands.bind(gpa, "repeat-change", .{
-        .name = "repeat-change",
+    _ = try commands.bind(gpa, "edit.repeat", .{
+        .name = "edit.repeat",
         .summary = "Repeat the last change (vim `.`).",
         .args = &.{},
         .handler = dispatch.repeatChangeHandler,
@@ -73,29 +73,29 @@ pub fn registerCursorCommands(
     // which-key: show the hint popup immediately (bypass the idle delay). If not
     // already in a menu, open the leader menu — so a help key (F1) surfaces it
     // from anywhere.
-    _ = try commands.bind(gpa, "which-key-now", .{
-        .name = "which-key-now",
+    _ = try commands.bind(gpa, "which-key.show", .{
+        .name = "which-key.show",
         .summary = "Show the which-key popup now (open the leader menu if idle).",
         .args = &.{},
         .handler = dispatch.whichKeyNowHandler,
         .data = which_key_now,
     });
-    _ = try commands.bind(gpa, "set-cursor", .{
-        .name = "set-cursor",
+    _ = try commands.bind(gpa, "cursor.set-style", .{
+        .name = "cursor.set-style",
         .summary = "Set the caret style (block|bar|underline) for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
         .handler = cursor_config.setCursorHandler,
         .data = cursor_cfg,
     });
-    _ = try commands.bind(gpa, "cursor-place", .{
-        .name = "cursor-place",
+    _ = try commands.bind(gpa, "cursor.set-place", .{
+        .name = "cursor.set-place",
         .summary = "Draw the caret at the selection's head, or inside it on its last character (head|inside), for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "place", .type = .string } },
         .handler = cursor_config.cursorPlaceHandler,
         .data = cursor_cfg,
     });
-    _ = try commands.bind(gpa, "cursor-blink", .{
-        .name = "cursor-blink",
+    _ = try commands.bind(gpa, "cursor.set-blink", .{
+        .name = "cursor.set-blink",
         .summary = "Toggle caret blink (on|off) for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
         .handler = cursor_config.cursorBlinkHandler,

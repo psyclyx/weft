@@ -54,7 +54,7 @@ test "workflow: vim — insert text, escape, and it lands in the buffer" {
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("hello weft", got);
-    ed.snapshot("vim-insert");
+    ed.snapshot("vim.insert");
 }
 
 test "workflow: vim — dw deletes a word (operator + motion compose)" {
@@ -85,7 +85,7 @@ test "workflow: autopair — typing an open paren inserts the matched pair" {
     try loadVim(&ed);
     // The natural way: bind the pair keys (a config would). Then in insert, `(`
     // is a bound key (not plain text) → the pair is inserted, caret between.
-    try ed.keymap.bind(gpa, "insert", "parenleft", "pair-paren", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "insert", "parenleft", "autopair.open-paren", core.Keymap.prio_config, "test");
 
     ed.press("i", "");
     ed.press("parenleft", "("); // bound → pair-paren, not literal text
@@ -222,10 +222,10 @@ test "workflow: modes — opening a file detects its language on activate, witho
     // editor's echo line). What this test asserts instead is the structural
     // guarantee: opening a file never lands language text on `ed.echoText()`
     // via this path, for either extension.
-    ed.runStr("open", "/tmp/weft-nonexistent-main.zig");
+    ed.runStr("file.open", "/tmp/weft-nonexistent-main.zig");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
 
-    ed.runStr("open", "/tmp/weft-nonexistent-app.js");
+    ed.runStr("file.open", "/tmp/weft-nonexistent-app.js");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
 }
 
@@ -243,7 +243,7 @@ test "workflow: intentions — Return resolves its fallback list through the cat
     try t.expectEqualStrings("std.editing.insert-line-break", arm_names[1]);
 
     // In a text entry nothing offers activation, so the SECOND arm wins and
-    // the line break lands exactly as the old `insert-newline` bind did.
+    // the line break lands exactly as the old `edit.insert-newline` bind did.
     ed.typeText("ab\ncd");
     const got = try ed.textAlloc();
     defer gpa.free(got);

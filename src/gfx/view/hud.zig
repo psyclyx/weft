@@ -274,9 +274,9 @@ test "hud: the panel reserves exactly what it renders (no status overlap)" {
     // computed offsets independently and drifted, so which-key's last hint
     // landed on the status row. Both now derive from `panelRows()`.
     const hints = [_]core.Keymap.Binding{
-        .{ .key = "f", .command = "find-file" },
+        .{ .key = "f", .command = "files.find" },
         .{ .key = "c", .command = "collab" },
-        .{ .key = "space", .command = "palette" },
+        .{ .key = "space", .command = "palette.open" },
     };
     const hud: Hud = .{ .mode = "leader", .which_key = &hints };
     try testing.expectEqual(@as(usize, 4), hud.panelRows()); // header + 3 hints

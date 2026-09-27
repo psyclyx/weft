@@ -16,7 +16,7 @@ weft.viewport("toolbar", {
   // One text row, however large the font: a share of the frame would grow
   // the strip with the window.
   extent: { rows: 1 },
-  // Never in `focus-other`'s rotation, and never where the keys go: a click
+  // Never in `window.focus-next`'s rotation, and never where the keys go: a click
   // acts through it and the editor keeps the keyboard, so the strip keeps
   // describing the editor while it is being clicked.
   cycles: false,

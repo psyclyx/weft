@@ -17,11 +17,11 @@ const Pair = struct { name: []const u8, open: []const u8, close: []const u8 };
 
 /// Shipped defaults, used when config sets no `pairs`.
 const defaults = [_]Pair{
-    .{ .name = "pair-paren", .open = "(", .close = ")" },
-    .{ .name = "pair-brace", .open = "{", .close = "}" },
-    .{ .name = "pair-bracket", .open = "[", .close = "]" },
-    .{ .name = "pair-quote", .open = "\"", .close = "\"" },
-    .{ .name = "pair-quote-single", .open = "'", .close = "'" },
+    .{ .name = "autopair.open-paren", .open = "(", .close = ")" },
+    .{ .name = "autopair.open-brace", .open = "{", .close = "}" },
+    .{ .name = "autopair.open-bracket", .open = "[", .close = "]" },
+    .{ .name = "autopair.quote-double", .open = "\"", .close = "\"" },
+    .{ .name = "autopair.quote-single", .open = "'", .close = "'" },
 };
 
 /// Extensions where `'` (a quote pair — open==close) is a QUOTE, not an
@@ -104,9 +104,9 @@ fn loadPairs() void {
 /// `f(x)` produces `f(x))` — every opener orphans its auto-closer.
 const Closer = struct { name: []const u8, ch: u8 };
 const closers = [_]Closer{
-    .{ .name = "pair-close-paren", .ch = ')' },
-    .{ .name = "pair-close-brace", .ch = '}' },
-    .{ .name = "pair-close-bracket", .ch = ']' },
+    .{ .name = "autopair.close-paren", .ch = ')' },
+    .{ .name = "autopair.close-brace", .ch = '}' },
+    .{ .name = "autopair.close-bracket", .ch = ']' },
 };
 
 // This is the ONE plugin in the tree whose command table is not known at

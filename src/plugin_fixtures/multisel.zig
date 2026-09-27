@@ -11,7 +11,7 @@
 //!   - `ms-motion`: a motion — the scalar after "the cursor", which in a run
 //!     dispatch maps is that run's selection.
 //!   - `ms-upcase-each`: an operator declared `.each` over `ms-motion`, which
-//!     also seals the undo unit (`undo-barrier`), so the one-undo-unit claim
+//!     also seals the undo unit (`edit.seal-undo`), so the one-undo-unit claim
 //!     of the mapping is tested against an operator that tries to break it.
 //!   - `ms-yank` / `ms-paste`: `.each` — one register value per selection,
 //!     and a paste at every head under core's distribution rule, with no
@@ -104,7 +104,7 @@ fn opUpcase() void {
     weft.editRange(h, buf[0..n]);
     // Seal the undo unit, as a modal grammar does on its boundaries — the
     // attempt the mapping's one-unit bracket must hold shut.
-    weft.run("undo-barrier");
+    weft.run("edit.seal-undo");
 }
 
 fn yank() void {

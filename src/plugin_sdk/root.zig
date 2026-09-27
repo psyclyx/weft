@@ -85,7 +85,7 @@ var owner_scratch: [1 << 8]u8 = undefined;
 /// (`commandArg`) — the third of the introspection trio, and it needs its own
 /// so all three compose. A palette row is `commandName` + `commandSummary` +
 /// the parameter shape at once; sharing `scratch` with `commandName` meant
-/// rendering `<slot>` over the front of `explain-binding` and listing a row
+/// rendering `<slot>` over the front of `action.explain` and listing a row
 /// called `slotain-binding` that nothing could ever run.
 var param_scratch: [256]u8 = undefined;
 /// A separate scratch for offer reasons and refusals, so a UI can hold an
@@ -120,7 +120,7 @@ pub fn declareCommand(name: []const u8) void {
 /// This is what makes a plugin command a first-class citizen: the palette
 /// documents it and asks for its arguments, the `:` line hints its shape while
 /// you type, and a refusal names what was missing. Without it a command is a
-/// bare name — which is all a plugin could say before, and why `net-open` from
+/// bare name — which is all a plugin could say before, and why `net.open` from
 /// the palette used to dial nothing at all.
 pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8) void {
     e.wl_declare_command_doc(
@@ -821,7 +821,7 @@ pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
 }
 /// Bind `key` in keymap `mode` to a FIRST-APPLICABLE list (architecture
 /// §10.2): `bindKeys("normal", "Return", &.{ "std.target.activate",
-/// "vim-open-focused" })` runs the activation intention where the focus
+/// "vim.next-line" })` runs the activation intention where the focus
 /// offers one and the plugin's own command everywhere else. The grammar
 /// authors the order; resolution happens at the keypress, against the focus.
 /// Framed as the config surface frames `weft.bind`'s list — one wire shape
@@ -1464,18 +1464,18 @@ pub fn focusBuffer(name: []const u8) bool {
         const other = bufferName(i) orelse continue;
         if (!std.mem.eql(u8, other, name)) continue;
         const id = bufferId(i) orelse return false;
-        runInt("buffer-switch", id);
+        runInt("buffer.switch", id);
         return true;
     }
     return false;
 }
 
 /// Focus `name`, creating the buffer if there is none. Tool plugins reuse one
-/// named buffer across runs, and `buffer-create` does NOT dedupe by name — so
+/// named buffer across runs, and `buffer.create` does NOT dedupe by name — so
 /// "create it if it isn't there" is the only spelling that doesn't pile up
 /// duplicates on the second invocation.
 pub fn focusOrCreateBuffer(name: []const u8) void {
-    if (!focusBuffer(name)) runStr("buffer-create", name);
+    if (!focusBuffer(name)) runStr("buffer.create", name);
 }
 
 /// The instance-`n` buffer name for `base`: `*base*` at 1, `*base:n*` above.
@@ -1553,7 +1553,7 @@ pub fn Instances(comptime T: type) type {
             const name = instanceName(base, ordinal, &name_buf) orelse return null;
             self.slots.ensureUnusedCapacity(allocator, 1) catch return null;
             const slot = allocator.create(Slot) catch return null;
-            runStr("buffer-create", name);
+            runStr("buffer.create", name);
             self.opens += 1;
             slot.* = .{
                 .name_buf = undefined,
@@ -2039,7 +2039,7 @@ pub fn designationOpener(kind: []const u8, command: []const u8) bool {
 
 /// Open a designation — or an absolute path — through the ordinary `open`.
 pub fn openDesignation(target: []const u8) void {
-    runStr("open", target);
+    runStr("file.open", target);
 }
 
 /// Open a name as a person typed it — a designation, an absolute path, a
@@ -2049,7 +2049,7 @@ pub fn openDesignation(target: []const u8) void {
 /// directory itself: a second resolver is a second set of rules (`..`,
 /// `host:path`, a place with no local directory) to drift from the first.
 pub fn openTyped(name: []const u8) void {
-    runStr("open", name);
+    runStr("file.open", name);
 }
 
 /// The designation of a projection that is ABOUT a place — a status, a
@@ -2185,8 +2185,8 @@ pub fn clipboardHoldsRegister(clip: []const u8, own: []const u8, linewise: bool)
 // is a jump and which keys record. Travel and replay are commands:
 // `run("jump-back")`, `runStr("jump-forward", "3")`, `run("jumplist-pick")`,
 // `runStr("macro-record-start", "a")`, `run("macro-record-stop")`,
-// `run("macro-record-toggle")` (register `@`), `runStr2("macro-play", "a",
-// "3")`, `run("macro-play")` (the last one played or recorded).
+// `run("macro-record-toggle")` (register `@`), `runStr2("macro.play", "a",
+// "3")`, `run("macro.play")` (the last one played or recorded).
 
 /// Remember the caret as a jump (before a search, a goto, a big motion).
 /// Moving between entries is recorded by core already.

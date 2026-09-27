@@ -3,26 +3,26 @@
 //! `syntax` surface — `nodeAt`, `nodeEnclosing` (expand-to-scope), `query`
 //! (materialized captures) — none of which lets the TREE cross the membrane;
 //! only kinds and byte spans do. Selection uses the native `editor.setSelection`
-//! primitive. Grammar-agnostic: `ts-select-function` grows by node KIND, and
-//! `ts-query` runs a caller-supplied `.scm`, so nothing hardcodes a language.
+//! primitive. Grammar-agnostic: `ts.select-function` grows by node KIND, and
+//! `ts.query` runs a caller-supplied `.scm`, so nothing hardcodes a language.
 
 const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ts-node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
-    .{ .name = "ts-select-node", .arity = weft.Arity.each_extent, .call = selectNode, .summary = "select the syntax node under the cursor" },
-    .{ .name = "ts-expand-selection", .arity = weft.Arity.each_extent, .call = expandSelection, .summary = "grow the selection to the enclosing node" },
-    .{ .name = "ts-goto-parent", .arity = weft.Arity.each_extent, .call = gotoParent, .summary = "move to the enclosing node" },
-    .{ .name = "ts-select-function", .arity = weft.Arity.each_extent, .call = selectFunction, .summary = "select the enclosing function" },
-    .{ .name = "ts-select-class", .arity = weft.Arity.each_extent, .call = selectClass, .summary = "select the enclosing class" },
-    .{ .name = "ts-select-call", .arity = weft.Arity.each_extent, .call = selectCall, .summary = "select the enclosing call" },
-    .{ .name = "ts-select-block", .arity = weft.Arity.each_extent, .call = selectBlock, .summary = "select the enclosing block" },
-    .{ .name = "ts-select-comment", .arity = weft.Arity.each_extent, .call = selectComment, .summary = "select the enclosing comment" },
-    .{ .name = "ts-goto-first-child", .arity = weft.Arity.each_extent, .call = gotoFirstChild, .summary = "move to the first child node" },
-    .{ .name = "ts-select-child", .arity = weft.Arity.each_extent, .call = selectChild, .summary = "select the first child node" },
-    .{ .name = "ts-raise", .arity = weft.Arity.each_extent, .call = raise, .summary = "replace the enclosing node with this one" },
-    .{ .name = "ts-query", .call = queryCount, .arity = .whole, .summary = "count what a tree-sitter query matches here" },
+    .{ .name = "ts.node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
+    .{ .name = "ts.select-node", .arity = weft.Arity.each_extent, .call = selectNode, .summary = "select the syntax node under the cursor" },
+    .{ .name = "ts.expand-selection", .arity = weft.Arity.each_extent, .call = expandSelection, .summary = "grow the selection to the enclosing node" },
+    .{ .name = "ts.goto-parent", .arity = weft.Arity.each_extent, .call = gotoParent, .summary = "move to the enclosing node" },
+    .{ .name = "ts.select-function", .arity = weft.Arity.each_extent, .call = selectFunction, .summary = "select the enclosing function" },
+    .{ .name = "ts.select-class", .arity = weft.Arity.each_extent, .call = selectClass, .summary = "select the enclosing class" },
+    .{ .name = "ts.select-call", .arity = weft.Arity.each_extent, .call = selectCall, .summary = "select the enclosing call" },
+    .{ .name = "ts.select-block", .arity = weft.Arity.each_extent, .call = selectBlock, .summary = "select the enclosing block" },
+    .{ .name = "ts.select-comment", .arity = weft.Arity.each_extent, .call = selectComment, .summary = "select the enclosing comment" },
+    .{ .name = "ts.goto-first-child", .arity = weft.Arity.each_extent, .call = gotoFirstChild, .summary = "move to the first child node" },
+    .{ .name = "ts.select-child", .arity = weft.Arity.each_extent, .call = selectChild, .summary = "select the first child node" },
+    .{ .name = "ts.raise", .arity = weft.Arity.each_extent, .call = raise, .summary = "replace the enclosing node with this one" },
+    .{ .name = "ts.query", .call = queryCount, .arity = .whole, .summary = "count what a tree-sitter query matches here" },
     // Range-returning forms (like `textobjects`: an absolute span, not a
     // move). Each answers for THE selection, so dispatch maps them over
     // every selection a grammar has; none touches the selection itself.
@@ -41,9 +41,12 @@ fn sel() weft.Range {
     return weft.selection() orelse .{ .start = weft.cursor(), .end = weft.cursor() };
 }
 
+/// Say the grammar kind of the node under the cursor, and answer it (nil
+/// with no grammar or no node) for a caller reading the result.
 fn nodeKind() void {
     const n = weft.nodeAt(weft.cursor()) orelse return;
     weft.echo(n.kind);
+    weft.setResultStr(n.kind);
 }
 
 fn selectNode() void {

@@ -4,7 +4,7 @@
 //! directories are — from the tree the peer shares, name by name through the
 //! provider's own listings (`directory`) — and its bytes cross through the
 //! peer filesystem's export surfaces: `bytes` to read it, `mutate` to write
-//! it, each granted or not by the peer (`--share-fs`, `share-fs`).
+//! it, each granted or not by the peer (`--share-fs`, `collab.share-fs`).
 //!
 //! A save is the guarded test-and-set, over the portable filesystem plan:
 //! the new bytes land beside the file in a temp (`create_file`, exclusive),

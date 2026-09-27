@@ -5,8 +5,8 @@
 //! grammar's. These are the two things a grammar needs from core to make
 //! those choices: "remember where I am, this was a jump", and "is a macro
 //! recording" (for a status chip, and for vim's `q`, which stops a recording
-//! or starts one). Travel and replay are ordinary commands (`jump-back`,
-//! `macro-play`, …), reached through `wl_run*` like any other.
+//! or starts one). Travel and replay are ordinary commands (`jump.back`,
+//! `macro.play`, …), reached through `wl_run*` like any other.
 //!
 //! Ungated: both act on the dispatching head's own history, never on the
 //! desktop or another head's. One body each, shared with the JS plane.

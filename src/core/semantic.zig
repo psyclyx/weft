@@ -25,7 +25,7 @@ pub const Services = struct {
     named_transfers: [26]?semantic.transfer.OwnedItem = @splat(null),
     next_owner: u64 = 1,
     /// How the loaded grammar focuses a row that holds a field (doc/chrome.md
-    /// §5.2) — its declaration (`structural-focus`), `row` when it made none.
+    /// §5.2) — its declaration (`mode.set-structural-focus`), `row` when it made none.
     /// Read only where a focus lands (`scene_edit.land`).
     granularity: input.Granularity = .row,
 
@@ -872,7 +872,7 @@ pub const Services = struct {
             head.scene_selection.clear();
             return null;
         };
-        // Only a selection this head is making (`set-mark`, i.e. visual mode
+        // Only a selection this head is making (`selection.start`, i.e. visual mode
         // or C-space) turns a transfer into a text transfer. A provider's
         // resting field selection must not capture node-level actions such
         // as `SPC v y` on the focused row. A BEGUN edit (doc/chrome.md §5.2) is
