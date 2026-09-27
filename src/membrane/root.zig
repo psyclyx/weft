@@ -389,6 +389,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_context_set", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "publish (key, value) at a scope (0 entry, 1 place, 2 global) of the entry this call is about — or, at the place scope, of the place a `dir` designation names; an empty value retracts; 0 done, -1 refused (key not namespaced, value too long, bad scope), -2 another plugin holds the key there" },
     .{ .name = "wl_context_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the primary context's value for any key (builtin or published) into guest memory (clamped); returns the full length, -1 when unset" },
     .{ .name = "wl_context_changed", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the keys the on_context_changed being delivered reports as moved, one per line (clamped); returns the full length" },
+    .{ .name = "wl_places", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the places the workspace is working in — every open entry's place, then every tree a peer shares — one designation per line (clamped); returns the full length" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
@@ -602,9 +603,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 258;
+const max_import_count: usize = 259;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 278;
+const max_semantic_operation_count: usize = 279;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -759,7 +760,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 258), census.imports);
+    try t.expectEqual(@as(usize, 259), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 278), census.semantic_operations);
+    try t.expectEqual(@as(usize, 279), census.semantic_operations);
 }

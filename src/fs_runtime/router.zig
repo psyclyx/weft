@@ -253,6 +253,14 @@ pub const Router = struct {
         return if (designation.len == 0) null else designation;
     }
 
+    /// Every directory binding's designation, in no particular order —
+    /// borrowed for the call. What "which trees are reachable from here"
+    /// is read from (the `places` a workspace works in).
+    pub fn eachDirectoryDesignation(self: *const Router, context: anytype, comptime visit: fn (@TypeOf(context), []const u8) void) void {
+        var it = self.target_bindings.valueIterator();
+        while (it.next()) |binding| if (binding.designation.len != 0) visit(context, binding.designation);
+    }
+
     fn removeEntryBinding(self: *Router, key: u128) bool {
         const removed = self.entry_bindings.fetchRemove(key) orelse return false;
         var binding = removed.value;

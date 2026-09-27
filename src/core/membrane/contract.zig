@@ -298,6 +298,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_context_set", .handler = context_doors.hContextSet },
     .{ .name = "wl_context_get", .handler = context_doors.hContextGet },
     .{ .name = "wl_context_changed", .handler = context_doors.hContextChanged },
+    .{ .name = "wl_places", .handler = context_doors.hPlaces },
 
     // ── history.zig — the head's jumplist and macro recorder ──────────
     .{ .name = "wl_jump_push", .handler = history.hJumpPush },

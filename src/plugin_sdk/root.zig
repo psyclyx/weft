@@ -1170,6 +1170,17 @@ pub fn contextGet(key: []const u8) ?[]const u8 {
     return context_scratch[0..@min(@as(usize, @intCast(n)), context_scratch.len)];
 }
 
+var places_scratch: [8192]u8 = undefined;
+
+/// The places the workspace is working in — every open entry's place, then
+/// every tree a peer shares with us — each a designation (`weft://here/dir/…`,
+/// `weft://<peer>/dir/`). Borrowed until the next call.
+pub fn places() ContextKeys {
+    const n = e.wl_places(p(&places_scratch), places_scratch.len);
+    const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), places_scratch.len);
+    return .{ .it = std.mem.splitScalar(u8, places_scratch[0..len], '\n'), .empty = len == 0 };
+}
+
 var changed_scratch: [4096]u8 = undefined;
 
 /// The keys the `on_context_changed` being delivered reports as moved.

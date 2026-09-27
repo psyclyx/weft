@@ -111,6 +111,28 @@ pub fn hContextChanged(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     results[0] = @intCast(@min(out.items.len, @as(usize, std.math.maxInt(i32))));
 }
 
+/// `places(out, cap) -> len`: the places the workspace is working in
+/// (`context.Context.places`), one designation per line (clamped); returns
+/// the full length. A read of the workspace, like `wl_context_get`.
+pub fn hPlaces(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = 0;
+    const ctx = p.activeCtx();
+    const context = ctx.context orelse return;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(p.gpa);
+    context.places(p.gpa, ctx.buffers, &names) catch return;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(p.gpa);
+    for (names.items, 0..) |name, i| {
+        if (i > 0) out.append(p.gpa, '\n') catch return;
+        out.appendSlice(p.gpa, name) catch return;
+    }
+    const cap: usize = @intCast(@max(args[1], 0));
+    _ = caller.writeMemory(@intCast(args[0]), cap, out.items) catch return;
+    results[0] = @intCast(@min(out.items.len, @as(usize, std.math.maxInt(i32))));
+}
+
 /// Fire the context-changed event (`on_context_changed`) at one plugin: keys
 /// of the head's primary context just moved (`wl_context_changed` lists
 /// them). The caller (`app/application.zig`'s `notifyContextChanged`)

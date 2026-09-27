@@ -109,6 +109,38 @@ pub const Context = struct {
         };
     }
 
+    /// The places the workspace is working in (doc/model.md §2.4's
+    /// `places` projection): the place of every open entry, then every tree
+    /// a peer shares with us (a peer directory binding at its root), each by
+    /// its designation, once, in that order. Borrowed until the entries or
+    /// the bindings change.
+    pub fn places(self: *const Context, gpa: Allocator, buffers: *const Buffers, out: *std.ArrayList([]const u8)) Allocator.Error!void {
+        var it = buffers.iterator();
+        while (it.next()) |entry| try addPlace(gpa, out, self.placeName(entry.place));
+        const router = self.filesystems orelse return;
+        const Visit = struct {
+            gpa: Allocator,
+            out: *std.ArrayList([]const u8),
+            failed: bool = false,
+            fn one(v: *@This(), text: []const u8) void {
+                const d = durable.parse(text) orelse return;
+                if (d.authority != .peer or d.kind != .directory or !std.mem.eql(u8, std.mem.trim(u8, d.ref, "/"), "")) return;
+                addPlace(v.gpa, v.out, text) catch {
+                    v.failed = true;
+                };
+            }
+        };
+        var visit: Visit = .{ .gpa = gpa, .out = out };
+        router.eachDirectoryDesignation(&visit, Visit.one);
+        if (visit.failed) return error.OutOfMemory;
+    }
+
+    fn addPlace(gpa: Allocator, out: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
+        if (name.len == 0) return;
+        for (out.items) |have| if (std.mem.eql(u8, have, name)) return;
+        try out.append(gpa, name);
+    }
+
     /// The store's coordinates for `entry`: its generation (unique for the
     /// life of the process, so a closed entry's values can never be read by
     /// the entry that reuses its slot) and its place's designation.
