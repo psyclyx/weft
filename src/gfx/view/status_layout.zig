@@ -182,6 +182,41 @@ pub fn cut(buf: []u8, text: []const u8, cols: usize, end: Elide) []const u8 {
     return buf[0 .. kept.len + ellipsis.len];
 }
 
+/// A pane's title in `cols` cells, by the same rules as a status segment. A
+/// title reads `label: subject` (`designation.title`'s one formula) or is a
+/// bare subject; a subject that is a path keeps its END — the leaf that names
+/// it — behind `…`, and the label stays whole. When the label would leave the
+/// subject less than `min_elided`, or the title is prose, it is cut at its end
+/// instead. Never mid-glyph, never past `cols`. Borrows `buf`, which must
+/// hold `title` plus `…`; a shorter one gets a plain codepoint-safe prefix.
+pub fn fitTitle(buf: []u8, title: []const u8, cols: usize) []const u8 {
+    if (cells(title) <= cols) return title;
+    if (cols == 0) return title[0..0];
+    if (buf.len < title.len + ellipsis.len) return prefix(title, cols);
+    if (std.mem.indexOf(u8, title, ": ")) |sep| {
+        const label = title[0 .. sep + 2];
+        const label_cols = cells(label);
+        if (label_cols + min_elided <= cols) {
+            @memcpy(buf[0..label.len], label);
+            const subject = cut(buf[label.len..], title[label.len..], cols - label_cols, .start);
+            // Cut into `buf` right after the label — else the subject was
+            // not text to cut (bytes that are not UTF-8), and neither is this.
+            if (subject.ptr == buf[label.len..].ptr) return buf[0 .. label.len + subject.len];
+            return prefix(title, cols);
+        }
+        return cut(buf, title, cols, .end);
+    }
+    return cut(buf, title, cols, if (std.mem.indexOfScalar(u8, title, '/') != null) .start else .end);
+}
+
+/// The first `cols` cells of `text`, cut between codepoints.
+fn prefix(text: []const u8, cols: usize) []const u8 {
+    var it = (std.unicode.Utf8View.init(text) catch return text[0..@min(text.len, cols)]).iterator();
+    var at: usize = 0;
+    for (0..cols) |_| at += (it.nextCodepointSlice() orelse break).len;
+    return text[0..at];
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -307,4 +342,22 @@ test "status_layout: a cut is between codepoints, marked at the end it removed" 
     const tail = cut(&buf, "→→→→→→→→", 4, .start);
     try t.expectEqualStrings("…→→→", tail);
     try t.expect(std.unicode.utf8ValidateSlice(tail));
+}
+
+test "status_layout: a title keeps its label and its leaf — the path shortens from the left" {
+    var buf: [256]u8 = undefined;
+    const title = "files: /tmp/nix-shell-3f9a/weft-project/src/deeply";
+    try t.expectEqualStrings(title, fitTitle(&buf, title, 80));
+    try t.expectEqualStrings("files: …ject/src/deeply", fitTitle(&buf, title, 23));
+    // No label to keep: the whole title is the path, and keeps its end.
+    try t.expectEqualStrings("…/src/deeply", fitTitle(&buf, "/tmp/nix-shell-3f9a/src/deeply", 12));
+    // Too narrow to keep the label and a useful cut of the path: the title
+    // is prose, cut at its end.
+    try t.expectEqualStrings("files: /…", fitTitle(&buf, title, 9));
+    // Never mid-glyph, never past the room.
+    for (1..60) |w| {
+        const fitted = fitTitle(&buf, "files: ~/ünïcödé/→→→/leaf", w);
+        try t.expect(std.unicode.utf8ValidateSlice(fitted));
+        try t.expect(cells(fitted) <= w);
+    }
 }

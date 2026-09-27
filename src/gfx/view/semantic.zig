@@ -15,6 +15,7 @@ const data = @import("semantic_data.zig");
 const popup = @import("popup.zig");
 const chrome_mod = @import("chrome.zig");
 const menu_mod = @import("menu.zig");
+const status_layout = @import("status_layout.zig");
 
 const View = view.View;
 const Run = view.Run;
@@ -225,7 +226,11 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
     var hits: std.ArrayList(Hit) = .empty;
     var content = body;
     if (!hud.brand_mark and document.title.len != 0 and body.h >= 2 * v.line_h) {
-        try popup.propLine(v, scratch, runs, firstCells(document.title, @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w)), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
+        // Every scene's title, fitted by the status line's rules (doc/chrome.md
+        // §4.2): a path keeps its leaf behind `…`, nothing is cut mid-glyph.
+        const title_buf = try scratch.alloc(u8, document.title.len + status_layout.ellipsis.len);
+        const cols: usize = @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w);
+        try popup.propLine(v, scratch, runs, status_layout.fitTitle(title_buf, document.title, cols), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
         content.y += v.line_h;
         content.h -= v.line_h;
     }
