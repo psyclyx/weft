@@ -55,17 +55,19 @@ const chrome_tabs = [_]view_mod.Tab{
     .{ .name = "config.js", .active = false, .id = 6 },
 };
 const chrome_segs = [_]view_mod.ui_mesh.Seg{
-    .{ .text = " NORMAL ", .bg_override = .{ 0.3, 0.6, 0.3, 1 }, .gap_after = 1 },
-    .{ .text = "1/6", .gap_after = 1 },
-    .{ .text = "src/core/Document.zig", .command = "file.open" },
-    .{ .text = "E:2 W:5", .align_right = true, .command = "problems.open" },
+    .{ .text = "NORMAL", .bg_override = .{ 0.3, 0.6, 0.3, 1 }, .priority = 100 },
+    .{ .text = "main", .icon = "git-branch", .command = "git.status" },
+    .{ .text = "src/core/Document.zig", .compact = "Document.zig", .command = "file.open", .priority = 90, .elide = .start },
+    .{ .text = "●", .icon = "dot" },
+    .{ .text = "saving…", .bg_override = .{ 0.9, 0.7, 0.4, 1 } },
+    .{ .text = "E 2", .icon = "circle-x", .command = "problems.open" },
+    .{ .text = "Ln 12, Col 4", .compact = "12:4", .align_right = true, .priority = 85 },
+    .{ .text = "zig", .align_right = true },
 };
 const chrome_hud: view_mod.Hud = .{
     .mode = "normal",
     .tabs = &chrome_tabs,
     .statusline_segs = &chrome_segs,
-    .dirty = true,
-    .save_note = "saving…",
     .pane_border = .{ .left = true },
     .pointer = .{ .at = .{ 200, 16 }, .chrome = .{ .kind = .tab, .index = 1, .part = .close } },
 };

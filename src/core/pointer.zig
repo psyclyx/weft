@@ -80,6 +80,10 @@ pub const Chrome = struct {
     part: Part = .body,
     /// The entry a tab shows.
     entry: ?Buffers.Id = null,
+    /// The pane a status segment describes, when the status line it is on
+    /// is PRESENTED by another pane (a bar showing the primary context's
+    /// status): its command acts there, not in the pane it is drawn in.
+    acts_in: ?PaneRef = null,
     /// A segment's command, `name [argument]`, copied (the segment itself
     /// lives in last frame's arena). Empty: not clickable.
     command_buf: [max_command]u8 = undefined,
@@ -367,9 +371,12 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
 /// A click on the pane's chrome: a tab's body shows its entry, its close
 /// glyph closes it, and a status segment runs the command it declared. The
 /// pane is focused first, so a segment's command acts for the entry of the
-/// status line it sits in.
+/// status line it sits in — which, on a bar presenting another context's
+/// status, is that context's pane.
 fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
-    _ = focusHitPane(ctx);
+    if (chrome.acts_in) |pane| {
+        if (ctx.panes) |panes| _ = panes.focus(panes.context, ctx, pane);
+    } else _ = focusHitPane(ctx);
     switch (chrome.kind) {
         .tab => {
             const entry = chrome.entry orelse return ok;

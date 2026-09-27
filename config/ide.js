@@ -222,7 +222,7 @@ weft.bind("ide", "C-f", "find.open");
 weft.bind("ide", "C-h", "find.replace");
 weft.bind("ide", "F3", "find.next");
 weft.bind("ide", "S-F3", "find.prev");
-weft.bind("ide", "C-g", "ide.goto-line");
+weft.bind("ide", "C-g", "jump.line");
 
 // The language server, in source.
 weft.bind("ide", "F2", "plugin.code.rename");
@@ -264,5 +264,14 @@ weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
 bindWorkspace("C-j", "panel.toggle");
 bindWorkspace("C-grave", "terminal.open");
 bindWorkspace("C-S-m", "problems.open");
+
+// ── The status bar ───────────────────────────────────────────────────
+// One bar along the bottom of the window (config/statusbar.js), presenting
+// the editor's status: the place, git's branch, the problems counts and a
+// running build on the left; Ln/Col, the language and the plugins' chips on
+// the right. The panes — the editor, its splits, the sidebar — carry no
+// status line of their own. Last among the docked fragments, so it spans
+// the whole window, under the sidebar and the panel too.
+weft.use("statusbar");
 
 weft.echo("weft: ide.js loaded");

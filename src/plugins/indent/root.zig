@@ -6,7 +6,9 @@
 //! hardcoded for now (a shiftwidth/expandtab config comes with the same work that
 //! makes comment's token language-aware).
 
+const std = @import("std");
 const weft = @import("weft");
+const statusline = @import("weft_statusline");
 
 /// One indent level. Two spaces — the web/JS default and what the harness fixtures
 /// use. Dedent peels leading spaces up to this width, or a single leading tab.
@@ -79,6 +81,34 @@ fn opDedent() void {
     indentSpan(r.start, r.end, true);
 }
 
+// ── The indentation, on the status line (doc/chrome.md §4.3) ─────────────────
+//
+// What one indent step here is — this plugin's unit, the only indentation
+// weft knows — among the right-hand facts of a text entry.
+
+fn init() void {
+    // After the position and the selection count (45, 44), before the
+    // language (40).
+    statusline.bind(.{ .all = &.{.{ .posture = "text" }} }, .core, 43);
+}
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    const tabs = std.mem.indexOfScalar(u8, unit, '\t') != null;
+    var full: [24]u8 = undefined;
+    var short: [8]u8 = undefined;
+    statusline.tell(handle, &.{.{
+        .text = if (tabs) "Tabs" else std.fmt.bufPrint(&full, "Spaces: {d}", .{unit.len}) catch "Spaces",
+        .compact = if (tabs) "" else std.fmt.bufPrint(&short, "sp{d}", .{unit.len}) catch "",
+        .role = .muted,
+        .right = true,
+        .priority = 30,
+        .tooltip = "Indentation",
+    }});
+}
+
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
+    weft.exportCallback("on_slot_fire", &onSlotFire);
 }

@@ -37,7 +37,6 @@ const std = @import("std");
 const weft = @import("weft");
 
 const path_pick = 1;
-const line_pick = 2;
 
 /// The arity of a command that runs once per selection.
 const each = weft.Arity.each_extent;
@@ -624,20 +623,6 @@ fn openPath() void {
     weft.pickFreeText();
     weft.pickEnd();
 }
-/// C-g: go to a line by number.
-fn gotoLine() void {
-    weft.pickBegin("go to line", line_pick);
-    weft.pickFreeText();
-    weft.pickEnd();
-}
-
-/// Put one caret at the start of 1-based line `number`, clamped to the last,
-/// leaving a jump where it was.
-fn jumpToLine(number: usize) void {
-    weft.jumpPush();
-    _ = weft.setSelections(&.{caret(weft.lineStart(number))}, 0);
-}
-
 /// C-b: show or hide the docked viewport this config names (`weft.set("ide",
 /// "sidebar", …)`, default `sidebar`) through core's generic viewport door.
 fn toggleSidebar() void {
@@ -657,10 +642,6 @@ fn onPickAccept(pick_id: u32) void {
     if (trimmed.len == 0) return;
     switch (pick_id) {
         path_pick => weft.openTyped(trimmed),
-        line_pick => jumpToLine(std.fmt.parseInt(usize, trimmed, 10) catch {
-            weft.echo("go to line: not a line number");
-            return;
-        }),
         else => {},
     }
 }
@@ -715,7 +696,6 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide.target-line-start", .call = targetLineStart, .arity = each, .summary = "Answer the start of a selection's line.", .internal = true },
     .{ .name = "ide.target-transfer", .call = targetTransfer, .arity = each, .summary = "Answer the text a clipboard key moves for a selection.", .internal = true },
     .{ .name = "ide.open-path", .call = openPath, .arity = .whole, .summary = "Open a file by typing its path.", .label = "Open Path", .prompts = true, .menu = "File", .group = "open", .order = 2, .icon = "file" },
-    .{ .name = "ide.goto-line", .call = gotoLine, .arity = .whole, .summary = "Go to a line by its number.", .label = "Go to Line", .prompts = true, .menu = "Go", .group = "line", .order = 1 },
     .{ .name = "ide.toggle-sidebar", .call = toggleSidebar, .arity = .whole, .summary = "Show or hide the docked sidebar.", .label = "Toggle Sidebar", .menu = "View", .group = "panels", .order = 1, .icon = "sidebar", .toggle = "viewport.sidebar.shown" },
     .{ .name = "ide.add-next-match", .call = addNextMatch, .arity = .whole, .summary = "Select the word, then add the next occurrence of the selection.", .label = "Add Next Occurrence", .menu = "Selection", .group = "cursors", .order = 1 },
     .{ .name = "ide.select-all-matches", .call = selectAllMatches, .arity = .whole, .summary = "Select every occurrence of the selection.", .label = "Select All Occurrences", .menu = "Selection", .group = "cursors", .order = 2 },

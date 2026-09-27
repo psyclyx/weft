@@ -733,7 +733,7 @@ pub fn build(
         }
     }
 
-    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa });
+    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa, .of = hud.status_of });
     self.build_chrome = chrome.items;
     self.build_float = null;
 

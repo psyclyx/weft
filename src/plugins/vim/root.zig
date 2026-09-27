@@ -757,6 +757,16 @@ fn initExtra() void {
     // nobody wrote down is one nobody can change.
     weft.restingPosture(.text, "normal");
     weft.restingPosture(.structural, "normal");
+    // What each mode is called on the status line, as vim's own mode line
+    // says it. A mode left unnamed (a count, a register, a menu) shows the
+    // mode the entry rests in; `visual` is renamed V-LINE while it is
+    // linewise (`visualLine`).
+    weft.modeDisplay("normal", "NORMAL", .normal);
+    weft.modeDisplay("insert", "INSERT", .insert);
+    weft.modeDisplay("visual", "VISUAL", .select);
+    weft.modeDisplay("op-pending", "O-PENDING", .pending);
+    weft.modeDisplay("op-to", "O-PENDING", .pending);
+    weft.modeDisplay("replace-char", "REPLACE", .replace);
     // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
     weft.runStr("mode.set-structural-focus", "text");
     // The break-out chord capture can never take away (§10.4), retained in
@@ -1099,11 +1109,15 @@ fn yankVisual(s: weft.Range) void {
 
 fn visual() void { // v — charwise
     visual_linewise = false;
+    weft.modeDisplay("visual", "VISUAL", .select);
     weft.run("selection.start");
     weft.setMode("visual");
 }
 fn visualLine() void { // V — linewise
     visual_linewise = true;
+    // One `visual` mode, linewise by this plugin's own flag: its name on the
+    // status line follows the flag, as vim's `-- VISUAL LINE --` does.
+    weft.modeDisplay("visual", "V-LINE", .select);
     // Over a listing's rows a line IS a row: the range is rows, whatever
     // part of the row is focused.
     weft.run(if (weft.posture() == .text) "selection.start" else "selection.start-rows");

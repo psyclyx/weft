@@ -287,7 +287,7 @@ pub fn materializeViewports(
     view: *view_mod.View,
 ) bool {
     var dirty = false;
-    for (registry.list.items) |*decl| {
+    for (registry.list.items, 0..) |*decl, at| {
         const edge = decl.attrs.dock orelse continue;
         if (!decl.shown) {
             // Hidden: undock it through the ordinary close, which already
@@ -316,7 +316,16 @@ pub fn materializeViewports(
             // Dock showing what it showed last (or is being handed), never a
             // second view of the active document when there is one.
             const first = take orelse kept orelse buffers.active_id;
-            const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
+            // Inside every viewport declared after this one: the one declared
+            // last stays outermost (a window-wide bar), however late this one
+            // is shown.
+            var outer: [window_layout.max_panes]window_layout.PaneId = undefined;
+            var nouter: usize = 0;
+            for (registry.list.items[at + 1 ..]) |later| if (later.pane) |id| if (nouter < outer.len) {
+                outer[nouter] = id;
+                nouter += 1;
+            };
+            const panel = win_layout.dockWithin(edge, decl.extent, first, decl.attrs, outer[0..nouter]) catch continue;
             decl.pane = panel.leaf.id;
             // Something to show already: an entry kept across a hide stays
             // what it was, rather than being re-presented over.

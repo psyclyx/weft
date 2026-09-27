@@ -40,7 +40,7 @@ fn activeName(ed: *Editor) []const u8 {
 
 /// The entry the bottom panel shows, or null when it is not docked.
 fn panelEntry(ed: *Editor) ?*core.Buffers.Buffer {
-    const node = ed.win_layout.dockedPanel(.bottom) orelse return null;
+    const node = ed.viewportPane("panel") orelse return null;
     return ed.buffers.get(node.pane().buffer_id);
 }
 
@@ -101,7 +101,7 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
 
     // The panel starts hidden; C-S-m opens the list in it and focuses it.
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    try t.expect(ed.viewportPane("panel") == null);
     ed.press("C-S-m", "");
     ed.applyWindow();
     const shown = panelEntry(ed) orelse return error.PanelNotShown;
@@ -249,7 +249,7 @@ test "e2e/panels: C-` runs a line-mode shell in the panel, with its controls str
     // C-j hides the panel, and shows the same shell again.
     ed.press("C-j", "");
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    try t.expect(ed.viewportPane("panel") == null);
     ed.press("C-j", "");
     ed.applyWindow();
     try t.expectEqualStrings("*terminal*", (panelEntry(ed) orelse return error.PanelNotShown).name);
@@ -472,7 +472,7 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     // unrelated one is created into the freed slot.
     ed.press("C-j", "");
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    try t.expect(ed.viewportPane("panel") == null);
     _ = try core.command.run(ed.commands, ed.ctx, "buffer.switch", &.{.{ .integer = held }});
     ed.run("buffer.close-unmodified");
     try t.expect(ed.buffers.get(held) == null);

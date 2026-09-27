@@ -11,6 +11,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
+const statusline = @import("weft_statusline");
 
 /// Scratch for the shell command line built from a buffer slice (`run.line`),
 /// which borrows `weft`'s read scratch and so must be copied before use.
@@ -42,6 +43,8 @@ fn initExtra() void {
     // `*output*` is navigable: Return jumps to the stack frame or compile error
     // the focused row points at, j/k walk, q goes back.
     output.installMode("output", "run.visit-output");
+    // A running command on the status line, beside a running build (94).
+    statusline.bind(.{ .all = &.{} }, .core, 93);
 }
 
 // A shell, spelled out. `run` is the one consumer that genuinely wants one —
@@ -50,7 +53,19 @@ fn initExtra() void {
 // than a string that happens to reach a shell, and it is why every OTHER
 // consumer of this library no longer has a shell in its path at all.
 fn shell(line: []const u8) void {
-    output.show(&.{ "sh", "-c", line }, out_name, "output", .{ .want_err = true });
+    output.show(&.{ "sh", "-c", line }, out_name, "output", .{ .want_err = true, .running = .{ .key = running_key, .what = "run" } });
+}
+
+// ── A running command, on the status line (doc/chrome.md §4.3) ──────────────
+
+/// Said on the place a command started in while it runs (`output.Running`).
+const running_key = "run.running";
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    if (output.runningHere(running_key) == null) return statusline.tell(handle, &.{});
+    statusline.tell(handle, &.{.{ .text = "running…", .role = .accent, .priority = 55, .icon = "play", .tooltip = "A shell command is running" }});
 }
 
 /// Run the command line passed as arg 0; no-op if none was given.
@@ -68,4 +83,5 @@ fn runLine() void {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
+    weft.exportCallback("on_slot_fire", &onSlotFire);
 }

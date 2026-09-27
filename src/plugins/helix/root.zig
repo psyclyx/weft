@@ -862,6 +862,11 @@ fn initExtra() void {
     // (`enterInsert`), rather than resting somewhere its keys are dead.
     weft.restingPosture(.text, "helix-normal");
     weft.restingPosture(.structural, "helix-normal");
+    // Helix's own status-line names. A mode left unnamed (goto, match, a
+    // count) shows the mode the entry rests in.
+    weft.modeDisplay("helix-normal", "NOR", .normal);
+    weft.modeDisplay("helix-insert", "INS", .insert);
+    weft.modeDisplay("helix-select", "SEL", .select);
     // A listing row IS its name to a modal grammar: focusing it edits the
     // name, and `helix-normal` keeps every key (doc/chrome.md §5.2).
     weft.runStr("mode.set-structural-focus", "text");

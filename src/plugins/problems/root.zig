@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const statusline = @import("weft_statusline");
 const Node = weft.semantic.scene.Node;
 const NodeId = weft.semantic.scene.NodeId;
 
@@ -84,6 +85,8 @@ fn init() void {
     // the plugin.
     _ = weft.signalSubscribe(orDefault("signal", "diagnostics"));
     _ = weft.designationOpener("diagnostics", "problems.present");
+    // The counts on the status line, after git's branch (96).
+    statusline.bind(.{ .all = &.{} }, .core, 95);
 }
 
 /// `problems`: the list of the place this runs in, shown in the panel and
@@ -201,6 +204,59 @@ fn refresh() void {
 fn onSignal(id: i32) callconv(.c) void {
     _ = id;
     refresh();
+    recount();
+}
+
+// ── The counts, on the status line (doc/chrome.md §4.3) ─────────────────────
+//
+// How many errors and warnings the source reports — every row, as a status
+// bar counts them — as two segments with their icons, a click on either
+// opening the list. Counted when the signal says the rows moved (and once,
+// on the first ask), and published as `problems.count` (`<errors> <warnings>`)
+// so the status line asks again, and so a predicate can read it.
+
+const Counts = struct { errors: usize = 0, warnings: usize = 0 };
+var counts: ?Counts = null;
+
+fn recount() void {
+    var now: Counts = .{};
+    var lines = std.mem.splitScalar(u8, source(), '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, '\t');
+        _ = f.next() orelse continue; // path
+        _ = f.next() orelse continue; // line
+        _ = f.next() orelse continue; // column
+        const sev = f.next() orelse continue;
+        if (std.mem.eql(u8, sev, "error")) now.errors += 1;
+        if (std.mem.eql(u8, sev, "warning")) now.warnings += 1;
+    }
+    if (counts) |was| if (std.meta.eql(was, now)) return;
+    counts = now;
+    var buf: [48]u8 = undefined;
+    const said = std.fmt.bufPrint(&buf, "{d} {d}", .{ now.errors, now.warnings }) catch return;
+    weft.contextSet("problems.count", said, .global) catch {};
+}
+
+var count_text: [2][24]u8 = undefined;
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    if (counts == null) recount();
+    const c = counts orelse return statusline.tell(handle, &.{});
+    var segs: [2]statusline.Segment = undefined;
+    var n: usize = 0;
+    // `E 2`: the letter is the text styles' mark, and the icon stands in for
+    // it where a style draws icons.
+    if (c.errors > 0) {
+        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[0], "E {d}", .{c.errors}) catch "E", .role = .danger, .priority = 65, .icon = "circle-x", .command = "problems.open", .tooltip = "Errors — open Problems" };
+        n += 1;
+    }
+    if (c.warnings > 0) {
+        segs[n] = .{ .text = std.fmt.bufPrint(&count_text[1], "W {d}", .{c.warnings}) catch "W", .role = .warning, .priority = 64, .icon = "triangle-alert", .command = "problems.open", .tooltip = "Warnings — open Problems" };
+        n += 1;
+    }
+    statusline.tell(handle, segs[0..n]);
 }
 
 /// The row's color, as a `tone` the scene renderer knows.
@@ -317,4 +373,5 @@ comptime {
     weft.plugin(&cmds, .{ .init = init, .capabilities = &.{"designation/diagnostics"} }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
     weft.exportCallback("on_signal", &onSignal);
+    weft.exportCallback("on_slot_fire", &onSlotFire);
 }

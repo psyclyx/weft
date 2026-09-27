@@ -171,6 +171,22 @@ fn configOn(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) bool
     return std.mem.eql(u8, s, "on") or std.mem.eql(u8, s, "true");
 }
 
+/// Whether `weft.set(ns, key, …)` says exactly `value`.
+fn configIs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8, value: []const u8) bool {
+    const raw = (config orelse return false).get(ns, key) orelse return false;
+    return std.mem.eql(u8, core.framed.first(raw) orelse return false, value);
+}
+
+/// The pane the primary context is in (`Head.primary_focus`): the focused
+/// pane when it is an ordinary one, else the editor pane the head last
+/// focused — never a docked companion, whose focus moves no primary.
+fn primaryPaneOf(fx: *const FrameCtx, layout: *window_layout.Layout, focused: *window_layout.Node) u32 {
+    if (focused.pane().attrs.isPrimary()) return focused.pane().id;
+    if (fx.head.primary_focus) |pf| if (layout.paneById(pf.pane) != null) return pf.pane;
+    if (layout.primaryPane()) |p| return p.pane().id;
+    return focused.pane().id;
+}
+
 /// A pane's layers as its frame draws them: `DocLayers` snapshotted over the
 /// pane's window (`layers.Snapshot`), so nothing that runs after the frame's
 /// input is taken can move what the pane draws.
@@ -361,32 +377,61 @@ pub fn answerRequestsFor(fx: *const FrameCtx, answers: *answers_mod.Answers) !bo
     }
     return true;
 }
-/// What a TEXT entry reports on the status line. An entry that holds no text
-/// has nothing to save, realize, or diagnose.
-const DocStatus = struct {
-    dirty: bool = false,
-    save_failed: bool = false,
-    save_note: ?[]const u8 = null,
-    unfetched_pct: ?u8 = null,
-    peers: usize = 0,
-    cursor_diag: ?[]const u8 = null,
+const StatuslineArgs = view_mod.ui_mesh.StatuslineArgs;
 
-    fn of(gpa: std.mem.Allocator, editor: ?*core.Editor, doc_layers: DocLayers) DocStatus {
-        const ed = editor orelse return .{};
-        return .{
-            .dirty = ed.isDirty(gpa) catch true,
-            .save_failed = ed.save_state == .failed,
-            .save_note = switch (ed.save_state) {
-                .saving => "saving…",
-                .stale => "save stale",
-                else => null,
-            },
-            .unfetched_pct = unfetchedPct(ed),
-            .peers = if (doc_layers.presence) |pl| pl.spanCount() else 0,
-            .cursor_diag = cursorDiag(doc_layers.diagnostics, ed.cursorOffset()),
-        };
-    }
-};
+/// What a TEXT entry reports on its status line. An entry that holds no text
+/// has nothing to save, realize, or diagnose.
+fn docStatus(gpa: std.mem.Allocator, editor: ?*core.Editor, doc_layers: DocLayers) StatuslineArgs.Doc {
+    const ed = editor orelse return .{};
+    return .{
+        .dirty = ed.isDirty(gpa) catch true,
+        .save_failed = ed.save_state == .failed,
+        .save_note = switch (ed.save_state) {
+            .saving => "saving…",
+            .stale => "save stale",
+            else => null,
+        },
+        .unfetched_pct = unfetchedPct(ed),
+        .peers = if (doc_layers.presence) |pl| pl.spanCount() else 0,
+    };
+}
+
+/// The chip a pane's mode shows: what the grammar calls the mode — or, for a
+/// mode it left unnamed (a count, a menu, the picker), what it calls the
+/// mode the entry rests in, so the chip holds still through a chord. A
+/// grammar that names no mode (a modeless one) shows no chip.
+fn modeChip(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, mode: []const u8) ?core.Keymap.ModeDisplay {
+    return fx.keymap.modeDisplay(mode) orelse fx.keymap.modeDisplay(core.intent.restingModeOf(fx.buffers, buffer));
+}
+
+/// The place an entry is in, by the name a person knows it by: a project
+/// here by its directory, a peer's tree by the peer, a shell's by the shell.
+fn placeOf(fx: *const FrameCtx, buffer: *core.Buffers.Buffer) ?StatuslineArgs.Place {
+    const context = fx.cmd_ctx.context orelse return null;
+    const text = context.placeName(buffer.place);
+    const d = semantic.durable.parse(text) orelse return null;
+    if (d.kind != .directory) return null;
+    const dir = std.fs.path.basename(std.mem.trimEnd(u8, d.ref, "/"));
+    return switch (d.authority) {
+        .here => .{ .name = if (dir.len > 0) dir else "/", .icon = "folder" },
+        .peer => .{ .name = core.designation.PeerNames.of(fx.cmd_ctx.peer_names, text) orelse (if (dir.len > 0) dir else "peer"), .icon = "users" },
+        .shell => |id| .{ .name = if (dir.len > 0) dir else id, .icon = "terminal" },
+    };
+}
+
+/// Where the caret is in `text`: its 1-based line and column (counted in
+/// characters), and how many selections there are.
+fn caretOf(text: *const core.TextSnapshot) StatuslineArgs.Caret {
+    const rope = text.text();
+    const off = @min(text.cursorOffset(), rope.byteLen());
+    const row = rope.offsetToPoint(off).row;
+    const start = rope.lineRange(row).start;
+    var buf: [1024]u8 = undefined;
+    const n = @min(off - start, buf.len);
+    rope.copyRange(buf[0..n], .{ .start = start, .end = start + n });
+    const chars = std.unicode.utf8CountCodepoints(buf[0..n]) catch n;
+    return .{ .line = row + 1, .col = chars + (off - start - n) + 1, .selections = text.selectionCount() };
+}
 
 /// Share of a partial checkout still unfetched, for the realization chip.
 fn unfetchedPct(editor: *core.Editor) ?u8 {
@@ -685,10 +730,35 @@ pub const FrameBuilder = struct {
         hud: view_mod.Hud,
         focused: bool,
         facts: core.facts.Facts,
-        /// The focused pane's extra status inputs.
-        buffer_pos: ?[]const u8 = null,
-        link: ?[]const u8 = null,
+        /// What the head says on the status line (its messages, its
+        /// connection): only the focused pane's line carries it.
+        head: ?StatuslineArgs.Head = null,
     };
+
+    /// The status segments of the context `buffer` is in, shown by `pane`
+    /// (`focused` when it is the head's): core's providers over what the
+    /// frame knows of the entry — its mode, place, path, text — and the
+    /// answers the plugins gave for it, with the question asked after the
+    /// frame when none of them is to this one.
+    fn statusOf(self: *FrameBuilder, fx: *const FrameCtx, arena: std.mem.Allocator, buffer: *core.Buffers.Buffer, pane: u32, facts: core.facts.Facts, focused: bool, text: ?*const core.TextSnapshot, head: ?StatuslineArgs.Head) ![]const view_mod.ui_mesh.Seg {
+        const ed = buffer.textEditor();
+        const name = if (ed) |e| e.backingPath() orelse buffer.name else buffer.name;
+        const subject = answers_mod.subjectOf(buffer);
+        var args: StatuslineArgs = .{
+            .facts = facts,
+            .theme = &self.view.theme,
+            .mode = modeChip(fx, buffer, facts.mode),
+            .place = placeOf(fx, buffer),
+            .file = if (ed) |e| (if (e.backingPath()) |p| core.designation.placeRelative(buffer, fx.cmd_ctx.realizer, p, try arena.alloc(u8, core.designation.max_len)) else name) else name,
+            .doc = docStatus(fx.gpa, ed, DocLayers.of(arena, fx.caps, ed)),
+            .caret = if (text) |tx| caretOf(tx) else null,
+            .head = head,
+            .plugin_answers = if (self.answers.status(pane, subject)) |e| e.answer.status else &.{},
+        };
+        const segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena, &args);
+        if (args.plugin_reached) wantStatus(fx, &self.answers, pane, subject, buffer, facts, focused);
+        return segs;
+    }
 
     /// Take one pane's input: settle its scroll around its caret, prepare its
     /// per-byte inputs over the window that scroll shows, snapshot its text
@@ -733,17 +803,8 @@ pub const FrameBuilder = struct {
         // Every answer this pane draws or asks for is about its subject: a
         // pane that just moved to another entry draws none of the last one's.
         const subject = answers_mod.subjectOf(spec.buffer);
-        var status_args: view_mod.ui_mesh.StatuslineArgs = .{
-            .facts = spec.facts,
-            .file = if (ed) |e| (if (e.backingPath()) |p| core.designation.placeRelative(spec.buffer, fx.cmd_ctx.realizer, p, try arena.alloc(u8, core.designation.max_len)) else name) else name,
-            .buffer_pos = spec.buffer_pos,
-            .diag_layer = live.diagnostics,
-            .link = spec.link,
-            .theme = &self.view.theme,
-            .plugin_answers = if (self.answers.status(spec.pane, subject)) |e| e.answer.status else &.{},
-        };
-        hud.statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena, &status_args);
-        if (status_args.plugin_reached) wantStatus(fx, &self.answers, spec.pane, subject, spec.buffer, spec.facts, spec.focused);
+        // A pane with no status line of its own asks nothing for one.
+        if (hud.status_line) hud.statusline_segs = try self.statusOf(fx, arena, spec.buffer, spec.pane, spec.facts, spec.focused, if (text) |*tx| tx else null, spec.head);
         hud.gutter = try gutterFrame(arena, fx, &self.answers, spec.pane, spec.buffer, spec.facts, layers.diagnostics, bpLines(arena, fx.caps, ed));
 
         try input.panes.append(arena, .{
@@ -817,7 +878,6 @@ pub const FrameBuilder = struct {
     /// caret popup, the published highlight) happens here, BEFORE anything is
     /// drawn; nothing here calls a guest.
     pub fn capture(self: *FrameBuilder, fx: *const FrameCtx, act: Active, input: *FrameInput) !void {
-        const gpa = fx.gpa;
         const editor = act.editor;
         const abuf = act.abuf;
         const fb = act.fb;
@@ -831,7 +891,7 @@ pub const FrameBuilder = struct {
         input.world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
         const doc_layers = DocLayers.of(arena, fx.caps, editor);
-        const doc_status = DocStatus.of(gpa, editor, doc_layers);
+        const cursor_diag = if (editor) |ed| cursorDiag(doc_layers.diagnostics, ed.cursorOffset()) else null;
 
         var pos_buf: [24]u8 = undefined;
         const buffer_pos = blk: {
@@ -974,25 +1034,28 @@ pub const FrameBuilder = struct {
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
             .row_focus = rowFocused(fx, abuf, cursor_mode),
-            .dirty = doc_status.dirty,
-            .save_failed = doc_status.save_failed,
-            .backing = backing_chip,
             .brand_mark = std.mem.eql(u8, abuf.tool, "dashboard"),
-            .save_note = doc_status.save_note,
-            .unfetched_pct = doc_status.unfetched_pct,
-            .peers = doc_status.peers,
-            .echo = if (fx.head.echo.items.len > 0) try arena.dupe(u8, fx.head.echo.items) else null,
-            .plugin_status = if (fx.buffers.status.get()) |s| try arena.dupe(u8, s) else null,
             // Rendering P2: the picker's scene already went into
             // `hud.surfaces` (`pick_surface`, above) — this field is dead in
             // production; see `View.build`'s doc.
             .pick = null,
+        };
+        // What the head says on a status line: its messages and its
+        // connection, and where the active entry stands among the open ones.
+        const head_status: StatuslineArgs.Head = .{
+            .buffer_pos = buffer_pos,
+            .backing = backing_chip,
+            .link = link_note,
+            .echo = if (fx.head.echo.items.len > 0) try arena.dupe(u8, fx.head.echo.items) else cursor_diag,
+            .feed = if (fx.buffers.status.get()) |s| try arena.dupe(u8, s) else null,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));
             } else null,
-            .cursor_diag = doc_status.cursor_diag,
         };
+        // Whether panes carry status lines of their own: a config that shows
+        // status in one bar instead (config/statusbar.js) turns them off.
+        const pane_status = !configIs(fx.config, "editor", "pane-status", "off");
 
         const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
         // Carve the window-bottom dock off the window FIRST, so the panes lay
@@ -1019,6 +1082,10 @@ pub const FrameBuilder = struct {
 
         var foc_rect = frame_rect;
         var foc_border: region.Edges = .{};
+        // The panes that PRESENT a context's status rather than an entry of
+        // their own: captured last, once the context they present has been.
+        var bars: [window_layout.max_panes]window_layout.Slot = undefined;
+        var nbars: usize = 0;
         for (slots[0..nslots]) |slot| {
             if (slot.focused) {
                 foc_rect = slot.rect;
@@ -1026,9 +1093,14 @@ pub const FrameBuilder = struct {
                 continue; // the focused pane is captured last, below
             }
             const ob = fx.buffers.get(slot.pane.buffer_id) orelse continue;
-            // A peeked pane: mode + file on its status line (no buffer
-            // position/link — a peeked pane never showed those), its own
-            // diagnostics count, gutter, syntax, markdown and tool colors.
+            if (core.status_projection.refOf(ob) != null) {
+                bars[nbars] = slot;
+                nbars += 1;
+                continue;
+            }
+            // A peeked pane: its own mode, path, position and plugin
+            // segments on its status line (the head's messages are the
+            // focused pane's), its own gutter, syntax, markdown and tool colors.
             const other_facts = paneFacts(fx, ob, slot.pane.id);
             try self.capturePane(fx, input, .{
                 .buffer = ob,
@@ -1040,7 +1112,7 @@ pub const FrameBuilder = struct {
                 .hud = .{
                     .mode = other_facts.mode,
                     .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
-                    .status_line = slot.pane.attrs.status_line,
+                    .status_line = slot.pane.attrs.status_line and pane_status,
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
                     .cursor_on = false, // the caret belongs to the focused pane
@@ -1056,7 +1128,7 @@ pub const FrameBuilder = struct {
         fhud.pane_border = foc_border;
         fhud.float_bounds = frame_rect;
         if (tabs_pane != focused.pane().id) fhud.tabs = null;
-        fhud.status_line = focused.pane().attrs.status_line;
+        fhud.status_line = focused.pane().attrs.status_line and pane_status;
         try self.capturePane(fx, input, .{
             .buffer = abuf,
             .pane = focused.pane().id,
@@ -1066,9 +1138,46 @@ pub const FrameBuilder = struct {
             .focused = true,
             .facts = paneFacts(fx, abuf, fx.head.focused_pane),
             .hud = fhud,
-            .buffer_pos = buffer_pos,
-            .link = link_note,
+            .head = head_status,
         });
+
+        // Each status bar: the status of the context it presents, drawn on
+        // its one row. Inserted before the focused pane, which is drawn last
+        // (the view's geometry map ends on it).
+        for (bars[0..nbars]) |slot| {
+            const ob = fx.buffers.get(slot.pane.buffer_id).?;
+            const ref = core.status_projection.refOf(ob).?;
+            const of: u32 = switch (ref) {
+                .active => focused.pane().id,
+                .primary => primaryPaneOf(fx, &self.win_layout, focused),
+            };
+            const subject = for (input.panes.items) |*p| {
+                if (p.pane == of) break p;
+            } else continue;
+            const buffer = fx.buffers.resolve(subject.entry) orelse continue;
+            const is_focused = of == focused.pane().id;
+            const segs = try self.statusOf(fx, arena, buffer, of, if (is_focused) paneFacts(fx, buffer, fx.head.focused_pane) else paneFacts(fx, buffer, of), is_focused, if (subject.text) |*tx| tx else null, head_status);
+            try input.panes.insert(arena, input.panes.items.len - 1, .{
+                .pane = slot.pane.id,
+                .entry = ob.ref(),
+                .subject = answers_mod.subjectOf(ob),
+                .rect = slot.rect,
+                .top_row = 0,
+                .top_row_at = &slot.pane.top_row,
+                .text = null,
+                .hud = .{
+                    .mode = "",
+                    .status_line = true,
+                    .status_of = of,
+                    .statusline_segs = segs,
+                    .cursor_on = false,
+                    .tooltips = false,
+                    .pane_border = slot.border,
+                    .pointer = pointerIn(fx, slot.pane.id),
+                },
+                .focused = false,
+            });
+        }
     }
 
     /// Draw a frame's input into `built_panes`: one `View.build` per pane, in

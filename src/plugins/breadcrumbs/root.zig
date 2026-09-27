@@ -86,9 +86,12 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     for (symbols[0..symbol_count]) |s| {
         if (n >= max_crumbs) break;
         if (q.caret < s.start or q.caret >= s.end) continue;
-        const text = std.fmt.bufPrint(&text_buf[n], " › {s}", .{nameOf(s)}) catch continue;
+        const text = std.fmt.bufPrint(&text_buf[n], "› {s}", .{nameOf(s)}) catch continue;
         const command = std.fmt.bufPrint(&command_buf[n], "breadcrumbs.jump {d}", .{s.start}) catch continue;
-        segs[n] = .{ .text = text, .role = if (n == 0) .muted else .accent, .command = command };
+        // A trail is worth less room than the path it hangs off, and its
+        // outer crumbs less than the one the caret is in: on a short line
+        // they go outermost first.
+        segs[n] = .{ .text = text, .role = if (n == 0) .muted else .accent, .command = command, .priority = @intCast(20 + n), .tooltip = nameOf(s) };
         n += 1;
     }
     statusline.tell(handle, segs[0..n]);

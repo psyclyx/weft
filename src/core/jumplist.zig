@@ -448,6 +448,44 @@ fn pickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     gpa.destroy(keys);
 }
 
+/// `jump.line [n]`: the caret to the start of line `n` (1-based, held to
+/// the last line), leaving a jump where it was; with no `n`, ask for one.
+/// Core's, so every grammar has it — it is what a click on the status
+/// line's position runs.
+fn cJumpLine(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+    _ = data;
+    const ed = (ctx.entry() orelse return .nil).textEditor() orelse {
+        say(ctx, "go to line: this entry holds no text");
+        return .nil;
+    };
+    if (args.len > 0 and args[0] != .nil) {
+        const n = countArg(args, 0) catch {
+            say(ctx, "go to line: a line number");
+            return .nil;
+        };
+        try goToLine(ctx, ed, n);
+        return .nil;
+    }
+    try ctx.head.pick.openWith(ctx, "go to line", &.{}, .{ .handler = lineAccept }, .{ .allow_free_text = true });
+    return .nil;
+}
+
+fn lineAccept(ctx: *Context, data: ?*anyopaque, outcome: pick_types.Outcome) anyerror!void {
+    _ = data;
+    const text = std.mem.trim(u8, outcome.text() orelse return, " \t");
+    const n = std.fmt.parseInt(usize, text, 10) catch return say(ctx, "go to line: a line number");
+    const ed = (ctx.entry() orelse return).textEditor() orelse return;
+    try goToLine(ctx, ed, n);
+}
+
+fn goToLine(ctx: *Context, ed: *@import("Editor.zig"), n: usize) !void {
+    try pushHere(&ctx.head.jumps, ctx.gpa, ctx.buffers);
+    const rope = ed.text();
+    const row = @min(n -| 1, rope.lineCount() -| 1);
+    ed.clearSelection();
+    ed.placeCursor(rope.lineRange(row).start);
+}
+
 const count_arg: []const command.ArgSpec = &.{.{ .name = "count", .type = .nil, .optional = true }};
 
 const table = [_]command.Command{
@@ -455,6 +493,7 @@ const table = [_]command.Command{
     .{ .name = "jump.forward", .summary = "Go forward again along the jumps you went back through.", .args = count_arg, .handler = travelCmd(.forward), .meta = .{ .label = "Forward", .menu = "Go", .group = "history", .order = 20, .icon = "arrow-right" } },
     .{ .name = "jump.push", .summary = "Remember the caret's position as a jump.", .args = &.{}, .handler = cJumpPush, .meta = .{ .label = "Remember Position" } },
     .{ .name = "jump.pick", .summary = "Pick a position from the jumplist and go there.", .args = &.{}, .handler = cJumplistPick, .meta = .{ .label = "Jump to Position", .menu = "Go", .group = "history", .order = 30, .icon = "history", .prompts = true } },
+    .{ .name = "jump.line", .summary = "Go to a line by its number.", .args = &.{.{ .name = "line", .type = .nil, .optional = true }}, .handler = cJumpLine, .meta = .{ .label = "Go to Line", .menu = "Go", .group = "line", .order = 1, .prompts = true } },
 };
 
 pub fn install(gpa: Allocator, commands: *command.Commands) !void {

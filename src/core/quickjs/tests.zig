@@ -1417,7 +1417,7 @@ test "quickjs: every shipped example config evals without a JS error" {
     const paths = [_][]const u8{
         "config/config.js",   "config/helix.js",   "config/ide.js",
         "config/defaults.js", "config/sidebar.js", "config/semantic.js",
-        "config/panel.js",    "config/toolbar.js",
+        "config/panel.js",    "config/toolbar.js", "config/statusbar.js",
     };
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();

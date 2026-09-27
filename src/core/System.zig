@@ -295,6 +295,9 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // plugin answers with. What a cell says (a line number, a mark) is the
     // plugin's.
     try @import("gutter.zig").declare(&self.container);
+    // And the status line's, for the same reason: what a segment says is the
+    // plugin's, its shape the frame's to decode.
+    try @import("status_segment.zig").declare(&self.container);
     // How a projection ROLE reads, as bindings rather than a switch — so a
     // theme restyles a diff, or styles a role core never heard of, the same
     // way anything else overrides anything else.
@@ -307,6 +310,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     errdefer self.intent.deinit(gpa);
     try self.intent.attachActions(gpa, &self.actions);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
+    // A context's status is a projection core produces itself.
+    try @import("status_projection.zig").install(gpa, &self.commands, &self.designations);
     return self;
 }
 

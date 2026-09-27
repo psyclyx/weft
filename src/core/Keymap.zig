@@ -103,6 +103,38 @@ group_names: std.StringArrayHashMapUnmanaged(GroupEntry) = .empty,
 /// `normal-source` in a document, helix says `helix-normal` binds through
 /// `helix-source`. Core pairs the facet with the mode and names neither.
 variants: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// mode → what a person calls it on the status line (`NORMAL`, `INS`), and
+/// its tone. The GRAMMAR's declaration (`setModeDisplay`): a mode no grammar
+/// named has no chip, so a modeless grammar shows none and no internal mode
+/// id (`ide-structural`) ever reaches the screen.
+displays: std.StringArrayHashMapUnmanaged(ModeDisplay) = .empty,
+
+/// What kind of state a mode is, for its chip's colour — the theme maps
+/// each to a colour (`Theme.modeChipColor`). Declared with the display name;
+/// never read off the mode's spelling.
+pub const ModeTone = enum(u32) {
+    /// At rest: keys are commands (vim's normal, helix's NOR).
+    normal = 0,
+    /// Typing inserts.
+    insert = 1,
+    /// A selection is being made or extended.
+    select = 2,
+    /// Typing replaces.
+    replace = 3,
+    /// Waiting for more keys: an operator, a menu.
+    pending = 4,
+
+    pub fn fromWire(v: u32) ModeTone {
+        if (v > @intFromEnum(ModeTone.pending)) return .normal;
+        return @enumFromInt(v);
+    }
+};
+
+/// A mode's name on the status line and its tone.
+pub const ModeDisplay = struct {
+    name: []const u8,
+    tone: ModeTone = .normal,
+};
 
 pub const empty: Keymap = .{};
 
@@ -140,7 +172,42 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v);
     }
     self.variants.deinit(gpa);
+    for (self.displays.keys(), self.displays.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v.name);
+    }
+    self.displays.deinit(gpa);
     self.* = .{};
+}
+
+/// DECLARE what `mode` is called on the status line, and its tone. The last
+/// declaration wins; an empty `name` withdraws it (the mode shows no chip).
+pub fn setModeDisplay(self: *Keymap, gpa: Allocator, mode: []const u8, name: []const u8, tone: ModeTone) Allocator.Error!void {
+    if (name.len == 0) {
+        if (self.displays.fetchSwapRemove(mode)) |kv| {
+            gpa.free(kv.key);
+            gpa.free(kv.value.name);
+        }
+        return;
+    }
+    const owned = try gpa.dupe(u8, name);
+    errdefer gpa.free(owned);
+    const gop = try self.displays.getOrPut(gpa, mode);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.name);
+    } else {
+        gop.key_ptr.* = gpa.dupe(u8, mode) catch |err| {
+            self.displays.swapRemoveAt(gop.index);
+            return err;
+        };
+    }
+    gop.value_ptr.* = .{ .name = owned, .tone = tone };
+}
+
+/// What `mode` is called on the status line, or null when no grammar named
+/// it. Borrowed until the next declaration for `mode`.
+pub fn modeDisplay(self: *const Keymap, mode: []const u8) ?ModeDisplay {
+    return self.displays.get(mode);
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
@@ -1192,4 +1259,25 @@ test "keymap: an arm list is stored whole, in authored order; a plain bind is it
     // A lower tier cannot shadow it.
     try km.bindArms(gpa, "normal", "Return", &.{"std.target.activate"}, prio_core, "core");
     try t.expectEqualStrings("edit.insert-newline", km.lookup("normal", "Return").?);
+}
+
+test "keymap: a mode's status-line name is the grammar's declaration — undeclared is none, and inheritance does not lend one" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.setFallback(gpa, "visual", "normal");
+    try km.setModeDisplay(gpa, "normal", "NORMAL", .normal);
+    try t.expectEqualStrings("NORMAL", km.modeDisplay("normal").?.name);
+    // A fallback lends bindings, never a name: `visual` said nothing.
+    try t.expect(km.modeDisplay("visual") == null);
+    try km.setModeDisplay(gpa, "visual", "VISUAL", .select);
+    try t.expectEqual(ModeTone.select, km.modeDisplay("visual").?.tone);
+    // Redeclared, then withdrawn.
+    try km.setModeDisplay(gpa, "normal", "NOR", .normal);
+    try t.expectEqualStrings("NOR", km.modeDisplay("normal").?.name);
+    try km.setModeDisplay(gpa, "normal", "", .normal);
+    try t.expect(km.modeDisplay("normal") == null);
+    // An unknown tone on the wire is the resting one, not a trap.
+    try t.expectEqual(ModeTone.normal, ModeTone.fromWire(99));
 }

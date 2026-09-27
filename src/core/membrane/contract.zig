@@ -181,6 +181,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_posture", .handler = keymap.hPosture },
     .{ .name = "wl_declare_posture", .handler = keymap.hDeclarePosture },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
+    .{ .name = "wl_mode_display", .handler = keymap.hModeDisplay },
     .{ .name = "wl_provide", .handler = keymap.hProvide },
 
     // ── commands.zig — register/run/introspect ──────────────────────────

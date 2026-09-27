@@ -359,6 +359,23 @@ pub const Layout = struct {
         buffer_id: core.Buffers.Id,
         attrs: core.viewport.Attrs,
     ) !*Node {
+        return self.dockWithin(edge, extent, buffer_id, attrs, &.{});
+    }
+
+    /// `dock`, but INSIDE the docks whose panels are `outer`: the new panel
+    /// takes its extent from what they leave, so they stay outermost. How a
+    /// viewport declared earlier keeps its place inside one declared later
+    /// whatever order they are shown in — a panel shown on demand docks
+    /// above a window-wide bar, not under it. Only the run of `outer` docks
+    /// at the root is passed through; nothing existing moves.
+    pub fn dockWithin(
+        self: *Layout,
+        edge: core.viewport.Edge,
+        extent: core.viewport.Extent,
+        buffer_id: core.Buffers.Id,
+        attrs: core.viewport.Attrs,
+        outer: []const PaneId,
+    ) !*Node {
         const panel = try self.gpa.create(Node);
         errdefer self.gpa.destroy(panel);
         const node = try self.gpa.create(Node);
@@ -367,8 +384,10 @@ pub const Layout = struct {
         var docked = attrs;
         docked.dock = edge; // the tree and the attributes cannot disagree
         panel.* = .{ .leaf = .{ .id = id, .buffer_id = buffer_id, .attrs = docked } };
-        node.* = .{ .dock = .{ .edge = edge, .extent = extent, .panel = panel, .rest = self.root } };
-        self.root = node;
+        var at: **Node = &self.root;
+        while (at.*.* == .dock and std.mem.indexOfScalar(PaneId, outer, at.*.dock.panel.leaf.id) != null) at = &at.*.dock.rest;
+        node.* = .{ .dock = .{ .edge = edge, .extent = extent, .panel = panel, .rest = at.* } };
+        at.* = node;
         return panel;
     }
 

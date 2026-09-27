@@ -90,21 +90,25 @@ pub fn roleColor(self: *const Theme, role: core.surface.Role) [4]f32 {
         .effect => self.md_link,
         .muted => self.status,
         .annotation => self.syn_comment, // a dimmed side note (completion kind/detail)
+        .warning => self.diag_warn,
+        .danger => self.diag_error,
         else => self.foreground, // .normal, .leaf, unknown
     };
 }
 
-/// Background color for the status-line mode chip, keyed by mode family so
-/// the editor's current state reads at a glance (green normal, blue insert,
-/// purple visual/select, amber operator/menu).
-pub fn modeChipColor(self: *const Theme, mode: []const u8) [4]f32 {
-    if (std.mem.startsWith(u8, mode, "insert")) return self.syn_function;
-    if (std.mem.startsWith(u8, mode, "visual") or std.mem.startsWith(u8, mode, "select")) return self.syn_keyword;
-    if (std.mem.startsWith(u8, mode, "normal")) return self.accent;
-    if (std.mem.startsWith(u8, mode, "op") or std.mem.startsWith(u8, mode, "leader") or
-        std.mem.startsWith(u8, mode, "menu") or std.mem.startsWith(u8, mode, "pick"))
-        return self.diag_warn;
-    return self.status;
+/// Background color for the status-line mode chip: the theme's table from a
+/// mode's TONE — which the grammar declares with the mode's name
+/// (`Keymap.ModeTone`) — to a palette colour, so the state reads at a glance
+/// (green at rest, blue inserting, purple selecting, red replacing, amber
+/// waiting for more keys). Nothing here reads a mode's spelling.
+pub fn modeChipColor(self: *const Theme, tone: core.Keymap.ModeTone) [4]f32 {
+    return switch (tone) {
+        .normal => self.accent,
+        .insert => self.syn_function,
+        .select => self.syn_keyword,
+        .replace => self.diag_error,
+        .pending => self.diag_warn,
+    };
 }
 
 pub fn classColor(self: *const Theme, class: HighlightClass) [4]f32 {

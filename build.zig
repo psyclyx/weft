@@ -456,15 +456,15 @@ const guests = [_]Guest{
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{ .ex, .regex } },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
     .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
-    .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
+    .{ .name = "indent", .import = "guest_indent_wasm", .install = true, .libraries = &.{.statusline} },
     .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
     .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
     .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
-    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions, .rowkey } },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions, .rowkey, .statusline } },
     .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
-    .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
-    .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{ .output, .statusline } },
+    .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{ .output, .statusline } },
     .{ .name = "notes", .import = "guest_notes_wasm", .install = true },
     .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
     .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
@@ -503,7 +503,7 @@ const guests = [_]Guest{
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
-    .{ .name = "problems", .import = "guest_problems_wasm", .install = true },
+    .{ .name = "problems", .import = "guest_problems_wasm", .install = true, .libraries = &.{.statusline} },
     .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true },
     .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };

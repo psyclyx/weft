@@ -938,6 +938,14 @@ pub const Editor = struct {
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
+    /// The pane a declared viewport is docked in, by the name its fragment
+    /// gave it, or null while it is hidden. What an edge cannot say once two
+    /// viewports share one (a panel and a status bar, both at the bottom).
+    pub fn viewportPane(self: *Editor, name: []const u8) ?*window_layout.Node {
+        const decl = self.session.system.viewports.find(name) orelse return null;
+        return self.win_layout.paneById(decl.pane orelse return null);
+    }
+
     /// Number of panes currently tiled.
     pub fn paneCount(self: *Editor) usize {
         return self.win_layout.count();

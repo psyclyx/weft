@@ -52,27 +52,15 @@ pub const MdInline = struct {
 /// that matched the snapshot's text, whatever the document did since.
 pub const Hud = struct {
     mode: []const u8,
-    /// Draw the pane's status line (the viewport's `status_line` attribute).
+    /// Draw the pane's status line (the viewport's `status_line` attribute,
+    /// or a pane presenting a status).
     status_line: bool = true,
-    dirty: bool = false,
-    save_failed: bool = false,
-    /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.
-    backing: ?[]const u8 = null,
+    /// The pane whose context `statusline_segs` describe, when it is not
+    /// this one: this pane PRESENTS another context's status (a bar showing
+    /// `weft://here/status/primary`), and a click on a segment acts there.
+    status_of: ?u32 = null,
     /// Paint the shipped mark above a dashboard tool's projection.
     brand_mark: bool = false,
-    /// Save progress chip: "saving…" | "save stale" | null.
-    save_note: ?[]const u8 = null,
-    /// Partial checkout: percent NOT yet fetched (0 = complete).
-    unfetched_pct: ?u8 = null,
-    /// Remote peers with presence in this buffer.
-    peers: usize = 0,
-    /// Transient `echo` message (wins the right-hand slot).
-    echo: ?[]const u8 = null,
-    /// A generic plugin-published status chip, PERSISTENT (unlike `echo`) —
-    /// the same kind of slot as `echo`, one tier up in lifetime. The core knows
-    /// nothing of what it says; a plugin publishes via `weft.status` (a task
-    /// progress, a repl state, an agent's "waiting"). Null = no chip.
-    plugin_status: ?[]const u8 = null,
     /// Rendering P2 (doc/rendering.md): a LEGACY/test-only path — production
     /// (`frame_builder.zig`) leaves this null and instead hands the picker's
     /// own `core.pick.Pick.buildSurface` scene through `surfaces` below, the
@@ -102,20 +90,14 @@ pub const Hud = struct {
     /// spans draw beside the line. The presentation knows only the feed
     /// shape — never which plugin published one, or what it means.
     annotations: []const core.layers.Snapshot = &.{},
-    /// Message of a diagnostic at the cursor, for the status line.
-    cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).
     presence_layer: ?*const core.layers.Snapshot = null,
-    /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
-    /// connected out to; see known_peers / the SAS).
-    trust: ?[]const u8 = null,
-    /// The `ui/statusline-seg` mesh's composed output (doc/cwa-prior-docs-audit.md §5
-    /// W3-1) — mode chip, buffer position, file/path, collab liveness (left
-    /// cluster) and the diagnostics count (right-anchored) all come from
-    /// here now; `statusline.zig` renders this list, it no longer formats
-    /// those chips itself. Empty when the caller never fired the mesh (every
-    /// pre-W3 test/harness call site) — those chips simply don't render,
-    /// same as any other omitted Hud field.
+    /// The status line: the `ui/statusline-seg` mesh's composed output for
+    /// the pane's context (doc/chrome.md §4.1) — the mode chip, the path,
+    /// the save state, the message, the position, and whatever a plugin
+    /// publishes, every one a segment. `statusline.zig` places and draws the
+    /// list; it formats nothing itself. Empty when the caller never fired
+    /// the mesh (a harness building one pane): an empty bar.
     statusline_segs: []const ui_mesh.Seg = &.{},
     /// The `ui/gutter-segment` mesh, resolved ONCE for this frame (north-
     /// star-plan §6 W3-1) — null when nothing is bound (today's default: no
@@ -235,6 +217,12 @@ pub const ChromeHit = struct {
     entry: ?u32 = null,
     /// The command a status segment declared for a click, or "".
     command: []const u8 = "",
+    /// The pane a status segment's command acts in, when it is not the one
+    /// it is drawn in (`Hud.status_of`).
+    pane: ?u32 = null,
+    /// What a status segment reads as drawn — its compact form, or its cut
+    /// with the `…`, when that is what the room allowed.
+    label: []const u8 = "",
 
     pub const Kind = enum { tab, status };
 };

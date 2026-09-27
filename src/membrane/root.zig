@@ -275,6 +275,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
     .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
+    .{ .name = "wl_mode_display", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare what a mode is called on the status line and its tone (an empty name withdraws it)" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, narrowed by an encoded facts.Predicate (same codec as wl_slot_bind) + priority" },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
@@ -615,9 +616,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 261;
+const max_import_count: usize = 262;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 283;
+const max_semantic_operation_count: usize = 284;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

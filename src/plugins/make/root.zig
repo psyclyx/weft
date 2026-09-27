@@ -11,6 +11,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
+const statusline = @import("weft_statusline");
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "make.build", .arity = .whole, .call = makeBuild, .summary = "Build this project.", .label = "Build Project", .menu = "Run", .group = "make", .order = 1, .icon = "build" },
@@ -27,6 +28,8 @@ fn describeExtra() void {
 fn initExtra() void {
     // Return jumps to the compiler error the focused row points at.
     output.installMode("build", "make.visit");
+    // A running build on the status line, after the problems counts (95).
+    statusline.bind(.{ .all = &.{} }, .core, 94);
     // A build is a projection this plugin re-runs by designation.
     _ = weft.designationOpener(kind, "make.open");
 }
@@ -40,15 +43,15 @@ const kind = "make";
 // floor. `want_err` is what makes `make.build` on a broken tree show the
 // errors rather than an empty window.
 fn makeBuild() void {
-    output.show(&.{ "zig", "build" }, "*build*", "build", .{ .want_err = true });
+    output.show(&.{ "zig", "build" }, "*build*", "build", .{ .want_err = true, .running = .{ .key = running_key, .what = "build" } });
     output.designate(kind, "run=build");
 }
 fn makeTest() void {
-    output.show(&.{ "zig", "build", "test" }, "*test*", "build", .{ .want_err = true });
+    output.show(&.{ "zig", "build", "test" }, "*test*", "build", .{ .want_err = true, .running = .{ .key = running_key, .what = "test" } });
     output.designate(kind, "run=test");
 }
 fn makeRun() void {
-    output.show(&.{"make"}, "*build*", "build", .{ .want_err = true });
+    output.show(&.{"make"}, "*build*", "build", .{ .want_err = true, .running = .{ .key = running_key, .what = "make" } });
     output.designate(kind, "run=make");
 }
 
@@ -61,6 +64,26 @@ fn reopen() void {
     makeBuild();
 }
 
+// ── A running build, on the status line (doc/chrome.md §4.3) ────────────────
+
+/// Said on the place a build started in while it runs (`output.Running`).
+const running_key = "make.running";
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    const what = output.runningHere(running_key) orelse return statusline.tell(handle, &.{});
+    var buf: [48]u8 = undefined;
+    statusline.tell(handle, &.{.{
+        .text = std.fmt.bufPrint(&buf, "{s}…", .{what}) catch what,
+        .role = .accent,
+        .priority = 55,
+        .icon = "hammer",
+        .tooltip = "Running",
+    }});
+}
+
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
+    weft.exportCallback("on_slot_fire", &onSlotFire);
 }

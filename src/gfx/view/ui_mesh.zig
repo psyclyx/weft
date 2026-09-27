@@ -27,12 +27,11 @@
 //! `Seg` is the shared "narrow waist" output BOTH slots emit (reusing
 //! `core.surface.Role`, per doc/rendering.md's scene-vocabulary argument),
 //! plus two small, NAMED escape hatches (`fg_override`/`bg_override`)
-//! documented on the type itself: today's mode chip (a per-MODE, not
-//! per-Role, background) and the diagnostics count / diagnostic gutter mark
-//! (`diag_error`/`diag_warn` — colors with no existing `Role`) predate the
-//! Role vocabulary and don't fit it losslessly. One or two users each, not
-//! generalized into a raw-color hole — a THIRD user is the forcing function
-//! for teaching `Role` these colors for real.
+//! documented on the type itself: a chip's background (the mode chip's
+//! colour is its declared TONE's, `Theme.modeChipColor`; a save warning's is
+//! a diagnostic colour) and the gutter's marks. The status line's third user
+//! of the diagnostic colours — the problems counts a plugin publishes — is
+//! what taught `Role` them for real (`warning`, `danger`).
 //!
 //! **Provider shape.** Every default provider here is a plain Zig function
 //! wrapped as a `container.ProviderRef.ui_provider` — the in-process
@@ -63,66 +62,80 @@ const core = @import("weft_core");
 const container = core.container;
 const Facts = container.Facts;
 const Theme = @import("Theme.zig");
+const status_layout = @import("status_layout.zig");
 
 /// A composed segment — the shared output vocabulary for both slots.
 pub const Seg = struct {
     /// Owned by whatever allocator the firing call was given (a per-frame
     /// arena in production; the caller's `gpa` in a test — see `freeSegs`).
     text: []const u8,
+    /// The short form the status line falls back to when the row is short
+    /// (`Ln 12, Col 4` → `12:4`), or "" for none. Owned like `text`.
+    compact: []const u8 = "",
     role: core.surface.Role = .normal,
-    /// Escape hatch: the mode chip's per-MODE (not per-Role) background text
-    /// color — `Theme.modeChipColor` has no `Role` analogue.
+    /// Escape hatch: a colour with no `Role` — the dirty mark's, a gutter
+    /// mark's (`diag_error`/`diag_warn`).
     fg_override: ?[4]f32 = null,
-    /// Escape hatch: the mode chip's per-MODE background rect.
+    /// A chip: the segment is a label on its own background (the mode chip,
+    /// a save warning) — `Theme.modeChipColor` and the diagnostic colours
+    /// have no `Role` analogue.
     bg_override: ?[4]f32 = null,
-    /// Right-anchored cluster (today's peers/diag-count/status group,
-    /// measured backward from the right edge) vs the ordinary left-to-right
-    /// cluster. Mirrors `core.surface.Span.column`'s alignment-tag
+    /// The right-hand cluster (measured back from the row's end) vs the
+    /// left-hand one. Mirrors `core.surface.Span.column`'s alignment-tag
     /// convention (0 = main, 1 = other) rather than inventing a new one.
     align_right: bool = false,
-    /// Blank columns to insert AFTER this segment, in the LEFT cluster's
-    /// render loop only — spacing is DATA the predecessor declares, not text
-    /// baked into a neighbor. This is what makes today's legacy gap rule
-    /// (an UNCONDITIONAL blank column after the mode chip; yet ANOTHER,
-    /// but only when buffer_pos actually rendered) reproduce correctly in
-    /// BOTH cases a mesh composition can hit: buffer_pos present (its own
-    /// `gap_after` supplies the second gap) and buffer_pos ABSENT — e.g. a
-    /// peeked pane, which never fires it (opts out, contributes nothing) —
-    /// where baking the gap into buffer_pos's own leading whitespace would
-    /// have silently dropped the chip's gap too. See `git show 8cb6244`'s
-    /// `statusline.zig` (`col += 1` after the chip, unconditional; a SECOND
-    /// `col += 1` only inside the `if (hud.buffer_pos)` block) for the
-    /// legacy rule this reproduces exactly in both cases.
-    gap_after: u8 = 0,
+    /// Who keeps its room when the row is short (`status_layout`): a lower
+    /// priority shrinks to `compact`, then goes, first. Not the binding's
+    /// priority, which only ORDERS segments along the row.
+    priority: i32 = default_priority,
+    /// Whether text too long for the room is cut short with `…`, and at
+    /// which end, instead of the segment going whole.
+    elide: status_layout.Elide = .none,
     /// The command a click on the segment runs, or "" (not clickable).
     /// BORROWED — a manifest decl's, or a plugin answer's in the frame
     /// arena — so `freeSegs` leaves it alone.
     command: []const u8 = "",
-    /// An icon name (the theme's set) drawn in place of the segment's first
-    /// glyph by a chrome style that shows icons. BORROWED, like `command`.
+    /// An icon name (the theme's set) a chrome style that shows icons
+    /// draws: in place of the text's leading glyph when that glyph stands
+    /// alone (`● `, `✦ 2`), else before the text. BORROWED, like `command`.
     icon: []const u8 = "",
     /// What the segment's tooltip says; its command when empty. BORROWED.
     tooltip: []const u8 = "",
+
+    /// A segment that says nothing of its importance sits in the middle.
+    pub const default_priority = 50;
 };
 
 pub fn freeSegs(gpa: Allocator, segs: []const Seg) void {
-    for (segs) |s| gpa.free(s.text);
+    for (segs) |s| {
+        gpa.free(s.text);
+        gpa.free(s.compact);
+    }
     gpa.free(segs);
 }
 
 // ── ui/statusline-seg ──────────────────────────────────────────────
 
-/// Per-HUD-build input a statusline provider reads. Frame-varying fields
-/// (`file`/`buffer_pos`/`diag_layer`/`link`) are filled by `frame_builder`
-/// from the SAME sources that fed the pre-mesh direct assembly; `facts` is
-/// the Container-matched context (today just `.mode`, room to grow).
+/// Per-HUD-build input a statusline provider reads: the facts of the pane's
+/// context and what the frame knows about its entry. `frame_builder` fills
+/// it; a field left at its default is a segment that opts out.
 pub const StatuslineArgs = struct {
     facts: Facts,
-    file: []const u8 = "",
-    buffer_pos: ?[]const u8 = null,
-    diag_layer: ?*const core.layers.Layer = null,
-    link: ?[]const u8 = null,
     theme: *const Theme,
+    /// The pane's mode as its grammar names it (`Keymap.modeDisplay`), or
+    /// null: no chip — a modeless grammar names none.
+    mode: ?core.Keymap.ModeDisplay = null,
+    /// The place the entry is in, by name.
+    place: ?Place = null,
+    /// The entry's path (place-relative) or name.
+    file: []const u8 = "",
+    doc: Doc = .{},
+    /// The caret, for a text entry.
+    caret: ?Caret = null,
+    /// What the HEAD says, not the entry — its messages, its connection.
+    /// Only the status line the head is looking at carries them: the
+    /// focused pane's, and a bar presenting the primary context's.
+    head: ?Head = null,
     /// What the PLUGIN providers last said for this pane
     /// (`app/answers.zig`), possibly to an older question: a frame never asks
     /// a guest itself. Empty means a `.schema_provider` binding contributes
@@ -134,6 +147,43 @@ pub const StatuslineArgs = struct {
     /// Set by `fireStatusline` itself before invoking providers — a caller
     /// building `StatuslineArgs` need not (and should not) set this.
     out: *std.ArrayList(Seg) = undefined,
+
+    pub const Place = struct {
+        name: []const u8,
+        /// `folder` for a project here, `users` for a peer's, `terminal` for
+        /// a shell's.
+        icon: []const u8,
+    };
+
+    /// What the entry's text is doing.
+    pub const Doc = struct {
+        dirty: bool = false,
+        save_failed: bool = false,
+        /// "saving…" | "save stale" | null.
+        save_note: ?[]const u8 = null,
+        /// A partial checkout's share NOT yet fetched.
+        unfetched_pct: ?u8 = null,
+        /// Remote peers with presence in the entry.
+        peers: usize = 0,
+    };
+
+    /// 1-based line and column (in characters), and how many selections.
+    pub const Caret = struct { line: usize, col: usize, selections: usize = 1 };
+
+    pub const Head = struct {
+        /// "3/7": the entry's place among the open ones.
+        buffer_pos: ?[]const u8 = null,
+        /// Backing kind: "file" | "tool" | "@shared" | a remote's label.
+        backing: ?[]const u8 = null,
+        /// How the entry's place, or the connection, is reachable.
+        link: ?[]const u8 = null,
+        /// The transient echo, else the diagnostic under the caret.
+        echo: ?[]const u8 = null,
+        /// The persistent plugin-published chip (`core.status_feed`).
+        feed: ?[]const u8 = null,
+        /// The trust chip for the host we connected out to.
+        trust: ?[]const u8 = null,
+    };
 };
 
 /// One plugin provider's segments, by the binding owner the slot host names
@@ -141,7 +191,7 @@ pub const StatuslineArgs = struct {
 pub const StatuslineAnswer = struct { owner: []const u8, segs: []const Seg };
 
 /// Decode one provider's `core.status_segment` answer into `Seg`s owned by
-/// `gpa` (text and command both). A malformed answer says nothing.
+/// `gpa` (every string). A malformed answer says nothing.
 pub fn decodeStatuslineAnswer(gpa: Allocator, owner: []const u8, payload: []const u8) !StatuslineAnswer {
     var segs: std.ArrayList(Seg) = .empty;
     if (core.status_segment.decodeTell(payload)) |told| {
@@ -151,69 +201,187 @@ pub fn decodeStatuslineAnswer(gpa: Allocator, owner: []const u8, payload: []cons
             if (s.text.len == 0) continue;
             try segs.append(gpa, .{
                 .text = try gpa.dupe(u8, s.text),
+                .compact = try gpa.dupe(u8, s.compact),
                 .role = core.surface.Role.fromInt(s.role),
                 .align_right = s.right,
+                .priority = std.math.cast(i32, s.priority) orelse Seg.default_priority,
                 .command = try gpa.dupe(u8, s.command),
+                .icon = try gpa.dupe(u8, s.icon),
+                .tooltip = try gpa.dupe(u8, s.tooltip),
             });
         }
     }
     return .{ .owner = try gpa.dupe(u8, owner), .segs = segs.items };
 }
 
+fn argsOf(raw: *anyopaque) *StatuslineArgs {
+    return @ptrCast(@alignCast(raw));
+}
+
 fn modeChipProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
-    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
-    const text = try std.fmt.allocPrint(gpa, " {s} ", .{a.facts.mode});
-    // `gap_after = 1` reproduces the legacy UNCONDITIONAL `col += 1` right
-    // after the chip (git show 8cb6244) — it fires whether or not
-    // buffer_pos follows, so it lives on the chip, not on buffer_pos.
-    try a.out.append(gpa, .{ .text = text, .fg_override = a.theme.background, .bg_override = a.theme.modeChipColor(a.facts.mode), .gap_after = 1 });
+    const a = argsOf(raw);
+    const mode = a.mode orelse return false;
+    try a.out.append(gpa, .{
+        .text = try gpa.dupe(u8, mode.name),
+        .fg_override = a.theme.background,
+        .bg_override = a.theme.modeChipColor(mode.tone),
+        .priority = 100,
+    });
     return true;
 }
 
-fn bufferPosProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
-    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
-    const bp = a.buffer_pos orelse return false;
-    const text = try gpa.dupe(u8, bp);
-    // `gap_after = 1` reproduces the legacy SECOND `col += 1`, INSIDE the
-    // `if (hud.buffer_pos)` block — conditional on this segment actually
-    // firing, which "opt out, contribute nothing" already gives us for
-    // free (the gap simply never gets added when this provider returns
-    // `false`, e.g. a peeked pane).
-    try a.out.append(gpa, .{ .text = text, .role = .muted, .gap_after = 1 });
+fn placeProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const place = a.place orelse return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, place.name), .role = .muted, .priority = 40, .icon = place.icon });
     return true;
 }
 
 fn filePathProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
-    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
-    const text = try gpa.dupe(u8, if (a.file.len > 0) a.file else "[scratch]");
-    try a.out.append(gpa, .{ .text = text, .role = .normal });
+    const a = argsOf(raw);
+    const file = if (a.file.len > 0) a.file else "[scratch]";
+    // The path, cut from its start when the room is short (its tail names
+    // it); its compact form is the file's own name.
+    const base = std.fs.path.basename(file);
+    try a.out.append(gpa, .{
+        .text = try gpa.dupe(u8, file),
+        .compact = if (base.len < file.len) try gpa.dupe(u8, base) else "",
+        .priority = 90,
+        .elide = .start,
+    });
+    // Modified: its own mark, right after the name it is about.
+    if (a.doc.dirty) try a.out.append(gpa, .{ .text = try gpa.dupe(u8, "●"), .role = .warning, .priority = 92, .icon = "dot", .tooltip = "Modified" });
     return true;
 }
 
-fn collabLivenessProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
-    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
-    const l = a.link orelse return false;
-    const text = try std.fmt.allocPrint(gpa, "  link:{s}", .{l});
-    try a.out.append(gpa, .{ .text = text, .role = .effect });
+/// The save and the checkout, when either needs saying: chips, a label on its
+/// own colour.
+fn docStateProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const d = a.doc;
+    var any = false;
+    if (d.save_note) |note| {
+        try a.out.append(gpa, .{ .text = try gpa.dupe(u8, note), .fg_override = a.theme.background, .bg_override = a.theme.diag_warn, .priority = 94 });
+        any = true;
+    }
+    if (d.save_failed) {
+        try a.out.append(gpa, .{ .text = try gpa.dupe(u8, "save failed"), .fg_override = a.theme.background, .bg_override = a.theme.diag_error, .priority = 96 });
+        any = true;
+    }
+    if (d.unfetched_pct) |pct| if (pct > 0) {
+        try a.out.append(gpa, .{
+            .text = try std.fmt.allocPrint(gpa, "{d}% fetched", .{100 - @as(u32, pct)}),
+            .compact = try std.fmt.allocPrint(gpa, "{d}%", .{100 - @as(u32, pct)}),
+            .fg_override = a.theme.background,
+            .bg_override = a.theme.diag_warn,
+            .priority = 60,
+        });
+        any = true;
+    };
+    return any;
+}
+
+fn bufferPosProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const bp = (a.head orelse return false).buffer_pos orelse return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, bp), .role = .muted, .priority = 15, .tooltip = "Open entries" });
     return true;
 }
 
-fn diagCountProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
-    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
-    const dl = a.diag_layer orelse return false;
-    const n = dl.spanCount();
-    if (n == 0) return false;
-    const text = try std.fmt.allocPrint(gpa, "!{d} ", .{n});
-    try a.out.append(gpa, .{ .text = text, .fg_override = a.theme.diag_error, .align_right = true });
+fn backingProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const b = (a.head orelse return false).backing orelse return false;
+    try a.out.append(gpa, .{ .text = try std.fmt.allocPrint(gpa, "({s})", .{b}), .role = .muted, .priority = 10 });
+    return true;
+}
+
+fn trustProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const tr = (a.head orelse return false).trust orelse return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, tr), .role = .muted, .priority = 55, .icon = "shield-check" });
+    return true;
+}
+
+/// The head's message: the echo, else the diagnostic under the caret. Worth
+/// a lot of room, and cut short rather than lost.
+fn echoProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const msg = (a.head orelse return false).echo orelse return false;
+    if (msg.len == 0) return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, msg), .priority = 95, .elide = .end });
+    return true;
+}
+
+/// Where the caret is: `Ln 12, Col 4`. A click goes to a line.
+fn positionProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const c = a.caret orelse return false;
+    try a.out.append(gpa, .{
+        .text = try std.fmt.allocPrint(gpa, "Ln {d}, Col {d}", .{ c.line, c.col }),
+        .compact = try std.fmt.allocPrint(gpa, "{d}:{d}", .{ c.line, c.col }),
+        .align_right = true,
+        .priority = 85,
+        .command = go_to_line,
+        .tooltip = "Go to Line",
+    });
+    return true;
+}
+
+/// The command a click on the position runs (core's, so every grammar has it).
+pub const go_to_line = "jump.line";
+
+fn selectionsProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const c = a.caret orelse return false;
+    if (c.selections < 2) return false;
+    try a.out.append(gpa, .{
+        .text = try std.fmt.allocPrint(gpa, "{d} selections", .{c.selections}),
+        .compact = try std.fmt.allocPrint(gpa, "{d} sel", .{c.selections}),
+        .role = .accent,
+        .align_right = true,
+        .priority = 45,
+    });
+    return true;
+}
+
+/// The entry's language, as the `lang` fact names it.
+fn languageProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    if (a.facts.lang.len == 0 or a.caret == null) return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, a.facts.lang), .role = .muted, .align_right = true, .priority = 35, .tooltip = "Language" });
+    return true;
+}
+
+/// How the entry's place, or the collaboration connection, is reachable.
+fn linkProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const l = (a.head orelse return false).link orelse return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, l), .role = .effect, .align_right = true, .priority = 70, .icon = "network", .elide = .end });
+    return true;
+}
+
+fn peersProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    if (a.doc.peers == 0) return false;
+    try a.out.append(gpa, .{ .text = try std.fmt.allocPrint(gpa, "✦ {d}", .{a.doc.peers}), .role = .accent, .align_right = true, .priority = 50, .icon = "users", .tooltip = "Peers here" });
+    return true;
+}
+
+/// A plugin's persistent chip (`weft.status`): a task's progress, an agent
+/// waiting.
+fn feedProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const st = (a.head orelse return false).feed orelse return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, st), .role = .accent, .align_right = true, .priority = 60, .icon = "bell", .elide = .end });
     return true;
 }
 
 /// Fire `ui/statusline-seg`: resolve the eligible, priority-sorted provider
 /// list against `args.facts` and invoke each in order, collecting whatever
-/// segments they contribute (a provider that opts out — e.g. no
-/// `buffer_pos` — contributes nothing, not an empty segment). Caller owns
-/// the returned slice AND every segment's `text` (`freeSegs`, or let a
-/// per-frame arena reclaim both).
+/// segments they contribute (a provider that opts out — e.g. no caret —
+/// contributes nothing, not an empty segment). Caller owns the returned
+/// slice AND every segment's `text` and `compact` (`freeSegs`, or let a
+/// per-frame arena reclaim them).
 pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *StatuslineArgs) ![]Seg {
     const bindings = try c.eligible(gpa, "ui/statusline-seg", args.facts);
     defer gpa.free(bindings);
@@ -227,12 +395,17 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
             },
             // A plugin: its segments are its last answer, in the priority
             // position its binding holds (text copied like every segment's,
-            // the command borrowed like every segment's).
+            // the rest borrowed like every segment's).
             .schema_provider => |ref| {
                 args.plugin_reached = true;
                 for (args.plugin_answers) |ans| {
                     if (!std.mem.eql(u8, ans.owner, ref.owner)) continue;
-                    for (ans.segs) |s| try out.append(gpa, .{ .text = try gpa.dupe(u8, s.text), .role = s.role, .align_right = s.align_right, .command = s.command });
+                    for (ans.segs) |s| {
+                        var copy = s;
+                        copy.text = try gpa.dupe(u8, s.text);
+                        copy.compact = try gpa.dupe(u8, s.compact);
+                        try out.append(gpa, copy);
+                    }
                     break;
                 }
             },
@@ -241,7 +414,6 @@ pub fn fireStatusline(c: *const container.Container, gpa: Allocator, args: *Stat
     }
     return out.toOwnedSlice(gpa);
 }
-
 // ── ui/gutter-segment ──────────────────────────────────────────────
 
 /// Per-visible-ROW input a gutter provider reads. `row` is this line's byte
@@ -479,11 +651,21 @@ pub fn declareSlots(c: *container.Container) !void {
     try core.gutter.declare(c);
 }
 
-/// The five default statusline segments, at `.core` tier (lowest). The TIER
-/// mechanism means a higher-tier binding on the same slot outranks these —
-/// proven by the mesh test. Priorities reproduce today's left-to-right
-/// order: mode, position, file, collab-liveness (left cluster); diagnostics
-/// count (right-anchored, `align_right`).
+/// Core's own status segments — what core KNOWS about a pane's context — at
+/// `.core` tier (lowest), so a higher-tier binding on the same slot outranks
+/// them (proven by the mesh test). The binding priorities are the order along
+/// the row, and the gaps between them are where a plugin that binds `.core`
+/// falls in among them: git's branch and the problems counts after the place
+/// (96, 95), a running task (94), the breadcrumbs after the path (75), the
+/// indentation among the right-hand facts (43).
+///
+///   left:  mode 100 · place 97 · path + modified 80 · save/fetch 74 ·
+///          entry position 71 · backing 70 · trust 69 · message 60
+///   right: Ln/Col 45 · selections 44 · language 40 · link 35 · peers 34 ·
+///          plugin chip 30
+///
+/// What each segment shows when the row is short is its own `Seg.priority`
+/// (`status_layout`), not this order.
 ///
 /// **Reachability (doc/cwa-prior-docs-audit.md §5):** two paths reach this
 /// Container now. (1) The shared-Container fold-in: `action.zig`'s
@@ -500,11 +682,33 @@ pub fn declareSlots(c: *container.Container) !void {
 pub fn bindDefaultStatusline(c: *container.Container) !void {
     const all: container.Predicate = .{ .all = &.{} };
     const owner = "core:statusline";
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = modeChipProvider } }, .predicate = all, .tier = .core, .priority = 100, .owner = owner, .domain = .ui, .decl_index = 0 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = bufferPosProvider } }, .predicate = all, .tier = .core, .priority = 90, .owner = owner, .domain = .ui, .decl_index = 1 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = filePathProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .domain = .ui, .decl_index = 2 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = collabLivenessProvider } }, .predicate = all, .tier = .core, .priority = 70, .owner = owner, .domain = .ui, .decl_index = 3 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = diagCountProvider } }, .predicate = all, .tier = .core, .priority = 10, .owner = owner, .domain = .ui, .decl_index = 4 });
+    const Provider = *const fn (?*anyopaque, Allocator, *anyopaque) anyerror!bool;
+    const defaults = [_]struct { call: Provider, priority: i32 }{
+        .{ .call = modeChipProvider, .priority = 100 },
+        .{ .call = placeProvider, .priority = 97 },
+        .{ .call = filePathProvider, .priority = 80 },
+        .{ .call = docStateProvider, .priority = 74 },
+        .{ .call = bufferPosProvider, .priority = 71 },
+        .{ .call = backingProvider, .priority = 70 },
+        .{ .call = trustProvider, .priority = 69 },
+        .{ .call = echoProvider, .priority = 60 },
+        .{ .call = positionProvider, .priority = 45 },
+        .{ .call = selectionsProvider, .priority = 44 },
+        .{ .call = languageProvider, .priority = 40 },
+        .{ .call = linkProvider, .priority = 35 },
+        .{ .call = peersProvider, .priority = 34 },
+        .{ .call = feedProvider, .priority = 30 },
+    };
+    for (defaults, 0..) |d, i| try c.bind(.{
+        .slot = "ui/statusline-seg",
+        .provider = .{ .ui_provider = .{ .call = d.call } },
+        .predicate = all,
+        .tier = .core,
+        .priority = d.priority,
+        .owner = owner,
+        .domain = .ui,
+        .decl_index = @intCast(i),
+    });
 }
 
 /// The three default gutter segments — real, fireable, tested, but NOT
@@ -583,7 +787,7 @@ fn manifestSegProvider(ctx: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerr
 
 const t = std.testing;
 
-test "ui_mesh: statusline defaults reproduce today's chip set + order" {
+test "ui_mesh: statusline defaults — the grammar's mode chip, the path, and the caret's facts on the right" {
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
     defer c.deinit();
@@ -592,75 +796,78 @@ test "ui_mesh: statusline defaults reproduce today's chip set + order" {
 
     const theme: Theme = .{};
     var args: StatuslineArgs = .{
-        .facts = .{ .mode = "normal" },
-        .file = "main.zig",
-        .buffer_pos = "1/2",
+        .facts = .{ .mode = "normal", .lang = "zig" },
+        .mode = .{ .name = "NORMAL", .tone = .normal },
+        .file = "src/main.zig",
+        .caret = .{ .line = 12, .col = 4 },
         .theme = &theme,
     };
     const segs = try fireStatusline(&c, gpa, &args);
     defer freeSegs(gpa, segs);
 
-    // No link, no diagnostics bound this call — three segments: mode,
-    // position, file, in that order (link/diag opted out — null/absent).
-    try t.expectEqual(@as(usize, 3), segs.len);
-    try t.expectEqualStrings(" normal ", segs[0].text);
-    try t.expectEqual(theme.modeChipColor("normal"), segs[0].bg_override.?);
-    try t.expectEqual(@as(u8, 1), segs[0].gap_after); // the legacy unconditional post-chip gap
-    try t.expectEqualStrings("1/2", segs[1].text);
-    try t.expectEqual(@as(u8, 1), segs[1].gap_after); // the legacy conditional post-position gap
-    try t.expectEqualStrings("main.zig", segs[2].text);
-    try t.expect(!segs[2].align_right);
-
-    // Column-accurate trace against `git show 8cb6244`'s statusline.zig:
-    // chip(8) + gap(1) + "1/2"(3) + gap(1) + file starts at col 13.
-    var col: usize = 0;
-    for (segs) |seg| {
-        col += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
-        col += seg.gap_after;
-    }
-    // (file itself contributes no trailing gap — the next legacy chip,
-    // `dirty`, supplies its OWN leading space, unchanged/hardcoded.)
-    try t.expectEqual(@as(usize, 8 + 1 + 3 + 1 + 8), col); // + "main.zig".len
+    // mode, path; then the right cluster: position, language. Nothing that
+    // opted out (no place, no head, one selection) left an empty segment.
+    try t.expectEqual(@as(usize, 4), segs.len);
+    try t.expectEqualStrings("NORMAL", segs[0].text);
+    try t.expectEqual(theme.modeChipColor(.normal), segs[0].bg_override.?);
+    try t.expectEqualStrings("src/main.zig", segs[1].text);
+    try t.expectEqualStrings("main.zig", segs[1].compact);
+    try t.expectEqual(status_layout.Elide.start, segs[1].elide);
+    try t.expect(!segs[1].align_right);
+    try t.expectEqualStrings("Ln 12, Col 4", segs[2].text);
+    try t.expectEqualStrings("12:4", segs[2].compact);
+    try t.expect(segs[2].align_right);
+    try t.expectEqualStrings(go_to_line, segs[2].command);
+    try t.expectEqualStrings("zig", segs[3].text);
+    try t.expect(segs[3].align_right);
+    // The chip outlives the path, which outlives the position.
+    try t.expect(segs[0].priority > segs[1].priority and segs[1].priority > segs[2].priority);
 }
 
-test "ui_mesh: statusline — buffer_pos ABSENT (a peeked pane) still gets the chip's unconditional gap" {
-    // The regression a review caught: baking the post-chip gap into
-    // buffer_pos's own leading whitespace works when buffer_pos fires, but
-    // silently drops the gap when it opts out (a peeked pane never sets
-    // it) — `file` would start 1 column too early. `gap_after` lives on the
-    // CHIP (fires unconditionally) instead, so this case is right too.
+test "ui_mesh: a mode no grammar named shows no chip; the head's extras show only where the head looks" {
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
     defer c.deinit();
     try declareSlots(&c);
     try bindDefaultStatusline(&c);
-
     const theme: Theme = .{};
-    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "main.zig", .theme = &theme }; // no buffer_pos
-    const segs = try fireStatusline(&c, gpa, &args);
+
+    // A modeless grammar: no chip at all — never the mode's id.
+    var bare: StatuslineArgs = .{ .facts = .{ .mode = "ide-structural" }, .file = "a.zig", .theme = &theme };
+    const plain = try fireStatusline(&c, gpa, &bare);
+    defer freeSegs(gpa, plain);
+    for (plain) |s| try t.expect(std.mem.indexOf(u8, s.text, "ide") == null);
+    try t.expectEqualStrings("a.zig", plain[0].text);
+
+    // Modified, several selections, and the head's message and chip.
+    var full: StatuslineArgs = .{
+        .facts = .{ .mode = "insert" },
+        .mode = .{ .name = "INSERT", .tone = .insert },
+        .file = "a.zig",
+        .doc = .{ .dirty = true, .peers = 2 },
+        .caret = .{ .line = 1, .col = 1, .selections = 3 },
+        .head = .{ .echo = "written", .feed = "building…", .link = "shell:box connecting" },
+        .theme = &theme,
+    };
+    const segs = try fireStatusline(&c, gpa, &full);
     defer freeSegs(gpa, segs);
-
-    try t.expectEqual(@as(usize, 2), segs.len); // mode, file — position opted out
-    try t.expectEqualStrings(" normal ", segs[0].text);
-    try t.expectEqual(@as(u8, 1), segs[0].gap_after);
-    try t.expectEqualStrings("main.zig", segs[1].text);
-
-    // Column-accurate trace: chip(8) + gap(1) + file starts at col 9 —
-    // matching `git show 8cb6244`'s peeked-pane path (`other_hud` never set
-    // `.buffer_pos`, so only the chip's unconditional `col += 1` applied).
-    var col: usize = 0;
-    for (segs) |seg| {
-        col += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
-        col += seg.gap_after;
-    }
-    try t.expectEqual(@as(usize, 8 + 1 + 8), col); // + "main.zig".len
+    var texts: [16][]const u8 = undefined;
+    for (segs, 0..) |s, i| texts[i] = s.text;
+    const want = [_][]const u8{ "INSERT", "a.zig", "●", "written", "Ln 1, Col 1", "3 selections", "shell:box connecting", "✦ 2", "building…" };
+    try t.expectEqual(want.len, segs.len);
+    for (want, texts[0..segs.len]) |w, got| try t.expectEqualStrings(w, got);
+    try t.expectEqual(theme.modeChipColor(.insert), segs[0].bg_override.?);
+    // The message is cut short rather than lost; the chips carry icons.
+    try t.expectEqual(status_layout.Elide.end, segs[3].elide);
+    try t.expectEqualStrings("dot", segs[2].icon);
+    try t.expectEqualStrings("users", segs[7].icon);
 }
 
 test "ui_mesh: MESH TEST — an extra statusline provider inserts at its priority position; unbind removes it" {
     // Proves the actual point of the mesh (doc/rendering.md "Wiring +
     // defaults"): swapping/adding a piece is literal and local — bind a new
     // provider on the SAME slot and it composes in; unbind and it's gone,
-    // with zero change to the other four providers.
+    // with zero change to the other providers.
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
     defer c.deinit();
@@ -680,55 +887,60 @@ test "ui_mesh: MESH TEST — an extra statusline provider inserts at its priorit
     // (tier-then-priority) rather than a hardcoded slot.
     try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = Extra.call } }, .predicate = .{ .all = &.{} }, .tier = .config, .priority = 0, .owner = "test-plugin", .domain = .ui });
 
-    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
+    const mode: core.Keymap.ModeDisplay = .{ .name = "NORMAL" };
+    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .mode = mode, .file = "a.zig", .theme = &theme };
     const with_extra = try fireStatusline(&c, gpa, &args);
     defer freeSegs(gpa, with_extra);
     try t.expectEqual(@as(usize, 3), with_extra.len); // extra, mode, file
     try t.expectEqualStrings("[extra]", with_extra[0].text);
-    try t.expectEqualStrings(" normal ", with_extra[1].text);
+    try t.expectEqualStrings("NORMAL", with_extra[1].text);
     try t.expectEqualStrings("a.zig", with_extra[2].text);
 
     c.unbindOwnerExact(.ui, "test-plugin");
-    var args2: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
+    var args2: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .mode = mode, .file = "a.zig", .theme = &theme };
     const after = try fireStatusline(&c, gpa, &args2);
     defer freeSegs(gpa, after);
     try t.expectEqual(@as(usize, 2), after.len); // back to mode, file only
-    try t.expectEqualStrings(" normal ", after[0].text);
+    try t.expectEqualStrings("NORMAL", after[0].text);
 }
 
-test "ui_mesh: diagnostics count is right-anchored and colored diag_error, opts out at zero" {
+test "ui_mesh: a plugin's segment keeps its compact form, priority, icon and tooltip through the wire" {
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
     defer c.deinit();
     try declareSlots(&c);
     try bindDefaultStatusline(&c);
-
-    var doc = try core.Document.init(gpa, "user");
-    defer doc.deinit(gpa);
-    try doc.insert(gpa, 0, "one\ntwo\n");
-    var store: core.layers.Layers = .empty;
-    defer store.deinit(gpa);
-    const dl = try store.claim(gpa, &doc, "diagnostics", .local, "test");
-    try dl.publishSpans(gpa, &.{.{ .start = 0, .end = 1, .kind = 1, .message = "bad" }});
+    // What `wl_slot_bind` at the core tier, priority 96, makes.
+    try c.bind(.{
+        .slot = core.status_segment.slot_name,
+        .provider = .{ .schema_provider = .{ .owner = "git", .seq = 0 } },
+        .predicate = .{ .all = &.{} },
+        .tier = .core,
+        .priority = 96,
+        .owner = "git",
+        .domain = .slot,
+    });
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const payload = try core.status_segment.encodeTell(a, &.{.{ .text = "feature/long-name", .compact = "feature…", .priority = 60, .command = "git.status", .icon = "git-branch", .tooltip = "Branch" }});
+    const answers = [_]StatuslineAnswer{try decodeStatuslineAnswer(a, "git", payload)};
 
     const theme: Theme = .{};
-    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .diag_layer = dl, .theme = &theme };
-    const segs = try fireStatusline(&c, gpa, &args);
-    defer freeSegs(gpa, segs);
-    try t.expectEqual(@as(usize, 3), segs.len); // mode, file, diag count
-    const diag = segs[2];
-    try t.expect(diag.align_right);
-    try t.expectEqualStrings("!1 ", diag.text);
-    try t.expectEqual(theme.diag_error, diag.fg_override.?);
-
-    // Clear the layer: the segment disappears (opt-out), not an empty one.
-    try dl.publishSpans(gpa, &.{});
-    var args2: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .diag_layer = dl, .theme = &theme };
-    const segs2 = try fireStatusline(&c, gpa, &args2);
-    defer freeSegs(gpa, segs2);
-    try t.expectEqual(@as(usize, 2), segs2.len);
+    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .mode = .{ .name = "NORMAL" }, .place = .{ .name = "weft", .icon = "folder" }, .file = "a.zig", .theme = &theme, .plugin_answers = &answers };
+    const segs = try fireStatusline(&c, a, &args);
+    try t.expect(args.plugin_reached);
+    // mode (100), place (97), the branch (96), the path (80).
+    try t.expectEqual(@as(usize, 4), segs.len);
+    try t.expectEqualStrings("weft", segs[1].text);
+    const branch = segs[2];
+    try t.expectEqualStrings("feature/long-name", branch.text);
+    try t.expectEqualStrings("feature…", branch.compact);
+    try t.expectEqual(@as(i32, 60), branch.priority);
+    try t.expectEqualStrings("git.status", branch.command);
+    try t.expectEqualStrings("git-branch", branch.icon);
+    try t.expectEqualStrings("Branch", branch.tooltip);
 }
-
 test "ui_mesh: gutter — unbound is a zero-cost no-op; bound, line numbers + diag + breakpoint marks compose per line" {
     const gpa = t.allocator;
     var c = container.Container.init(gpa);
@@ -947,7 +1159,7 @@ test "ui_mesh: weft.statusSegment with NO binder wired is a logged no-op, not a 
     defer freeSegs(gpa, segs);
 
     for (segs) |s| try t.expect(!std.mem.eql(u8, s.text, "unreachable"));
-    try t.expectEqualStrings(" normal ", segs[0].text); // just the ordinary defaults
+    try t.expectEqualStrings("a.zig", segs[0].text); // just the ordinary defaults
 }
 
 test {

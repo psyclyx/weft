@@ -203,6 +203,7 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
                 .close => .close,
             },
             .entry = c.entry,
+            .acts_in = if (c.pane) |id| if (driver.layout.paneGen(id)) |g| .{ .id = id, .gen = g } else null else null,
         };
         chrome.setCommand(c.command);
         hit.chrome = chrome;

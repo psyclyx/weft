@@ -72,6 +72,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const prompt = @import("weft_prompt");
+const statusline = @import("weft_statusline");
 
 // The plugin's own parts. A verb below composes them; none of them knows
 // about a verb, so the model can be read without the commands and the
@@ -385,6 +386,9 @@ comptime {
 
 fn initExtra() void {
     provideRowVerbs();
+    // The branch on the status line, right after the place it is the
+    // branch of (core's place segment is 97), for every entry.
+    statusline.bind(.{ .all = &.{} }, .core, 96);
     // What a settled gather owes the rest of the plugin, and how a view is
     // coloured. Installed rather than called directly so `gather.zig` stays
     // readable without the rest of this file in your head.
@@ -559,6 +563,7 @@ fn refuseStale() void {
 /// from wherever you happen to be standing. The dance is gone, and with it the
 /// window where a gather landing mid-keystroke moved your focus.
 fn onGathered() void {
+    forgetBranch(model.curSession().root);
     renderStatus();
     if (cur().committing != null) gitCommitSettle();
     if (cur().sequencing != null) gitRebaseSettle();
@@ -1515,4 +1520,101 @@ fn gitRebaseSettle() void {
 
 comptime {
     weft.exportCallback("on_activate", &on_activate);
+    weft.exportCallback("on_slot_fire", &onSlotFire);
+}
+
+// ── The branch, on the status line (doc/chrome.md §4.3) ─────────────────────
+//
+// A status segment git publishes like any other provider: the branch of the
+// repository the entry is in, with its icon, and a click that opens the
+// repository's status. Asked for a place git has not read yet, it answers
+// nothing and runs `git rev-parse` there once; the answer lands as
+// `git.branch` on that place (a context key a predicate can read too), and
+// publishing it is what makes the status line ask again. A gather — any
+// mutation git runs, a checkout among them — forgets the repository's branch,
+// so the next ask reads it afresh.
+
+const Branch = struct {
+    root: [1024]u8 = undefined,
+    root_len: usize = 0,
+    name: [128]u8 = undefined,
+    name_len: usize = 0,
+    /// Read (`name` holds the answer, empty outside a repository).
+    known: bool = false,
+    /// A `git rev-parse` for it is out.
+    pending: bool = false,
+};
+
+var branches: [8]Branch = @splat(.{});
+/// The next slot a new place takes when all eight are held.
+var branch_next: usize = 0;
+
+fn branchFor(root: []const u8) ?*Branch {
+    if (root.len > 1024) return null;
+    for (&branches) |*b| if (b.root_len == root.len and std.mem.eql(u8, b.root[0..b.root_len], root)) return b;
+    const b = &branches[branch_next];
+    branch_next = (branch_next + 1) % branches.len;
+    b.* = .{};
+    @memcpy(b.root[0..root.len], root);
+    b.root_len = root.len;
+    return b;
+}
+
+/// The place a branch was asked for, carried to the answer.
+const BranchAsk = struct { root: [1024]u8, root_len: usize, place: [1100]u8, place_len: usize };
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    const root = weft.placeRoot();
+    const b = (if (root.len > 0) branchFor(root) else null) orelse return statusline.tell(handle, &.{});
+    if (!b.known) {
+        if (!b.pending) readBranch(b);
+        return statusline.tell(handle, &.{});
+    }
+    if (b.name_len == 0) return statusline.tell(handle, &.{});
+    statusline.tell(handle, &.{.{
+        .text = b.name[0..b.name_len],
+        .role = .muted,
+        .priority = 60,
+        .icon = "git-branch",
+        .command = "git.status",
+        .tooltip = "Branch — open Source Control",
+    }});
+}
+
+/// Ask git for `b`'s branch, in the place this dispatch is in (`b`'s).
+fn readBranch(b: *Branch) void {
+    // Not a repository: nothing to ask, and nothing to show.
+    if (weft.placeHas(".git") == .none) {
+        b.known = true;
+        return;
+    }
+    var ask: BranchAsk = undefined;
+    @memcpy(ask.root[0..b.root_len], b.root[0..b.root_len]);
+    ask.root_len = b.root_len;
+    const place = weft.placeDesignation(&ask.place) orelse return;
+    ask.place_len = place.len;
+    if (weft.execWith(BranchAsk, ask, .{ .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" } }, branchRead)) b.pending = true;
+}
+
+fn branchRead(r: weft.ExecDone, ask: BranchAsk) void {
+    const b = branchFor(ask.root[0..ask.root_len]) orelse return;
+    b.pending = false;
+    b.known = true;
+    var out: [256]u8 = undefined;
+    const name = if (r.ok()) std.mem.trim(u8, r.read(.out, 0, &out), " \t\r\n") else "";
+    b.name_len = @min(name.len, b.name.len);
+    @memcpy(b.name[0..b.name_len], name[0..b.name_len]);
+    // Said on the place it is true of — which is also what asks the status
+    // line again.
+    weft.contextSetAt("git.branch", b.name[0..b.name_len], ask.place[0..ask.place_len]) catch {};
+}
+
+/// A gather ran in `root`: whatever git did there, its branch is read again
+/// on the next ask.
+fn forgetBranch(root: []const u8) void {
+    for (&branches) |*b| if (b.root_len == root.len and std.mem.eql(u8, b.root[0..b.root_len], root)) {
+        if (!b.pending) b.known = false;
+    };
 }

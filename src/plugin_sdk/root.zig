@@ -953,6 +953,18 @@ pub fn stickyMenu(mode: []const u8) void {
     e.wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
 }
 
+/// What kind of state a mode is — the colour its status-line chip takes
+/// comes from the theme's entry for it, never from the mode's spelling.
+/// Restates the host's `Keymap.ModeTone` wire values.
+pub const ModeTone = enum(u32) { normal = 0, insert = 1, select = 2, replace = 3, pending = 4 };
+
+/// DECLARE what `mode` is called on the status line (`NORMAL`, `INS`) and its
+/// tone. A mode never named shows no chip — so a modeless grammar names none,
+/// and a mode id is never what a person reads. `""` withdraws the name.
+pub fn modeDisplay(mode: []const u8, name: []const u8, tone: ModeTone) void {
+    e.wl_mode_display(p(mode.ptr), @intCast(mode.len), p(name.ptr), @intCast(name.len), @intFromEnum(tone));
+}
+
 /// Register `cmd` as a provider for `action` under the predicate `when`, at
 /// `prio` (higher wins; ties break toward the more specific `when`). Auto-
 /// declares the action if `declareAction` hasn't run — a language plugin can

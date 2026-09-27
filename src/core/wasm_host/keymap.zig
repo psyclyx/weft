@@ -308,6 +308,21 @@ pub fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     km.tagMode(p.gpa, mode, "sticky") catch {};
 }
 
+/// `mode_display(mode, name, tone)`: the GRAMMAR says what `mode` is called
+/// on the status line (`NORMAL`, `INS`) and what kind of state it is, for
+/// its chip's colour. System-scoped like the other mode-table declarations,
+/// so legal from `init`. A mode no grammar names shows no chip — core never
+/// prints a mode id, and never guesses a colour from one.
+pub fn hModeDisplay(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    const name = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(name);
+    p.activeCtx().keymap.setModeDisplay(p.gpa, mode, name, .fromWire(@bitCast(args[4]))) catch {};
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;

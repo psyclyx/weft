@@ -82,6 +82,9 @@ pub const gutter = @import("gutter.zig");
 /// The status line's plugin exchange: the `ui/statusline-seg` slot's name
 /// and schema.
 pub const status_segment = @import("status_segment.zig");
+/// A context's status as a projection (`weft://here/status/primary`): the
+/// kind's producer, and which context an entry presents.
+pub const status_projection = @import("status_projection.zig");
 /// The transient highlight over what an operation just touched: a set of
 /// ranges anchored on its document.
 pub const flash = @import("flash.zig");

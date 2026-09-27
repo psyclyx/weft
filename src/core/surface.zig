@@ -46,11 +46,16 @@ pub const Role = enum(u32) {
     /// dim by column position, so the color is DATA the surface carries, not
     /// a layout side effect the drawer infers.
     annotation = 6,
+    /// Something needs attention (a warning's count): the diagnostic
+    /// warning colour.
+    warning = 7,
+    /// Something is wrong (an error's count): the diagnostic error colour.
+    danger = 8,
     _,
 
     pub fn fromInt(v: u32) Role {
         return switch (v) {
-            0, 1, 2, 3, 4, 5, 6 => @enumFromInt(v),
+            0, 1, 2, 3, 4, 5, 6, 7, 8 => @enumFromInt(v),
             else => .normal,
         };
     }
