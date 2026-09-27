@@ -18,11 +18,9 @@ const Style = view_mod.chrome.Style;
 /// The owner of the one transient binding these commands keep.
 const owner = "theme.set-chrome";
 
-/// Replace the transient chrome binding with `style`. The old one goes first:
-/// two bindings from one owner at one tier would tie, and the tie would not
-/// go to the newer.
+/// Replace the transient chrome binding with `style` (a transient rebind from
+/// one owner replaces its last, `Container.bind`).
 fn bindStyle(container: *core.container.Container, style: Style) !void {
-    container.unbindOwnerExact(.other, owner);
     container.bind(.{
         .slot = View.chrome_slot,
         .provider = .{ .value = style.name() },

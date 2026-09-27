@@ -274,10 +274,11 @@ What this leaves for the later lanes, and two things found on the way:
   row-role styling, so a producer naming a row role `chrome` or `icons`
   would read them. Harmless (an unknown class reads as `normal`), but a
   sign the family holds two kinds of value.
-- `set-color` binds at the transient tier under one owner and never unbinds,
-  so a second `set-color` of the same name ties with the first and loses
-  (`Container.betterThan` keeps the earlier). The chrome switch unbinds its
-  last binding first; `set-color` should too.
+- `set-color` bound at the transient tier under one owner and never
+  unbound, so a second `set-color` of the same name tied with the first and
+  lost (`Container.betterThan` keeps the earlier). Fixed for the class:
+  `Container.bind` at the transient tier replaces the same owner's binding
+  on that slot, so the chrome switch no longer unbinds first.
 
 ## 4. The status bar
 

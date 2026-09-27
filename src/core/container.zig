@@ -321,8 +321,33 @@ pub const Container = struct {
         owned.slot = decl.name;
         owned.provider = try dupePayload(self.gpa, binding.provider);
         errdefer freePayload(self.gpa, owned.provider);
-        try self.bindings.append(self.gpa, owned);
+        try self.bindings.ensureUnusedCapacity(self.gpa, 1);
+        // A runtime rebind REPLACES. The transient tier is what the user set
+        // just now (`theme.set-color`, `theme.set-chrome`): one owner holds at
+        // most one binding per slot there, so setting a thing twice cannot
+        // tie with, and lose to, the first setting (`betterThan` keeps the
+        // earlier `decl_index`, and a runtime binder has no list to take one
+        // from). Every other tier is an authored list, where one owner's
+        // several bindings on a slot are the point. Dropped only now: the
+        // payload is copied (it may borrow the binding it replaces) and the
+        // append can no longer fail.
+        if (binding.tier == .transient) self.dropTransient(binding);
+        self.bindings.appendAssumeCapacity(owned);
         self.epoch +%= 1;
+    }
+
+    /// The transient binding `binding` replaces: same slot, domain and owner.
+    fn dropTransient(self: *Container, binding: Binding) void {
+        var i: usize = 0;
+        while (i < self.bindings.items.len) {
+            const e = self.bindings.items[i];
+            if (e.tier == .transient and e.domain == binding.domain and
+                std.mem.eql(u8, e.slot, binding.slot) and std.mem.eql(u8, e.owner, binding.owner))
+            {
+                freePayload(self.gpa, e.provider);
+                _ = self.bindings.swapRemove(i);
+            } else i += 1;
+        }
     }
 
     /// Remove every binding in `domain` whose owner starts with `prefix`
@@ -585,6 +610,23 @@ test "container: within-owner decl_index — earlier index wins by convention" {
     try c.bind(.{ .slot = "s", .provider = .{ .value = "first" }, .predicate = .{ .all = &.{} }, .owner = "a", .decl_index = 0 });
     try c.bind(.{ .slot = "s", .provider = .{ .value = "second" }, .predicate = .{ .all = &.{} }, .owner = "a", .decl_index = 1 });
     try t.expectEqualStrings("first", c.resolveOne("s", .{}).?.provider.value);
+}
+
+test "container: a transient rebind from the same owner replaces its previous binding" {
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try declared(&c, "theme/fg", .first_wins);
+    try declared(&c, "theme/bg", .first_wins);
+    try c.bind(.{ .slot = "theme/fg", .provider = .{ .value = "#111111" }, .predicate = .{ .all = &.{} }, .tier = .config, .owner = "config" });
+    try c.bind(.{ .slot = "theme/fg", .provider = .{ .value = "#222222" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try c.bind(.{ .slot = "theme/bg", .provider = .{ .value = "#000000" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try c.bind(.{ .slot = "theme/fg", .provider = .{ .value = "#333333" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try t.expectEqualStrings("#333333", c.resolveOne("theme/fg", .{}).?.provider.value);
+    // Only that slot's binding went: the owner's other slot, and the config
+    // tier under it, stay.
+    try t.expectEqualStrings("#000000", c.resolveOne("theme/bg", .{}).?.provider.value);
+    try t.expectEqual(@as(usize, 3), c.bindings.items.len);
 }
 
 test "container: same-owner rebind never collides; cross-owner tie collides unless disjoint" {
