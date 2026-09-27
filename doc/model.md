@@ -41,9 +41,9 @@ the locus (`here`, a peer fingerprint, `shell:<id>`); a path without one means
 nothing (substrate §7, R1).
 
 The shift: **a designation is the only way to name content across the ABI.**
-`open`, `present`, `reveal`, jumplist entries, embeds, context values and
+`file.open`, `present`, `reveal`, jumplist entries, embeds, context values and
 viewport subjects all take one. A bare absolute path is accepted as sugar for
-`weft://here/file/…`. A relative name a person types (`open foo.txt`, `:e`,
+`weft://here/file/…`. A relative name a person types (`file.open foo.txt`, `:e`,
 the command line, a stored recent that predates designations) is resolved
 once, at the user-facing door, against the place the command runs in
 (`designation.resolveRelative`), so nothing downstream ever holds one. The
@@ -338,7 +338,7 @@ container's place is on the locus its designation names
 by locus, `Buffer.locality()` is the one reading, and ide.js offers
 build/test/debug/run in local source only. The coreutils tier is a
 filesystem provider (`ShellProvider`, mounted under `Router.freshAuthority`):
-`open weft://shell:<id>/dir/…` lists, a shell file is in its directory's
+`file.open weft://shell:<id>/dir/…` lists, a shell file is in its directory's
 place, the sidebar follows and reveals, and the status line reports a remote
 place's liveness (R5; `ShellFs` no longer blocks its spawn on the far side).
 A peer's file is editable: `Backing.remote` is one `backing.Remote` seam for
@@ -352,7 +352,7 @@ read-only with the reason (`Buffer.read_only` holds it).
 - `on_offers_changed` and the focus feed's `Companion` → `on_context_changed(keys)`.
 - The toolbar and contextmenu plugins as viewport owners → one `offers` projection provider.
 - Path subjects and `weft.placeRoot()` as a browsing root → designations.
-  Done for names and pickers: a plugin hands a typed name to `open`
+  Done for names and pickers: a plugin hands a typed name to `file.open`
   (`weft.openTyped`; `openUnder`, the guest-side join, is deleted) and
   `openFilePick` names no directory — core lists the dispatch's place and
   resolves the accepted name against the same place.
@@ -377,7 +377,7 @@ kept alive past its phase.
    `DocId`, 32 lowercase hex), `proc`, and any lowercase dotted name as a
    producer's projection; a path kind's ref is absolute by construction (the
    kind's separator is the path's root), so no relative designation can be
-   spelled. `durable.Spec` is the one reading of what `open`/`present` are
+   spelled. `durable.Spec` is the one reading of what `file.open`/`present` are
    handed: a designation, an absolute path as sugar, or a refusal
    (relative, malformed). Every `Document` mints 128 random bits at `init`;
    a bulk load, an edit, a save and a reload keep them, and a joined
@@ -387,7 +387,7 @@ kept alive past its phase.
    the receiver's own replica; the wire version is unchanged, as with every
    additive field before it. `core/designation.zig` answers an entry's
    designation — what was declared for it, else its file, else its
-   document — finds the live entry for one, and routes `open` for the kinds
+   document — finds the live entry for one, and routes `file.open` for the kinds
    core can answer: a live entry, a parked document (closing a scratch
    document with text parks it in `Buffers.parked`, bounded at 16), a
    projection's producer re-run (`Openers`: a producer claims its kind and a
@@ -396,7 +396,7 @@ kept alive past its phase.
    declares as `designation/<kind>`, and a refused claim fails its load; an
    unloaded producer's kind is refused as such), a live process
    reattached by the producer of its namespace (`proc.<ns>`), else a refusal
-   by name. The shell's `open` adds `here` paths, `shell:` files, and peer
+   by name. The shell's `file.open` adds `here` paths, `shell:` files, and peer
    authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
    tree by the provider's own listing and is presented as every directory
    is; a peer's `doc` opens the offer carrying that id, across reconnects;
@@ -489,8 +489,8 @@ kept alive past its phase.
    nothing shows it — the refusing close, so an entry holding unsaved work
    stays as a tab: a listing says it holds a draft by offering `view.apply`
    enabled (`Services.holdsDraft`), which `buffer.close-unmodified` refuses like a dirty
-   file; and a presentation drops the placement an `open` from a
-   tool entry asks for. `as` rides to `open` as the `?as=` view parameter:
+   file; and a presentation drops the placement an `file.open` from a
+   tool entry asks for. `as` rides to `file.open` as the `?as=` view parameter:
    `designation.openHeld` routes `?as=<a claimed kind>` to that producer with
    the subject's entry active (the projection OF the subject), otherwise the
    subject's own producer reads it, and a live entry satisfies an open only
@@ -627,7 +627,7 @@ when a parse lands (their private cache is deleted). Scratch documents
 outlive the process: past the parked bound, and at shutdown for every open or
 parked scratch with text, a document goes to `Buffers.documents` (`DocStore`:
 32 records, histories up to 1 MiB else the text alone, `documents.kv` beside
-`plugins.kv`), and `open weft://here/doc/<id>` or a jump restores it on
+`plugins.kv`), and `file.open weft://here/doc/<id>` or a jump restores it on
 demand — no session restore, since weft has none; a record is forgotten only
 once its entry stands, and a document ever bound to a peer
 (`Document.bound_to_peer`) is never stored. JS plugins reach the tool and

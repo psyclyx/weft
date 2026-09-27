@@ -111,22 +111,22 @@ palette with `SPC :` and enter them without the leading colon.
 In the host editor, focus the document to share and start listening:
 
 ```text
-:listen 7777 edit
+:collab.listen 7777 edit
 ```
 
 In the other editor, replace `HOST` with the host's address:
 
 ```text
-:connect HOST:7777
+:collab.connect HOST:7777
 ```
 
 The host's document opens as a new buffer. To share another document, focus it
-and run `:share pair`. Use `:peers` to see connected peers and their identity
+and run `:collab.share pair`. Use `:collab.peers` to see connected peers and their identity
 fingerprints and verification words. `:collab.share-presence off` hides your cursor;
-`:disconnect` leaves the host while keeping the shared buffers locally.
+`:collab.disconnect` leaves the host while keeping the shared buffers locally.
 
 Connections are encrypted and use the token supplied at startup with `--token`;
-both editors must use the same value. `listen` takes an explicit access grade:
+both editors must use the same value. `collab.listen` takes an explicit access grade:
 use `view` instead of `edit` for read-only access. Filesystem sharing is a
 separate grant. See [the wire protocol](doc/wire.md) for details.
 

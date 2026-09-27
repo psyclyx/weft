@@ -123,7 +123,7 @@ their text in the same column. `virtual_after` and `eol` still do not draw.
 
 **Built.** `core/flash.zig`: a `flash` layer per document (anchored spans) plus a
 generation and a source on `Caps.flash`. `wl_flash` replaces the set, `wl_flash_add`
-adds to it (SDK `flash`, `flashAdd`, `flashRanges`). `undo`/`redo` always record the
+adds to it (SDK `flash`, `flashAdd`, `flashRanges`). `edit.undo`/`edit.redo` always record the
 span their commits changed (`flash.changedSince`) as an `undo` flash, in a set of its own
 beside the edit set (`Flash.showing`): the frame shows it only when `editor/flash-undo`
 is `on` and it is the newer, so with the option off an undo cannot cut a fading
@@ -329,7 +329,7 @@ settled:
   register (`@` by default), `q` plays it with a count. `SPC y` yanks and hands the
   unnamed register to the clipboard; `SPC p P R` paste the clipboard, or the unnamed
   register when the clipboard still holds its text, so a ferried identity survives.
-- `SPC d` is a new lsp command, `diagnostics`: a picker over this file's diagnostics.
+- `SPC d` is a new lsp command, `lsp.pick-diagnostic`: a picker over this file's diagnostics.
 - Not yet: `A-u`/`A-U` (core undo is linear: a new edit drops the redo stack, so there is
   no branch to walk), `]g`/`[g` (no plugin knows a file buffer's hunks; git's hunks live in
   its status projection), `SPC S` and `SPC D` (lsp tracks one document, and its picker
@@ -512,7 +512,7 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   `plugin.fs.create-file`, labelled "New file").
 - Availability: core's table is computed from an entry `Shape`. Undo and redo are
   disabled with `nothing-to-undo` or `nothing-to-redo`. `std.persistence.save` is absent
-  unless some `save` provider is eligible. Core's `file.write` now excludes
+  unless some `file.save` provider is eligible. Core's `file.write` now excludes
   `locus == tool` (priority -1, so it is still the floor), so a git status listing isn't
   offered save, and a files listing (which provides `view.apply`) is.
 - ide: `C-d` selects the word, then adds the next literal occurrence. `C-S-l` selects

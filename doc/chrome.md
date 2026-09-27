@@ -80,6 +80,68 @@ marginalia's context-blind scan. Menus, the palette, tooltips and which-key
 all use it, so the key shown is always the one that would actually work in
 the focused pane.
 
+### 1.4 Landed (2026-09-27, branch `arc/chrome`)
+
+All of §1.
+
+- **One grammar.** Every command, action and semantic action is
+  `<namespace>.<verb>[-<object>]` — 941 ids across the three shipped configs
+  (977 before, in four spellings). `weft_membrane.command_id` is the grammar,
+  direction vocabulary included (`fwd`, `previous`, `backward`, `rev` are
+  refused by name; `WORD` is `big-word`); `weft.plugin` checks every entry at
+  the plugin's comptime, and `e2e/identity` holds every id the configs
+  register to it. An action a config offers is spelled as an intention
+  (`plugin.code.format`), the other grammar a bound name may take; the std
+  vocabulary follows the same directions (`std.navigation.word-prev`).
+  Grammar plumbing is in its grammar's namespace (`vim.move-word-next`,
+  `helix.count-3`, `vim.register-a`, `lsp.rename-type`); prompts, ex lines
+  and transients derive their commands from one grammar id and their mode
+  from it.
+- **Duplicates collapsed, one registration each.** The window family is
+  `window.*` (the `windows` plugin is gone); `files.find` is the one file
+  picker (vim, helix, emacs, ide and the dashboard each had one); `lsp.*`
+  pushes its own jump, so the `hx-`/`ide-goto-*` wrappers are gone; the
+  dashed semantic wrappers are their dotted actions; `palette.open`,
+  `buffer.pick`, `buffer.scratch`, `ts.node-kind` are single; `eval`/
+  `format` and ide.js's `plugin.ide.*` are `plugin.code.*` in every config.
+  Core's `file.open` and `buffer.close-*` are registered once and answered by
+  the shell through an `EntryShell` door; `cursor.up`/`down` move by visual
+  line through a `Panes.vertical` door; `main()`'s second `scroll.page-*`
+  is gone. The registry counts a bind over a bound id, and the identity gate
+  refuses any — which found `offers` loaded twice by ide.js and its toolbar
+  fragment (a manifest now loads each plugin once).
+- **Presentation** (`weft_membrane.presentation`: label, summary, menu,
+  group, order, icon, prompts, toggle, internal, one text form both ends
+  parse). Declared by `command.define(…).present(.{…})` in core, by
+  `CommandEntry` fields in a wasm plugin (`wl_declare_command_meta`), by
+  `weft.command(name, fn, {…})` in a JS plugin (`qjs_declare_command_meta`,
+  the same body), and at the config tier by `weft.command(id, {…})`, which
+  wins field by field (`Presentations`). `presentations.of(ctx, name)` is the
+  one reading — an intention's is its provider's here, else the std label —
+  served by `wl_command_meta`/`qjs_command_meta`. Every command has a
+  one-sentence summary; the 455 a person runs have labels, 486 are
+  `internal`. Menu paths use File, Edit, Selection, View, Go, Run, Terminal,
+  Help. The icon set grew to 94 Lucide drawings. Viewports publish
+  `viewport.<name>.shown`, which the sidebar and panel toggles name.
+- **keysFor** (`core/keys_for.zig`): the keys that run a command, action or
+  intention in a binding mode, shortest first, each key's arms walked as
+  dispatch walks them — an intention arm counts through the command its
+  winning offer runs (`Invokers.commandOf`), a refused one only for the
+  intention. "Here" is the focused context's binding mode, or the mode a
+  picker was opened from. `wl_keys_for`/`qjs_keys_for`; the chrome tooltip's
+  `KeyHints` hook is filled with it.
+- **Consumers.** The palette lists labels (`Open File…`), with the id, shape
+  and summary as secondary text and the key beside it; its regex hide list is
+  gone. which-key shows labels and hides internal commands. marginalia's
+  context-blind table scan is replaced by `keysFor`, and the two doors that
+  fed it (`wl_mode_names`, `wl_binding_table`) are retired. Offers take a
+  plugin intention's label and every icon from the command they run, so the
+  toolbar's buttons carry icons.
+
+Found on the way: which-key's page clamp, stepping 12 but clamping to a
+multiple of 32, cycled a short menu (0, 12, 0, …) under repeated page-down;
+ide.js pinned a toolbar button to a command that no longer existed.
+
 ## 2. Menus are one widget over one model
 
 ### 2.1 The model

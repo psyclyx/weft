@@ -24,6 +24,10 @@
 //   weft.provide(name, when, cmd[, prio]) — a provider for one, chosen by
 //                                    {mode, lang} at fire time
 //   weft.semanticAction(name)      — declare an open focused-view action command
+//   weft.command(id, {label, summary, menu, group, order, icon, prompts,
+//                     toggle, internal}) — describe how a command is presented
+//                                    (palette, which-key, menus); wins over what
+//                                    its plugin declared
 //   weft.viewport(name, attrs)     — compose the workspace: a pane's attributes
 //                                    {edge, extent (a share, or {rows}), cycles,
 //                                    persistent, followFocus, takesFocus, statusLine}
