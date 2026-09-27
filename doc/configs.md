@@ -525,34 +525,45 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
 - A click on such a pane acts through it: `pointer-click` runs an `action` node there
   by reference (`Services.invokeActionNode`) and leaves the head's focus alone. An
   action node is clickable whether or not it is in the focus order.
-- `weft.present(v, {command})`: a viewport shows the entry a command leaves active,
-  which is how a plugin entry with no path is presented.
+- `weft.present(v, {command})`: a viewport showed the entry a command left active.
+  Retired by doc/model.md phase 3: every entry has a designation now, so a viewport
+  presents `{subject, as, reveal}` (below).
 - `pointer-focus-point`: focus the pane and the node or caret under the pointer, and
   keep a selection the point is inside. It is what "the context under the pointer"
   means.
 - The bundled presenter hangs an interaction with `presentation: "pointer"` or
   `"caret"` below that point.
 
-The plugins:
+The chrome, since doc/model.md phase 3 — compositions, not plugins that own viewports:
 
-- **`toolbar`** (`config/toolbar.js`) lists the pinned entries (`weft.set("toolbar",
-  "pinned", ...)`) plus every non-`std.*` offer of the primary context. It arranges them
-  with the shared `affordances` plugin library (groups by their most urgent `order`,
-  separators between). It redraws only when `on_context_changed` reports `offers` or
-  `mode` moved (it was `on_offers_changed` until doc/model.md phase 2). A click runs
-  `invokeIntentionIn(.primary)`, and a refusal is echoed. A disabled offer is greyed by
-  a `tone` fact and stays clickable so it can say why. Measured in ide.js: a Zig file
-  shows `Save Undo Redo Palette | Build Test Debug | Format Rename`; a files listing
-  in the primary pane shows its node actions (New file, New directory, Rename, …); git
-  status shows `Stage Diff Commit Push Pull Fetch Refresh` (git now labels its verbs
-  with `provideAffordance`).
-- **`contextmenu`** (mouse-3; S-F10 and Menu open it at the caret) runs
-  `pointer-focus-point`, then lists `offersIn(.active)` as a head-local interaction.
-  The menu hides the key-only words (navigation, input, gesture, line break); set
-  `weft.set("contextmenu", "hide", [...])` to change that. Its keys (Up, Down,
-  Return, Escape) and its clicks are the interaction's own bindings, so no mode is
-  entered. A click on an item runs it; a click anywhere else closes the menu.
-  config.js binds it on mouse-3 as well.
+- **The toolbar** (`config/toolbar.js`) is a viewport presenting
+  `weft://here/offers/primary` `as: "strip"`. The `offers` plugin is the provider for
+  designations of kind `offers` (`primary`, `active`, `at-pointer`), presented as a
+  `strip`, a `list` or a `menu`. The strip lists the pinned entries (`weft.set("offers",
+  "pinned", ...)`) plus every non-`std.*` offer of the primary context, arranged by the
+  shared `affordances` library (groups by their most urgent `order`, separators
+  between) through the `weft_offers` library — the one reading the palette's offer rows
+  use too. It redraws only when `on_context_changed` reports `offers` or `mode` moved.
+  A click runs `invokeIntentionIn(.primary)`, and a refusal is echoed. A disabled offer
+  is greyed by a `tone` fact and stays clickable so it can say why. Measured in ide.js:
+  a Zig file shows `Save Undo Redo Palette | Build Test Debug | Format Rename`; a files
+  listing in the primary pane shows its node actions (New file, New directory, Rename,
+  …); git status shows `Stage Diff Commit Push Pull Fetch Refresh` (git labels its
+  verbs with `provideAffordance`).
+- **The context menu** is mouse-3 presenting `weft://here/offers/at-pointer` `as:
+  "menu"` (`offers-menu`; S-F10 and Menu present `offers/active` at the caret,
+  `offers-menu-at-caret`). It runs `pointer-focus-point`, then lists the active
+  context's offers as a head-local interaction, leaving out what cannot run and the
+  key-only words (navigation, input, gesture, line break; `weft.set("offers", "hide",
+  [...])` changes that). Its keys (Up, Down, Return, Escape) and its clicks are the
+  interaction's own bindings, so no mode is entered. A click on an item runs it; a
+  click anywhere else closes the menu. config.js binds it on mouse-3 as well.
+- **The sidebar** (`config/sidebar.js`) presents `{subject: {context: "place"},
+  reveal: {context: "entry"}}`: the files provider lists the place the editor's entry
+  is in — a local project, a peer's shared tree — moves when the place moves, keeps
+  what you navigated to inside it until then, and highlights the editor's entry
+  (opening the folders above it) without taking the keys. `weft://here/places/all`,
+  the places you are working in, is the documented alternative subject.
 - ide.js's actions are intention-named (`plugin.ide.build/test/debug/format/rename`),
   because only intentions are offers, and so only they reach chrome. Each is provided
   "in source" (`posture: "text"` and `locality` local or remote), so a git status

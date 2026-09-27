@@ -335,6 +335,63 @@ kept alive past its phase.
    `offers` provider replaces the toolbar and contextmenu plugins; the
    palette and which-key read the same offers. Sidebar, outline, problems
    and breadcrumbs are rewritten as compositions.
+
+   *Landed (2026-09-26, branch `arc/model`).* `weft.present(viewport,
+   {subject, as, reveal})`: subject and reveal are a designation or
+   `{context: key}` (`viewport.Binding`), refused where written
+   (`viewport.validate`); `as` is a projection name. The workspace reads the
+   frame boundary's per-key comparison — the one `on_context_changed`
+   delivers — through `Registry.follow`, and the application runs a second
+   layout pass in the same wake, so a follower is on the new value in the
+   frame its key moved. A key re-read to the same value keeps the pane (and
+   whatever the user navigated to inside it); a key with no value presents an
+   explicit empty state (core's own one-line view per viewport); the entry
+   the previous presentation made is closed through the shell's close once
+   nothing shows it; and a presentation drops the placement an `open` from a
+   tool entry asks for. `as` rides to `open` as the `?as=` view parameter:
+   `designation.openHeld` routes `?as=<a claimed kind>` to that producer with
+   the subject's entry active (the projection OF the subject), otherwise the
+   subject's own producer reads it, and a live entry satisfies an open only
+   with the same `as`. `reveal` is the standard `view.reveal` action, whose
+   request now carries an `argument` (scene codec v3, additive); core asks it
+   unadvertised (`action.Registry.ask` — advertising is what makes an action
+   an offer) and moves the ENTRY's retained highlight, never the head's
+   (`Services.reveal`). The files listing answers it from its own
+   designation, which trusted publishers now state on the directory
+   descriptor (`fs.target.designation_fact_name`), opening one folder at a
+   time. `{command}` presenting is deleted.
+   The `offers` plugin is the provider for kind `offers` (`primary`,
+   `active`, `at-pointer`; `as` strip, list, menu) and replaces the toolbar
+   and contextmenu plugins, both deleted; `plugin_lib/offers` is the one
+   reading (pinned entries, grammar words, hidden prefixes, disabled kept or
+   omitted), which the palette's offer rows read too, and the index-addressed
+   `wl_offer_count/name/provider/reason` doors are deleted. Compositions, in
+   config: the sidebar (`{context: "place"}`, reveal `{context: "entry"}`),
+   the outline (`config/outline.js`, `{context: "entry"}` as `symbols`,
+   answered by the new `symbols` plugin from the grammar's outline), the
+   problems list as the `diagnostics` projection of a place
+   (`weft://here/diagnostics/<place>`, rows scoped to it), and the `places`
+   projection (`weft://here/places/all` from the files plugin over the new
+   `wl_places`: every entry's place, then every tree a peer shares), the
+   sidebar's documented alternative. A peer's listing and shared documents
+   are in the peer tree's place (`ShareCtx.remotePlace`), and a peer's FILE
+   now opens as a read-only entry read once through the tree — so the
+   sidebar follows onto a peer's tree and reveals the file there. The gutter
+   answer can be a formula over the frame's snapshot (`core.gutter.Rule`:
+   a line's number, or its distance from the caret line); the caret left the
+   question, and linenumbers answers rules, so relative numbers are right on
+   the frame the caret moves.
+   Still open: the breadcrumbs stay a status-segment answer — a status
+   segment answers a per-pane, per-frame question and is no viewport, so it
+   has no subject to present; which-key still asks what a key would run
+   (`menuBindingIntent`), a different question from what a context offers;
+   the outline reads the tree an entry has when it is presented (no event
+   for a document's revision yet, so a parse or an edit landing later shows
+   at the next presentation or `symbols-refresh`) and asks no language
+   server; a `shell:` locus lists no directories and a shell file has no
+   place of its own, so the sidebar cannot follow a remote shell; a peer's
+   file is read-only, and a peer place's locus is `here` (its locality reads
+   local).
 4. **Extent sets.** Unify text selections and listing focus; declared
    mapping; dispatch-owned `.each`. Migrate vim, helix, ide, surround, find
    and files; delete their hand loops.

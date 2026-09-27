@@ -27,8 +27,9 @@
 //   weft.viewport(name, attrs)     — compose the workspace: a pane's attributes
 //                                    {edge, extent (a share, or {rows}), cycles,
 //                                    persistent, followFocus, takesFocus, statusLine}
-//   weft.present(viewport, {subject} | {command}) — show a resource in one, or
-//                                    what a command leaves active (a plugin's entry)
+//   weft.present(viewport, {subject, as, reveal}) — show a designation, or the
+//                                    value of ONE context key ({context: "place"}),
+//                                    as a projection, revealing one inside it
 //   weft.set(owner, key, value)    — a value binding; every key has an OWNER
 //   weft.menu(name)                — declare a prefix-menu keymap mode
 //   weft.statusSegment(text, role, prio[, cmd]) — a static status-line segment; a click runs cmd

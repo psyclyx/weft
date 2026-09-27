@@ -101,6 +101,35 @@ Complection avoided: the DSL fuses query language + reactivity + workspace
 state; the split keeps feed = state change, query = the provider's business,
 retarget = an op.
 
+### D2 revisited (2026-09-26, doc/model.md §2.5, §6.1): one key, no expressions
+
+The rejection above holds for EXPRESSIONS and is kept. What changed is what a
+subject can name. With designations for projections (doc/model.md §2.1), "the
+symbols of the focused entry" stops being a function and becomes a key plus a
+view parameter: the `entry` key's value (a designation) presented `as:
+"symbols"`. What D2 feared needed evaluating now just needs reading. So a
+viewport subject — and a `reveal` inside it — may be bound to ONE context key:
+
+```js
+weft.present("sidebar", { subject: { context: "place" }, reveal: { context: "entry" } });
+weft.present("outline", { subject: { context: "entry" }, as: "symbols" });
+```
+
+There is no function, no composition and no evaluation order: `{context:
+key}` is the whole grammar, refused otherwise at the line it is written on,
+and `as` is a plain name carried as the designation's `as` view parameter.
+Following reuses D2's two primitives rather than adding a third: the feed is
+the primary context's per-key comparison (`on_context_changed`, which already
+existed for plugins), and the op is present-in-viewport. The workspace reads
+the moved keys at the same frame boundary and presents again only when the
+bound key moved, so a persistent viewport keeps what the user navigated to
+until then, and a key with no value presents an explicit empty state. The
+companion property is kept by construction: the primary context reads focus
+only from a `focus_source` pane, so a follower cannot hear itself. The
+risk D2 named — a DSL accreting — is bounded by refusing anything but one key;
+a follower that needs more than one key's value is still ten lines of provider
+code, as D2 said.
+
 ## D3. Open placement: a hint + one policy slot, not a rule system
 
 Recommend: §9.4 outcomes carry an optional placement **hint**
