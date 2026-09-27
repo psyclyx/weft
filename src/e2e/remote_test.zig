@@ -137,3 +137,174 @@ test "e2e/remote: a shell that is gone reads offline in the status line, and its
     const l = ed.ctx.loci.?.resolve(.{ .shell = "gone" }) orelse return error.NoLocus;
     try t.expectEqual(core.locus.Liveness.offline, ed.ctx.loci.?.liveness(l));
 }
+
+/// Bob, connected to alice, who shares `<project>/shared` granting `access`.
+const PeerPair = struct {
+    proj: Project,
+    a: Editor,
+    b: Editor,
+    loader: ConfigLoader,
+    link: h.Loopback,
+    fp: [24]u8,
+    tree: projection.PeerTree,
+    file_name: [128]u8,
+
+    fn init(self: *PeerPair, gpa: std.mem.Allocator, access: h.fs_remote.Access) !void {
+        try self.proj.init(gpa);
+        errdefer self.proj.deinit();
+        try core.file.writeBytesMakingDirs(gpa, "shared/src", "shared/src/main.zig", "pub fn main() void {}\n");
+        try Editor.initNamed(gpa, &self.a, "alice");
+        try Editor.initNamed(gpa, &self.b, "bob");
+        self.loader = .{ .ed = &self.b };
+        try bootIde(gpa, &self.proj, &self.b, &self.loader);
+        try self.b.enableCollabCommands();
+        try h.Loopback.init(&self.link, gpa, &self.a, &self.b, "alice", "bob");
+        self.fp = self.link.peer_sess.peerFingerprint() orelse return error.NoHandshake;
+        const shared_root = try std.fmt.allocPrint(gpa, "{s}/shared", .{self.proj.root});
+        defer gpa.free(shared_root);
+        try self.tree.initGranting(gpa, &self.b, shared_root, &self.fp, access);
+    }
+
+    fn deinit(self: *PeerPair, gpa: std.mem.Allocator) void {
+        self.tree.deinit(gpa, &self.b);
+        self.link.deinit();
+        self.loader.deinit();
+        self.b.deinit();
+        self.a.deinit();
+        self.proj.deinit();
+    }
+
+    /// `weft://<alice>/file/src/main.zig`.
+    fn fileDesignation(self: *PeerPair) ![]const u8 {
+        return (durable.Designation{ .authority = .{ .peer = &self.fp }, .kind = .file, .ref = "/src/main.zig" }).render(&self.file_name);
+    }
+
+    fn disk(self: *PeerPair, gpa: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return core.file.readAlloc(gpa, "shared/src/main.zig");
+    }
+};
+
+test "e2e/remote: a peer's file is editable where the peer granted a write surface — guarded save, external changes merged as the backing peer's" {
+    const gpa = t.allocator;
+    var pair: PeerPair = undefined;
+    try pair.init(gpa, .read_write);
+    defer pair.deinit(gpa);
+    const b = &pair.b;
+
+    const designation = try pair.fileDesignation();
+    try t.expect(projection.openOk(b, designation));
+    try t.expectEqualStrings(designation, b.buffers.active().designationText());
+    try t.expect(b.buffers.active().read_only == null);
+    // In the peer's place, on the peer's locus: remote — so the build drops
+    // for its locality, now that the file is editable source.
+    try t.expectEqualStrings(pair.tree.root_designation, fact(b, "place"));
+    try t.expectEqualStrings("remote", fact(b, "locality"));
+    try t.expectEqualStrings("text", fact(b, "posture"));
+    try t.expect(!ide.offered(b, "plugin.ide.build"));
+    try t.expect(ide.offered(b, "plugin.ide.format"));
+
+    // R2 + R5: the locus is the fingerprint; whatever connection reaches it
+    // is a binding, and the status line reads its liveness.
+    const loci = b.ctx.loci.?;
+    const locus = loci.resolve(.{ .peer = &pair.fp }) orelse return error.NoPeerLocus;
+    try t.expectEqual(locus, b.buffers.active().place.locus());
+    var conn = try core.session.Conn.init(gpa, pair.link.peer_sess, "alice", .client);
+    defer conn.deinit();
+    loci.bindPeer(locus, &conn);
+    {
+        const note = (try remoteNote(b)) orelse return error.NoRemoteNote;
+        defer gpa.free(note);
+        try t.expect(std.mem.endsWith(u8, note, " connected"));
+    }
+    loci.bindPeer(locus, null);
+    {
+        const note = (try remoteNote(b)) orelse return error.NoRemoteNote;
+        defer gpa.free(note);
+        try t.expect(std.mem.endsWith(u8, note, " offline"));
+    }
+
+    // An edit saves back through the peer's write surface. The peer's tree
+    // rides the connection the frame thread ticks, so every step lands on
+    // the call: no worker to wait for.
+    const te = b.buffers.active().textEditor().?;
+    te.moveTo(te.text().byteLen());
+    try te.insertText(gpa, "// edited\n");
+    try te.requestSave(gpa);
+    try t.expect(te.pollSave(gpa));
+    try t.expect(!try te.isDirty(gpa));
+    {
+        const on_disk = try pair.disk(gpa);
+        defer gpa.free(on_disk);
+        try t.expectEqualStrings("pub fn main() void {}\n// edited\n", on_disk);
+    }
+
+    // The peer's disk moves while this side has unsaved work: the save is
+    // STALE and writes nothing; the poll merges the peer's change as the
+    // backing peer's ops beside the unsaved edit; the retry lands both.
+    try core.file.writeBytes(gpa, "shared/src/main.zig", "pub fn main() void {}\n// edited\n// theirs\n");
+    te.moveTo(0);
+    try te.insertText(gpa, "// mine\n");
+    try te.requestSave(gpa);
+    try t.expect(!te.pollSave(gpa));
+    try t.expect(te.save_state == .stale);
+    {
+        const on_disk = try pair.disk(gpa);
+        defer gpa.free(on_disk);
+        try t.expectEqualStrings("pub fn main() void {}\n// edited\n// theirs\n", on_disk);
+    }
+    // (A poll the frame loop asked for before the peer's write is folded
+    // first: it saw nothing new, and says so.)
+    _ = try te.pollBacking(gpa);
+    try te.requestBackingPoll(gpa);
+    try t.expect(try te.pollBacking(gpa));
+    try t.expect(te.save_state == .idle);
+    const merged = "// mine\npub fn main() void {}\n// edited\n// theirs\n";
+    {
+        const text = try b.textAlloc();
+        defer gpa.free(text);
+        try t.expectEqualStrings(merged, text);
+    }
+    try te.requestSave(gpa);
+    try t.expect(te.pollSave(gpa));
+    {
+        const on_disk = try pair.disk(gpa);
+        defer gpa.free(on_disk);
+        try t.expectEqualStrings(merged, on_disk);
+    }
+    // No temp left beside it.
+    try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp").kind == core.file.Stat.absent.kind);
+
+    // The peer's own edit is not ours to undo: undo takes back only "// mine".
+    b.run("undo");
+    {
+        const text = try b.textAlloc();
+        defer gpa.free(text);
+        try t.expectEqualStrings("pub fn main() void {}\n// edited\n// theirs\n", text);
+    }
+}
+
+test "e2e/remote: a peer's file without a write grant is read-only and says why" {
+    const gpa = t.allocator;
+    var pair: PeerPair = undefined;
+    try pair.init(gpa, .read);
+    defer pair.deinit(gpa);
+    const b = &pair.b;
+
+    try t.expect(projection.openOk(b, try pair.fileDesignation()));
+    try t.expectEqualStrings(h.app.peer_file.refuse_no_write, b.buffers.active().read_only orelse return error.NotReadOnly);
+    try t.expectEqualStrings("remote", fact(b, "locality"));
+    // Said when it opens…
+    try t.expect(std.mem.indexOf(u8, b.echoText(), "without a write grant") != null);
+    b.head.echo.clearRetainingCapacity();
+    // …and by every edit it refuses: the entry rests structural, so a key
+    // types nothing, and an edit that reaches the door is refused with the
+    // entry's own reason.
+    try t.expectEqualStrings("structural", fact(b, "posture"));
+    b.typeText("x");
+    try t.expectError(error.Unauthorized, b.ctx.edit(.{ .start = 0, .end = 0 }, "x"));
+    try t.expect(std.mem.indexOf(u8, b.echoText(), "without a write grant") != null);
+    const text = try b.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("pub fn main() void {}\n", text);
+}

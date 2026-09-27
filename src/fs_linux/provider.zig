@@ -755,7 +755,15 @@ pub const LinuxFs = struct {
     }
 
     fn rename(self: *LinuxFs, destination_root: contract.Root, rename_op: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
-        try requireExclusive(rename_op.expected);
+        // `expected = .entry` is a guarded REPLACE: the destination is taken
+        // over only while it is still exactly the file the caller observed
+        // (identity and revision) — the move-iff-unchanged half of a guarded
+        // save (substrate §2). Preflight strength, as advertised: the check
+        // is repeated immediately before the rename, not coupled to it.
+        const replacing: ?@FieldType(contract.Expected, "entry") = switch (rename_op.expected) {
+            .absent, .anything => null,
+            .entry => |wanted| wanted,
+        };
         const source = try self.resolveEntry(rename_op.source.root, rename_op.source.ref);
         defer source.close();
         if (!revisionMatches(source.snapshot, rename_op.source.revision)) return error.Stale;
@@ -788,7 +796,20 @@ pub const LinuxFs = struct {
         };
         if (!guarded.identity.eql(source.snapshot.identity) or
             !revisionMatches(guarded, rename_op.source.revision)) return error.Stale;
-        try renameNoReplace(source.parent_fd, source_name_z.ptr, destination.fd, destination_name_z.ptr);
+        if (replacing) |wanted| {
+            if (source.snapshot.kind == .directory) return error.Unsupported; // files replace files
+            const target = try self.resolveEntry(destination_root, wanted.ref);
+            defer target.close();
+            if (target.snapshot.kind == .directory or !revisionMatches(target.snapshot, wanted.revision)) return error.Stale;
+            // The observed file must be the one AT the destination name.
+            const there = statAt(self.gpa, destination.fd, rename_op.destination.name.bytes) catch |err| switch (err) {
+                error.NotFound => return error.Stale,
+                else => return err,
+            };
+            if (!there.identity.eql(target.snapshot.identity) or !revisionMatches(there, wanted.revision)) return error.Stale;
+            try renameReplace(source.parent_fd, source_name_z.ptr, destination.fd, destination_name_z.ptr);
+            self.invalidateEntry(wanted.ref);
+        } else try renameNoReplace(source.parent_fd, source_name_z.ptr, destination.fd, destination_name_z.ptr);
         const moved = statAt(self.gpa, destination.fd, rename_op.destination.name.bytes) catch
             return .{ .outcome = .{ .ambiguous = "rename succeeded but the destination immediately changed" } };
         if (!moved.identity.eql(source.snapshot.identity))
@@ -1675,7 +1696,16 @@ fn writeAll(fd: i32, bytes: []const u8) contract.Error!void {
 }
 
 fn renameNoReplace(old_fd: i32, old_name: [*:0]const u8, new_fd: i32, new_name: [*:0]const u8) contract.Error!void {
-    const rc = linux.renameat2(old_fd, old_name, new_fd, new_name, .{ .NOREPLACE = true });
+    return renameErr(linux.renameat2(old_fd, old_name, new_fd, new_name, .{ .NOREPLACE = true }));
+}
+
+/// A rename that takes over an existing destination — only ever after the
+/// guarded-replace checks in `rename`.
+fn renameReplace(old_fd: i32, old_name: [*:0]const u8, new_fd: i32, new_name: [*:0]const u8) contract.Error!void {
+    return renameErr(linux.renameat2(old_fd, old_name, new_fd, new_name, .{}));
+}
+
+fn renameErr(rc: usize) contract.Error!void {
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         .EXIST, .NOTEMPTY => return error.AlreadyExists,
@@ -2142,6 +2172,54 @@ test "linux provider reports stale after external rename deletion and content ch
     defer after.deinit();
     try t.expect(findEntry(after.value, "changed") != null);
     try t.expect(findEntry(after.value, "changed-away") == null);
+}
+
+test "linux provider replaces a file by rename only while it is still the file observed (guarded save)" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{
+        .{ .id = opId(90), .operation = .{ .create_file = .{ .destination = .{ .parent = .root, .name = try .init("doc") }, .contents = "old" } } },
+        .{ .id = opId(91), .operation = .{ .create_file = .{ .destination = .{ .parent = .root, .name = try .init("tmp") }, .contents = "new bytes" } } },
+    };
+    var setup_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer setup_report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const doc = findEntry(listing.value, "doc") orelse return error.TestExpectedEqual;
+    const tmp = findEntry(listing.value, "tmp") orelse return error.TestExpectedEqual;
+
+    // Someone else writes the destination first: the replace is stale, and
+    // neither file moves.
+    try externalWrite(&fixture.local, fixture.root, "doc", "theirs, and longer");
+    const stale = [_]contract.Planned{.{ .id = opId(92), .operation = .{ .rename = .{
+        .source = .{ .root = fixture.root, .ref = tmp.observation.node.entry, .revision = tmp.observation.revision },
+        .destination = .{ .parent = .root, .name = try .init("doc") },
+        .expected = .{ .entry = .{ .ref = doc.observation.node.entry, .revision = doc.observation.revision } },
+    } } }};
+    var stale_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &stale });
+    defer stale_report.deinit();
+    try expectOutcome(.stale, stale_report.value.entries[0].outcome);
+
+    // Observed again, unchanged since: the replace lands.
+    var fresh = try provider.list(t.allocator, fixture.root, .root);
+    defer fresh.deinit();
+    const doc_now = findEntry(fresh.value, "doc") orelse return error.TestExpectedEqual;
+    const replace = [_]contract.Planned{.{ .id = opId(93), .operation = .{ .rename = .{
+        .source = .{ .root = fixture.root, .ref = tmp.observation.node.entry, .revision = tmp.observation.revision },
+        .destination = .{ .parent = .root, .name = try .init("doc") },
+        .expected = .{ .entry = .{ .ref = doc_now.observation.node.entry, .revision = doc_now.observation.revision } },
+    } } }};
+    var report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &replace });
+    defer report.deinit();
+    try expectOutcome(.applied, report.value.entries[0].outcome);
+    var after = try provider.list(t.allocator, fixture.root, .root);
+    defer after.deinit();
+    try t.expect(findEntry(after.value, "tmp") == null);
+    const replaced = findEntry(after.value, "doc") orelse return error.TestExpectedEqual;
+    var bytes = try provider.read(t.allocator, .{ .source = .{ .entry = .{ .root = fixture.root, .ref = replaced.observation.node.entry, .revision = replaced.observation.revision } } });
+    defer bytes.deinit();
+    try t.expectEqualStrings("new bytes", bytes.value.bytes);
 }
 
 test "linux provider refuses destination collisions and hierarchy cycles" {

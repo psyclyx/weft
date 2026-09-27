@@ -37,6 +37,7 @@ pub const collab_cmds = @import("collab_cmds.zig");
 
 /// Collaboration wiring and its preset grant bundles.
 pub const collab = @import("collab.zig");
+pub const peer_file = @import("peer_file.zig");
 pub const collab_presets = @import("collab_presets.zig");
 
 /// Capability/syntax/LSP providers attached to a running system.

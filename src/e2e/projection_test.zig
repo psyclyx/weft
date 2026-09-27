@@ -394,10 +394,15 @@ pub const PeerTree = struct {
     };
 
     pub fn init(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor, shared: []const u8, fp: []const u8) !void {
+        return self.initGranting(gpa, b, shared, fp, .read);
+    }
+
+    /// `init`, the peer granting `access` over its tree.
+    pub fn initGranting(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor, shared: []const u8, fp: []const u8, access: h.fs_remote.Access) !void {
         const system = b.session.system;
         self.local = h.fs_platform.Provider.init(gpa);
         self.alice_root = try self.local.acquireRoot(shared);
-        self.server = try h.fs_remote.Server.init(gpa, self.local.provider(), self.alice_root, .read);
+        self.server = try h.fs_remote.Server.init(gpa, self.local.provider(), self.alice_root, access);
         self.exchange = .{ .server = &self.server };
         self.provider = try h.fs_remote.Provider.init(@enumFromInt(77), .init(&self.exchange));
         try system.filesystems.register(self.provider.authority, self.provider.provider());
@@ -487,7 +492,7 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     }
     b.applyWindow();
     try t.expectEqualStrings(file_designation, b.buffers.active().designationText());
-    try t.expect(b.buffers.active().read_only);
+    try t.expect(b.buffers.active().read_only != null);
     {
         const text = try b.textAlloc();
         defer gpa.free(text);

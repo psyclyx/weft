@@ -33,6 +33,9 @@ const Document = @import("Document.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
+/// Why a PRODUCED entry refuses interactive edits (`Buffer.read_only`).
+pub const produced = "read-only buffer";
+
 const Buffers = @This();
 
 pool: *task.Pool,
@@ -135,7 +138,12 @@ pub const Buffer = struct {
     /// render`), not user-editable. Not a permission on an owner — a distinction
     /// between operations. An editable projection (mini.files files) is simply
     /// NOT read-only and takes `edit`.
-    read_only: bool = false,
+    ///
+    /// Held as the REASON, not a flag: what a refused keystroke says is the
+    /// value that refused it (`produced` for a projection; a peer's file
+    /// without a write grant says so), so the state and its explanation
+    /// cannot disagree. Null: editable. Static strings only.
+    read_only: ?[]const u8 = null,
     /// The semantic VIEW this entry.s producer publishes for it, when the
     /// entry is a text projection rather than a scene.
     ///
@@ -258,7 +266,7 @@ pub const Buffer = struct {
     /// listings, and similar), so their editor dirtiness is producer output,
     /// not user work that needs a save/close refusal.
     pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
-        if (self.read_only or self.tool.len > 0) return false;
+        if (self.read_only != null or self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
         return ed.isDirty(gpa);
     }
@@ -282,7 +290,7 @@ pub const Buffer = struct {
     }
 
     pub fn posture(self: *const Buffer, field_focused: bool) Posture {
-        const derived: Posture = if (self.editor != null and !self.read_only) .text else .structural;
+        const derived: Posture = if (self.editor != null and self.read_only == null) .text else .structural;
         const declared = self.declared_posture orelse derived;
         return if (declared == .structural and field_focused) .field else declared;
     }
@@ -356,7 +364,7 @@ pub const Buffer = struct {
     /// its document's minted id, and its document outlives it (`park`).
     pub fn isBareDocument(self: *Buffer) bool {
         const ed = self.textEditor() orelse return false;
-        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and !self.read_only;
+        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and self.read_only == null;
     }
 };
 
@@ -1034,7 +1042,7 @@ test "buffers: generated read-only output is discardable even when editor-dirty"
     const b = bufs.get(output).?;
     try b.textEditor().?.doc.insert(gpa, 0, "generated output");
     try t.expect(try b.textEditor().?.isDirty(gpa));
-    b.read_only = true;
+    b.read_only = produced;
     try t.expect(!(try b.hasUnsavedFile(gpa)));
 }
 

@@ -209,7 +209,7 @@ fn openShell(ctx: *core.command.Context, command_context: *Context, host: []cons
     var rit = ctx.buffers.iterator();
     while (rit.next()) |b| {
         switch ((b.textEditor() orelse continue).backing) {
-            .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, path)) {
+            .remote => |r| if (core.backing.ShellRemote.of(r.remote)) |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, path)) {
                 try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
                 return .{ .integer = @intCast(b.id) };
             },

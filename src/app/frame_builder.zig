@@ -798,7 +798,7 @@ pub const FrameBuilder = struct {
         const backing_chip: ?[]const u8 = if (abuf.tool.len > 0) "tool" else switch (if (editor) |ed| ed.backing else .none) {
             .none => if (shared_here) "@shared" else null,
             .file => if (shared_here) "file+shared" else "file",
-            .shell => if (shared_here) "shell+shared" else "shell",
+            .remote => |r| if (shared_here) try std.fmt.allocPrint(arena, "{s}+shared", .{r.remote.vtable.label}) else r.remote.vtable.label,
         };
         var listen_buf: [40]u8 = undefined;
         // An entry in a remote place says how that place is reachable (R5):

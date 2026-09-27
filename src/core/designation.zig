@@ -47,9 +47,9 @@ pub fn of(entry: *Buffers.Buffer, out: []u8) ?[]const u8 {
             // the only honest name the entry has.
             if (Designation.ofPath(.file, f.path)) |d| return d.render(out) catch null;
         },
-        // A remote shell's file is named when it is opened (the shell knows
-        // its host; the backing does not), and declared then.
-        .shell, .none => {},
+        // A remote file is named when it is opened (its tier knows the
+        // authority; the backing does not), and declared then.
+        .remote, .none => {},
     }
     const id = ed.doc.id.text();
     return Designation.ofDoc(.here, &id).render(out) catch null;

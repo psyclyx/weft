@@ -147,15 +147,13 @@ pub const ShareCtx = struct {
     /// tree, published once and reused: looked up in the provider's own
     /// listing of `parent`, so it is what the peer really has. Null when
     /// there is no such directory (a file by that name included).
-    pub fn remoteChild(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?semantic.target.Located {
+    pub fn remoteChild(self: *ShareCtx, services: *core.semantic.Services, router: *fs_runtime.Router, parent: semantic.target.Located, name: []const u8) !?semantic.target.Located {
         for (self.remote_children.items) |c| {
             if (c.registration.active and c.parent.target.eql(parent.target) and
                 c.parent.revision == parent.revision and std.mem.eql(u8, c.name, name))
                 return c.registration.located();
         }
         const owner = self.remote_fs_owner orelse return null;
-        const services = ctx.semantic orelse return null;
-        const router = ctx.filesystems orelse return null;
         const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
         switch (published) {
             .file => |registration| {
@@ -172,31 +170,6 @@ pub const ShareCtx = struct {
                 return directory.located();
             },
         }
-    }
-
-    /// The bytes of the file `name` in the peer's directory `parent`, owned
-    /// by `gpa` — looked up in the provider's own listing of `parent` and
-    /// read through the router at the revision that listing observed, then
-    /// the file's publication retired again. Null when the peer has no such
-    /// regular file there.
-    pub fn readRemoteFile(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?[]u8 {
-        const owner = self.remote_fs_owner orelse return null;
-        const services = ctx.semantic orelse return null;
-        const router = ctx.filesystems orelse return null;
-        const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
-        var file = switch (published) {
-            .file => |registration| registration,
-            .directory => |registration| {
-                var directory = registration;
-                _ = directory.close(self.gpa, &services.targets);
-                return null;
-            },
-        };
-        defer _ = file.close(self.gpa, &services.targets, router);
-        const entry = try router.authorizedEntry(file.ref, file.revision);
-        var read = try router.read(ctx.gpa, .{ .source = .{ .entry = .{ .root = entry.root, .ref = entry.ref, .revision = entry.revision } } });
-        defer read.deinit();
-        return try ctx.gpa.dupe(u8, read.value.bytes);
     }
 
     /// The place a peer's shared tree is (doc/place.md): its root container,

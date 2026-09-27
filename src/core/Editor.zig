@@ -79,14 +79,32 @@ fold_layer: ?*const layers.Layer = null,
 /// `fold_layer`; consulted at the edit door.
 readonly_layer: ?*const layers.Layer = null,
 
-pub const SaveError = file.GuardedWriteError || ShellFs.WriteError;
-pub const PollError = file.ReadError || ShellFs.Error || Allocator.Error;
+pub const SaveError = file.GuardedWriteError || backing_mod.RemoteError;
+pub const PollError = file.ReadError || backing_mod.RemoteError || Allocator.Error;
+
+/// Work whose result folds in later: on a pool worker, or — for a tier whose
+/// calls run on the thread that asked (`Remote.Affinity.caller`) — already
+/// done. One shape, so every fold reads both the same way.
+pub fn Pending(comptime T: type) type {
+    return union(enum) {
+        task: task.Handle(T),
+        done: T,
+
+        /// The result if it is in (consumes it), else null.
+        pub fn poll(self: *@This()) ?T {
+            return switch (self.*) {
+                .task => |*h| h.poll(),
+                .done => |value| value,
+            };
+        }
+    };
+}
 
 pub const SaveState = union(enum) {
     idle,
     /// A save is in flight; the version it snapshots. The worker
     /// returns the written content's token.
-    saving: struct { handle: task.Handle(SaveError![]u8), version: []u8 },
+    saving: struct { pending: Pending(SaveError![]u8), version: []u8 },
     /// The disk moved under us — poll the backing (merges the external
     /// write), then request again. Cleared by `pollBacking`.
     stale,
@@ -96,7 +114,7 @@ pub const SaveState = union(enum) {
 
 pub const PollState = union(enum) {
     idle,
-    polling: task.Handle(PollError!?file.Fetched),
+    polling: Pending(PollError!?file.Fetched),
 };
 
 /// One selection: a `head` (the caret — where typing lands and motion acts)
@@ -134,9 +152,8 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
     // it out (shutdown path, blocking allowed) so nothing leaks.
     switch (self.save_state) {
         .saving => |*s| {
-            var h = s.handle;
             while (true) {
-                if (h.poll()) |result| {
+                if (s.pending.poll()) |result| {
                     if (result) |token| gpa.free(token) else |_| {}
                     break;
                 }
@@ -147,10 +164,9 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
         else => {},
     }
     switch (self.poll_state) {
-        .polling => |*h| {
-            var handle = h.*;
+        .polling => |*pending| {
             while (true) {
-                if (handle.poll()) |result| {
+                if (pending.poll()) |result| {
                     if (result) |maybe| {
                         if (maybe) |f| {
                             gpa.free(f.bytes);
@@ -170,9 +186,9 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
             f.sync.deinit(gpa, &self.doc);
             gpa.free(f.path);
         },
-        .shell => |*s| {
-            s.sync.deinit(gpa, &self.doc);
-            gpa.free(s.path);
+        .remote => |*r| {
+            r.sync.deinit(gpa, &self.doc);
+            r.remote.deinit(gpa);
         },
     }
     self.history.deinit(gpa);
@@ -204,7 +220,7 @@ fn primarySelection(self: *const Editor) Selection {
 pub fn backingPath(self: *const Editor) ?[]const u8 {
     return switch (self.backing) {
         .file => |f| f.path,
-        .shell => |s| s.path,
+        .remote => |r| r.remote.path(),
         else => null,
     };
 }
@@ -255,17 +271,27 @@ pub fn openFileContent(self: *Editor, gpa: Allocator, path: []const u8, bytes: [
 
 /// Open a remote file over a persistent shell (coreutils tier). Blocks
 /// (two shell round-trips); startup/open path.
-pub fn openShell(self: *Editor, gpa: Allocator, fs: *ShellFs, path: []const u8) (Allocator.Error || ShellFs.Error || Document.AddPeerError)!void {
+pub fn openShell(self: *Editor, gpa: Allocator, fs: *ShellFs, path: []const u8) (backing_mod.RemoteError || Document.AddPeerError)!void {
     task.assertMayBlock();
+    const remote = try backing_mod.ShellRemote.create(gpa, fs, path);
+    return self.openRemote(gpa, remote);
+}
+
+/// Open a file on another tier as this buffer's backing (`backing.Remote`),
+/// which the backing takes over — freed with it, or here on failure. Blocks
+/// for the tier's fetch; the open path.
+pub fn openRemote(self: *Editor, gpa: Allocator, remote: backing_mod.Remote) (backing_mod.RemoteError || Document.AddPeerError)!void {
     assert(self.backing == .none);
-    const bytes = try fs.readAll(gpa, path);
-    defer gpa.free(bytes);
-    const token = try fs.hashToken(gpa, path);
-    defer gpa.free(token);
+    var owned = true;
+    errdefer if (owned) remote.deinit(gpa);
+    const fetched = (try remote.fetch(gpa, null)) orelse return error.Failed;
+    defer gpa.free(fetched.bytes);
+    defer gpa.free(fetched.token);
     var sync = try backing_mod.Sync.init(gpa, &self.doc);
-    errdefer sync.deinit(gpa, &self.doc);
-    try sync.load(gpa, &self.doc, bytes, token);
-    self.backing = .{ .shell = .{ .fs = fs, .path = try gpa.dupe(u8, path), .sync = sync } };
+    errdefer if (owned) sync.deinit(gpa, &self.doc);
+    try sync.load(gpa, &self.doc, fetched.bytes, fetched.token);
+    self.backing = .{ .remote = .{ .remote = remote, .sync = sync } };
+    owned = false;
     try self.setBackingLoaded(gpa);
 }
 
@@ -323,7 +349,7 @@ fn compactIfGrown(self: *Editor, gpa: Allocator) void {
 fn backingSync(self: *Editor) ?*backing_mod.Sync {
     return switch (self.backing) {
         .file => |*f| &f.sync,
-        .shell => |*s| &s.sync,
+        .remote => |*r| &r.sync,
         else => null,
     };
 }
@@ -336,24 +362,23 @@ fn filePollWorker(gpa: Allocator, path: []u8, expected: []u8) PollError!?file.Fe
     return file.pollFile(gpa, path, expected);
 }
 
-fn shellSaveWorker(gpa: Allocator, fs: *ShellFs, path: []u8, bytes: []u8, expected: ?[]u8) SaveError![]u8 {
-    defer gpa.free(path);
+fn remoteSaveWorker(gpa: Allocator, remote: backing_mod.Remote, bytes: []u8, expected: ?[]u8) SaveError![]u8 {
     defer gpa.free(bytes);
     defer if (expected) |e| gpa.free(e);
-    return fs.writeGuarded(gpa, path, bytes, expected);
+    return remote.write(gpa, bytes, expected);
 }
 
-fn shellPollWorker(gpa: Allocator, fs: *ShellFs, path: []u8, expected: []u8) PollError!?file.Fetched {
-    defer gpa.free(path);
+fn remotePollWorker(gpa: Allocator, remote: backing_mod.Remote, expected: []u8) PollError!?file.Fetched {
     defer gpa.free(expected);
-    const token = try fs.hashToken(gpa, path);
-    if (std.mem.eql(u8, token, expected)) {
-        gpa.free(token);
-        return null;
-    }
-    errdefer gpa.free(token);
-    const bytes = try fs.readAll(gpa, path);
-    return .{ .bytes = bytes, .token = token };
+    return remote.fetch(gpa, expected);
+}
+
+/// Run `f` where `remote`'s calls may run: on a pool worker, or right here.
+fn onTier(self: *Editor, remote: backing_mod.Remote, comptime f: anytype, args: std.meta.ArgsTuple(@TypeOf(f))) Allocator.Error!Pending(@typeInfo(@TypeOf(f)).@"fn".return_type.?) {
+    return switch (remote.vtable.affinity) {
+        .worker => .{ .task = try self.pool.spawn(f, args) },
+        .caller => .{ .done = @call(.auto, f, args) },
+    };
 }
 
 /// Request a guarded save: O(1) rope snapshot + version token, written
@@ -365,32 +390,28 @@ pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.save_state == .saving) return;
     const version = try self.doc.version(gpa);
     errdefer gpa.free(version);
-    const handle: task.Handle(SaveError![]u8) = switch (self.backing) {
+    const pending: Pending(SaveError![]u8) = switch (self.backing) {
         .none => {
             gpa.free(version);
             return;
         },
-        .file => |f| try self.pool.spawn(fileSaveWorker, .{
+        .file => |f| .{ .task = try self.pool.spawn(fileSaveWorker, .{
             gpa,
             try gpa.dupe(u8, f.path),
             self.doc.text().snapshot(),
             if (f.sync.token) |tk| try gpa.dupe(u8, tk) else null,
-        }),
-        .shell => |s| blk: {
+        }) },
+        .remote => |r| blk: {
             var snap = self.doc.text().snapshot();
             defer snap.deinit(gpa);
             const bytes = try snap.toOwnedSlice(gpa);
             errdefer gpa.free(bytes);
-            break :blk try self.pool.spawn(shellSaveWorker, .{
-                gpa,
-                s.fs,
-                try gpa.dupe(u8, s.path),
-                bytes,
-                if (s.sync.token) |tk| try gpa.dupe(u8, tk) else null,
-            });
+            const expected = if (r.sync.token) |tk| try gpa.dupe(u8, tk) else null;
+            errdefer if (expected) |e| gpa.free(e);
+            break :blk try self.onTier(r.remote, remoteSaveWorker, .{ gpa, r.remote, bytes, expected });
         },
     };
-    self.save_state = .{ .saving = .{ .handle = handle, .version = version } };
+    self.save_state = .{ .saving = .{ .pending = pending, .version = version } };
 }
 
 /// Non-blocking: fold a finished save into state. Returns true when a
@@ -399,8 +420,7 @@ pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
 pub fn pollSave(self: *Editor, gpa: Allocator) bool {
     switch (self.save_state) {
         .saving => |*s| {
-            var h = s.handle;
-            const result = h.poll() orelse return false;
+            const result = s.pending.poll() orelse return false;
             const version = s.version;
             if (result) |token| {
                 defer gpa.free(token);
@@ -430,15 +450,13 @@ pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
         .none => {},
         .file => |f| {
             const tk = f.sync.token orelse return;
-            self.poll_state = .{ .polling = try self.pool.spawn(filePollWorker, .{
+            self.poll_state = .{ .polling = .{ .task = try self.pool.spawn(filePollWorker, .{
                 gpa, try gpa.dupe(u8, f.path), try gpa.dupe(u8, tk),
-            }) };
+            }) } };
         },
-        .shell => |s| {
-            const tk = s.sync.token orelse return;
-            self.poll_state = .{ .polling = try self.pool.spawn(shellPollWorker, .{
-                gpa, s.fs, try gpa.dupe(u8, s.path), try gpa.dupe(u8, tk),
-            }) };
+        .remote => |r| {
+            const tk = r.sync.token orelse return;
+            self.poll_state = .{ .polling = try self.onTier(r.remote, remotePollWorker, .{ gpa, r.remote, try gpa.dupe(u8, tk) }) };
         },
     }
 }
@@ -449,9 +467,8 @@ pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
 /// for retry. Returns true when the buffer changed.
 pub fn pollBacking(self: *Editor, gpa: Allocator) Allocator.Error!bool {
     switch (self.poll_state) {
-        .polling => |*h| {
-            var handle = h.*;
-            const result = handle.poll() orelse return false;
+        .polling => |*pending| {
+            const result = pending.poll() orelse return false;
             self.poll_state = .idle;
             const fetched = result catch return false; // transient; next poll retries
             const f = fetched orelse {

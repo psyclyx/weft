@@ -474,7 +474,7 @@ pub const Context = struct {
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        if (self.buffer().read_only) |why| return self.refuse(why);
         if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
             .ok => {},
@@ -494,7 +494,7 @@ pub const Context = struct {
         if (ranges.len == 1) return self.edit(ranges[0], bytes);
         if (ranges.len == 0) return;
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        if (self.buffer().read_only) |why| return self.refuse(why);
         for (ranges) |r| {
             if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
             switch (self.checkDocRegion(r.start, r.end)) {
@@ -1344,7 +1344,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     // Seed via render (content production), THEN mark the buffer read-only.
     ctx.user_initiated = true;
     try ctx.edit(.{ .start = 0, .end = 0 }, "tree");
-    ctx.buffer().read_only = true;
+    ctx.buffer().read_only = Buffers.produced;
 
     const Peer = struct {
         gpa: std.mem.Allocator,
@@ -1377,7 +1377,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
 
     // ── Span-level: a read-only SPAN (a comint's output) refuses edits inside
     // it, while the rest of the buffer (its input line) stays editable.
-    ctx.buffer().read_only = false;
+    ctx.buffer().read_only = null;
     ctx.principal = .user;
     ctx.user_initiated = true;
     const doc2 = ctx.document().?;
