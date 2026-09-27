@@ -535,3 +535,105 @@ test "e2e/designation: a scratch document outlives the process and opens by its 
     try sr.interface.readSliceAll(text[0..len]);
     try t.expectEqualStrings("written last run\n", text[0..len]);
 }
+
+/// A JS producer: the designation doors, the context event and a subject
+/// watch, through the same bodies a `.wasm` plugin reaches (doc/model.md
+/// §3.5: JS plugins had none of them).
+const js_producer =
+    \\weft.designationOpener("jsp.probe", "jsp-probe");
+    \\var keys = [];
+    \\var subjects = [];
+    \\weft.onContextChanged(function (k) { keys = keys.concat(k); });
+    \\weft.onSubjectChanged(function (d) { subjects.push(d + "#" + weft.byteLen()); });
+    \\weft.command("jsp-probe", function () {});
+    \\weft.command("jsp-name", function () { weft.echo(weft.designation() || "none"); });
+    \\weft.command("jsp-make", function () {
+    \\  weft.run("buffer-create", "*jsmade*");
+    \\  weft.echo(weft.designate("weft://here/jsp.probe/one") ? "ok" : "refused");
+    \\});
+    \\weft.command("jsp-foreign", function () { weft.echo(weft.designate("weft://here/jsp.probe/two") ? "ok" : "refused"); });
+    \\weft.command("jsp-steal", function () { weft.echo(weft.designationOpener("dashboard", "x") ? "ok" : "refused"); });
+    \\weft.command("jsp-watch", function () { weft.echo(weft.subjectWatch(weft.designation()) ? "ok" : "refused"); });
+    \\weft.command("jsp-keys", function () { weft.echo(keys.indexOf("entry") >= 0 ? "entry" : "none"); keys = []; });
+    \\weft.command("jsp-subjects", function () { weft.echo(subjects.length ? subjects.join(",") : "(none)"); subjects = []; });
+;
+
+test "e2e/designation: a JS plugin reads and declares designations and claims a kind under the wasm rules" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try ed.loadJs("jsp", js_producer);
+
+    // It reads what core derives.
+    ed.runStr("buffer-create", "*mine*");
+    ed.run("jsp-name");
+    const doc = ed.buffers.active().textEditor().?.doc.id.text();
+    var want: [64]u8 = undefined;
+    try t.expectEqualStrings(try std.fmt.bufPrint(&want, "weft://here/doc/{s}", .{&doc}), ed.echoText());
+    // The user's entry is not its to re-declare: the creator rule.
+    ed.run("jsp-foreign");
+    try t.expectEqualStrings("refused", ed.echoText());
+    try t.expect(ed.buffers.active().designation.len == 0);
+    // An entry it made, in the kind it claimed at load, it may declare — and
+    // `open` finds the entry by it.
+    ed.run("jsp-make");
+    try t.expectEqualStrings("ok", ed.echoText());
+    try t.expectEqualStrings("*jsmade*", ed.bufferName());
+    try t.expectEqualStrings("jsp", ed.buffers.active().creator);
+    try t.expectEqualStrings("weft://here/jsp.probe/one", ed.buffers.active().designationText());
+    const made = ed.buffers.active_id;
+    ed.runStr("buffer-create", "*elsewhere*");
+    ed.runStr("open", "weft://here/jsp.probe/one");
+    try t.expectEqual(made, ed.buffers.active_id);
+    // A kind outside its name is not its to claim (and a JS plugin declares
+    // no capabilities to widen that).
+    ed.run("jsp-steal");
+    try t.expectEqualStrings("refused", ed.echoText());
+}
+
+test "e2e/designation: a JS plugin whose load claims a kind outside its name fails to load, as a wasm one does" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try t.expectError(error.DesignationKindRefused, ed.loadJs("jsbad", "weft.designationOpener(\"other.kind\", \"x\");"));
+    // Nothing it said outlives the failed load.
+    try t.expect(ed.ctx.designations.?.find("other.kind") == null);
+}
+
+test "e2e/designation: a JS plugin hears the context move and its watched subject change, bound to the subject" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try ed.loadJs("jsp", js_producer);
+
+    ed.runStr("buffer-create", "*subject*");
+    const subject = ed.buffers.active();
+    ed.run("jsp-watch");
+    try t.expectEqualStrings("ok", ed.echoText());
+    ed.run("jsp-name");
+    var name_buf: [128]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "{s}", .{ed.echoText()});
+
+    // Moving to another entry moves the `entry` key: onContextChanged hears it.
+    ed.runStr("buffer-create", "*other*");
+    ed.applyWindow();
+    ed.run("jsp-keys");
+    try t.expectEqualStrings("entry", ed.echoText());
+
+    // The subject changes while another entry is in front: the handler is
+    // told once, bound to the subject — its reads are the subject's.
+    const doc = &subject.textEditor().?.doc;
+    try doc.insert(gpa, 0, "four");
+    try doc.insert(gpa, 4, "56");
+    ed.applyWindow();
+    ed.run("jsp-subjects");
+    var want: [160]u8 = undefined;
+    try t.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}#6", .{name}), ed.echoText());
+    // Nothing moved since: nothing is delivered.
+    ed.applyWindow();
+    ed.run("jsp-subjects");
+    try t.expectEqualStrings("(none)", ed.echoText());
+}

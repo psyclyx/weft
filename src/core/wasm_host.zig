@@ -78,6 +78,20 @@ pub const context_doors = struct {
     pub const hSubjectWatch = context.hSubjectWatch;
 };
 
+/// The tool doors — tool backing and the designation trio — whose bodies
+/// both membranes run. Re-exported for the same function-pointer proof.
+const tool = @import("wasm_host/tool.zig");
+pub const tool_doors = struct {
+    pub const toolBackingBody = tool.toolBackingBody;
+    pub const designationBody = tool.designationBody;
+    pub const designateBody = tool.designateBody;
+    pub const openerBody = tool.openerBody;
+    pub const hToolBacking = tool.hToolBacking;
+    pub const hEntryDesignation = tool.hEntryDesignation;
+    pub const hEntryDesignate = tool.hEntryDesignate;
+    pub const hDesignationOpener = tool.hDesignationOpener;
+};
+
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
 /// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
 /// ever reaches core through this facade — can recompute each handler from

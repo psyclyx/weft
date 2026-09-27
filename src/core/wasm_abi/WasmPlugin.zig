@@ -247,8 +247,6 @@ commands: std.ArrayList(*WasmCmd) = .empty,
 
 // ── Perm handshake state ──
 phase: Phase = .describing,
-/// Capability names the guest declared during `describe()` (owned).
-declared_caps: std.ArrayList([]u8) = .empty,
 perms: [perm_count]bool = @splat(false),
 /// doc/contextual-workspace-architecture.md §13.5 — the grant table this plugin's possessed
 /// handles (`grant_handles`, below) are checked against. `null` (the default
@@ -763,8 +761,7 @@ pub fn declaration(self: *WasmPlugin, name: []const u8) ?*const DeclaredCommand 
 }
 
 pub fn declaresCapability(self: *WasmPlugin, name: []const u8) bool {
-    for (self.declared_caps.items) |d| if (std.mem.eql(u8, d, name)) return true;
-    return false;
+    return self.resources.declaresCapability(name);
 }
 
 /// This plugin as an edit principal: authors as its own peer on whatever
@@ -889,8 +886,6 @@ pub fn deinit(self: *WasmPlugin) void {
     self.pick_items.deinit(gpa);
     self.surface.deinit(gpa);
     self.subs.deinit(gpa); // the SubBuffers service owns the entries
-    for (self.declared_caps.items) |d| gpa.free(d);
-    self.declared_caps.deinit(gpa);
     self.instance.deinit();
     self.linker.deinit();
     self.module.deinit();

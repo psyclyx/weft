@@ -225,7 +225,8 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     if (p.grant_table) |table| wasm_host.mintGrantHandles(table, p.name, p.perms, &p.grant_handles);
     contract.callRequiredExport("init", p, .{}) catch |e| return failLoad(p, e);
     p.loading = false;
-    if (p.load_error) |e| return failLoad(p, e);
+    const refused: ?anyerror = if (p.load_error) |e| e else p.resources.load_refusal;
+    if (refused) |e| return failLoad(p, e);
     return p;
 }
 

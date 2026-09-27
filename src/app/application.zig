@@ -258,7 +258,10 @@ pub const Application = struct {
         const context = ctx.context orelse return false;
         const plugins = self.driver.ctx.plugins.items;
         const viewports = self.driver.ctx.viewports;
-        const hears = context.listeners.items.len > 0 or viewports.followsAny() or for (plugins) |pl| {
+        // A JS plugin registers its handler from JS (`weft.onContextChanged`),
+        // which the host cannot see, so a loaded one counts as listening; one
+        // with no handler returns from the delivery at once.
+        const hears = context.listeners.items.len > 0 or viewports.followsAny() or self.js_plugins.items.len > 0 or for (plugins) |pl| {
             if (core.wasm_host.hearsContext(pl)) break true;
         } else false;
         if (!hears) return false;
@@ -270,6 +273,9 @@ pub const Application = struct {
         var ran = context.notify();
         for (plugins) |pl| {
             if (core.wasm_host.notifyContextChanged(pl)) ran = true;
+        }
+        for (self.js_plugins.items) |jp| {
+            if (jp.notifyContextChanged()) ran = true;
         }
         if (viewports.follow(context.movedKeys())) {
             if (self.driver.applyWindowIntents(ctx)) ran = true;
@@ -302,6 +308,10 @@ pub const Application = struct {
             for (self.driver.ctx.plugins.items) |pl| {
                 if (!std.mem.eql(u8, pl.name, m.owner)) continue;
                 if (core.wasm_host.notifySubjectChanged(pl, m.entry)) ran = true;
+            }
+            for (self.js_plugins.items) |jp| {
+                if (!std.mem.eql(u8, jp.name, m.owner)) continue;
+                if (jp.notifySubjectChanged(m.entry)) ran = true;
             }
         }
         return ran;
