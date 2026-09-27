@@ -1065,7 +1065,7 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
 
 /// The names of the focused listing's rows whose pending change is `change`,
 /// in view order, joined by spaces.
-fn rowsChanged(ed: *Editor, change: []const u8, buf: []u8) ![]const u8 {
+pub fn rowsChanged(ed: *Editor, change: []const u8, buf: []u8) ![]const u8 {
     const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return error.NoFilesView) orelse return error.StaleView;
     var len: usize = 0;
     for (instance.scene.content.container.children) |row| {

@@ -166,7 +166,8 @@ picks the projection when a designation has several. `reveal` expands to and
 highlights a designation inside what's presented, without taking focus.
 The highlight is literal: it is the view's own *revealed* node, drawn
 beside the selection. A reveal never touches a selection — no head's focus,
-no entry's marked rows — so revealing is never navigating. There are no functions, no composition, and no evaluation order to define.
+no entry's marked rows — so revealing is never navigating. There are no
+functions, no composition, and no evaluation order to define.
 
 `as` has two readings, and which one applies is decided by registration, not
 by the config author: if a plugin claims the name as a projection kind
@@ -243,7 +244,10 @@ As built (phase 4, `core/selection.zig`):
     (`transfer.Item.members`; codec transfer v3, request v4, written only
     for a set), which a paste lands in order. Mapped per extent, each run
     would replace the one captured value. A one-row verb (rename, insert
-    beside, step out) declares nothing and is refused on several rows.
+    beside, step out) declares nothing and is refused on several rows. A
+    grammar's transfer key (vim's `yy`, `p`, `dd`) is two verbs: it is
+    `.whole` and only routes — to the view's transfer when one is offered,
+    else to its text half, a command of its own that maps `.each`.
   - `.homogeneous` — once, refused when the extents differ in kind.
   - `.one` — refused on several: it reads THE caret or row and has no
     per-extent reading (a labelled search, a goto from the word at point, a

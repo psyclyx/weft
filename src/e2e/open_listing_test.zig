@@ -309,3 +309,41 @@ test "e2e/files: config.js — V j d over rows removes every row of the range, a
     try t.expect(ed.head.scene_selection.anchor == null);
     try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
 }
+
+/// The primary row's place in the focused listing's focus order.
+fn primaryRowIndex(ed: *Editor) !u64 {
+    const set = try core.selection.read(ed.ctx, ed.gpa);
+    defer ed.gpa.free(set.extents);
+    return set.extents[set.primary].head;
+}
+
+test "e2e/files: config.js — `yy` over two marked rows copies both, as one transfer, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+    const alpha = try primaryRowIndex(ed);
+    try goToRow(ed, vim_keys, "gamma.txt");
+    const gamma = try primaryRowIndex(ed);
+    // Two rows marked, two extents — what a C-click gives a vim user too.
+    try t.expect(try core.selection.write(ed.ctx, gpa, &.{
+        .{ .kind = .rows, .anchor = alpha, .head = alpha },
+        .{ .kind = .rows, .anchor = gamma, .head = gamma },
+    }, 1));
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+
+    // `yy` is a transfer over rows: ONE copy of the set. Mapped per row,
+    // each run replaced the one captured value and a paste landed one row.
+    ed.press("y", "");
+    ed.press("y", "");
+    try t.expect(try core.selection.write(ed.ctx, gpa, &.{.{ .kind = .rows, .anchor = alpha, .head = alpha }}, 0));
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt gamma.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}

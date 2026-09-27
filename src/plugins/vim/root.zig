@@ -389,9 +389,12 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-delete-eol", .call = deleteEol, .arity = each },
     .{ .name = "vim-change-eol", .call = changeEol, .arity = each },
     .{ .name = "vim-change-line", .call = changeLine, .arity = each },
-    .{ .name = "yank-line", .call = yankLine, .arity = each },
-    .{ .name = "paste", .call = paste, .arity = each },
-    .{ .name = "paste-before", .call = pasteBefore, .arity = each },
+    .{ .name = "yank-line", .call = yankLine, .arity = .whole },
+    .{ .name = "vim-yank-line-text", .call = yankLineText, .arity = each },
+    .{ .name = "paste", .call = paste, .arity = .whole },
+    .{ .name = "vim-paste-text", .call = pasteText(true), .arity = each },
+    .{ .name = "paste-before", .call = pasteBefore, .arity = .whole },
+    .{ .name = "vim-paste-before-text", .call = pasteText(false), .arity = each },
     .{ .name = "vim-open-focused", .call = openFocused, .arity = .whole },
     .{ .name = "vim-open-container", .call = openContainer, .arity = .whole },
     .{ .name = "join-lines", .call = joinLines, .arity = each },
@@ -401,7 +404,8 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "enter-op-comment", .call = enterOpComment, .arity = .whole },
     .{ .name = "op-cancel", .call = opCancel, .arity = .whole },
     .{ .name = "vim-operate", .call = operate, .arity = each },
-    .{ .name = "op-line", .call = opLine, .arity = each },
+    .{ .name = "op-line", .call = opLine, .arity = .whole },
+    .{ .name = "vim-op-line-text", .call = opLineText, .arity = each },
     .{ .name = "enter-op-inner", .call = enterOpInner, .arity = .whole },
     .{ .name = "enter-op-around", .call = enterOpAround, .arity = .whole },
     .{ .name = "enter-register", .call = enterRegister, .arity = .whole },
@@ -1137,23 +1141,37 @@ fn openContainer() void {
     weft.jump(if (first_range.end == after_up) first_range.start else first_range.end);
 }
 
+// A transfer key is two verbs with two mappings. Over rows the view's
+// transfer is ONE request for every selected row — run per row, each run
+// would replace the one captured value. Over text it is one yank or put per
+// caret. So the key's command is `.whole` and only ROUTES: to the view's
+// transfer when something offers it, else to its text half, a command of
+// its own that maps `each`.
 fn yankLine() void {
     if (transferred(std_yank, semantic_action.copy)) return;
+    weft.run("vim-yank-line-text");
+}
+fn yankLineText() void {
     const l = weft.lineAt(weft.cursor());
     yankCurrent(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
-    if (clip_register) return pasteClipboard(true);
-    if (transferred(std_paste, semantic_action.paste_after)) return;
-    const slot = consumeRegister();
-    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), true, slot);
+    if (!clip_register and transferred(std_paste, semantic_action.paste_after)) return;
+    weft.run("vim-paste-text");
 }
 fn pasteBefore() void {
-    if (clip_register) return pasteClipboard(false);
-    if (transferred(std_paste, semantic_action.paste_before)) return;
-    const slot = consumeRegister();
-    put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), false, slot);
+    if (!clip_register and transferred(std_paste, semantic_action.paste_before)) return;
+    weft.run("vim-paste-before-text");
+}
+fn pasteText(comptime after: bool) fn () void {
+    return struct {
+        fn h() void {
+            if (clip_register) return pasteClipboard(after);
+            const slot = consumeRegister();
+            put(weft.registerTextIn(slot), weft.registerLinewiseIn(slot), after, slot);
+        }
+    }.h;
 }
 
 /// `"+p`/`"+P`: paste the desktop clipboard. When it still holds what vim
@@ -1293,6 +1311,10 @@ fn opLine() void {
         enterAfterOp();
         return;
     }
+    // The text half, per caret (see `yankLine`).
+    weft.run("vim-op-line-text");
+}
+fn opLineText() void {
     const l = weft.lineAt(weft.cursor());
     if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
