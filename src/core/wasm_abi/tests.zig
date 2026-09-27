@@ -4205,6 +4205,45 @@ test "wasm plugin: a command that declares no mapping is refused on several sele
     try t.expectEqual(@as(usize, 2), ed.selectionCount());
 }
 
+test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge extents away, and when nothing runs" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "multisel", @embedFile("guest_multisel_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = env.buffers.active().textEditor().?;
+    try ed.insertText(gpa, "one two\nthree\n");
+    const Count = struct {
+        fn of(e: *Env) !i64 {
+            return (try command.run(&e.commands, &e.ctx, "ms-epilogues", &.{})).integer;
+        }
+    };
+    // Each read runs the epilogue once itself (ms-epilogues is a command).
+    const start = try Count.of(&env);
+
+    // Two carets on one line: the first run selects the line, merging the
+    // other caret into it, so fewer runs happen than were scheduled.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 5, .head = 5 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    try t.expectEqual(@as(usize, 1), ed.selectionCount());
+    try t.expectEqual(start + 2, try Count.of(&env));
+
+    // Two carets, neither with a target: no run at all, one epilogue.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 10, .head = 10 } }, 0);
+    _ = try command.run(&env.commands, &env.ctx, "ms-op-none", &.{});
+    try t.expectEqual(start + 4, try Count.of(&env));
+
+    // Two carets on two lines: two runs, still one epilogue.
+    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    try t.expectEqual(start + 6, try Count.of(&env));
+}
+
 test "context: a wasm plugin publishes at a scope, a predicate reads it, and unloading retracts it" {
     const gpa = t.allocator;
     var env: Env = undefined;

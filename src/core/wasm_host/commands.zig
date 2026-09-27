@@ -22,6 +22,8 @@
 //!   the load-time `ctx` for the call's duration):
 //!     - `on_command`      (`wpCmdTrampoline`, here) — a keymap/command-run
 //!       dispatch; the ctx IS the dispatching head's.
+//!     - `on_mapping_end`  (`wpCmdEnded`, here) — the end of a selection
+//!       mapping of one of its commands; the same dispatch's ctx.
 //!     - `on_pick_accept`  (`pick.zig`'s `wpPickAccept`) — the ctx passed in
 //!       is the head whose pick session just accepted.
 //!
@@ -103,6 +105,7 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         // every command it registers.
         .owner = p.name,
         .handler = wpCmdTrampoline,
+        .ended = wpCmdEnded,
         .arity = decl.arity,
         .data = wc,
     }) catch {
@@ -347,7 +350,20 @@ pub fn hCommandArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 /// dispatching head's mode/pending/pick/echo/dot-repeat, not whichever head's
 /// `Head` the plugin happened to be loaded against.
 fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
-    const wc: *WasmCmd = @ptrCast(@alignCast(data.?));
+    return enterGuest(ctx, @ptrCast(@alignCast(data.?)), args, .command);
+}
+
+/// A mapping of a guest command ended (`command.Command.ended`): the guest's
+/// `on_mapping_end(id)`, under the same dispatch its runs had, so an epilogue
+/// may use the head-gated doors a command can. Optional: a guest with no
+/// per-command epilogue does not export it.
+fn wpCmdEnded(ctx: *command.Context, data: ?*anyopaque) void {
+    _ = enterGuest(ctx, @ptrCast(@alignCast(data.?)), &.{}, .mapping_end) catch {};
+}
+
+/// Enter the guest for `wc` under the dispatching `ctx` (see
+/// `wpCmdTrampoline`): its `on_command`, or its `on_mapping_end`.
+fn enterGuest(ctx: *command.Context, wc: *WasmCmd, args: []const command.Value, comptime entry: enum { command, mapping_end }) anyerror!command.Value {
     const p = wc.plugin;
     const top_level = p.dispatch_depth == 0;
     if (top_level) {
@@ -392,6 +408,11 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     }
     p.cur_args = args;
     p.result = .nil;
-    try contract.callRequiredExport("on_command", &p.instance, .{@as(i32, @intCast(wc.id))});
+    const id: i32 = @intCast(wc.id);
+    switch (entry) {
+        .command => try contract.callRequiredExport("on_command", &p.instance, .{id}),
+        .mapping_end => contract.callOptionalExport("on_mapping_end", &p.instance, .{id}) catch |e|
+            if (e != error.MissingExport) return e,
+    }
     return p.result;
 }

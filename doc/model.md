@@ -531,9 +531,13 @@ kept alive past its phase.
    tree-sitter trail, C-d/C-S-l, find's replace-all and select-all-matches
    are `.whole`. The doors `wl_run_range_each`, `wl_run_range_arg_each`,
    `wl_yank_each`, `wl_register_paste_value` and `wl_paste_value_at` are
-   gone; `wl_declare_arity`, `wl_visit` (a guest epilogue — helix's count —
-   waits for a mapping's last run) and `qjs_declare_arity` are new
-   (imports 259 → 256, semantic operations 279 → 276). A user edit lifts
+   gone; `wl_declare_arity`, `wl_visit` (whether a dispatch is a run, and
+   how many are still scheduled), the optional export `on_mapping_end` (a
+   guest epilogue — helix's count, a typed register — runs there, exactly
+   once per mapping: a run cannot know it is the last, since an earlier run
+   may merge the extents still to come) and `qjs_declare_arity` are new
+   (imports 259 → 256, exports 20 → 21, semantic operations 279 → 277).
+   A user edit lifts
    only the anchor of the selection it replaced (typing over it), not every
    selection's, so runs do not collapse their siblings. In a listing,
    C-click marks rows, `V j` grows a range, Delete/`d` remove every selected

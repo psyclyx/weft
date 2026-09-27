@@ -197,6 +197,25 @@ pub const Visit = struct {
     stage: *Stage,
 };
 
+/// The mapping's END, told to the command once (`Command.ended`) whatever
+/// happened between: every run, a refusal found while mapping, no run at all.
+/// Taken when the mapping begins — a run may rebind the command's name — and
+/// told from the mapping's own `defer`, so no path out of it can skip it or
+/// say it twice. A run cannot know it is the last (an earlier run may merge
+/// the extents still to come); only the mapping can.
+const End = struct {
+    f: ?*const fn (ctx: *command.Context, data: ?*anyopaque) void,
+    data: ?*anyopaque,
+
+    fn of(cmd: *const command.Command) End {
+        return .{ .f = cmd.ended, .data = cmd.data };
+    }
+
+    fn tell(self: End, ctx: *command.Context) void {
+        if (self.f) |f| f(ctx, self.data);
+    }
+};
+
 /// What a mapping collects across its runs and lands once when it ends.
 pub const Stage = struct {
     gpa: Allocator,
@@ -410,6 +429,7 @@ fn mapText(
     defer gpa.free(heads);
     for (heads, ed.selections.items) |*h, sel| h.* = sel.head;
     const primary_head = ed.selections.items[ed.primary].head;
+    const ended: End = .of(cmd);
 
     var stage = Stage.init(gpa);
     defer stage.deinit();
@@ -425,6 +445,7 @@ fn mapText(
         }
         // What the runs yanked and flashed lands once, as the mapping ends.
         stage.commit(ctx, still == ed);
+        ended.tell(ctx);
     }
 
     return if (each.over) |over|
@@ -641,6 +662,7 @@ fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const com
         primary_at = i;
     };
 
+    const ended: End = .of(cmd);
     var stage = Stage.init(gpa);
     defer stage.deinit();
     defer {
@@ -655,6 +677,7 @@ fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const com
                 focus.others.append(gpa, r) catch {};
             }
         }
+        ended.tell(ctx);
     }
     var result: command.Value = .nil;
     var i = extents.len;

@@ -21,6 +21,10 @@
 //!   - `ms-unit-leak`: opens an undo unit (`undo_unit(1)`), edits, and never
 //!     closes it — the unit must still end with the dispatch.
 //!   - `ms-unit-close`: closes a unit it never opened; answers the door's -1.
+//!   - `ms-line` (`.each`: select the caret's line, so two carets on one line
+//!     merge), `ms-op-none` (`.each` over `ms-none`, which finds no target),
+//!     and `ms-epilogues` (how many times the table's `after` hook ran): a
+//!     mapping's epilogue runs exactly once, however many runs it had.
 
 const weft = @import("weft");
 
@@ -37,10 +41,32 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ms-undeclared", .arity = .one, .call = undeclared },
     .{ .name = "ms-unit-leak", .call = unitLeak, .arity = .whole },
     .{ .name = "ms-unit-close", .call = unitClose, .arity = .whole },
+    .{ .name = "ms-line", .call = line, .arity = each },
+    .{ .name = "ms-none", .call = none, .arity = each },
+    .{ .name = "ms-op-none", .call = opUpcase, .arity = .{ .each = .{ .over = "ms-none" } } },
+    .{ .name = "ms-epilogues", .call = epilogueCount, .arity = .whole },
 };
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .after = epilogue }).exportAll();
+}
+
+fn line() void {
+    weft.setSelection(weft.lineAt(weft.cursor()));
+}
+
+/// A target finder with nothing to find.
+fn none() void {}
+
+/// The epilogue, counted: a test reads how often it ran.
+var epilogues: i32 = 0;
+
+fn epilogue(_: usize) void {
+    epilogues += 1;
+}
+
+fn epilogueCount() void {
+    weft.setResultInt(epilogues);
 }
 
 fn count() void {

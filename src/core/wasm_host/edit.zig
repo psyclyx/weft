@@ -553,8 +553,9 @@ pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 
 /// `visit() -> remaining | -1`: whether this dispatch is one run of a
 /// selection mapping (`selection.Visit`), and how many runs come after it;
-/// -1 outside one. What a guest's per-command epilogue — clearing a typed
-/// count or register — waits on: the LAST run, not the first.
+/// -1 outside one. A count of runs still SCHEDULED: an earlier run may merge
+/// extents away, so no run can be sure it is the last. A per-command epilogue
+/// waits on `on_mapping_end` instead, which the mapping sends exactly once.
 pub fn hVisit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;

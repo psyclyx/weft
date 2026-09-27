@@ -197,9 +197,18 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             cmds[index].call();
             depth -= 1;
             // The epilogue ends the COMMAND, so it runs once: not after a
-            // command this one ran, and not before a mapping's last run — a
-            // typed count read by the first run is still due to the rest.
-            if (hooks.after) |f| if (depth == 0 and (weft.visitsLeft() orelse 0) == 0) f(index);
+            // command this one ran, and not after any run of a mapping — a
+            // typed count read by the first run is still due to the rest, and
+            // the host says when the mapping is over (`onMappingEnd`).
+            if (hooks.after) |f| if (depth == 0 and weft.visitsLeft() == null) f(index);
+        }
+
+        /// A mapping of command `id` ended: its epilogue, exactly once however
+        /// many runs there were (none, or fewer than scheduled because runs
+        /// merged extents).
+        fn onMappingEnd(id: u32) callconv(.c) void {
+            const index = indexOf(id) orelse return;
+            if (hooks.after) |f| if (depth == 0) f(index);
         }
 
         /// The table index for a host id. Linear over a table this small, and
@@ -233,6 +242,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             exportCallback("init", &initFn);
             exportCallback("on_command", &onCommand);
             exportCallback("on_exec", &onExec);
+            if (hooks.after != null) exportCallback("on_mapping_end", &onMappingEnd);
             exportCallback("on_pick_accept", &onPickAccept);
         }
 

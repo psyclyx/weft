@@ -809,6 +809,14 @@ pub const Command = struct {
     /// always what its plugin declared (`declare_arity`) — null when it said
     /// nothing — never this default.
     arity: ?selection.Arity = .whole,
+    /// Told, exactly once, that a MAPPING of this command ended
+    /// (`selection.run`): after its last run, after a refusal found while
+    /// mapping, and when there was nothing to run at all. What a per-command
+    /// epilogue (a guest clearing its typed count or register) waits on — a
+    /// run cannot know it is the last, because an earlier run may merge the
+    /// extents still to come. Not called for a dispatch that maps nothing
+    /// (one extent, `.whole`): the handler's return is its end.
+    ended: ?*const fn (ctx: *Context, data: ?*anyopaque) void = null,
 
     /// This command, declaring `arity`.
     pub fn maps(self: Command, arity: ?selection.Arity) Command {

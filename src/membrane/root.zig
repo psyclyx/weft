@@ -213,7 +213,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{kind,anchor,head}` extents (document order; kind 0 text offsets, 1 rows by focus order) — the visited extent alone inside a mapping run; returns the extent count" },
     .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace the selection from a `{primary, n × {kind,anchor,head}}` record (text normalized: sorted, overlaps merged; rows must exist) — the visited extent alone inside a mapping run; 0 on success, -1 on a wrong kind or bad record" },
     .{ .name = "wl_undo_unit", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "open (1) or close (0) an undo unit on the addressed entry; nests (the outermost owns the unit), scoped to the dispatch that opened it; 0 on success" },
-    .{ .name = "wl_visit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "whether this dispatch is one run of a selection mapping: the runs still to come after it, or -1 outside a mapping" },
+    .{ .name = "wl_visit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "whether this dispatch is one run of a selection mapping: the runs still scheduled after it (an earlier run may merge some away: the mapping's end is `on_mapping_end`), or -1 outside a mapping" },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .params = &.{.u32}, .results = &.{.u32}, .group = .pointer, .doc = "write the pointer gesture being dispatched (kind, button, clicks, mods, offset and scene node under the pointer) as eight u32 words; 0 when there is none" },
@@ -554,6 +554,7 @@ pub const exports = [_]Export{
     .{ .name = "init", .params = &.{}, .results = &.{}, .required = true, .doc = "register commands/keymap/etc, cross-checked against describe()'s declarations" },
     .{ .name = "run", .params = &.{}, .results = &.{}, .required = true, .transport = .run_guest, .doc = "the milestone-2 minimal-ABI entrypoint (runGuest's one-shot guest, not the full plugin lifecycle)" },
     .{ .name = "on_command", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "dispatch a registered command by id; args/result cross via wl_arg_*/wl_set_result_*" },
+    .{ .name = "on_mapping_end", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a selection mapping of the command with this id ended (after its last run, a refusal met while mapping, or no run at all); exactly once per mapping, under the same dispatch — where a per-command epilogue runs" },
     .{ .name = "on_complete", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a completion session (handle); missing/trapped -> the host declines it" },
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
@@ -601,8 +602,8 @@ pub const legacy_callback_names = [_][]const u8{
 };
 
 const max_import_count: usize = 256;
-const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 276;
+const max_export_count: usize = 21;
+const max_semantic_operation_count: usize = 277;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -730,7 +731,7 @@ test "membrane contract data: every export entry is well-formed, documented, and
     try t.expectEqual(@as(usize, max_export_count), census.exports);
 }
 
-test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini callback" {
+test "membrane contract data: ABI v1 owns twenty full callbacks and one mini callback" {
     try t.expectEqualStrings("1", abi_major);
     try t.expectEqualStrings("weft:abi/1", abi_namespace);
     try t.expectEqualStrings("weft:abi/1/", export_prefix);
@@ -746,7 +747,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
             try t.expectEqualStrings("run", entry.name);
         },
     };
-    try t.expectEqual(@as(usize, 19), full);
+    try t.expectEqual(@as(usize, 20), full);
     try t.expectEqual(@as(usize, 1), mini);
     try t.expectEqual(@as(usize, 17), legacy_callback_names.len);
     for (legacy_callback_names, 0..) |name, i| {
@@ -758,6 +759,6 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
     try t.expectEqual(@as(usize, 256), census.imports);
-    try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 276), census.semantic_operations);
+    try t.expectEqual(@as(usize, 21), census.exports);
+    try t.expectEqual(@as(usize, 277), census.semantic_operations);
 }
