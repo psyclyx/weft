@@ -285,6 +285,36 @@ kept alive past its phase.
    path, delete `render_safe`. Can run alongside phases 3-4, since it touches
    the render path rather than plugins.
 
+   *Landed (2026-09-26, branch `arc/model`).* A frame is two halves:
+   `FrameBuilder.capture` takes a `FrameInput` — per pane a
+   `core.TextSnapshot` (the O(1) rope snapshot, selections and folds
+   resolved to offsets, the revision) and a `Hud` whose layers are
+   `layers.Snapshot`s (spans resolved, messages and bulk paint copied,
+   clipped to the pane's window) — and `draw` builds every pane from that
+   input alone. `View.build` accepts only snapshots, so it cannot read a
+   live `Editor` or `Layer`. No guest runs in either half: gutter cells and
+   status segments come from `app/answers.zig`, a cache keyed by
+   (pane, entry, revision, `Facts.digest`, ask), drawn even when one version
+   behind; the questions a frame lacked are asked by a new lifecycle phase
+   after the build (`answerRequests`, `piawpobr`), and answers that land
+   damage the view and wake the loop (`AdvanceResult.redraw`,
+   `loop_sources.redrawDue`). `contract.render_safe`, `answerGate` and
+   `WasmPlugin.answering` are deleted; a provider may act while answering,
+   and its edit is the next version. `Syntax` caches paint per
+   (tree generation, window), so an unchanged frame runs no highlight query.
+   `on_context_changed` still fires from `applyWindowIntents`, before the
+   build, as phase 2 left it. Measured (`bench-syntax`, ReleaseFast, an
+   11.6k-line JS buffer): taking a frame's input costs p50 0.5 µs, p99
+   1.3 µs; a redraw that changes nothing the text shows went from 0.36 ms
+   to 0.09 ms.
+   Still open: the initial parse is all-or-nothing (tree-sitter yields no
+   partial tree), so a large file still paints once the whole parse lands;
+   the answer cache keys entries by local `Buffers.Ref` and revisions are the
+   local log length, so a peer-rendered view needs designation keys and an
+   opaque remote version; the `Hud`'s strings, surfaces and semantic scenes
+   are borrowed for the frame (safe: nothing mutates them between capture
+   and draw) but a view sent to a peer would need them owned.
+
 Phases 1-2 are foundations and touch every plugin lightly. Phase 3 is most of
 the visible payoff. Phase 4 is the largest and riskiest; it is where the
 review's bug class dies.
