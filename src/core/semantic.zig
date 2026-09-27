@@ -858,13 +858,19 @@ pub const Services = struct {
             if (try self.invokeFocusedFieldTransfer(stack, head, gpa, path, action, register)) |effect| return effect;
         }
         const subject = actingNode(instance, path.nodes, action) orelse return error.ActionUnavailable;
-        // A row RANGE (`V j`) is one extent: the request names every row in
-        // it that answers the action, the focused one its subject.
+        // The request names every row the selection holds that answers the
+        // action — a RANGE (`V j`) is one extent of several rows, marked rows
+        // (C-click) are more extents — the focused one its subject. Inside a
+        // mapping's run the visited extent is the whole selection (no marks
+        // beside it), so an `.each` command sends its extent's rows; a
+        // `.whole` one (copy, cut) sends the set as ONE request.
         var rows: std.ArrayList(semantic.scene.NodeId) = .empty;
         defer rows.deinit(gpa);
-        if (head.scene_selection.anchor) |anchor| if (anchor != path.leaf()) {
-            try rangeActors(gpa, instance, anchor, path.leaf() orelse anchor, action, &rows);
-        };
+        var extents: std.ArrayList(Head.SceneSelection.Rows) = .empty;
+        defer extents.deinit(gpa);
+        if (head.scene_selection.primaryRows()) |primary| try extents.append(gpa, primary);
+        try extents.appendSlice(gpa, head.scene_selection.others.items);
+        try selectionActors(gpa, instance, extents.items, action, &rows);
         const prior_focus = head.scene_selection.path();
         const effect = try self.invokeActionInRegister(stack, gpa, .{
             .action = action,
@@ -889,21 +895,33 @@ pub const Services = struct {
         return null;
     }
 
-    /// Every distinct node answering `action` for the rows from `a` to `b`
-    /// (either order) in the view's focus order.
-    fn rangeActors(
+    /// Every distinct node answering `action` for the rows of `extents`
+    /// (each from its anchor to its head, either order), in the view's focus
+    /// order — so a set is named, and transferred, in the order it is seen.
+    fn selectionActors(
         gpa: std.mem.Allocator,
         instance: *const view_runtime.view.Instance,
-        a: semantic.scene.NodeId,
-        b: semantic.scene.NodeId,
+        extents: []const Head.SceneSelection.Rows,
         action: []const u8,
         out: *std.ArrayList(semantic.scene.NodeId),
     ) !void {
         const order = instance.focus_order;
-        const ia = std.mem.indexOfScalar(semantic.scene.NodeId, order, a) orelse return;
-        const ib = std.mem.indexOfScalar(semantic.scene.NodeId, order, b) orelse return;
+        // Each extent as its span of places in the focus order.
+        const spans = try gpa.alloc([2]usize, extents.len);
+        defer gpa.free(spans);
+        var n: usize = 0;
+        for (extents) |extent| {
+            const ia = std.mem.indexOfScalar(semantic.scene.NodeId, order, extent.anchor) orelse continue;
+            const ib = std.mem.indexOfScalar(semantic.scene.NodeId, order, extent.head) orelse continue;
+            spans[n] = .{ @min(ia, ib), @max(ia, ib) };
+            n += 1;
+        }
         var storage: [1026]semantic.scene.NodeId = undefined;
-        for (order[@min(ia, ib) .. @max(ia, ib) + 1]) |leaf| {
+        for (order, 0..) |leaf, at| {
+            const inside = for (spans[0..n]) |span| {
+                if (at >= span[0] and at <= span[1]) break true;
+            } else false;
+            if (!inside) continue;
             const p = (try instance.focusPath(leaf, &storage)) orelse continue;
             const actor = actingNode(instance, p.nodes, action) orelse continue;
             if (std.mem.indexOfScalar(semantic.scene.NodeId, out.items, actor) == null) try out.append(gpa, actor);

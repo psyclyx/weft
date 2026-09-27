@@ -628,9 +628,37 @@ pub const Session = struct {
         return true;
     }
 
+    /// Lease every copied file the capture carries — each item of a set the
+    /// same as a lone one — so the copy survives its source changing.
     fn materializeCapture(self: *Session, captured: *semantic.transfer.OwnedItem) !void {
         if (captured.value.intent != .copy or self.capabilities.durable_lease == null) return;
-        const representation = captured.value.representation(files.entry_media_type) orelse return;
+        const gpa = self.plugin.gpa;
+        const count = captured.value.partCount();
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const parts = try arena.alloc(semantic.transfer.Item, count);
+        var changed = false;
+        for (parts, 0..) |*part, index| {
+            part.* = captured.value.part(index);
+            if (try self.leased(arena, part.*)) |representations| {
+                part.representations = representations;
+                changed = true;
+            }
+        }
+        if (!changed) return;
+        var set = parts[0];
+        set.members = parts[1..];
+        const materialized = try semantic.transfer.OwnedItem.init(gpa, set);
+        captured.deinit();
+        captured.* = materialized;
+    }
+
+    /// `item`'s representations with its entry leased, allocated in `arena`,
+    /// or null when there is nothing to lease (a directory, an existing
+    /// lease, no entry representation).
+    fn leased(self: *Session, arena: std.mem.Allocator, item: semantic.transfer.Item) !?[]semantic.transfer.Representation {
+        const representation = item.representation(files.entry_media_type) orelse return null;
         const schema = representation.schema orelse return error.InvalidTransfer;
         const decoded = try files.decodeEntryTransferWithAttachment(
             representation.payload,
@@ -640,36 +668,24 @@ pub const Session = struct {
         );
         const entry = switch (decoded.source) {
             .entry => |source| source,
-            .lease => return,
+            .lease => return null,
         };
         switch (decoded.kind) {
             .regular, .symlink => {},
-            .directory, .other => return,
+            .directory, .other => return null,
         }
         const capture = try weft.semanticTransferCapture(self.target, self.target_revision, entry);
-        const payload = try files.encodeEntryTransfer(self.plugin.gpa, .{ .lease = capture.source }, decoded.kind, decoded.mode);
-        defer self.plugin.gpa.free(payload);
-        const representations = try self.plugin.gpa.alloc(semantic.transfer.Representation, captured.value.representations.len);
-        defer self.plugin.gpa.free(representations);
-        var replaced = false;
-        for (captured.value.representations, representations) |source, *destination| {
+        const payload = try files.encodeEntryTransfer(arena, .{ .lease = capture.source }, decoded.kind, decoded.mode);
+        const representations = try arena.alloc(semantic.transfer.Representation, item.representations.len);
+        for (item.representations, representations) |source, *destination| {
             destination.* = source;
             if (!std.mem.eql(u8, source.media_type, files.entry_media_type)) continue;
             destination.schema = files.entry_schema_current;
             destination.payload = payload;
             destination.resource = null;
             destination.attachment = capture.attachment;
-            replaced = true;
         }
-        if (!replaced) return error.InvalidTransfer;
-        const materialized = try semantic.transfer.OwnedItem.init(self.plugin.gpa, .{
-            .intent = captured.value.intent,
-            .suggested_name = captured.value.suggested_name,
-            .source = captured.value.source,
-            .representations = representations,
-        });
-        captured.deinit();
-        captured.* = materialized;
+        return representations;
     }
 
     fn editField(self: *Session, field: *Field, edit: weft.SemanticFieldEdit) !void {

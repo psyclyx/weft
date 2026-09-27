@@ -226,19 +226,25 @@ pub const Registry = struct {
     /// decoded transfer; once this succeeds, each non-null resource reference
     /// is owned by that `OwnedTransfer` and released by its deinit.  No
     /// process pointer crosses the wasm boundary.
+    /// A set resolves every member's attachments the same way, all checked
+    /// before any is taken.
     pub fn resolve(self: *const Registry, owned: *scene_codec.transfer.Owned) Error!void {
-        for (owned.value.representations) |representation| {
-            if (representation.attachment) |attachment| {
-                if (representation.resource != null or self.lookupState(attachment) == null)
-                    return error.InvalidAttachment;
+        for (0..owned.value.partCount()) |index| {
+            for (owned.value.part(index).representations) |representation| {
+                if (representation.attachment) |attachment| {
+                    if (representation.resource != null or self.lookupState(attachment) == null)
+                        return error.InvalidAttachment;
+                }
             }
         }
-        for (@constCast(owned.value.representations)) |*representation| {
-            if (representation.attachment) |attachment| {
-                const state = self.lookupState(attachment).?;
-                const resource = state.resource();
-                resource.retain();
-                representation.resource = resource;
+        for (0..owned.value.partCount()) |index| {
+            for (@constCast(owned.value.part(index).representations)) |*representation| {
+                if (representation.attachment) |attachment| {
+                    const state = self.lookupState(attachment).?;
+                    const resource = state.resource();
+                    resource.retain();
+                    representation.resource = resource;
+                }
             }
         }
     }

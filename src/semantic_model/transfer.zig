@@ -57,6 +57,8 @@ pub const ValidationError = error{
     InvalidMediaType,
     InvalidAttachment,
     DuplicateRepresentation,
+    /// A set's member that is itself a set, or has another intent.
+    InvalidMember,
 } || std.mem.Allocator.Error;
 
 pub const Item = struct {
@@ -64,8 +66,33 @@ pub const Item = struct {
     suggested_name: []const u8 = &.{},
     source: ?Source = null,
     representations: []const Representation,
+    /// A SET: the items transferred together with this one, after it, in
+    /// order — several rows copied as one act. Each member is a whole item
+    /// (its own name, source and representations); a member has no members,
+    /// and every member shares this item's intent. Read a set by `part`, so
+    /// no reader handles the first item differently from the rest.
+    members: []const Item = &.{},
+
+    /// How many items this transfer carries: one, or a set's count.
+    pub fn partCount(self: Item) usize {
+        return 1 + self.members.len;
+    }
+
+    /// Item `index` of the set, as a lone item (index 0 is this one).
+    pub fn part(self: Item, index: usize) Item {
+        if (index == 0) {
+            var lone = self;
+            lone.members = &.{};
+            return lone;
+        }
+        return self.members[index - 1];
+    }
 
     pub fn validate(self: Item, gpa: std.mem.Allocator) ValidationError!void {
+        for (self.members) |member| {
+            if (member.members.len != 0 or member.intent != self.intent) return error.InvalidMember;
+            try member.validate(gpa);
+        }
         if (self.representations.len == 0) return error.NoRepresentations;
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(gpa);
@@ -98,34 +125,40 @@ pub const OwnedItem = struct {
         var owned: OwnedItem = .{ .arena = .init(gpa) };
         errdefer owned.deinit();
         const arena = owned.arena.allocator();
-        owned.value = .{
-            .intent = source_item.intent,
-            .suggested_name = &.{},
-            .source = null,
-            .representations = &.{},
-        };
-        const representations = try arena.alloc(Representation, source_item.representations.len);
-        @memset(representations, .{ .media_type = &.{}, .payload = &.{} });
-        owned.value.representations = representations;
-        for (source_item.representations, representations) |source, *destination| {
-            destination.resource = source.resource;
-            if (source.resource) |resource| resource.retain();
-            destination.attachment = source.attachment;
-            destination.media_type = try arena.dupe(u8, source.media_type);
-            destination.schema = if (source.schema) |schema| try arena.dupe(u8, schema) else null;
-            destination.payload = try arena.dupe(u8, source.payload);
-        }
-        owned.value.suggested_name = try arena.dupe(u8, source_item.suggested_name);
-        owned.value.source = if (source_item.source) |source| .{
-            .target = source.target,
-            .revision = try arena.dupe(u8, source.revision),
-        } else null;
+        owned.value = .{ .intent = source_item.intent, .representations = &.{} };
+        try copyInto(arena, &owned.value, source_item);
+        const members = try arena.alloc(Item, source_item.members.len);
+        for (members) |*member| member.* = .{ .intent = source_item.intent, .representations = &.{} };
+        owned.value.members = members;
+        for (source_item.members, members) |source, *member| try copyInto(arena, member, source);
         return owned;
     }
 
+    /// Copy `source` (not its members) into `destination`, which starts
+    /// empty: every representation is visible to `deinit` from the moment
+    /// its resource is retained, so a failed copy releases exactly what it
+    /// took.
+    fn copyInto(arena: std.mem.Allocator, destination: *Item, source_item: Item) std.mem.Allocator.Error!void {
+        const representations = try arena.alloc(Representation, source_item.representations.len);
+        @memset(representations, .{ .media_type = &.{}, .payload = &.{} });
+        destination.representations = representations;
+        for (source_item.representations, representations) |source, *copy| {
+            copy.resource = source.resource;
+            if (source.resource) |resource| resource.retain();
+            copy.attachment = source.attachment;
+            copy.media_type = try arena.dupe(u8, source.media_type);
+            copy.schema = if (source.schema) |schema| try arena.dupe(u8, schema) else null;
+            copy.payload = try arena.dupe(u8, source.payload);
+        }
+        destination.suggested_name = try arena.dupe(u8, source_item.suggested_name);
+        destination.source = if (source_item.source) |source| .{
+            .target = source.target,
+            .revision = try arena.dupe(u8, source.revision),
+        } else null;
+    }
+
     pub fn deinit(self: *OwnedItem) void {
-        for (self.value.representations) |representation|
-            if (representation.resource) |resource| resource.release();
+        releaseResources(self.value);
         self.arena.deinit();
         self.* = undefined;
     }
@@ -140,6 +173,14 @@ pub const OwnedItem = struct {
         self.* = next;
     }
 };
+
+/// Release every host resource `item` (and each member of its set) holds.
+pub fn releaseResources(item: Item) void {
+    for (0..item.partCount()) |index| {
+        for (item.part(index).representations) |representation|
+            if (representation.resource) |resource| resource.release();
+    }
+}
 
 test "transfer requires unique typed representations" {
     const reps = [_]Representation{
@@ -158,6 +199,51 @@ test "transfer rejects malformed attachment generations before transport" {
     }};
     const item: Item = .{ .intent = .copy, .representations = &reps };
     try std.testing.expectError(error.InvalidAttachment, item.validate(std.testing.allocator));
+}
+
+test "a set is read part by part, owns every member, and releases each member's resources once" {
+    const Probe = struct {
+        retains: usize = 0,
+        releases: usize = 0,
+
+        fn retain(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.retains += 1;
+        }
+
+        fn release(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.releases += 1;
+        }
+    };
+    var probe: Probe = .{};
+    const resource: Resource = .{ .context = &probe, .vtable = &.{ .retain = Probe.retain, .release = Probe.release } };
+    var name = [_]u8{ 'c', '.', 't' };
+    const members = [_]Item{.{
+        .intent = .copy,
+        .suggested_name = &name,
+        .representations = &.{.{ .media_type = "application/test", .payload = "c", .resource = resource }},
+    }};
+    var owned = try OwnedItem.init(std.testing.allocator, .{
+        .intent = .copy,
+        .suggested_name = "a.t",
+        .representations = &.{.{ .media_type = "application/test", .payload = "a" }},
+        .members = &members,
+    });
+    @memset(&name, 'x');
+    try std.testing.expectEqual(@as(usize, 2), owned.value.partCount());
+    try std.testing.expectEqualStrings("a.t", owned.value.part(0).suggested_name);
+    try std.testing.expectEqual(@as(usize, 0), owned.value.part(0).members.len);
+    try std.testing.expectEqualStrings("c.t", owned.value.part(1).suggested_name);
+    try std.testing.expectEqual(@as(usize, 1), probe.retains);
+    owned.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.releases);
+
+    // A member is a lone item of the set's intent.
+    const nested = [_]Item{.{ .intent = .copy, .representations = &.{.{ .media_type = "a/b", .payload = "" }}, .members = &members }};
+    try std.testing.expectError(error.InvalidMember, (Item{ .intent = .copy, .representations = &.{.{ .media_type = "a/b", .payload = "" }}, .members = &nested }).validate(std.testing.allocator));
+    const cut = [_]Item{.{ .intent = .cut, .representations = &.{.{ .media_type = "a/b", .payload = "" }} }};
+    try std.testing.expectError(error.InvalidMember, (Item{ .intent = .copy, .representations = &.{.{ .media_type = "a/b", .payload = "" }}, .members = &cut }).validate(std.testing.allocator));
 }
 
 test "owned transfer survives mutation of producer storage" {

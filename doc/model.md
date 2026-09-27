@@ -232,7 +232,14 @@ As built (phase 4, `core/selection.zig`):
   - `.whole` — once; the command reads the set (split, add-next-match,
     align) or never looks at it (save, a picker whose accept does not move
     the caret, a command that only runs another — which then maps by its
-    own declaration).
+    own declaration). A row transfer is
+    `.whole`: copy and cut send every selected row (ranges and marks, in
+    view order; a text projection's rows under every caret) as ONE request
+    and get ONE transfer back — several rows are a set
+    (`transfer.Item.members`; codec transfer v3, request v4, written only
+    for a set), which a paste lands in order. Mapped per extent, each run
+    would replace the one captured value. A one-row verb (rename, insert
+    beside, step out) declares nothing and is refused on several rows.
   - `.homogeneous` — once, refused when the extents differ in kind.
   - `.one` — refused on several: it reads THE caret or row and has no
     per-extent reading (a labelled search, a goto from the word at point, a
@@ -514,8 +521,8 @@ kept alive past its phase.
    (vim makes no multi-selections); `mixed` shape is always false today —
    no entry yet holds text and rows at once (a listing's focused name field
    is text *inside* the primary row, not an extent), so `.homogeneous` is
-   exercised by unit tests only; transfers of several rows (copy, paste) are
-   one row at a time (the files controller refuses a range); row navigation
+   exercised by unit tests only; a paste beside several marked rows is
+   refused as ambiguous (a set lands beside one row); row navigation
    moves the primary and keeps marks, as a file manager does; `.each` over a
    target is text-only.
 5. **Snapshot frames.** Versioned provider answers, highlight off the frame

@@ -113,11 +113,16 @@ pub fn registerSemanticAction(
 }
 
 /// How an open semantic action maps over several selected rows. The standard
-/// vocabulary says: a `selection.*` action and `target.open` act on each row;
-/// a `view.*` action acts on the view once. Any other name says nothing, so
-/// it is refused on several rows rather than run on the focused one alone.
+/// vocabulary says: a transfer (copy, cut, paste) reads the whole selection as
+/// one request, since it makes or consumes ONE value; any other `selection.*`
+/// action and `target.open` act on each row; a `view.*` action acts on the
+/// view once. Any other name says nothing, so it is refused on several rows
+/// rather than run on the focused one alone.
 fn semanticArity(name: []const u8) ?@import("selection.zig").Arity {
-    if (std.mem.startsWith(u8, name, "selection.") or std.mem.eql(u8, name, semantic_model.action.standard.open))
+    const standard = semantic_model.action.standard;
+    for ([_][]const u8{ standard.copy, standard.cut, standard.paste_before, standard.paste_after }) |transfer|
+        if (std.mem.eql(u8, name, transfer)) return .whole;
+    if (std.mem.startsWith(u8, name, "selection.") or std.mem.eql(u8, name, standard.open))
         return .each_extent;
     if (std.mem.startsWith(u8, name, "view.")) return .whole;
     return null;
@@ -833,11 +838,15 @@ const table = [_]command.Command{
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
     command.define("open-relative", "Open a raw name below the semantic working target.", cOpenRelative),
-    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy).maps(.each_extent),
-    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut).maps(.each_extent),
+    // A transfer is ONE value: copy and cut send every selected row as one
+    // request and get one transfer (a set) back — per extent, each run would
+    // overwrite the last. Paste reads the whole selection the same way (a
+    // provider refuses a paste beside several rows as ambiguous).
+    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy).maps(.whole),
+    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut).maps(.whole),
     command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete).maps(.each_extent),
-    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore).maps(.each_extent),
-    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.each_extent),
+    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore).maps(.whole),
+    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.whole),
     command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused).maps(.each_extent),
     command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded).maps(.each_extent),
     // One row's verbs: a name edited, a row inserted beside it, its container

@@ -98,9 +98,10 @@ pub const Controller = struct {
         if (std.mem.eql(u8, request.action, action.standard.copy) or
             std.mem.eql(u8, request.action, action.standard.cut))
         {
-            if (selected.len != 1) return error.AmbiguousSubject;
+            // Every selected row, one transfer: a lone item, or a set in the
+            // listing's order.
             const intent: transfer.Intent = if (std.mem.eql(u8, request.action, action.standard.copy)) .copy else .cut;
-            const next = self.model.yank(selected[0], intent) catch |err| return mapModelError(err);
+            const next = self.model.yankSet(selected, intent) catch |err| return mapModelError(err);
             self.clearCapture();
             self.capture = next;
             return .{ .transfer = self.capture.?.value };
@@ -141,9 +142,12 @@ pub const Controller = struct {
                 break :blk ids;
             },
             .nodes => |nodes| blk: {
-                // Several rows are one request only for what acts on each:
-                // delete marks them all; every other action takes one row.
-                const many = std.mem.eql(u8, request.action, action.standard.delete);
+                // Several rows are one request for what reads a set: delete
+                // marks them all, copy and cut transfer them as one set;
+                // every other action (a paste beside a row) takes one row.
+                const many = std.mem.eql(u8, request.action, action.standard.delete) or
+                    std.mem.eql(u8, request.action, action.standard.copy) or
+                    std.mem.eql(u8, request.action, action.standard.cut);
                 if (nodes.len == 0 or nodes.len > max_selection or (!many and nodes.len != 1)) return error.AmbiguousSubject;
                 const ids = try self.gpa.alloc(model.NodeId, nodes.len);
                 errdefer self.gpa.free(ids);
@@ -201,12 +205,55 @@ test "files actions capture copy and cut, delete selected rows, and reject ambig
     const selected = [_]semantic.scene.NodeId{rowNode(second)};
     _ = try controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &selected } });
     try std.testing.expectEqual(model.Pending.deleted, files.row(second).?.pending);
+    // A paste lands beside ONE row: beside two it is ambiguous.
     const ambiguous = [_]semantic.scene.NodeId{ rowNode(first), rowNode(second) };
-    try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &ambiguous } }));
+    try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.paste_after, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &ambiguous }, .transfer = cut.transfer }));
     try std.testing.expectEqual(model.Pending.observed, files.row(first).?.pending);
 }
 
-test "files actions delete every row of a range in one request, and copy refuses one" {
+test "files actions copy and cut several rows as one set, in the listing's order, and a paste lands every one in order" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
+        .{ .identity = ref(1, 1), .name = "a.txt", .revision = "r1", .kind = .regular },
+        .{ .identity = ref(2, 1), .name = "b.txt", .revision = "r2", .kind = .regular },
+        .{ .identity = ref(3, 1), .name = "c.txt", .revision = "r3", .kind = .regular },
+    } });
+    const a = files.rows.items[0].id;
+    const b = files.rows.items[1].id;
+    const c = files.rows.items[2].id;
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 4, .generation = 1 });
+    defer controller.deinit();
+
+    // Named out of order (the primary first): transferred in view order.
+    const marked = [_]semantic.scene.NodeId{ rowNode(c), rowNode(a) };
+    const copied = try controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(c), .selection = .{ .nodes = &marked } });
+    try std.testing.expectEqual(@as(usize, 2), copied.transfer.partCount());
+    try std.testing.expectEqualStrings("a.txt", copied.transfer.part(0).suggested_name);
+    try std.testing.expectEqualStrings("c.txt", copied.transfer.part(1).suggested_name);
+    try std.testing.expectEqual(transfer.Intent.copy, copied.transfer.part(1).intent);
+
+    // Pasted after b.txt: a.txt's copy, then c.txt's, then the rest.
+    _ = try controller.invoke(.{ .action = action.standard.paste_after, .view = controller.view_ref, .subject = rowNode(b), .transfer = copied.transfer });
+    const names = [_][]const u8{ "a.txt", "b.txt", "a.txt", "c.txt", "c.txt" };
+    try std.testing.expectEqual(names.len, files.rows.items.len);
+    for (names, files.rows.items) |name, row| try std.testing.expectEqualStrings(name, row.draft.name);
+    try std.testing.expectEqual(model.Pending.copied, files.rows.items[2].pending);
+    try std.testing.expectEqual(model.Pending.copied, files.rows.items[3].pending);
+
+    // Before a row: the set still lands in order.
+    _ = try controller.invoke(.{ .action = action.standard.paste_before, .view = controller.view_ref, .subject = rowNode(a), .transfer = copied.transfer });
+    try std.testing.expectEqualStrings("a.txt", files.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("c.txt", files.rows.items[1].draft.name);
+    try std.testing.expectEqual(a, files.rows.items[2].id);
+
+    // Cut takes the set as well.
+    const cut = try controller.invoke(.{ .action = action.standard.cut, .view = controller.view_ref, .subject = rowNode(a), .selection = .{ .nodes = &marked } });
+    try std.testing.expectEqual(@as(usize, 2), cut.transfer.partCount());
+    try std.testing.expectEqual(transfer.Intent.cut, cut.transfer.intent);
+}
+
+test "files actions delete every row of a range in one request" {
     var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
     defer files.deinit();
     try files.reconcile(.{ .entries = &.{
@@ -218,7 +265,6 @@ test "files actions delete every row of a range in one request, and copy refuses
     var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 4, .generation = 1 });
     defer controller.deinit();
     const range = [_]semantic.scene.NodeId{ rowNode(rows[0].id), rowNode(rows[1].id) };
-    try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(rows[1].id), .selection = .{ .nodes = &range } }));
     _ = try controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(rows[1].id), .selection = .{ .nodes = &range } });
     try std.testing.expectEqual(model.Pending.deleted, files.row(rows[0].id).?.pending);
     try std.testing.expectEqual(model.Pending.deleted, files.row(rows[1].id).?.pending);

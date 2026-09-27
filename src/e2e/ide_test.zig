@@ -1063,6 +1063,54 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     try t.expect(fileOpen(ed, "c.txt"));
 }
 
+/// The names of the focused listing's rows whose pending change is `change`,
+/// in view order, joined by spaces.
+fn rowsChanged(ed: *Editor, change: []const u8, buf: []u8) ![]const u8 {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return error.NoFilesView) orelse return error.StaleView;
+    var len: usize = 0;
+    for (instance.scene.content.container.children) |row| {
+        const hit = for (row.facts) |fact| {
+            if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, change)) break true;
+        } else false;
+        if (!hit) continue;
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (len > 0) {
+                buf[len] = ' ';
+                len += 1;
+            }
+            @memcpy(buf[len..][0..snap.value.bytes.len], snap.value.bytes);
+            len += snap.value.bytes.len;
+        }
+    }
+    return buf[0..len];
+}
+
+test "e2e/ide: copy of several marked rows is one transfer — paste lands every row, in order" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try markTwoRows(ed);
+
+    // Copy reads the whole set: ONE request naming both rows, one transfer
+    // holding both — not two runs each overwriting the one captured value.
+    ed.run("selection-copy");
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+
+    // Paste after b.txt, one row focused: both copies land, a.txt's first.
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "b.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
+    ed.run("selection-paste-after");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("a.txt c.txt", try rowsChanged(ed, "copy", &buf));
+}
+
 test "e2e/ide: a one-row verb on several marked rows is refused — Rename, insert beside and step out act on one row, and the offers say so" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

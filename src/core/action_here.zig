@@ -99,12 +99,19 @@ fn invokeOnProjection(
     const view_ref = entry.tool_view orelse return null;
     const view = services.views.get(view_ref) orelse return null;
     const here = subjectsHere(ctx);
+    // Several carets (or a selection over several lines) name several rows:
+    // the row request carries every one, the primary's its subject — the
+    // text plane's twin of a scene's marked rows.
+    var rows: std.ArrayList(semantic_model.scene.NodeId) = .empty;
+    defer rows.deinit(ctx.gpa);
+    try rowsIn(ctx.gpa, entry, &rows);
     for ([_]?semantic_model.scene.NodeId{ here.part, here.row, view.scene.id }) |candidate| {
         const subject = candidate orelse continue;
+        const set = candidate == here.row and rows.items.len > 1;
         if (services.invokeActionInRegister(
             &ctx.head.interactions,
             ctx.gpa,
-            .{ .action = action, .view = view_ref, .subject = subject },
+            .{ .action = action, .view = view_ref, .subject = subject, .selection = if (set) .{ .nodes = rows.items } else .none },
             register,
         )) |effect| {
             if (effect == .declined) continue;
@@ -190,6 +197,33 @@ pub fn subjectsIn(entry: *Buffers.Buffer) Subjects {
     const part = nodeIdOf(subject.key);
     // The row answering as its own subject is one candidate, not two.
     return .{ .part = if (part != null and part != row) part else null, .row = row };
+}
+
+/// Every row the entry's selections cover, in document order, each once —
+/// inside a mapping's run, the visited selection's alone.
+fn rowsIn(gpa: std.mem.Allocator, entry: *Buffers.Buffer, out: *std.ArrayList(semantic_model.scene.NodeId)) !void {
+    if (entry.tool_view == null) return;
+    const view = entry.projection orelse return;
+    const ed = entry.textEditor() orelse return;
+    const text = view.text.items;
+    const first: usize = if (ed.visiting > 0) ed.primary else 0;
+    const count: usize = if (ed.visiting > 0) 1 else ed.selectionCount();
+    for (first..first + count) |i| {
+        const ends = ed.selectionEnds(i);
+        const lo = @min(ends.anchor, ends.head);
+        const hi = @max(ends.anchor, ends.head);
+        // One subject per line: the line the extent starts on, then every
+        // line that starts inside it (one ending at a line's start does not
+        // reach that line).
+        var at: usize = if (std.mem.lastIndexOfScalar(u8, text[0..@min(lo, text.len)], '\n')) |nl| nl + 1 else 0;
+        while (true) {
+            if (view.subjectAt(at)) |subject| if (nodeIdOf(subject.node.key)) |row| {
+                if (std.mem.indexOfScalar(semantic_model.scene.NodeId, out.items, row) == null) try out.append(gpa, row);
+            };
+            at = (std.mem.indexOfScalarPos(u8, text, at, '\n') orelse break) + 1;
+            if (at >= hi) break;
+        }
+    }
 }
 
 fn nodeIdOf(key: []const u8) ?semantic_model.scene.NodeId {
