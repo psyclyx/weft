@@ -495,6 +495,98 @@ pub const KeyHints = struct {
 
 const testing = std.testing;
 
+test "chrome: every role renders under all three styles, switched live between frames" {
+    const gpa = testing.allocator;
+    const harness = @import("../harness.zig");
+    const render = @import("render.zig");
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    const w: u32 = 480;
+    const h: u32 = 400;
+
+    const Case = struct { role: Role, state: State, content: Content };
+    const cases = [_]Case{
+        .{ .role = .button, .state = .{}, .content = .{ .label = "Save", .icon = "save" } },
+        .{ .role = .button, .state = .{ .hover = true }, .content = .{ .label = "Undo", .icon = "undo" } },
+        .{ .role = .button, .state = .{ .disabled = true }, .content = .{ .label = "Redo", .icon = "redo" } },
+        .{ .role = .menu_item, .state = .{ .hover = true }, .content = .{ .label = "Split Right", .icon = "split-right", .key_hint = "C-w v" } },
+        .{ .role = .menu_item, .state = .{ .checked = true }, .content = .{ .label = "Sidebar" } },
+        .{ .role = .status_segment, .state = .{ .hover = true }, .content = .{ .label = "" } },
+        .{ .role = .chip, .state = .{}, .content = .{ .bg = v.theme.diag_error } },
+        .{ .role = .row, .state = .{ .hover = true }, .content = .{ .label = "a.zig" } },
+        .{ .role = .header, .state = .{}, .content = .{ .label = "Changes" } },
+        .{ .role = .separator, .state = .{}, .content = .{} },
+        .{ .role = .tab, .state = .{ .selected = true }, .content = .{ .label = "main.zig", .icon = "file" } },
+    };
+    var last: ?[]u8 = null;
+    defer if (last) |p| gpa.free(p);
+    for ([_]Style{ .text, .text_icons, .widget }) |style| {
+        // Switched between frames, as `theme.set-chrome` does: the same
+        // view, the next frame drawn in the new style.
+        v.chrome = style;
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var runs: std.ArrayList(Run) = .empty;
+        var rects: std.ArrayList(Rect) = .empty;
+        const s: Sink = .{ .v = &v, .scratch = arena.allocator(), .runs = &runs, .rects = &rects };
+        var boxes: [cases.len + 2]region.Rect = undefined;
+        for (cases, 0..) |c, i| {
+            const y = 8 + @as(f32, @floatFromInt(i)) * (v.line_h + 6);
+            boxes[i] = .{ .x = 8, .y = y, .w = if (c.role == .button) colsW(&v, buttonCols(&v, c.content)) else 220, .h = if (c.role == .separator) 3 else v.line_h };
+            try paint(s, c.role, c.state, c.content, boxes[i]);
+            // A segment's or chip's text is the status line's to place.
+            if (c.role == .status_segment or c.role == .chip) try s.label("12:4", boxes[i].x, y, v.theme.foreground, null);
+        }
+        // A panel with a tooltip over it, beside the rows.
+        boxes[cases.len] = .{ .x = 260, .y = 20, .w = 180, .h = 120 };
+        try paintPanel(s, boxes[cases.len], v.theme.selection, v.theme.accent, .menu);
+        try paintTooltip(s, .{ .label = "Close", .reason = "nothing to close" }, .{ 270, 150 }, .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) });
+        boxes[cases.len + 1] = .{ .x = 270, .y = 150 + v.line_h, .w = 120, .h = v.line_h };
+        var built = try render.render(&v, .identity, runs.items, rects.items, &.{});
+        defer built.deinit(gpa);
+        const pixels = try harness.rasterize(gpa, &v, &.{built.items}, w, h);
+        for (boxes, 0..) |b, i| {
+            errdefer std.debug.print("style {s}: box {d} empty\n", .{ style.name(), i });
+            try testing.expect(harness.hasContent(pixels, w, @intFromFloat(b.x), @intFromFloat(b.y), @intFromFloat(b.x + b.w), @intFromFloat(b.y + @max(1, b.h))));
+        }
+        // Each style is its own look: no frame repeats the one before it.
+        if (last) |prev| try testing.expect(!std.mem.eql(u8, prev, pixels));
+        if (last) |prev| gpa.free(prev);
+        last = pixels;
+        // The widget style's shapes are the D2 primitives.
+        var rounded = false;
+        var paths = false;
+        for (built.items) |item| switch (item) {
+            .rrect => rounded = true,
+            .path => paths = true,
+            else => {},
+        };
+        try testing.expectEqual(style == .widget, rounded);
+        try testing.expectEqual(style != .text, paths);
+    }
+}
+
+test "chrome: a button's cells are the same in every style that draws the same parts" {
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(testing.allocator, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    const save: Content = .{ .label = "Save", .icon = "save" };
+    // The text style has no icons: the label and a cell either side, which
+    // is what "[Save]" took, so a toolbar keeps its columns.
+    v.chrome = .text;
+    try testing.expectEqual(@as(usize, 6), buttonCols(&v, save));
+    v.chrome = .text_icons;
+    try testing.expectEqual(@as(usize, 8), buttonCols(&v, save));
+    v.chrome = .widget;
+    try testing.expectEqual(@as(usize, 8), buttonCols(&v, save));
+    // No icon by that name: no icon cells.
+    try testing.expectEqual(@as(usize, 6), buttonCols(&v, .{ .label = "Save", .icon = "no-such-icon" }));
+    // `theme/icons none` turns every icon off.
+    v.icons_on = false;
+    try testing.expectEqual(@as(usize, 6), buttonCols(&v, save));
+}
+
 test "chrome: the style names are the theme slot's spelling, and cycle through all three" {
     try testing.expectEqual(Style.text_icons, Style.parse("text-icons").?);
     try testing.expect(Style.parse("text_icons") == null);

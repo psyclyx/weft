@@ -261,6 +261,77 @@ test "harness: an icon draws as a tinted path, closed subpaths included" {
     try t.expectEqual(bg[0..3].*, pixelAt(pixels, 64, 32, 32));
 }
 
+test "harness: tabs are laid out by each chrome style, and hover lights a widget tab's close glyph" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var ed = try makeEditor(gpa, pool, "hello tabs\n");
+    defer ed.deinit(gpa);
+    const w: u32 = 640;
+    const h: u32 = 200;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const tabs = [_]view_mod.Tab{
+        .{ .name = "a.zig", .active = true, .id = 1 },
+        .{ .name = "b.md", .active = false, .id = 2 },
+        .{ .name = "c.txt", .active = false, .id = 3 },
+    };
+
+    const Frame = struct {
+        fn draw(g: std.mem.Allocator, v: *view_mod.View, e: *const core.Editor, hud: view_mod.Hud, fw: u32, fh: u32, m: scene.Transform2D, hits: *[6]view_mod.ChromeHit) ![]u8 {
+            var arena = std.heap.ArenaAllocator.init(g);
+            defer arena.deinit();
+            v.resetFrame();
+            var top: usize = 0;
+            var built = try buildOf(g, v, arena.allocator(), e, hud, &top, fullFrame(fw, fh), .{}, m);
+            defer built.deinit(g);
+            var n: usize = 0;
+            for (v.build_chrome) |c| if (c.kind == .tab) {
+                hits[n] = c;
+                n += 1;
+            };
+            try t.expectEqual(@as(usize, 6), n);
+            return rasterize(g, v, &.{built.items}, fw, fh);
+        }
+    };
+
+    for ([_]view_mod.chrome.Style{ .text, .text_icons, .widget }) |style| {
+        view.chrome = style;
+        var hits: [6]view_mod.ChromeHit = undefined;
+        const pixels = try Frame.draw(gpa, &view, &ed, .{ .mode = "normal", .tabs = &tabs }, w, h, w2p, &hits);
+        defer gpa.free(pixels);
+        // Body then close, tab by tab, left to right, never overlapping, and
+        // every one of them drawn.
+        for (hits, 0..) |c, i| {
+            try t.expectEqual(i / 2, c.index);
+            try t.expectEqual(if (i % 2 == 0) view_mod.TabPart.body else view_mod.TabPart.close, c.part);
+            if (i > 0) try t.expect(c.rect.x >= hits[i - 1].rect.x + hits[i - 1].rect.w - 0.01);
+            if (c.part == .body) try t.expect(hasContent(pixels, w, @intFromFloat(c.rect.x), @intFromFloat(c.rect.y), @intFromFloat(c.rect.x + c.rect.w), @intFromFloat(c.rect.y + c.rect.h)));
+        }
+        if (style != .widget) continue;
+        // The pointer on the second tab's close glyph: the frame input says
+        // so, and the glyph appears (under `widget` an inactive tab shows none
+        // until hovered); the first tab is untouched.
+        const close = hits[3].rect;
+        var lit: [6]view_mod.ChromeHit = undefined;
+        const hovered = try Frame.draw(gpa, &view, &ed, .{ .mode = "normal", .tabs = &tabs, .pointer = .{
+            .at = .{ close.x + close.w / 2, close.y + close.h / 2 },
+            .chrome = .{ .kind = .tab, .index = 1, .part = .close },
+        } }, w, h, w2p, &lit);
+        defer gpa.free(hovered);
+        try t.expect(!hasContent(pixels, w, @intFromFloat(close.x), @intFromFloat(close.y), @intFromFloat(close.x + close.w), @intFromFloat(close.y + close.h)));
+        try t.expect(hasContent(hovered, w, @intFromFloat(close.x), @intFromFloat(close.y), @intFromFloat(close.x + close.w), @intFromFloat(close.y + close.h)));
+        const first = hits[0].rect;
+        for (@as(usize, @intFromFloat(first.y))..@as(usize, @intFromFloat(first.y + first.h))) |row| {
+            const a = (row * w + @as(usize, @intFromFloat(first.x))) * 4;
+            const b = a + @as(usize, @intFromFloat(first.w)) * 4;
+            try t.expectEqualSlices(u8, pixels[a..b], hovered[a..b]);
+        }
+    }
+}
+
 test "harness: a single pane renders text into the body" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });

@@ -26,6 +26,7 @@ pub const MdInline = hud_mod.MdInline;
 pub const Tab = hud_mod.Tab;
 pub const ChromeHit = hud_mod.ChromeHit;
 pub const Hover = hud_mod.Hover;
+pub const TabPart = hud_mod.TabPart;
 
 /// How chrome looks: roles, states and the three styles (doc/chrome.md §3).
 pub const chrome = @import("view/chrome.zig");
