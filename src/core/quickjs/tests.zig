@@ -361,6 +361,36 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     try t.expectEqualStrings("hi from js", env.head.echo.items);
 }
 
+test "quickjs: a JS plugin whose load fails leaves nothing it registered behind" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const intent = @import("../intent.zig");
+
+    // A body that registers a command, binds a key, labels a chord group,
+    // provides for an action — then throws.
+    const src =
+        \\weft.command("half.run", () => weft.echo("ran"));
+        \\weft.bind("normal", "C-x h", "half.run");
+        \\weft.group("normal", "C-x", "Half");
+        \\weft.action("half.act");
+        \\weft.provide("half.act", { mode: "normal" }, "half.run", 10);
+        \\throw new Error("the rest of the body is broken");
+    ;
+    try t.expectError(error.ConfigException, JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "half", null, src));
+
+    // Nothing of it is left: no command (whose handler pointed into the
+    // plugin that is gone), no key, no label, no provider.
+    try t.expect(env.commands.resolve("half.run") == null);
+    try t.expect(env.keymap.lookup("normal", "C-x h") == null);
+    try t.expect(env.keymap.groupName("normal", "C-x") == null);
+    try env.head.setModeRaw(gpa, "normal");
+    try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("half.act", intent.factsFor(&env.ctx)));
+}
+
 test "quickjs: a JS plugin publishes context through the wasm door's body, config gates on it, unloading retracts it" {
     const gpa = t.allocator;
     var env: Env = undefined;

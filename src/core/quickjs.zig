@@ -117,6 +117,11 @@ const Bridge = struct {
     /// safety argument: `active_ctx` is still the fresh load-time `ctx`
     /// during this call, so nothing else could be mid-interaction yet.
     loading: bool = false,
+    /// Who a LIVE registration (a key, a group label, a provider, a
+    /// description) is made on behalf of: the resident plugin's name, so its
+    /// teardown can take back exactly what it registered (`JsPlugin.retract`).
+    /// Config-eval mode stages onto `manifest` and never reads it.
+    owner: []const u8 = "config",
 
     /// Optional-with-fallback where WasmPlugin's twin is non-optional
     /// (init'd to the load ctx): the null here MEANS something — config-eval
@@ -505,7 +510,23 @@ pub const JsPlugin = struct {
     /// from `ctx.grant_table` — whatever `weft.grant` already minted for
     /// `name`, adopted BEFORE the body runs, so the plugin's very first
     /// statement is already gated.
+    ///
+    /// TRANSACTIONAL: a body that fails — it threw, or claimed a projection
+    /// kind it may not — leaves nothing behind. Its commands, keys, group
+    /// labels, providers, descriptions, context values, watches and openers
+    /// go by the one path an unload takes (`deinit`), so a half-registered
+    /// plugin is not a state the editor can be in.
     pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
+        const self = try instantiate(gpa, engine, ctx, pool, environ, name, config_store);
+        self.run(src) catch |e| {
+            self.deinit();
+            return e;
+        };
+        return self;
+    }
+
+    /// Stand up the instance and its membrane, running nothing of the body.
+    fn instantiate(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
         // Hoisted out of the struct literal so each owned value gets its
@@ -531,7 +552,7 @@ pub const JsPlugin = struct {
             // LIVE mode (`manifest` left null) — see Bridge's doc: a resident
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
-            .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
+            .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine, .owner = name_dup },
             .module = module,
             .linker = undefined,
             .instance = undefined,
@@ -548,7 +569,12 @@ pub const JsPlugin = struct {
         self.instance.callVoid("_initialize", &.{}) catch |e| {
             if (e != error.MissingExport) return e;
         };
+        return self;
+    }
 
+    /// Run the plugin body (`src`), which registers its commands. On an
+    /// error what it registered is still there; `load` takes it back.
+    fn run(self: *JsPlugin, src: []const u8) !void {
         const size: i32 = @intCast(src.len + 1);
         const ptr = try self.instance.callI32("malloc", &.{size});
         if (ptr == 0) return error.OutOfMemory;
@@ -557,11 +583,9 @@ pub const JsPlugin = struct {
         try self.instance.writeGuest(at, src);
         try self.instance.writeGuest(at + src.len, &.{0});
         // `Bridge.loading` (task #19 item 4): legitimate for the top-level JS
-        // body to touch head state while it runs (see that field's doc) — no
-        // `defer` needed to reset it: every error path below returns before
-        // reaching the plain `false` set, and `self`/`self.bridge` are only
-        // read again on the surviving success path.
+        // body to touch head state while it runs (see that field's doc).
         self.bridge.loading = true;
+        defer self.bridge.loading = false;
         // A JS plugin has no `describe()` to separate declaring from
         // registering, so its whole top-level body is the declaring window —
         // `weft.command(name, fn, summary)` declares and registers in one call.
@@ -569,23 +593,17 @@ pub const JsPlugin = struct {
         // rewrite what one of its commands claims to be after the palette has
         // read it.
         self.resources.accepting_declarations = true;
+        defer self.resources.accepting_declarations = false;
         const rc = blk: {
-            const entries = ctx.buffers;
+            const entries = self.ctx.buffers;
             const was = entries.actAs(self.name);
             defer _ = entries.actAs(was);
             break :blk try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
         };
-        self.resources.accepting_declarations = false;
-        self.bridge.loading = false;
         // A body that threw, or a projection kind it may not claim (the same
-        // rule, and the same refusal, as a `.wasm` plugin's load): what it
-        // published or claimed before failing goes with it.
-        const failed: ?anyerror = if (rc != 0) error.ConfigException else self.resources.load_refusal;
-        if (failed) |e| {
-            self.retract();
-            return e;
-        }
-        return self;
+        // rule, and the same refusal, as a `.wasm` plugin's load).
+        if (rc != 0) return error.ConfigException;
+        if (self.resources.load_refusal) |e| return e;
     }
 
     /// Every guest call enters here: for its duration this plugin is the
@@ -620,12 +638,24 @@ pub const JsPlugin = struct {
         return true;
     }
 
-    /// Take back what this plugin said to the workspace: its published
-    /// context values, its subject watches, its projection kinds — as a
-    /// `.wasm` plugin's unload does. Before `name`, which they are keyed by,
-    /// is freed.
+    /// Take back everything this plugin registered: its commands, the keys
+    /// and group labels it bound, the providers it offered, the descriptions
+    /// it gave, its published context values, its subject watches, its
+    /// projection kinds — as a `.wasm` plugin's unload does. The one path for
+    /// an unload and a failed load alike. Before `name`, which they are keyed
+    /// by, is freed; before the trampolines, which the commands point into.
+    /// Declarations (an action's name, a menu mode) outlive it, as they do a
+    /// `.wasm` plugin: cheap names another provider may still answer.
     fn retract(self: *JsPlugin) void {
         const ctx = self.activeCtx();
+        for (self.cmds.items) |c| {
+            const n = ctx.commands.find(c.name) orelse continue;
+            const cmd = ctx.commands.lookup(n) orelse continue;
+            if (cmd.data == @as(?*anyopaque, c)) ctx.commands.unbind(n);
+        }
+        ctx.keymap.unbindOwner(self.gpa, self.name);
+        ctx.actions.unregisterByOwner(self.name);
+        if (ctx.presentations) |table| table.dropOwner(self.gpa, self.name);
         if (ctx.context) |context| {
             _ = context.store.retractOwner(self.resources.name);
             context.unwatchOwner(self.resources.name);
@@ -1571,7 +1601,7 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     // LIVE mode (a resident JS plugin): user config shadows plugins and core
     // defaults (highest tier). Fallback lists bind their FIRST entry, as
     // `applyDecls` does — no resolution is faked here either.
-    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_config, "config") catch {};
+    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_config, br.owner) catch {};
 }
 
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
@@ -1735,7 +1765,7 @@ fn cGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
         m.addGroup(mode, prefix, name) catch {};
         return;
     }
-    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_config, "config") catch {};
+    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_config, br.owner) catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind
@@ -1774,7 +1804,8 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 /// weft.command(id, {label, summary, menu, …}) — the config plane's: describe
 /// how a command is presented (doc/chrome.md §1.2). `meta` arrives in the
 /// shared text form the C side built. Staged on the manifest when there is
-/// one; otherwise applied straight into the live table under "config".
+/// one; otherwise applied straight into the live table, owned by the
+/// resident plugin that described it (`Bridge.owner`).
 fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1788,7 +1819,7 @@ fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         return;
     }
     const table = br.activeCtx().presentations orelse return;
-    table.put(gpa, name, @import("weft_membrane").presentation.decode(meta), "config") catch {};
+    table.put(gpa, name, @import("weft_membrane").presentation.decode(meta), br.owner) catch {};
 }
 
 /// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`
@@ -1826,7 +1857,7 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         .predicate = parsed.predicate,
         .command = cmd,
         .priority = parsed.priority,
-        .owner = "config",
+        .owner = br.owner,
         .affordance = parsed.affordance,
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br, action);
 }

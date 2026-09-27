@@ -255,6 +255,40 @@ pub fn unsetGroupName(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: [
     }
 }
 
+/// Remove every binding and group label `owner` still holds, in every mode —
+/// a resident plugin's teardown (`JsPlugin.retract`), which binds by key
+/// and so has no list of what it bound to walk.
+pub fn unbindOwner(self: *Keymap, gpa: Allocator, owner: []const u8) void {
+    for (self.modes.values()) |*bindings| {
+        var i: usize = 0;
+        while (i < bindings.count()) {
+            const v = bindings.values()[i];
+            if (!std.mem.eql(u8, v.owner, owner)) {
+                i += 1;
+                continue;
+            }
+            const k = bindings.keys()[i];
+            freeArms(gpa, v.commands);
+            gpa.free(v.owner);
+            bindings.swapRemoveAt(i);
+            gpa.free(k);
+        }
+    }
+    var i: usize = 0;
+    while (i < self.group_names.count()) {
+        const v = self.group_names.values()[i];
+        if (!std.mem.eql(u8, v.owner, owner)) {
+            i += 1;
+            continue;
+        }
+        const k = self.group_names.keys()[i];
+        gpa.free(v.name);
+        gpa.free(v.owner);
+        self.group_names.swapRemoveAt(i);
+        gpa.free(k);
+    }
+}
+
 /// The nearest label in the mode's fallback chain, then the universal layer.
 /// The returned name is keymap-owned and remains valid until the next group
 /// metadata mutation.
