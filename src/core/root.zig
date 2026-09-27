@@ -37,6 +37,8 @@ pub const register = @import("register.zig");
 /// "unwanted" are different claims and only the author can make the second.
 pub const watch = @import("watch.zig");
 pub const Editor = @import("Editor.zig");
+/// A text entry as a frame reads it, at one revision (doc/model.md §2.7).
+pub const TextSnapshot = @import("TextSnapshot.zig");
 pub const Buffers = @import("Buffers.zig");
 /// The compact editor environment core's own tests run against. Exported
 /// because a cross-layer test — one that drives core's membrane through app's
@@ -72,6 +74,9 @@ pub const facts = @import("weft_facts");
 /// (contextual-workspace-architecture §11.8): 831 lines, 9 tests, no caller.
 pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
+/// The schema-directed slot host every plugin exchange (gutter, status line,
+/// badges) is fired through.
+pub const slot = @import("slot.zig");
 /// The gutter's plugin exchange: the `ui/gutter-segment` slot's name and schema.
 pub const gutter = @import("gutter.zig");
 /// The status line's plugin exchange: the `ui/statusline-seg` slot's name
@@ -131,6 +136,7 @@ test {
     // in src/weft.zig's test block while core was compiled into that module.
     // Core is its own module now, and a module owns its tests.
     _ = @import("target_open.zig");
+    _ = @import("TextSnapshot.zig");
     _ = @import("intentions.zig");
     _ = @import("tests.zig");
     _ = @import("markdown.zig");

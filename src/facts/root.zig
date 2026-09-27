@@ -97,6 +97,25 @@ pub const Facts = struct {
     /// and then every open key reads as unset.
     context: context.Open = .{},
 
+    /// A digest of every fact, for a cache keyed by what was true when it was
+    /// filled (the frame's provider answers, `app/answers.zig`). EVERY field
+    /// is in it — walked at comptime, so a fact added later is folded in by
+    /// construction rather than by someone remembering to — and the open keys
+    /// through their reader's `Open.digest` (the store's revision and the
+    /// coordinates), never the store's address.
+    pub fn digest(self: Facts) u64 {
+        var h = std.hash.Wyhash.init(0);
+        inline for (@typeInfo(Facts).@"struct".fields) |f| {
+            const v = @field(self, f.name);
+            if (f.type == context.Open) {
+                h.update(std.mem.asBytes(&v.digest()));
+            } else {
+                std.hash.autoHashStrat(&h, v, .Deep);
+            }
+        }
+        return h.final();
+    }
+
     fn hasTag(self: Facts, tag: []const u8) bool {
         for (self.tags) |tg| if (std.mem.eql(u8, tg, tag)) return true;
         return false;
@@ -638,6 +657,25 @@ pub fn globMatch(pattern: []const u8, text: []const u8) bool {
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "facts: the digest moves with every fact, the open keys included" {
+    const base: Facts = .{ .mode = "normal", .path = "a.zig", .tags = &.{"x"} };
+    try std.testing.expectEqual(base.digest(), (Facts{ .mode = "normal", .path = "a.zig", .tags = &.{"x"} }).digest());
+    var moved = base;
+    moved.pane = 2;
+    try std.testing.expect(moved.digest() != base.digest());
+    moved = base;
+    moved.tags = &.{"y"};
+    try std.testing.expect(moved.digest() != base.digest());
+
+    var store = context.Store.init(std.testing.allocator);
+    defer store.deinit();
+    var open = base;
+    open.context = .{ .store = &store, .at = .{ .entry = 1, .place = 1 } };
+    const before = open.digest();
+    _ = try store.set("p", .global, "repl.session", "weft://here/proc/1");
+    try std.testing.expect(open.digest() != before);
+}
 
 test "facts: predicates match merged buffer + interaction facts" {
     const f: Facts = .{

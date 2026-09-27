@@ -234,6 +234,56 @@ pub const Layer = struct {
     pub fn spanCount(self: *const Layer) usize {
         return if (self.resolves()) self.spans.items.len else 0;
     }
+
+    /// This layer as of now, over `window`: what a frame draws from
+    /// (doc/model.md §2.7). Every span a consumer may paint (`spanCount`)
+    /// that touches the window, resolved to offsets, and the bulk paint
+    /// clipped to it — copied into `arena`, so a later edit, republish or
+    /// release leaves the snapshot as it was. `gutter`-placed spans are kept
+    /// wherever they are: one anywhere in the entry sizes the sign column on
+    /// every row. Messages are copied too; nothing in a snapshot points back
+    /// into the layer.
+    pub fn snapshot(self: *const Layer, arena: Allocator, window: stemma.Range) Allocator.Error!Snapshot {
+        var spans: std.ArrayList(ResolvedSpan) = .empty;
+        for (0..self.spanCount()) |i| {
+            var s = self.resolvedSpan(i);
+            if (s.placement != .gutter and (s.end < window.start or s.start > window.end)) continue;
+            s.message = try arena.dupe(u8, s.message);
+            try spans.append(arena, s);
+        }
+        const bulk: ?Snapshot.Paint = if (self.bulk) |b| blk: {
+            const from = @max(b.start, window.start);
+            const to = @min(b.start + b.classes.len, window.end);
+            if (from >= to) break :blk null;
+            break :blk .{ .start = from, .classes = try arena.dupe(u8, b.classes[from - b.start .. to - b.start]) };
+        } else null;
+        return .{ .spans = spans.items, .bulk = bulk };
+    }
+};
+
+/// A layer as of one revision, over one window (`Layer.snapshot`): plain
+/// data, read through the same `spanCount`/`resolvedSpan`/`bulk` a live
+/// layer offers, and owned by whoever allocated it. A frame draws from these,
+/// never from a live `Layer`, so nothing that runs while it draws — or after,
+/// before it is shown — can move what it reads. A peer that rendered a view
+/// would receive exactly this.
+pub const Snapshot = struct {
+    spans: []const Layer.ResolvedSpan = &.{},
+    bulk: ?Paint = null,
+
+    /// Bulk paint over `[start, start + classes.len)`.
+    pub const Paint = struct {
+        start: usize,
+        classes: []const u8,
+    };
+
+    pub fn spanCount(self: *const Snapshot) usize {
+        return self.spans.len;
+    }
+
+    pub fn resolvedSpan(self: *const Snapshot, i: usize) Layer.ResolvedSpan {
+        return self.spans[i];
+    }
 };
 
 /// All layers of one editor session, keyed by (document, name) — the
@@ -471,4 +521,43 @@ test "layers: feeds coexist per name, never cross classes, and release takes onl
     try unstamped.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 5, .message = "" });
     try std.testing.expect(!unstamped.resolves());
     try std.testing.expectEqual(@as(usize, 0), unstamped.spanCount());
+}
+
+test "layers: a snapshot holds what the layer said, over its window, whatever the layer does next" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "aaaa\nbbbb\ncccc\n");
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+    const diags = try store.claim(gpa, &doc, "diagnostics", .host, "lsp");
+    try diags.publishSpans(gpa, &.{
+        .{ .start = 0, .end = 2, .kind = 1, .message = "first" },
+        .{ .start = 10, .end = 12, .kind = 2, .message = "third" },
+        .{ .start = 11, .end = 11, .kind = 3, .message = "●", .placement = .gutter },
+    });
+    const hl = try store.claim(gpa, &doc, "highlight", .local, "syntax");
+    try hl.publishBulk(gpa, "v", 0, &[_]u8{7} ** 15);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    // The first line's window: the third line's span is outside it, its
+    // gutter mark is not (a mark anywhere sizes the column), and the paint
+    // is clipped to the window.
+    const snap = try diags.snapshot(arena.allocator(), .{ .start = 0, .end = 5 });
+    try std.testing.expectEqual(@as(usize, 2), snap.spanCount());
+    try std.testing.expectEqualStrings("first", snap.resolvedSpan(0).message);
+    try std.testing.expectEqual(Placement.gutter, snap.resolvedSpan(1).placement);
+    const paint = (try hl.snapshot(arena.allocator(), .{ .start = 5, .end = 10 })).bulk.?;
+    try std.testing.expectEqual(@as(usize, 5), paint.start);
+    try std.testing.expectEqual(@as(usize, 5), paint.classes.len);
+
+    // The layer moves on — an edit shifts its anchors, a republish frees its
+    // messages — and the snapshot still says what it said.
+    try doc.insert(gpa, 0, "zz");
+    try diags.publishSpans(gpa, &.{.{ .start = 1, .end = 3, .kind = 1, .message = "other" }});
+    try hl.publishBulk(gpa, "w", 0, &[_]u8{1} ** 17);
+    try std.testing.expectEqual(@as(usize, 0), snap.resolvedSpan(0).start);
+    try std.testing.expectEqualStrings("first", snap.resolvedSpan(0).message);
+    try std.testing.expectEqual(@as(u8, 7), paint.classes[0]);
 }
