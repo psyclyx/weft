@@ -165,6 +165,10 @@ pub const Hud = struct {
     pane_border: region.Edges = .{},
     /// What the pointer rests on in this pane (frame input; see `Hover`).
     pointer: Hover = .{},
+    /// This build paints the frame's tooltip, whichever pane offered it —
+    /// the pane built last, so the tooltip is above every pane. A caller
+    /// building one pane leaves it on.
+    tooltips: bool = true,
     /// Where a tooltip's key hint comes from; null until `keysFor`
     /// (doc/chrome.md §1.3) is wired, and hints are absent.
     key_hints: ?chrome.KeyHints = null,

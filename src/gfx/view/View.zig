@@ -138,6 +138,9 @@ icon_set: icons.Set,
 icons_on: bool = true,
 /// The tooltip the current build's hovered element offered, painted last.
 build_tip: ?chrome_mod.Tip = null,
+/// The frame's tooltip, whichever pane's element offered it, until the pane
+/// that paints tooltips (`Hud.tooltips`) draws it. Reset with the frame.
+frame_tip: ?struct { tip: chrome_mod.Tip, at: [2]f32 } = null,
 
 em: f32,
 cell_w: f32,
@@ -377,6 +380,7 @@ pub fn resetFrame(self: *View) void {
     self.semantic_active = false;
     self.build_hits = &.{};
     self.build_chrome = &.{};
+    self.frame_tip = null;
     self.pane_map_count = 0;
 }
 
@@ -788,14 +792,20 @@ pub fn build(
         self.build_hits = self.semantic_hits;
     }
 
-    // A tooltip is the topmost thing a pane draws — its own layer, so no
-    // popup's text beneath it shows through its box. Only the element the
-    // pointer rests on offers one, once the delay has passed (`Hud.hover`).
-    const top: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
+    // A tooltip is the topmost thing a FRAME draws — its own layer, so no
+    // popup's text beneath it shows through its box, painted by the pane that
+    // paints last (`Hud.tooltips`), so a toolbar button's tooltip hangs over
+    // the editor below it instead of being clipped to the strip. Only the
+    // element the pointer rests on offers one, once the delay has passed
+    // (`Hud.pointer`).
     if (self.build_tip) |tip| if (hud.pointer.at) |at| {
-        var shown = tip;
-        if (shown.key_hint.len == 0) shown.key_hint = chrome_mod.KeyHints.of(hud.key_hints, scratch, tip.command);
-        try chrome_mod.paintTooltip(sink, shown, at, hud.float_bounds orelse frame);
+        self.frame_tip = .{ .tip = tip, .at = at };
+    };
+    const top: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
+    if (hud.tooltips) if (self.frame_tip) |ft| {
+        var shown = ft.tip;
+        if (shown.key_hint.len == 0) shown.key_hint = chrome_mod.KeyHints.of(hud.key_hints, scratch, shown.command);
+        try chrome_mod.paintTooltip(sink, shown, ft.at, hud.float_bounds orelse frame);
     };
 
     var built = try render.render(self, world_to_pixel, runs.items, rects.items, &.{ float, top });

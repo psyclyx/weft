@@ -18,7 +18,7 @@
 //! Layout that other code measures (a button's cells in a scene row, a
 //! status segment's columns) is decided by `buttonCols` and friends, which
 //! every style answers; painting never moves anything a hit rect was taken
-//! from. Hover and press are frame INPUT (`Hud.hover`, doc/model.md §2.7):
+//! from. Hover and press are frame INPUT (`Hud.pointer`, doc/model.md §2.7):
 //! a style reads them, it never asks for them.
 
 const std = @import("std");

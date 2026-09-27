@@ -1019,6 +1019,8 @@ pub const FrameBuilder = struct {
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
                     .cursor_on = false, // the caret belongs to the focused pane
+                    // The focused pane, built last, paints the tooltip.
+                    .tooltips = false,
                     .pane_border = slot.border,
                 },
             });
