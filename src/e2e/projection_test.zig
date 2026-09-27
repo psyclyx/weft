@@ -42,16 +42,18 @@ fn sidebarShows(ed: *Editor) ![]const u8 {
     return (try paneEntry(ed, try sidebarPane(ed))).designationText();
 }
 
-/// The designation of the row the sidebar's entry highlights — the node its
-/// retained focus names, through the target that row links (whose name its
-/// trusted publisher bound: the parent's plus the provider's leaf).
+/// The designation of the row the sidebar's view reveals — the node its
+/// revealed highlight names (never its selection), through the target that
+/// row links (whose name its trusted publisher bound: the parent's plus the
+/// provider's leaf).
 fn sidebarHighlights(ed: *Editor) ?[]const u8 {
     const pane = sidebarPane(ed) catch return null;
     const entry = paneEntry(ed, pane) catch return null;
-    const focus = if (entry.id == ed.buffers.active_id) &ed.head.scene_selection else &entry.scene_selection;
-    const path = focus.path() orelse return null;
-    const instance = ed.session.system.semantic.views.get(path.view) orelse return null;
-    const node = instance.node(path.leaf() orelse return null) orelse return null;
+    const views = &ed.session.system.semantic.views;
+    const shown = if (entry.id == ed.buffers.active_id) ed.head.scene_selection.view else entry.scene_selection.view;
+    const view = shown orelse entry.tool_view orelse return null;
+    const instance = views.get(view) orelse return null;
+    const node = instance.node(views.revealed(view) orelse return null) orelse return null;
     const link = node.target orelse return null;
     return ed.session.system.filesystems.designationOf(link.target, link.revision);
 }
@@ -555,4 +557,62 @@ fn openOk(ed: *Editor, spec: []const u8) bool {
     const outcome = core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = spec }}) catch return false;
     ed.applyWindow();
     return outcome != .string;
+}
+
+/// The name field of the row for `name` in the listing `view` shows.
+fn nameNode(ed: *Editor, view: semantic_model.view.Ref, name: []const u8) !semantic_model.scene.NodeId {
+    const instance = ed.session.system.semantic.views.get(view) orelse return error.StaleView;
+    for (instance.scene.content.container.children) |row| {
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (std.mem.eql(u8, snap.value.bytes, name)) return node.id;
+        }
+    }
+    return error.FilesNameNotFound;
+}
+
+/// The sidebar entry's selection, wherever it rests: the head's while the
+/// sidebar has the keys, else the entry's own.
+fn sidebarSelection(ed: *Editor) !*core.Head.SceneSelection {
+    const entry = try paneEntry(ed, try sidebarPane(ed));
+    return if (entry.id == ed.buffers.active_id) &ed.head.scene_selection else &entry.scene_selection;
+}
+
+test "e2e/projection: a reveal highlights beside the selection — the rows you marked stay marked, the primary stays put" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try makeProjects(gpa);
+    for ([_][]const u8{ "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    var buf: [4096]u8 = undefined;
+
+    ed.runStr("open", "a.txt");
+    ed.applyWindow();
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    const view = ed.toolView() orelse return error.NoFilesView;
+    // Mark b.txt and c.txt: two extents, neither of them the editor's file.
+    ed.click(ed.pointAtNode(try nameNode(ed, view, "b.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try nameNode(ed, view, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    const before = try sidebarSelection(ed);
+    try t.expectEqual(@as(usize, 2), before.extentCount());
+    const primary = before.primaryRows().?;
+    const marked = before.others.items[0];
+
+    // The editor moves to another file: the sidebar reveals it…
+    ed.runStr("open", "sub/inner.txt");
+    ed.applyWindow();
+    try t.expectEqualStrings(under(&app.proj, &buf, "file", "/sub/inner.txt"), sidebarHighlights(ed) orelse return error.NothingRevealed);
+    // …and the selection is exactly what the user made: the same primary,
+    // the same marked row, nothing added.
+    const after = try sidebarSelection(ed);
+    try t.expectEqual(@as(usize, 2), after.extentCount());
+    try t.expectEqual(primary, after.primaryRows().?);
+    try t.expectEqual(marked, after.others.items[0]);
 }

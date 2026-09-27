@@ -551,19 +551,16 @@ pub const Services = struct {
     }
 
     /// Ask view `ref`'s provider to expand to and highlight `designation`
-    /// (`standard.reveal`), and move `focus` — an ENTRY's retained highlight,
-    /// not a head's — to the node it answers with. No head moves: revealing
-    /// what the editor is on inside a companion must not take the keys away
-    /// from the editor. False when the provider declined (the view does not
-    /// contain it) or answered anything but a node of this view.
-    pub fn reveal(
-        self: *Services,
-        stack: *view_runtime.interaction.Stack,
-        gpa: std.mem.Allocator,
-        focus: *Head.SceneSelection,
-        ref: semantic.view.Ref,
-        designation: []const u8,
-    ) !bool {
+    /// (`standard.reveal`), and mark the node it answers with as the view's
+    /// REVEALED node (`view.Registry.reveal`) — a highlight the renderer
+    /// draws beside the selection. It takes no selection to write: no head's
+    /// focus and no entry's rows move, so revealing is never navigating, and
+    /// the rows a person marked stay marked. The answer is read, not
+    /// absorbed: a reveal can only ever name a node, so a provider answering
+    /// it with a transfer, a dialog or an open does nothing. False when the
+    /// provider declined (the view does not contain it) or answered anything
+    /// but a node of this view.
+    pub fn reveal(self: *Services, ref: semantic.view.Ref, designation: []const u8) bool {
         const root = (self.views.get(ref) orelse return false).descriptor.root;
         const outcome = self.actions.ask(&self.views, .{
             .action = semantic.action.standard.reveal,
@@ -571,18 +568,12 @@ pub const Services = struct {
             .subject = root,
             .argument = designation,
         }) catch return false;
-        const effect = self.absorbActionOutcome(stack, gpa, ref, outcome, 0) catch return false;
-        const wanted = switch (effect) {
-            .focus_requested => |f| f,
-            else => return false,
+        // The provider may have republished while answering: the registry
+        // checks the node against the view as it is now.
+        return switch (outcome) {
+            .focus => |node| self.views.reveal(ref, node),
+            else => false,
         };
-        // The provider may have republished while answering (a folder
-        // opened): read the view as it is now.
-        const instance = self.views.get(wanted.view) orelse return false;
-        var storage: [1026]semantic.scene.NodeId = undefined;
-        const path = (try instance.focusPath(wanted.node, &storage)) orelse return false;
-        try focus.set(gpa, path);
-        return true;
     }
 
     /// Return the closest target link on one head's retained focus path. The

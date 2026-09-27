@@ -363,7 +363,7 @@ pub fn materializeViewports(
         }
         if (decl.reveal_due) {
             decl.reveal_due = false;
-            if (revealIn(ctx, buffers, gpa, head, decl, node)) dirty = true;
+            if (revealIn(ctx, buffers, head, decl, node)) dirty = true;
         }
         // What it holds follows what it shows: navigating inside a listing
         // moves the listing's designation, and that is what showing it again
@@ -539,13 +539,13 @@ fn presentEmpty(
 
 /// Highlight `decl`'s reveal inside what `node` shows, without taking focus
 /// (`Services.reveal`): the provider expands to it and names the node, and
-/// the ENTRY's highlight moves there — the head's too only when the head is
-/// in that entry. True when a highlight moved.
+/// that node becomes the VIEW's revealed highlight. Neither the head's nor
+/// the entry's selection is handed over, so neither can move. True when the
+/// highlight moved.
 fn revealIn(
     ctx: *core.command.Context,
     buffers: *core.Buffers,
-    gpa: std.mem.Allocator,
-    head: *core.Head,
+    head: *const core.Head,
     decl: *const core.viewport.Declaration,
     node: *window_layout.Node,
 ) bool {
@@ -557,9 +557,9 @@ fn revealIn(
         const value = core.intent.factsIn(scope).get(decl.reveal.text) orelse return false;
         break :blk std.fmt.bufPrint(&buf, "{s}", .{value}) catch return false;
     };
-    const focus = if (entry.id == buffers.active_id) &head.scene_selection else &entry.scene_selection;
-    const view_ref = focus.view orelse entry.tool_view orelse return false;
-    return services.reveal(&head.interactions, gpa, focus, view_ref, wanted) catch false;
+    const shown = if (entry.id == buffers.active_id) head.scene_selection.view else entry.scene_selection.view;
+    const view_ref = shown orelse entry.tool_view orelse return false;
+    return services.reveal(view_ref, wanted);
 }
 
 /// Open `designation` again and show it in `node` — a viewport's closed

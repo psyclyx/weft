@@ -95,8 +95,8 @@ pub const standard = struct {
     /// inside this view — what a viewport's `reveal` asks of whatever it
     /// presents (doc/model.md §2.5). The provider answers `.focus` with the
     /// node that shows it (opening what encloses it first), or declines when
-    /// the view does not contain it. Core moves the ENTRY's highlight to that
-    /// node and never the head's focus: revealing is not navigating.
+    /// the view does not contain it. Core marks that node as the view's
+    /// revealed node — never any selection: revealing is not navigating.
     pub const reveal = "view.reveal";
     pub const refresh = "view.refresh";
     pub const revert = "view.revert";

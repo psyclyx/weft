@@ -15,6 +15,9 @@ pub const Document = struct {
     /// The rows the scene's selection covers beyond the focused one (a range,
     /// marked rows) — washed as selected. Frame-lived.
     selected: []const semantic.scene.NodeId = &.{},
+    /// The node a viewport's `reveal` names in this view — marked beside
+    /// the selection, never as it (doc/model.md §2.5).
+    revealed: ?semantic.scene.NodeId = null,
     active: bool = true,
     fields: *const view_runtime.field.Registry,
 };

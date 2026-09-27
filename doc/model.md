@@ -164,7 +164,9 @@ weft.present("toolbar", { subject: "weft://here/offers/primary", as: "strip" });
 A subject is a designation, or the current value of one context key. `as`
 picks the projection when a designation has several. `reveal` expands to and
 highlights a designation inside what's presented, without taking focus.
-There are no functions, no composition, and no evaluation order to define.
+The highlight is literal: it is the view's own *revealed* node, drawn
+beside the selection. A reveal never touches a selection — no head's focus,
+no entry's marked rows — so revealing is never navigating. There are no functions, no composition, and no evaluation order to define.
 
 `as` has two readings, and which one applies is decided by registration, not
 by the config author: if a plugin claims the name as a projection kind
@@ -460,8 +462,12 @@ kept alive past its phase.
    with the same `as`. `reveal` is the standard `view.reveal` action, whose
    request now carries an `argument` (scene codec v3, additive); core asks it
    unadvertised (`action.Registry.ask` — advertising is what makes an action
-   an offer) and moves the ENTRY's retained highlight, never the head's
-   (`Services.reveal`). The files listing answers it from its own
+   an offer) and marks the node it answers as the VIEW's revealed node
+   (`view.Registry.reveal`, drawn as an accent bar beside the selection's
+   wash). `Services.reveal` is handed no selection, so it cannot move one:
+   it first moved the entry's focus, which made a revealed row the primary
+   while marked rows stayed marked beside it (a later Delete ran twice on
+   one row). The files listing answers it from its own
    designation, which trusted publishers now state on the directory
    descriptor (`fs.target.designation_fact_name`), opening one folder at a
    time. `{command}` presenting is deleted.

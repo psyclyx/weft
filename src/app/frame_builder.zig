@@ -413,6 +413,7 @@ fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *c
         .title = buffer.name,
         .focused = if (path.leaf()) |node| if (instance.node(node) != null) node else instance.reconcileFocus(null) else instance.reconcileFocus(null),
         .selected = selectedRows(arena, instance, focus),
+        .revealed = fx.semantic.views.revealed(path.view),
         .active = active,
         .fields = &fx.semantic.fields,
     };
