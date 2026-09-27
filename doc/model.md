@@ -459,7 +459,10 @@ kept alive past its phase.
    whatever the user navigated to inside it); a key with no value presents an
    explicit empty state (core's own one-line view per viewport); the entry
    the previous presentation made is closed through the shell's close once
-   nothing shows it; and a presentation drops the placement an `open` from a
+   nothing shows it — the refusing close, so an entry holding unsaved work
+   stays as a tab: a listing says it holds a draft by offering `view.apply`
+   enabled (`Services.holdsDraft`), which `buffer-close` refuses like a dirty
+   file; and a presentation drops the placement an `open` from a
    tool entry asks for. `as` rides to `open` as the `?as=` view parameter:
    `designation.openHeld` routes `?as=<a claimed kind>` to that producer with
    the subject's entry active (the projection OF the subject), otherwise the

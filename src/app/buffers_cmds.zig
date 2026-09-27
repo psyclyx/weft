@@ -297,8 +297,22 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
 
 pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     if (args.len != 0) return error.ArityMismatch;
-    if (ctx.buffers.active().hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
+    if (holdsUnsavedWork(ctx, ctx.buffers.active())) return .{ .string = "dirty" };
     return closeActive(ctx, data);
+}
+
+/// Whether closing `b` would lose work: edits its file never received, or a
+/// draft one of its views holds that its provider has not applied (a renamed
+/// row in a listing). A listing keeps a view per directory it visited, so
+/// every one of them is asked, not only the one it shows.
+pub fn holdsUnsavedWork(ctx: *core.command.Context, b: *core.Buffers.Buffer) bool {
+    if (b.hasUnsavedFile(ctx.gpa) catch true) return true;
+    const services = ctx.semantic orelse return false;
+    const focus = if (b.id == ctx.buffers.active_id) &ctx.head.scene_selection else &b.scene_selection;
+    if (focus.view) |v| if (services.holdsDraft(v)) return true;
+    if (b.tool_view) |v| if (services.holdsDraft(v)) return true;
+    for (b.view_cursors.items) |saved| if (services.holdsDraft(saved.view)) return true;
+    return false;
 }
 
 /// `buffer-close-force`: the same close, minus the dirty check. It has to be

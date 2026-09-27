@@ -784,11 +784,13 @@ pub fn attachFocusedSemanticView(
         target.name = renamed;
     }
     // Capture the just-opened path on its destination before switchTo saves
-    // the outgoing buffer. Then clear the head so the outgoing buffer records
-    // no foreign semantic cursor.
+    // the outgoing buffer. Then give the head back the outgoing buffer's own
+    // selection, so what switchTo saves there is neither a foreign cursor nor
+    // nothing: a listing another listing was opened from still knows which
+    // view it shows (and whether that view holds a draft).
     try target.scene_selection.copyFrom(gpa, &head.scene_selection);
     if (target_id == self.active_id) return target_id;
-    head.scene_selection.clear();
+    try head.scene_selection.copyFrom(gpa, &self.active().scene_selection);
     try self.switchTo(gpa, target_id, head, keymap);
     return target_id;
 }

@@ -1063,6 +1063,19 @@ pub const Services = struct {
         }
     }
 
+    /// Whether `ref` holds a draft its provider has not applied: the view's
+    /// root offers `view.apply`, enabled. The provider says so in the scene
+    /// it publishes (an editable projection disables apply while there is
+    /// nothing to apply), so what a draft IS stays the provider's; core only
+    /// reads the offer, the way a toolbar greys it.
+    pub fn holdsDraft(self: *const Services, ref: semantic.view.Ref) bool {
+        const instance = self.views.get(ref) orelse return false;
+        for (instance.scene.actions) |a| {
+            if (a.enabled and std.mem.eql(u8, a.id, semantic.action.standard.apply)) return true;
+        }
+        return false;
+    }
+
     pub fn hasActiveView(self: *const Services, head: *const Head) bool {
         const path = head.scene_selection.path() orelse return false;
         const instance = self.views.get(path.view) orelse return false;

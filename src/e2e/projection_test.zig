@@ -128,6 +128,53 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     try t.expect(ed.buffers.resolve(navigated) == null);
 }
 
+test "e2e/projection: a following sidebar never discards a draft — the listing holding one stays, as a tab" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try makeProjects(gpa);
+    var buf: [4096]u8 = undefined;
+
+    ed.runStr("open", "a.txt");
+    ed.applyWindow();
+    // Into the sidebar, and rename a row there: a draft, not yet applied.
+    const pane = try sidebarPane(ed);
+    const view = try ed.ensureView();
+    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
+        if (m.pane == pane.pane().id and m.hits.len > 0) break m.hits[0];
+    } else return error.SidebarNotDrawn;
+    ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    ed.applyWindow();
+    const listing = (try paneEntry(ed, pane)).ref();
+    try t.expectEqual(listing.id, ed.buffers.active_id);
+    try ed.focusFilesName("a.txt");
+    const field = ed.head.scene_selection.field orelse return error.NoField;
+    const provider = ed.session.system.semantic.fields.get(field) orelse return error.StaleField;
+    var snap = try provider.snapshot(gpa);
+    defer snap.deinit();
+    try provider.edit(snap.value.revision, .{ .start = 0, .end = 0, .replacement = "draft-", .selection_after = .{ .anchor = 6, .caret = 6 } });
+    const listing_view = ed.toolView() orelse return error.NoFilesView;
+    {
+        const draft = try ed.draftHere(gpa);
+        defer gpa.free(draft);
+        try t.expectEqualStrings("draft-a.txt", draft);
+    }
+
+    // Another project: the sidebar follows it…
+    ed.runStr("open", "other/b.txt");
+    ed.applyWindow();
+    try t.expectEqualStrings(under(&app.proj, &buf, "dir", "/other"), try sidebarShows(ed));
+    // …and the listing holding the draft is still an entry, the draft in it.
+    try t.expect(ed.buffers.resolve(listing) != null);
+    const text = try ed.semanticText(listing_view);
+    defer gpa.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "draft-a.txt") != null);
+    // Nothing was applied: the file keeps its name.
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "a.txt"));
+}
+
 test "e2e/projection: the reveal highlights the editor's entry in the sidebar without taking focus" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;

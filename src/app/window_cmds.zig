@@ -410,8 +410,10 @@ fn withProjection(out: []u8, value: []const u8, as: []const u8) ?[]const u8 {
 /// A key with no value presents the explicit empty state, never the stale
 /// subject. The entry the previous presentation MADE (it did not exist
 /// before) is closed when nothing shows it any more, so following a key
-/// does not leave a trail of listings behind as tabs. True when the pane
-/// changed.
+/// does not leave a trail of listings behind as tabs — by the ordinary,
+/// refusing close: an entry holding unsaved work (a draft rename in a
+/// listing) is never discarded by following, and stays as a tab, no longer
+/// the viewport's. True when the pane changed.
 fn presentDeclared(
     ctx: *core.command.Context,
     win_layout: *window_layout.Layout,
@@ -482,8 +484,11 @@ fn retireEmpty(
     decl.empty = null;
 }
 
+/// The shell's refusing close: a viewport retiring what it made never
+/// discards work the user did in it (`buffer-close` refuses a dirty file or
+/// an unapplied draft, and the entry stays).
 fn closeEntry(ctx: *core.command.Context) void {
-    _ = core.command.run(ctx.commands, ctx, "buffer-close-force", &.{}) catch {};
+    _ = core.command.run(ctx.commands, ctx, "buffer-close", &.{}) catch {};
 }
 
 fn paneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
