@@ -189,6 +189,105 @@ menubar does, because they are the same widget.
   are the discovery surfaces), but `weft.use("menubar")` adds the same one.
   The context menu is on for every config.
 
+### 2.3 Landed (2026-09-27, branch `arc/chrome`)
+
+All of §2, with two departures (below).
+
+- **The widget** (`gfx/view/menu.zig`) is a presenter of a small scene
+  vocabulary, so a menu's look is one place and its behaviour another. A
+  `menu` node is a panel; its children are `menu-item` action rows,
+  `separator`s, and at most one nested `menu` — the open submenu of the row
+  before it. A row's facts: `keys`, `icon`, `reason` (greyed; the tooltip
+  says why), `checked` and `radio`, `submenu` (a chevron), `mnemonic` (the
+  underlined codepoint), `lit`. The root hangs below the node its
+  `anchor-view`/`anchor-node` facts name in another view (a menubar title),
+  else at the pointer or the caret, and every panel is placed against the
+  frame: clamped, a submenu beside its row and flipped to the other side at
+  the edge, a panel too long for the frame packed to the text grid. Rows
+  paint through the `menu_item` role — the lit row's wash included, so the
+  presenter's sharp focus highlight no longer reaches a menu — and the bar's
+  titles through `menu_title`. `text` and `text-icons` keep a clean cell
+  box; `widget` pads, rounds and shadows. The old overlay-in-a-box menu
+  path is gone.
+- **The behaviour** (`plugin_lib/menu`, `weft_menu`) is plain data with host
+  tests (`cascade.zig`): Up/Down skip rules, headings and greyed rows and
+  wrap; Right/Left open and close submenus and, at the cascade's edge, move
+  across the bar; Enter/Space choose; Escape closes one level; a letter runs
+  its row's mnemonic (an `&` in a label marks one, else the first free
+  word-start letter) or steps through rows starting with it. The library
+  also builds the scene and the interaction: the menu keys, `mouse-1`, Alt
+  with a letter, `hover`, and `*`. Two generic interaction inputs made that
+  possible: `*` captures every input the interaction binds nothing else to
+  (a menu's keys never leak into the editor beneath), and `hover` is handed
+  to an interaction that binds it by name whenever the pointer comes to
+  rest on a new target — the keymap still never sees hover. Underlines show
+  once the keyboard drives a menu (a click-opened one has none, as on the
+  desktop).
+- **The model** is the `menu` plugin's projection, `weft://here/menu/main`,
+  presented `as: "menubar"` (a viewport, `config/menubar.js`) or
+  `as: "menu"` (the same menus at the caret, what F10 opens where no bar is
+  shown). Every non-internal command with a `menu` path, under File, Edit,
+  Selection, View, Go, Run, Terminal, Help (`weft.set("menu", "menus", […])`
+  replaces the list); rows sorted by group — each menu has a default group
+  order, `weft.set("menu", "groups", ["File\tnew open …"])` — then order,
+  then label, a rule where the group changes, and a verb named once per
+  menu (the row a key runs wins: ide's Copy over core's). Config places any
+  command with the config tier's `weft.command(id, {menu, group, order})`;
+  rows that run a command WITH an argument are the plugin's own config,
+  `weft.set("menu", "items", ["View/Appearance\tToolbar\tviewport.toggle
+  toolbar\tviewport.toolbar.shown"])`.
+- **Here is the primary context.** A row's key hint, its greying and its
+  run are all of the primary context — the editor, even while the sidebar
+  has the keys. One reading door serves the first two: `wl_command_at`
+  (`core/standing.zig`) says whether a command, action or intention would
+  run in a chosen context and why not, in words, and which keys run it
+  there; `keys_for.keysForAt` asks intention arms of that context, and a
+  command whose key is refused for the moment shows the key that means it (a
+  greyed Undo shows C-z). Running is `wl_intent_invoke_at`, which now runs
+  a name that is no intention as a command in the chosen context. A row
+  with an argument still to give asks for it, as the palette does. A menu's
+  rows are asked about when it opens, never kept.
+- **Toggles and choices.** A `toggle` context key checks its row; the form
+  `key=value` is one choice among several (a dot). The frame publishes the
+  style it draws as `theme.chrome`, and View ▸ Appearance ▸ Chrome Style's
+  Text / Text with Icons / Widgets are commands checked by it. Sidebar,
+  Panel, Menu Bar and Toolbar are checked by `viewport.<name>.shown`.
+- **Keys.** ide.js docks the bar above the toolbar. Alt+F, Alt+E, … run
+  `menu.open-file`, … (one command per conventional menu, "File Menu" in
+  the palette — a key never runs an internal command). F10 lights the bar;
+  in ide.js F10 is `[plugin.debug.step-over, menu.focus-bar]`, and dap.js
+  publishes `dap.session`, so F10 steps while a session is live and opens
+  the menubar otherwise. S-F10 and Menu open the context menu at the caret
+  in config.js as in ide.js.
+- **The context menu** is the same widget: `offers` builds `weft_menu`
+  entries (labels, icons, keys in the context it describes, its rules), so
+  it has hover, letters and keyboard cues too; greyed offers stay omitted.
+- **Content.** File (New File, Open File… C-p, Open Path…, Browse Files,
+  Open Recent Project, Open…, Save C-s, Save As…, Close Editor, Close
+  Without Saving, Notes ▸, Quit), Edit (history, clipboard, find, Find in
+  Files, refactor, format, comment, Insert ▸, Lines ▸, Macros ▸,
+  Transform ▸), Selection, View (Command Palette, Sidebar, Panel, Problems,
+  Source Control, Appearance ▸, Editor Layout ▸), Go (Back/Forward, buffers,
+  Go to Line, symbols, definition and references, Next/Previous Problem),
+  Run (Run, Test, the build targets, Start/Stop Debugging, Continue, Step
+  Over/Into/Out, breakpoints, Agents ▸, REPL ▸, Tools ▸), Terminal, Help
+  (Show Key Hints, Explain Binding, and the permissions and identity rows the
+  windowed app registers).
+
+Departures, and what is left:
+
+- **No bare Alt.** Alt pressed and released alone does not light the bar:
+  a bare modifier is state, swallowed at dispatch, and the platform delivers
+  no key releases. F10 lights it; Alt with a letter opens a menu.
+- **`weft.menuItem` is plugin config**, not a new config verb: rows with
+  arguments are the menu plugin's `items` list, beside the config tier's
+  `weft.command` for placing any command. A second fragment setting `items`
+  replaces the first's list (ide.js lists the menubar's toggle with its own).
+- No dynamic submenus (Open Recent is the project picker, not a ▸ of
+  recent files), no Revert for a file (there is no such command), no
+  Outline toggle (ide.js composes no outline), and nothing scrolls: a panel
+  taller than the frame packs its rows and, past that, loses its tail.
+
 ## 3. How chrome looks: two styles, chosen by theme
 
 ### 3.1 Roles, not text
@@ -284,7 +383,7 @@ What this leaves for the later lanes, and two things found on the way:
   producer fills.
 - A menu's focused row is still washed by the scene presenter's row
   highlight, sharp in every style; §2's menu widget should route focus
-  through `menu_item` too, as hover already is.
+  through `menu_item` too, as hover already is. (Done: §2.3.)
 - `widget` tabs sit in a strip one text row tall, which is cramped for real
   tabs. A taller strip is a carve (layout) change, for §4's layout pass.
 - `theme/chrome` and `theme/icons` share the `theme/<leaf>` family with

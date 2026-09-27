@@ -41,10 +41,7 @@ const NodeId = semantic_model.scene.NodeId;
 /// declares it under (two strips share the top edge: the menubar and the
 /// toolbar).
 pub fn viewportPane(ed: *Editor, name: []const u8) !*window_layout.Node {
-    const registry = ed.ctx.viewports orelse return error.NoViewports;
-    const decl = registry.find(name) orelse return error.NoSuchViewport;
-    const id = decl.pane orelse return error.ViewportNotDocked;
-    return ed.win_layout.paneById(id) orelse error.ViewportNotDocked;
+    return ed.viewportPane(name) orelse error.ViewportNotDocked;
 }
 
 fn toolbarPane(ed: *Editor) !*window_layout.Node {
