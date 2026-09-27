@@ -426,8 +426,9 @@ pub const FrameBuilder = struct {
     }
 
     /// The byte range a pane scrolled to `top_row` paints from: the viewport
-    /// plus a generous margin either side (a scroll can outrun a frame —
-    /// `view.build` may move `top_row` itself), clamped to the document.
+    /// plus a generous margin either side, clamped to the document. `top_row`
+    /// is the SETTLED scroll (`prepareRows`), so the margin is not what keeps
+    /// the shown rows inside the window; it covers rows a fold hides.
     /// Every per-byte analysis (syntax paint, markdown attributes) sizes
     /// itself from this, so their cost follows the VIEWPORT, not the file. The
     /// view reads only inside the published window: `resolveStyleInputs`
@@ -443,15 +444,36 @@ pub const FrameBuilder = struct {
         return .{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
     }
 
-    /// Reparse + publish a buffer's syntax highlight over that pane's paint
-    /// window. Called once per rendered pane, immediately before that pane
-    /// builds — two panes on one buffer at different scrolls each paint their
-    /// own window, and the last publish is always the one the next build reads.
-    fn publishHighlight(self: *FrameBuilder, gpa: std.mem.Allocator, editor: *core.Editor, syn: *core.syntax.Syntax, caps: *core.Caps, top_row: usize) !void {
-        _ = self;
-        _ = try syn.sync(gpa, &editor.doc);
-        const hl = caps.layers.find(&editor.doc, "highlight") orelse return;
-        try syn.publishHighlight(gpa, &editor.doc, hl, paintWindow(editor.text(), top_row));
+    /// Prepare a text pane's per-row inputs for the rows it is about to show:
+    /// settle its scroll FIRST (exactly what `View.build` will do — keep the
+    /// caret in view), then reparse + publish the buffer's syntax highlight and
+    /// analyze its markdown around THAT scroll. Called once per rendered pane,
+    /// immediately before that pane builds — two panes on one buffer at
+    /// different scrolls each paint their own window, and the last publish is
+    /// always the one the next build reads.
+    ///
+    /// The order is the fix for a whole class: preparing around the pre-build
+    /// `top_row` meant any move that scrolls further than the paint margin (a
+    /// jump to the end of the file, a search hit, go-to-line) built its frame
+    /// from a window around where the pane USED to be — an unhighlighted
+    /// frame that stayed that way until some other input caused another.
+    fn prepareRows(
+        self: *FrameBuilder,
+        arena: std.mem.Allocator,
+        fx: *const FrameCtx,
+        buf: *core.Buffers.Buffer,
+        editor: *core.Editor,
+        name: []const u8,
+        hud: *view_mod.Hud,
+        top_row: *usize,
+        rect: region.Rect,
+    ) !void {
+        self.view.settleScroll(editor, hud.*, top_row, rect);
+        hud.md_inline = mdInlineFor(arena, editor, name, top_row.*);
+        const syn = providers.resolveSyntax(buf) orelse return;
+        _ = try syn.sync(fx.gpa, &editor.doc);
+        const hl = fx.caps.layers.find(&editor.doc, "highlight") orelse return;
+        try syn.publishHighlight(fx.gpa, &editor.doc, hl, paintWindow(editor.text(), top_row.*));
     }
 
     /// Per-byte markdown attributes for a `.md` buffer over that pane's paint
@@ -483,17 +505,15 @@ pub const FrameBuilder = struct {
         const projection = scene.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         const world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-        // Markdown styling for .md buffers: analyze this pane's paint
-        // window into per-byte attributes each damage frame — a
-        // stale paint is slightly-old truth, like highlight bulk. Reused
-        // below for the `ui/statusline-seg`/`ui/gutter-segment` mesh output
-        // (segment text, the eligible-bindings slice) — both are per-frame
-        // scratch, reclaimed by this same arena, no manual free needed.
+        // Per-frame scratch for the `ui/statusline-seg`/`ui/gutter-segment`
+        // mesh output (segment text, the eligible-bindings slice), reclaimed
+        // by this arena, no manual free needed. (Markdown attributes are NOT
+        // prepared here: they depend on where the pane scrolls, which is only
+        // known once the pane's HUD is — see `renderPanes`.)
         var md_arena = std.heap.ArenaAllocator.init(gpa);
         defer md_arena.deinit();
         const mesh_gpa = md_arena.allocator();
         const file_name = if (editor) |ed| ed.backingPath() orelse abuf.name else abuf.name;
-        const md_inline = if (editor) |ed| mdInlineFor(mesh_gpa, ed, file_name, self.view.top_row) else null;
         const doc_layers = DocLayers.of(mesh_gpa, fx.caps, editor);
         const doc_status = DocStatus.of(gpa, editor, doc_layers);
         const diag_layer = doc_layers.diagnostics;
@@ -655,7 +675,6 @@ pub const FrameBuilder = struct {
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
-            .md_inline = md_inline,
             .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
             .caret_place = fx.cursor_cfg.placeFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
             .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode()))) act.blink_on else true,
@@ -743,11 +762,6 @@ pub const FrameBuilder = struct {
             if (oed) |e| {
                 e.fold_layer = fx.caps.layers.find(&e.doc, "folds");
                 e.readonly_layer = fx.caps.layers.find(&e.doc, "readonly");
-                // Highlight this split too — reparse + publish its syntax (was
-                // focused-pane-only, hence "one split at a time"). Its buffer is
-                // attached by main's visible-pane loop, so resolveSyntax finds it.
-                if (providers.resolveSyntax(ob)) |syn|
-                    self.publishHighlight(gpa, e, syn, fx.caps, slot.pane.top_row) catch {};
             }
             const other_name = if (oed) |e| e.backingPath() orelse ob.name else ob.name;
             const other_layers = DocLayers.of(arena_state.allocator(), fx.caps, oed);
@@ -766,7 +780,7 @@ pub const FrameBuilder = struct {
             };
             const other_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena_state.allocator(), &other_args);
             const other_gutter = try gutterFrame(arena_state.allocator(), fx, other_facts, oed, other_diag, bpLines(arena_state.allocator(), fx.caps, oed));
-            const other_hud: view_mod.Hud = .{
+            var other_hud: view_mod.Hud = .{
                 .mode = other_facts.mode,
                 .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
                 .status_line = slot.pane.attrs.status_line,
@@ -778,12 +792,15 @@ pub const FrameBuilder = struct {
                 .pane_border = slot.border,
                 // A peeked pane keeps its syntax + markdown + tool colors + diagnostics.
                 .highlight_layer = other_layers.highlight,
-                .md_inline = if (oed) |e| mdInlineFor(arena_state.allocator(), e, other_name, slot.pane.top_row) else null,
                 .styles_layer = other_layers.styles,
                 .diag_layer = other_diag,
                 .decorations_layer = other_layers.decorations,
                 .annotations = other_layers.annotations,
             };
+            // Highlight this split too (its buffer is attached by the
+            // visible-pane loop, so its syntax resolves) — around the rows it
+            // will show. A failed publish only costs this split its colors.
+            if (oed) |e| self.prepareRows(arena_state.allocator(), fx, ob, e, other_name, &other_hud, &slot.pane.top_row, slot.rect) catch {};
             const bo = try self.view.build(arena_state.allocator(), oed, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             self.view.recordPane(slot.pane.id, slot.rect);
             try self.built_panes.append(gpa, bo);
@@ -795,7 +812,7 @@ pub const FrameBuilder = struct {
         fhud.float_bounds = frame_rect;
         if (tabs_pane != focused.pane().id) fhud.tabs = null;
         fhud.status_line = focused.pane().attrs.status_line;
-        if (act.attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
+        if (editor) |ed| try self.prepareRows(arena_state.allocator(), fx, act.abuf, ed, ed.backingPath() orelse act.abuf.name, &fhud, &self.view.top_row, foc_rect);
         if (editor) |ed| {
             ed.fold_layer = fx.caps.layers.find(&ed.doc, "folds");
             ed.readonly_layer = fx.caps.layers.find(&ed.doc, "readonly");
