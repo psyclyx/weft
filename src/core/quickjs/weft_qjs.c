@@ -157,7 +157,7 @@ extern int host_clipboard_get(char *out, int cap);
 // is not namespaced, an oversized value, a bad scope) or -2 (another plugin
 // holds the key there); `get` answers the FULL length, or -1 for no value.
 __attribute__((import_module("weft"), import_name("qjs_context_set")))
-extern int host_context_set(const char *key, int key_len, const char *value, int value_len, int scope);
+extern int host_context_set(const char *key, int key_len, const char *value, int value_len, int scope, const char *place, int place_len);
 __attribute__((import_module("weft"), import_name("qjs_context_get")))
 extern int host_context_get(const char *key, int key_len, char *out, int cap);
 // The head's history — wasm_host/history.zig's bodies.
@@ -1121,11 +1121,13 @@ static JSValue js_clipboard_get(JSContext *ctx, JSValueConst this_val,
     return v;
 }
 
-// weft.contextSet(key, value, scope) -> bool: publish `value` for the
-// namespaced `key` ("repl.session") at `scope` — "entry", "place" or
-// "global" — of the entry this call is about. An empty value retracts; so
-// does unloading the plugin. False when refused (a bad key or scope, or
-// another plugin holds the key there).
+// weft.contextSet(key, value, scope[, place]) -> bool: publish `value` for
+// the namespaced `key` ("repl.session") at `scope` — "entry", "place" or
+// "global" — of the entry this call is about; at "place", an optional
+// `place` designation (`weft://here/dir/…`) names the place instead of the
+// calling entry's. An empty value retracts; so does unloading the plugin.
+// False when refused (a bad key, scope or place, or another plugin holds the
+// key there).
 static JSValue js_context_set(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     (void)this_val;
@@ -1135,7 +1137,7 @@ static JSValue js_context_set(JSContext *ctx, JSValueConst this_val,
     int kind = strcmp(scope, "entry") == 0 ? 0 : strcmp(scope, "place") == 0 ? 1 : strcmp(scope, "global") == 0 ? 2 : -1;
     JS_FreeCString(ctx, scope);
     if (kind < 0) return JS_FALSE;
-    size_t kl, vl;
+    size_t kl, vl, pl = 0;
     const char *k = JS_ToCStringLen(ctx, &kl, argv[0]);
     if (!k) return JS_EXCEPTION;
     const char *v = JS_ToCStringLen(ctx, &vl, argv[1]);
@@ -1143,9 +1145,19 @@ static JSValue js_context_set(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, k);
         return JS_EXCEPTION;
     }
-    int r = host_context_set(k, (int)kl, v, (int)vl, kind);
+    const char *place = "";
+    if (argc > 3 && !JS_IsUndefined(argv[3])) {
+        place = JS_ToCStringLen(ctx, &pl, argv[3]);
+        if (!place) {
+            JS_FreeCString(ctx, k);
+            JS_FreeCString(ctx, v);
+            return JS_EXCEPTION;
+        }
+    }
+    int r = host_context_set(k, (int)kl, v, (int)vl, kind, place, (int)pl);
     JS_FreeCString(ctx, k);
     JS_FreeCString(ctx, v);
+    if (argc > 3 && !JS_IsUndefined(argv[3])) JS_FreeCString(ctx, place);
     return JS_NewBool(ctx, r == 0);
 }
 

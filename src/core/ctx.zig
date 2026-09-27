@@ -318,6 +318,7 @@ pub const Ctx = struct {
             .kind = .buffer,
             .facts = .{
                 .path = buf.name,
+                .designation = buf.designationText(),
                 .name = buf.name,
                 .lang = action_mod.langOfName(buf.name),
                 .tool = buf.tool,

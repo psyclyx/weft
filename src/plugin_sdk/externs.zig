@@ -201,6 +201,9 @@ pub extern "weft:abi/1" fn wl_signal_emit(name_ptr: u32, name_len: u32) i32;
 pub extern "weft:abi/1" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 pub extern "weft:abi/1" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 pub extern "weft:abi/1" fn wl_tool_backing(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_entry_designation(out: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_entry_designate(ptr: u32, len: u32) i32;
+pub extern "weft:abi/1" fn wl_designation_opener(kind_ptr: u32, kind_len: u32, cmd_ptr: u32, cmd_len: u32) i32;
 // Register/kill service (core, shared by every editor): yank snapshots text +
 // any overlapping subbuffer facts; paste re-stamps them over inserted text.
 pub extern "weft:abi/1" fn wl_yank_range(start: u32, end: u32, linewise: u32, name: u32) void;
@@ -218,7 +221,7 @@ pub extern "weft:abi/1" fn wl_jump_push() void;
 pub extern "weft:abi/1" fn wl_macro_recording() u32;
 // Context (doc/model.md §2.5): publish a key at a scope (0 entry, 1 place,
 // 2 global), read the primary context, list the keys a delivery moved.
-pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scope: u32) i32;
+pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scope: u32, place: u32, place_len: u32) i32;
 pub extern "weft:abi/1" fn wl_context_get(k: u32, kl: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_context_changed(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;

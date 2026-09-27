@@ -904,12 +904,12 @@ fn gotoFile() void {
     var buf: [1024]u8 = undefined;
     const name = weft.slice(r.start, @min(r.end, r.start + buf.len));
     @memcpy(buf[0..name.len], name);
-    weft.runStr("open", buf[0..name.len]);
+    weft.openUnder(weft.placeRoot(), buf[0..name.len]);
 }
 
 fn findFile() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", weft.placeRoot(), file_pick);
 }
 fn onPickAccept(pick_id: u32) void {
     if (pick_id != file_pick) return;
@@ -920,7 +920,7 @@ fn onPickAccept(pick_id: u32) void {
         .input => |input| input,
         .cancelled => return,
     };
-    if (chosen.len > 0) weft.runStr("open", chosen);
+    if (chosen.len > 0) weft.openUnder(weft.placeRoot(), chosen);
 }
 
 comptime {

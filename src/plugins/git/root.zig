@@ -217,6 +217,7 @@ fn callFor(comptime i: usize) *const fn () void {
 }
 const base_cmds = [_]Cmd{
     .{ .name = "git-status", .do = .{ .call = gitStatus }, .route = .repo, .summary = "show the repository's status" },
+    .{ .name = "git-status-open", .do = .{ .call = gitStatusOpen }, .route = .repo, .summary = "show the status a `weft://here/git.status/…` designation names" },
     .{ .name = "git-init", .do = .{ .run = &.{ "git", "init" } }, .route = .repo, .summary = "start a repository here" },
     .{ .name = "git-refresh", .do = .{ .call = gitRefresh }, .summary = "re-read the repository" },
     .{ .name = "git-toggle-fold", .do = .{ .call = gitToggleFold }, .summary = "fold or unfold the section under the cursor" },
@@ -385,6 +386,12 @@ fn initExtra() void {
 
     // Discard and the other destructive verbs ask through the pick membrane
     // (`confirmPick`), so git owns no confirmation modes at all.
+
+    // A status entry IS a repository's status: `weft://here/git.status/<root>`
+    // (doc/model.md §2.1). Git re-runs it when that designation is opened
+    // with no entry showing it — a jump back to a closed status, a viewport
+    // showing one again.
+    _ = weft.designationOpener(model.status_kind, "git-status-open");
 
     // A commit draft owns NO mode and NO keys: it is an ordinary text entry in
     // the configuration's own editing modes. Its tool identity is what makes it
@@ -708,6 +715,22 @@ fn gitPrevRow() void {
 fn gitStatus() void {
     gather_mod.gather();
     weft.setMode("git");
+}
+
+/// The opener for `weft://here/git.status/<root>` (arg 0): the status of that
+/// repository, re-gathered. Routed like `git-status` — by the place this
+/// dispatch is in — so it answers only for the repository of that place, and
+/// says which one it is about otherwise rather than showing another.
+fn gitStatusOpen() void {
+    const text = weft.argStr(0) orelse return gitStatus();
+    const d = weft.semantic.durable.parse(text) orelse return weft.echo("git: not a status designation");
+    var root_buf: [4096]u8 = undefined;
+    const root = weft.placeOf(d, &root_buf) orelse return weft.echo("git: not a status designation");
+    if (!std.mem.eql(u8, root, model.curSession().root)) {
+        var msg: [4200]u8 = undefined;
+        return weft.echo(std.fmt.bufPrint(&msg, "git: that status is of {s} — open it from there", .{root}) catch "git: that status is another repository's");
+    }
+    gitStatus();
 }
 
 /// Start version control from inside the editor: `git init` in the project,

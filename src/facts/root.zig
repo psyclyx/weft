@@ -58,6 +58,10 @@ pub const Facts = struct {
     locality: Locality = .none,
     path: ?[]const u8 = null,
     name: []const u8 = "",
+    /// The entry's designation (`weft://here/file/…`, `…/doc/<id>`,
+    /// doc/model.md §2.2) — the `entry` key. Empty when the caller does not
+    /// say, or the entry has none.
+    designation: []const u8 = "",
     first_line: []const u8 = "",
     tags: []const []const u8 = &.{},
     size: usize = 0,
@@ -121,19 +125,16 @@ pub const Facts = struct {
         return false;
     }
 
-    /// Longest `get` answer that has to be formatted (a place's coordinates).
-    pub const scratch_len = 48;
-
     /// The value of context key `key` here, or null when nothing is true of
     /// it. This is the one reader over the whole map: a builtin key answers
     /// from its typed field — `Facts` IS the typed view of the builtins — and
-    /// any other key from the open store. `scratch` backs an answer that has
-    /// to be formatted (`place`); the result may borrow it.
+    /// any other key from the open store. Every answer is borrowed: `entry`
+    /// and `place` are designations, stored where they are named.
     ///
     /// `offers` answers nothing here: what a context offers is DERIVED from
     /// its facts, so a fact about offers would be circular. It is a key of the
     /// primary context (`on_context_changed`), not a predicate axis.
-    pub fn get(self: Facts, key: []const u8, scratch: *[scratch_len]u8) ?[]const u8 {
+    pub fn get(self: Facts, key: []const u8) ?[]const u8 {
         const eql = std.mem.eql;
         const v: []const u8 = if (eql(u8, key, "mode"))
             self.mode
@@ -148,14 +149,13 @@ pub const Facts = struct {
         else if (eql(u8, key, "locality"))
             (if (self.locality == .none) "" else @tagName(self.locality))
         else if (eql(u8, key, "entry"))
-            // TODO(doc/model.md phase 1): the entry's designation
-            // (`designationOf(entry)`) once every entry has one. Until then
-            // its backing path, else its name.
-            self.path orelse self.name
+            // What the entry opens (doc/model.md §2.2), never the slot it
+            // is open in.
+            self.designation
         else if (eql(u8, key, "place"))
-            // TODO(doc/model.md phase 1): the place's `dir` designation. Until
-            // then its exact coordinates: an identity, though not yet a name.
-            (if (self.context.present()) std.fmt.bufPrint(scratch, "place:{x}", .{self.context.at.place}) catch "" else "")
+            // The place's container, by its designation — the same string a
+            // place-scoped publication is keyed on.
+            self.context.at.place
         else if (eql(u8, key, "offers"))
             ""
         else
@@ -264,8 +264,7 @@ pub const Predicate = union(enum) {
             .role => |r| std.mem.eql(u8, r, f.role),
             .posture => |r| std.mem.eql(u8, r, f.posture),
             .context => |c| {
-                var scratch: [Facts.scratch_len]u8 = undefined;
-                const v = f.get(c.key, &scratch) orelse return false;
+                const v = f.get(c.key) orelse return false;
                 return c.isAny() or std.mem.eql(u8, c.value, v);
             },
             .all => |kids| {
@@ -747,7 +746,7 @@ test "facts: a context leaf tests any key — open or builtin — and an unset k
     const gpa = t.allocator;
     var store = context.Store.init(gpa);
     defer store.deinit();
-    const here: Facts = .{ .mode = "normal", .context = .{ .store = &store, .at = .{ .entry = 5, .place = 2 } } };
+    const here: Facts = .{ .mode = "normal", .context = .{ .store = &store, .at = .{ .entry = 5, .place = "weft://here/dir/p2" } } };
     const any: Predicate = .{ .context = .{ .key = "repl.session", .value = Pair.any } };
     const named: Predicate = .{ .context = .{ .key = "repl.session", .value = "*repl*" } };
 
@@ -757,13 +756,13 @@ test "facts: a context leaf tests any key — open or builtin — and an unset k
     // Nor does a Facts with no store at all.
     try t.expect(!any.matches(.{}));
 
-    _ = try store.set("repl", .{ .place = 2 }, "repl.session", "*repl*");
+    _ = try store.set("repl", .{ .place = "weft://here/dir/p2" }, "repl.session", "*repl*");
     try t.expect(any.matches(here));
     try t.expect(named.matches(here));
     try t.expect(!(Predicate{ .context = .{ .key = "repl.session", .value = "*repl:2*" } }).matches(here));
     // Another place does not see it.
     var elsewhere = here;
-    elsewhere.context.at.place = 3;
+    elsewhere.context.at.place = "weft://here/dir/p3";
     try t.expect(!any.matches(elsewhere));
 
     // A builtin key reads the typed field: the leaf is a view, not a copy.

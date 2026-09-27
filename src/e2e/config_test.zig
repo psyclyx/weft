@@ -1378,7 +1378,10 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     try t.expect(!decl.attrs.cycles); // out of focus-other's rotation
     try t.expect(decl.attrs.persistent); // owns its entry
     try t.expect(!decl.attrs.focus_source); // a companion cannot chase itself
-    try t.expectEqualStrings(".", decl.subject);
+    // It presents the PLACE's directory, through the files producer — never
+    // "." (a relative path names nothing, doc/model.md §2.1).
+    try t.expectEqualStrings("", decl.subject);
+    try t.expectEqualStrings("files", decl.command);
     try t.expect(decl.pane == null); // nothing realized during eval
 
     // The layout phase realizes it — an ordinary application wake, with no
@@ -1400,6 +1403,12 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     const browser = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
     try t.expect(std.mem.startsWith(u8, browser.name, "files:"));
     try t.expect(browser.editor == null);
+    // The listing IS the project's directory — by designation, and titled
+    // with its absolute display form, not "files: .".
+    const listed = try std.fmt.allocPrint(gpa, "weft://here/dir{s}", .{proj.root});
+    defer gpa.free(listed);
+    try t.expectEqualStrings(listed, browser.designationText());
+    try t.expect(std.mem.indexOf(u8, browser.name, "files: .") == null);
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expect(primary.pane().buffer_id != panel.pane().buffer_id);
 }

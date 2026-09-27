@@ -96,6 +96,9 @@ pub const buf_base = "git";
 /// so the verbs below are about a git buffer — not about whichever mode happens
 /// to be active, and not about a rendered byte range.
 pub const tool = "git";
+/// The projection kind a status entry is (`weft://here/git.status/<root>`,
+/// doc/model.md §2.1): what git claims, and re-runs, by designation.
+pub const status_kind = "git.status";
 
 // ── The model ────────────────────────────────────────────────────────────
 pub const Section = enum(u8) { untracked = 0, unstaged = 1, staged = 2, recent = 3 };

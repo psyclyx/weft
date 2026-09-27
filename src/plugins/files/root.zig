@@ -47,12 +47,14 @@ fn start() void {
 fn browse() void {
     // The browser opens WHERE the dispatch is (`doc/place.md`): the project the
     // focused file belongs to, not the directory the editor was launched in.
-    const directory = weft.placeRoot();
-    if (directory.len == 0) {
+    // By its designation: the listing then IS that `dir`, and titles itself
+    // absolute (doc/model.md §2.1).
+    var named: [4096]u8 = undefined;
+    const directory = weft.placeDesignation(&named) orelse {
         weft.echo("files: this place has no local directory to browse");
         return;
-    }
-    weft.runStr("open", directory);
+    };
+    weft.openDesignation(directory);
 }
 
 fn on_semantic_target_probe(token: u32) callconv(.c) void {

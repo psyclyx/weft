@@ -25,7 +25,7 @@ pub fn jumpPushBody(d: Door, caller: *wasm.Caller, args: []const i32, results: [
     _ = args;
     _ = results;
     const ctx = d.ctx;
-    jumplist.push(&ctx.head.jumps, ctx.gpa, ctx.buffers, jumplist.here(ctx.buffers)) catch {};
+    jumplist.pushHere(&ctx.head.jumps, ctx.gpa, ctx.buffers) catch {};
 }
 pub const hJumpPush = shared.wasmDoor(jumpPushBody, null);
 

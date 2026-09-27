@@ -65,7 +65,7 @@ test "e2e/panels: a tab click shows its file, a middle click and the close glyph
     const ids = ed.tabEntries(&ids_buf);
     const listing = ed.win_layout.dockedPanel(.left).?.pane().buffer_id;
     try t.expect(std.mem.indexOfScalar(u32, ids, listing) == null);
-    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(ed.buffers.get(id).?.ref()));
+    for (ids) |id| try t.expect(!ed.ctx.viewports.?.holdsEntry(ed.buffers.get(id).?.designationText()));
     for ([_]u32{ a, b, c }) |want| try t.expect(std.mem.indexOfScalar(u32, ids, want) != null);
 
     // A click on a's tab puts a in front.

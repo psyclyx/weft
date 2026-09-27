@@ -96,6 +96,97 @@ pub fn show(argv: []const []const u8, name: []const u8, mode: []const u8, opts: 
     }, .{ .argv = argv }, landed);
 }
 
+// ── What an output entry IS (doc/model.md §2.1) ──────────────────────
+//
+// An output entry is a PROJECTION: a producer's run in a place, named
+// `weft://here/<kind>/<place>[?params]`. Named that way, a jump back to a
+// closed `*grep*`, or a viewport showing one again, re-runs the producer
+// rather than remembering a buffer slot — and a producer can only re-run in
+// the place it was run in, because where a spawn runs is the dispatch's
+// place, never something a guest names.
+
+var named_buf: [4096]u8 = undefined;
+
+/// Declare the entry `show` just focused to be `kind` run in this place,
+/// with `params` (already encoded — `encodeParam`). The producer must have
+/// claimed `kind` (`weft.designationOpener`).
+pub fn designate(kind: []const u8, params: []const u8) void {
+    const text = weft.placeProjection(kind, params, &named_buf) orelse return;
+    _ = weft.designate(text);
+}
+
+var reopen_buf: [4096]u8 = undefined;
+
+/// For a producer's opener: the designation it was handed (arg 0), when it
+/// names a run of `kind` in the place this dispatch is in. Anything else is
+/// said and answered null — a run elsewhere cannot be repeated from here.
+/// Borrows a buffer the next call reuses.
+pub fn reopening(kind: []const u8) ?weft.semantic.durable.Designation {
+    const arg = weft.argStr(0) orelse return null;
+    const n = @min(arg.len, reopen_buf.len);
+    @memcpy(reopen_buf[0..n], arg[0..n]);
+    const d = weft.semantic.durable.parse(reopen_buf[0..n]) orelse {
+        weft.echo("open: not a designation this producer answers");
+        return null;
+    };
+    if (d.kind != .projection or !std.mem.eql(u8, d.kind.projection, kind)) {
+        weft.echo("open: not a designation this producer answers");
+        return null;
+    }
+    var place_buf: [4096]u8 = undefined;
+    const place = weft.placeOf(d, &place_buf) orelse return null;
+    if (!std.mem.eql(u8, place, weft.placeRoot())) {
+        var msg: [4200]u8 = undefined;
+        weft.echo(std.fmt.bufPrint(&msg, "{s}: that ran in {s} — open it from there", .{ kind, place }) catch "that ran in another place");
+        return null;
+    }
+    return d;
+}
+
+/// `raw` as a view-parameter value: every byte but `[A-Za-z0-9._-]` as
+/// `%XX`, so a pattern with `&`, `?` or a space cannot break the grammar.
+pub fn encodeParam(raw: []const u8, out: []u8) ?[]const u8 {
+    var w: usize = 0;
+    for (raw) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-') {
+            if (w >= out.len) return null;
+            out[w] = c;
+            w += 1;
+        } else {
+            if (w + 3 > out.len) return null;
+            _ = std.fmt.bufPrint(out[w..][0..3], "%{X:0>2}", .{c}) catch return null;
+            w += 3;
+        }
+    }
+    return out[0..w];
+}
+
+/// `encodeParam` undone. Null for a malformed escape.
+pub fn decodeParam(enc: []const u8, out: []u8) ?[]const u8 {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < enc.len) : (w += 1) {
+        if (w >= out.len) return null;
+        if (enc[i] == '%') {
+            if (i + 3 > enc.len) return null;
+            out[w] = std.fmt.parseInt(u8, enc[i + 1 .. i + 3], 16) catch return null;
+            i += 3;
+        } else {
+            out[w] = enc[i];
+            i += 1;
+        }
+    }
+    return out[0..w];
+}
+
+test "output: a view parameter round-trips any bytes" {
+    var enc: [64]u8 = undefined;
+    var dec: [64]u8 = undefined;
+    const e = encodeParam("don't & ?x=1", &enc).?;
+    try std.testing.expect(std.mem.indexOfAny(u8, e, "&?= '") == null);
+    try std.testing.expectEqualStrings("don't & ?x=1", decodeParam(e, &dec).?);
+}
+
 /// The command finished: publish what it wrote as the buffer's projection.
 /// Nothing is read back out of the buffer — the bytes are right here, which is
 /// what the fill door could never say.
@@ -184,7 +275,9 @@ pub fn visit() void {
     const key = weft.projectionAtCursor() orelse return;
     const target = slot.table.get(indexOfKey(key) orelse return) orelse return;
     // The path is the table's; `open` reuses the read scratch, not this.
-    weft.runStr("open", target.path);
+    // Relative to where the tool ran: this entry's place (it inherited the
+    // place it was produced in, doc/place.md §2.1).
+    weft.openUnder(weft.placeRoot(), target.path);
     var at = lineStartOffset(target.line);
     if (target.col > 1) at = @min(at + target.col - 1, weft.lineAt(at).end);
     weft.jump(at);

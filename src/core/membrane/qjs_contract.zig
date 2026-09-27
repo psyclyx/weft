@@ -179,7 +179,7 @@ pub const imports = [_]Entry{
     e("qjs_macro_recording", 0, 1, .plugin, "weft.macroRecording(): the register a macro is recording into, or null"),
     // Context, running `wasm_host/context.zig`'s bodies — the ones
     // `wl_context_set`/`wl_context_get` run.
-    e("qjs_context_set", 5, 1, .plugin, "weft.contextSet(key, value, scope): publish a namespaced key at entry/place/global; empty retracts"),
+    e("qjs_context_set", 7, 1, .plugin, "weft.contextSet(key, value, scope[, place]): publish a namespaced key at entry/place/global — at a place a designation names, when given; empty retracts"),
     e("qjs_context_get", 4, 1, .plugin, "weft.contextGet(key): the primary context's value for any key, or null"),
 };
 
@@ -250,7 +250,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .capability, .state = .absent, .note = "the completion provider surface (wl_caps_*)" },
     .{ .group = .syntax, .state = .absent, .note = "tree-sitter reads: no caller yet" },
     .{ .group = .activation, .state = .absent, .note = "on_activate has no JS export twin" },
-    .{ .group = .tool, .state = .absent, .note = "tool-backing declaration" },
+    .{ .group = .tool, .state = .absent, .note = "tool-backing and designation doors (wl_entry_designation/designate, wl_designation_opener): a JS-owned entry is named by what core derives — its document — and a JS plugin cannot claim a projection kind or reattach a process" },
     .{ .group = .register, .state = .absent, .note = "the shared kill/yank ring" },
     .{ .group = .sessions, .state = .absent, .note = "repl/net sessions; the JS plane has raw proc, which is the transport underneath them" },
 };

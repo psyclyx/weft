@@ -63,6 +63,15 @@ pub fn gather() void {
     const sess = model.curSession();
     weft.focusOrCreateBuffer(sess.name());
     weft.toolBacking(tool);
+    // The entry IS this repository's status (doc/model.md §2.1): named by
+    // what it shows, so a jump or a viewport holding it re-runs git here
+    // rather than remembering a buffer slot.
+    var named: [4096]u8 = undefined;
+    const status: weft.semantic.durable.Designation = .{
+        .kind = .{ .projection = model.status_kind },
+        .ref = std.mem.trimStart(u8, sess.root, "/"),
+    };
+    if (status.render(&named)) |text| _ = weft.designate(text) else |_| {}
     s.gathering = true;
     s.raw.clearRetainingCapacity();
     s.pending_parts = model.part_count;

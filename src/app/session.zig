@@ -259,12 +259,13 @@ pub const Session = struct {
         const owned_path = try ctx.gpa.dupe(u8, resolved_path);
         var path_owned = true;
         errdefer if (path_owned) ctx.gpa.free(owned_path);
+        var designation_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
         var publication = try fs_runtime.publication.publish(
             ctx.gpa,
             &system.semantic.targets,
             &system.filesystems,
             self.filesystem_owner,
-            .{ .display_name = resolved_path, .directory = .{ .root = root } },
+            .{ .display_name = resolved_path, .directory = .{ .root = root }, .designation = localDesignation(&designation_buf, .directory, resolved_path) },
         );
         var publication_owned = true;
         errdefer {
@@ -287,6 +288,15 @@ pub const Session = struct {
             self.closeDirectoryTarget(self.directory_targets.items.len - 1);
         if (focus) try focusDirectoryTarget(ctx, publication.ref);
         return .{ .target = publication.ref, .revision = publication.revision };
+    }
+
+    /// The durable name of a local directory or file this session publishes
+    /// (`weft://here/dir|file/<path>`), rendered into `buf`, or empty when
+    /// `path` cannot be one — a relative path names nothing, so a publication
+    /// reached through one carries no designation rather than a wrong one.
+    fn localDesignation(buf: []u8, kind: semantic.durable.Kind, path: []const u8) []const u8 {
+        const d = semantic.durable.Designation.ofPath(kind, path) orelse return "";
+        return d.render(buf) catch "";
     }
 
     /// Open (and focus) a local directory. The shape `DirectoryOpener` expects.
@@ -452,12 +462,13 @@ pub const Session = struct {
         try self.directory_targets.ensureUnusedCapacity(self.gpa, 1);
         const parent_path = try std.fs.path.resolve(self.gpa, &.{ source.path, ".." });
         errdefer self.gpa.free(parent_path);
+        var designation_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
         var publication = try fs_runtime.publication.publish(
             self.gpa,
             &self.filesystem_system.semantic.targets,
             &self.filesystem_system.filesystems,
             self.filesystem_owner,
-            .{ .display_name = parent_path, .directory = .{ .root = parent_root } },
+            .{ .display_name = parent_path, .directory = .{ .root = parent_root }, .designation = localDesignation(&designation_buf, .directory, parent_path) },
         );
         errdefer _ = publication.close(
             self.gpa,
@@ -482,21 +493,24 @@ pub const Session = struct {
         return self.openLocalDirectory(ctx, path);
     }
 
-    /// This shell's placement policy (`core.command.EntryOpener`): a local
-    /// file target no tool claimed becomes an ordinary editor entry, opened
-    /// through the very same `open` a picker or `:e` runs. Activation grants
-    /// nothing new — the router must still authorize the exact revision, and
-    /// the path is reconstructed from a root this session itself opened, so a
-    /// plugin's opaque target never becomes an arbitrary path.
+    /// This shell's placement policy (`core.command.EntryOpener`): a file
+    /// target no tool claimed becomes an ordinary editor entry, opened BY ITS
+    /// DESIGNATION through the very same `open` a picker or `:e` runs.
     ///
-    /// The file's directory need not be one this session opened: a listing
-    /// reaches deeper directories by publishing their targets itself (a
-    /// descent, a folded-open row), and those carry no path. The generic
-    /// `container` relation — which whoever published a target answers — walks
-    /// back up to a directory this session did open, and the leaf names on the
-    /// way are joined onto its path. Nothing about that walk is trusted: the
-    /// reconstructed directory must be, by the provider's identity, the very
-    /// directory that holds the authorized entry, or nothing opens.
+    /// The designation is the binding's (`Router.designationOf`): whoever
+    /// bound the target named it — this session for a directory it opened,
+    /// the publication layer for a listing's row, as its parent's name plus
+    /// the provider's own leaf. No guest wrote any of it, so a plugin's opaque
+    /// target still never becomes an arbitrary path, and a file however deep
+    /// below the listing's root opens without anything walking back up the
+    /// container chain to a directory this session remembers the path of.
+    ///
+    /// Activation grants nothing new: the router must still authorize the
+    /// exact revision, and a LOCAL designation must still name — by the
+    /// provider's identity, now, not as it was when the row was listed — the
+    /// directory the authorized entry is in, or nothing opens. A peer's file
+    /// goes to `open` as the peer designation it is, which routes it to the
+    /// peer or refuses it by name.
     pub fn openWorkspaceEntry(
         self: *Session,
         ctx: *core.command.Context,
@@ -507,95 +521,25 @@ pub const Session = struct {
         const descriptor = system.semantic.targets.get(located.target) orelse return false;
         if (descriptor.revision != located.revision or descriptor.kind != .file) return false;
         const entry = system.filesystems.authorizedEntry(located.target, located.revision) catch return false;
-        const directory = (try self.directoryPathHolding(ctx.gpa, located, entry.root)) orelse return false;
-        defer ctx.gpa.free(directory);
-        const path = try std.fs.path.join(ctx.gpa, &.{ directory, descriptor.display_name });
-        defer ctx.gpa.free(path);
-        _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = path }});
+        const named = system.filesystems.designationOf(located.target, located.revision) orelse return false;
+        const designation = semantic.durable.parse(named) orelse return false;
+        if (designation.kind != .file) return false;
+        if (designation.authority == .here) {
+            const directory = std.fs.path.dirname(designation.ref) orelse return false;
+            if (!self.namesRoot(directory, entry.root)) return false;
+        }
+        // Owned across the open: opening may republish, and the binding's
+        // bytes go with it.
+        const owned = try ctx.gpa.dupe(u8, named);
+        defer ctx.gpa.free(owned);
+        _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = owned }});
         return true;
     }
 
-    /// How far `directoryPathHolding` climbs before giving up — a bound on a
-    /// provider that answers `container` in a cycle, not a limit anyone
-    /// browsing a real tree meets.
-    const max_container_depth = 256;
-
-    /// The path of the directory holding `target`, whose provider root is
-    /// `root`, or null when no directory this session opened contains it.
-    /// Caller owns the result.
-    fn directoryPathHolding(
-        self: *Session,
-        gpa: std.mem.Allocator,
-        target: semantic.target.Located,
-        root: fs.contract.Root,
-    ) !?[]u8 {
-        if (self.localDirectoryPath(root)) |base| return try gpa.dupe(u8, base);
-
-        // Leaf names from the directory holding `target` upward, innermost
-        // first.
-        var names: std.ArrayList([]const u8) = .empty;
-        defer {
-            for (names.items) |name| gpa.free(name);
-            names.deinit(gpa);
-        }
-        var current = target;
-        for (0..max_container_depth) |_| {
-            const directory = (try self.containerOf(gpa, current)) orelse return null;
-            const binding = self.filesystem_system.filesystems.authorizedDirectory(directory.target, directory.revision) catch return null;
-            if (self.localDirectoryPath(binding.root)) |base| {
-                var parts: std.ArrayList([]const u8) = .empty;
-                defer parts.deinit(gpa);
-                try parts.append(gpa, base);
-                var i = names.items.len;
-                while (i > 0) {
-                    i -= 1;
-                    try parts.append(gpa, names.items[i]);
-                }
-                const path = try std.fs.path.join(gpa, parts.items);
-                if (!self.namesRoot(path, root)) {
-                    gpa.free(path);
-                    return null;
-                }
-                return path;
-            }
-            // Not ours: a target someone published below one of ours, named
-            // by its leaf. Anything else cannot be joined onto a path.
-            const descriptor = self.filesystem_system.semantic.targets.get(directory.target) orelse return null;
-            const leaf = descriptor.display_name;
-            if (leaf.len == 0 or std.mem.indexOfScalar(u8, leaf, '/') != null or
-                std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return null;
-            try names.ensureUnusedCapacity(gpa, 1);
-            names.appendAssumeCapacity(try gpa.dupe(u8, leaf));
-            current = .{ .target = directory.target, .revision = directory.revision };
-        }
-        return null;
-    }
-
-    /// This session's path for the directory whose provider identity is
-    /// `root`. Borrowed from `directory_targets`.
-    fn localDirectoryPath(self: *Session, root: fs.contract.Root) ?[]const u8 {
-        for (self.directory_targets.items) |directory| {
-            const same_root = self.filesystem_system.filesystems.sameRoot(directory.root, root) catch continue;
-            if (same_root) return directory.path;
-        }
-        return null;
-    }
-
-    /// The directory target holding `source`, by the `container` relation.
-    fn containerOf(self: *Session, gpa: std.mem.Allocator, source: semantic.target.Located) !?semantic.target.Located {
-        var relation = self.filesystem_system.semantic.resolveTargetRelation(gpa, source, "container") catch return null;
-        defer relation.deinit();
-        const located = switch (relation.value) {
-            .resolved => |located| located,
-            .absent, .ambiguous => return null,
-        };
-        if (located.location != .whole) return null;
-        return .{ .target = located.target, .revision = located.revision };
-    }
-
     /// Whether `path` names, by the provider's own identity, the directory
-    /// `root` pins — the proof a path reconstructed from leaf names must pass
-    /// before anything is opened through it.
+    /// `root` pins — the proof a designation must pass before a file is
+    /// opened through it, since a path can be renamed and replaced after a
+    /// listing observed it.
     fn namesRoot(self: *Session, path: []const u8, root: fs.contract.Root) bool {
         const acquired = self.filesystem_provider.acquireRoot(path) catch return false;
         defer self.filesystem_provider.releaseRoot(acquired);
@@ -847,13 +791,26 @@ const LocalDirectoryRelations = struct {
 
 fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref) anyerror!void {
     const services = ctx.semantic orelse return error.SemanticUnavailable;
-    switch (try core.target_open.openAndFocus(services, ctx.head, ctx.gpa, target)) {
+    const descriptor = services.targets.get(target) orelse return error.StaleTarget;
+    return presentDirectory(ctx, .{ .target = target, .revision = descriptor.revision });
+}
+
+/// Open a directory target through whatever claims it, and make what it
+/// shows a workspace entry representing that directory's designation. ONE
+/// path for every directory, wherever it is: a local one this session opened
+/// and a peer's shared tree (`collab_cmds`) are presented, named and titled
+/// alike (`designation.presentTarget`), so `open weft://<peer>/dir/…` and
+/// `peer-files` are the same operation as `open /some/dir`.
+pub fn presentDirectory(ctx: *core.command.Context, located: semantic.target.Located) anyerror!void {
+    const services = ctx.semantic orelse return error.SemanticUnavailable;
+    switch (try core.target_open.openLocated(services, ctx.head, ctx.gpa, located, null)) {
         .opened => {
-            const descriptor = services.targets.get(target) orelse return error.StaleTarget;
-            const base = std.fs.path.basename(descriptor.display_name);
-            const name = try std.fmt.allocPrint(ctx.gpa, "files: {s}", .{if (base.len == 0) descriptor.display_name else base});
-            defer ctx.gpa.free(name);
-            _ = try ctx.buffers.attachFocusedSemanticView(ctx.gpa, ctx.head, ctx.keymap, name, "files");
+            // Named "files" after the tool whose listing it is, as before;
+            // the title is replaced with the designation's reading below.
+            const id = try ctx.buffers.attachFocusedSemanticView(ctx.gpa, ctx.head, ctx.keymap, "files", "files");
+            const entry = ctx.buffers.get(id) orelse return;
+            if (entry.editor != null) return; // nothing was attached: a text entry keeps its own name
+            try core.designation.presentTarget(ctx, entry, located);
         },
         .no_handler => return error.NoTargetHandler,
         .ambiguous => return error.AmbiguousTargetHandlers,

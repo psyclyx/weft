@@ -663,7 +663,7 @@ fn pasteFrom(src: put.Source, lines: bool) void {
 /// C-p: fuzzy-open a project file (the native recursive finder).
 fn quickOpen() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", weft.placeRoot(), file_pick);
 }
 /// C-o: open a path as typed — including one that does not exist yet.
 fn openPath() void {
@@ -703,7 +703,7 @@ fn onPickAccept(pick_id: u32) void {
     const trimmed = std.mem.trim(u8, text, " \t");
     if (trimmed.len == 0) return;
     switch (pick_id) {
-        file_pick, path_pick => weft.runStr("open", trimmed),
+        file_pick, path_pick => weft.openUnder(weft.placeRoot(), trimmed),
         line_pick => jumpToLine(std.fmt.parseInt(usize, trimmed, 10) catch {
             weft.echo("go to line: not a line number");
             return;

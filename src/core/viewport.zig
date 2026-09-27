@@ -30,7 +30,7 @@
 //! gfx. The pane TREE (geometry, dock nodes) stays in gfx.
 
 const std = @import("std");
-const Buffers = @import("Buffers.zig");
+const durable = @import("weft_semantic").durable;
 
 /// Which frame edge a docked viewport anchors to.
 pub const Edge = enum {
@@ -109,7 +109,10 @@ pub const Declaration = struct {
     name: []u8,
     attrs: Attrs,
     extent: Extent,
-    /// The resource to present, or `""` for none.
+    /// The resource to present — a designation, or an absolute path standing
+    /// in for one (`durable.Spec`) — or `""` for none. A relative path is
+    /// refused where it is declared (`present`), never resolved later against
+    /// wherever the process happens to be.
     subject: []u8,
     /// The command that presents `subject` (`open` when empty): the entry it
     /// leaves active is what the viewport shows. A plugin whose entry has no
@@ -127,13 +130,16 @@ pub const Declaration = struct {
     /// into it, or what `take` put there. Kept across a hide, so showing it
     /// again brings the same entry back rather than whatever is active, and
     /// so the chrome can tell a docked companion's entry from a document
-    /// (`holdsEntry`). A generation-checked `Buffers.Ref`, never a bare id:
-    /// the entry can close and its slot be reused by an unrelated entry, which
-    /// a bare id would then name — and the viewport would capture.
-    entry: ?Buffers.Ref = null,
-    /// A pending `take`: put this entry in the viewport, show it, and focus
-    /// it, at the next layout phase. Generation-checked for the same reason.
-    take: ?Buffers.Ref = null,
+    /// (`holdsEntry`). Held as the entry's DESIGNATION (doc/model.md §2.2),
+    /// owned: the entry can close and its slot be reused by an unrelated
+    /// entry, which a slot would then name and the viewport capture. A
+    /// designation names what was shown instead, so a reused slot is simply
+    /// something else, and a closed entry is opened again when the viewport
+    /// next shows.
+    entry: ?[]u8 = null,
+    /// A pending `take`: put the entry opening this designation in the
+    /// viewport, show it, and focus it, at the next layout phase. Owned.
+    take: ?[]u8 = null,
 
     /// Whether there is anything to present: a subject to open, or a command
     /// that presents on its own.
@@ -157,6 +163,8 @@ pub const Registry = struct {
             gpa.free(d.name);
             gpa.free(d.subject);
             gpa.free(d.command);
+            if (d.entry) |held| gpa.free(held);
+            if (d.take) |held| gpa.free(held);
         }
         self.list.deinit(gpa);
         self.* = undefined;
@@ -204,32 +212,47 @@ pub const Registry = struct {
         return d.shown;
     }
 
-    /// Put entry `entry` in `name`, show it, and focus it — at the next
-    /// layout phase, which owns the pane tree. What a plugin runs to bring its
-    /// own entry (a terminal, a problems list) into a declared panel: the
-    /// viewport shows one entry at a time, so this REPLACES what it showed.
-    pub fn takeEntry(self: *Registry, name: []const u8, entry: Buffers.Ref) error{UnknownViewport}!void {
+    /// Put the entry opening `designation` in `name`, show it, and focus it —
+    /// at the next layout phase, which owns the pane tree. What a plugin runs
+    /// to bring its own entry (a terminal, a problems list) into a declared
+    /// panel: the viewport shows one entry at a time, so this REPLACES what it
+    /// showed.
+    pub fn takeEntry(self: *Registry, gpa: std.mem.Allocator, name: []const u8, designation: []const u8) (error{UnknownViewport} || std.mem.Allocator.Error)!void {
         const d = self.find(name) orelse return error.UnknownViewport;
-        d.take = entry;
+        try hold(gpa, &d.take, designation);
         d.shown = true;
     }
 
-    /// Whether `entry` is what some DOCKED viewport holds — a companion's
-    /// entry (a file tree, a panel, a toolbar), which the chrome lists
-    /// apart from the documents (never as a tab).
-    pub fn holdsEntry(self: *const Registry, entry: Buffers.Ref) bool {
+    /// Replace the designation `slot` holds (null lets go).
+    pub fn hold(gpa: std.mem.Allocator, slot: *?[]u8, designation: ?[]const u8) std.mem.Allocator.Error!void {
+        const owned: ?[]u8 = if (designation) |text| try gpa.dupe(u8, text) else null;
+        if (slot.*) |old| gpa.free(old);
+        slot.* = owned;
+    }
+
+    /// Whether the entry designated `designation` is what some DOCKED
+    /// viewport holds — a companion's entry (a file tree, a panel, a
+    /// toolbar), which the chrome lists apart from the documents (never as a
+    /// tab).
+    pub fn holdsEntry(self: *const Registry, designation: []const u8) bool {
         for (self.list.items) |d| {
             if (d.attrs.dock == null) continue;
             const held = d.entry orelse continue;
-            if (held.id == entry.id and held.generation == entry.generation) return true;
+            if (std.mem.eql(u8, held, designation)) return true;
         }
         return false;
     }
 
     /// "Present resource R in viewport V" as a declaration. A NEW subject
     /// (or presenting command) clears `presented`, so the layout phase
-    /// presents it; the same pair again changes nothing.
+    /// presents it; the same pair again changes nothing. A subject must name
+    /// something wherever it is read: a designation or an absolute path.
     pub fn present(self: *Registry, gpa: std.mem.Allocator, name: []const u8, subject: []const u8, command: []const u8) !void {
+        if (subject.len != 0) switch (durable.Spec.of(subject)) {
+            .designation, .path => {},
+            .relative => return error.RelativeSubject,
+            .malformed => return error.MalformedSubject,
+        };
         const d = self.find(name) orelse return error.UnknownViewport;
         if (std.mem.eql(u8, d.subject, subject) and std.mem.eql(u8, d.command, command)) return;
         const owned = try gpa.dupe(u8, subject);
@@ -256,24 +279,28 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
     defer reg.deinit(gpa);
 
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
-    try reg.present(gpa, "sidebar", ".", "");
+    try reg.present(gpa, "sidebar", "/srv/proj", "");
     reg.find("sidebar").?.pane = 3;
     reg.find("sidebar").?.presented = true;
 
     // Re-applying the same manifest updates in place — no second sidebar,
     // and nothing already realized is disturbed.
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
-    try reg.present(gpa, "sidebar", ".", "");
+    try reg.present(gpa, "sidebar", "/srv/proj", "");
     try t.expectEqual(@as(usize, 1), reg.list.items.len);
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
     try t.expect(reg.find("sidebar").?.presented);
 
     // A new subject is a new presentation, and only that.
-    try reg.present(gpa, "sidebar", "src", "");
+    try reg.present(gpa, "sidebar", "weft://here/dir/srv/proj/src", "");
     try t.expect(!reg.find("sidebar").?.presented);
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
 
-    try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", ".", ""));
+    try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", "/srv", ""));
+    // A relative subject names nothing, and says so where it is written.
+    try t.expectError(error.RelativeSubject, reg.present(gpa, "sidebar", ".", ""));
+    try t.expectError(error.MalformedSubject, reg.present(gpa, "sidebar", "weft://here/nope", ""));
+    try t.expectEqualStrings("weft://here/dir/srv/proj/src", reg.find("sidebar").?.subject);
 }
 
 test "viewport: toggling is workspace state a re-declaration leaves alone" {
@@ -353,20 +380,21 @@ test "viewport: a panel can start hidden, take an entry, and holds it as chrome"
     try t.expect(reg.find("panel").?.shown);
 
     reg.find("panel").?.shown = false;
-    const seven: Buffers.Ref = .{ .id = 7, .generation = 1 };
-    const eight: Buffers.Ref = .{ .id = 8, .generation = 1 };
-    try reg.takeEntry("panel", seven);
+    const terminal = "weft://here/proc/terminal.1";
+    const problems = "weft://here/problems/srv/proj";
+    try reg.takeEntry(gpa, "panel", terminal);
     try t.expect(reg.find("panel").?.shown);
-    try t.expectEqual(@as(?Buffers.Ref, seven), reg.find("panel").?.take);
-    try t.expectError(error.UnknownViewport, reg.takeEntry("nope", seven));
+    try t.expectEqualStrings(terminal, reg.find("panel").?.take.?);
+    try t.expectError(error.UnknownViewport, reg.takeEntry(gpa, "nope", terminal));
 
     // Only what a DOCKED viewport shows is chrome.
-    reg.find("panel").?.entry = seven;
-    try t.expect(reg.holdsEntry(seven));
-    try t.expect(!reg.holdsEntry(eight));
-    // Slot 7 reused by a later entry is not what the panel holds.
-    try t.expect(!reg.holdsEntry(.{ .id = 7, .generation = 2 }));
+    try Registry.hold(gpa, &reg.find("panel").?.entry, terminal);
+    try t.expect(reg.holdsEntry(terminal));
+    try t.expect(!reg.holdsEntry(problems));
+    // What the panel holds is WHAT it showed: whichever entry opens that
+    // designation now, never whatever reuses the slot the old one had.
+    try t.expect(!reg.holdsEntry("weft://here/proc/terminal.2"));
     try reg.declare(gpa, "tiled", .{}, .{ .fraction = 0.5 });
-    reg.find("tiled").?.entry = eight;
-    try t.expect(!reg.holdsEntry(eight));
+    try Registry.hold(gpa, &reg.find("tiled").?.entry, problems);
+    try t.expect(!reg.holdsEntry(problems));
 }

@@ -735,7 +735,7 @@ const OpenCommandProbe = struct {
     }
 };
 
-test "files wasm launcher: delegates to the ordinary open command at cwd" {
+test "files wasm launcher: delegates to the ordinary open command with the place's designation" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -766,7 +766,10 @@ test "files wasm launcher: delegates to the ordinary open command at cwd" {
     var cwd_buf: [4096]u8 = undefined;
     const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd;
     const cwd = std.mem.sliceTo(cwd_ptr, 0);
-    try t.expectEqualStrings(cwd, open_probe.target.?);
+    // The place, by its designation — never "." and never a bare path.
+    const want = try std.fmt.allocPrint(gpa, "weft://here/dir{s}", .{cwd});
+    defer gpa.free(want);
+    try t.expectEqualStrings(want, open_probe.target.?);
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {
@@ -2396,7 +2399,14 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     };
     try t.expect(scratch == null);
 
-    const id = env.buffers.findByPath(tmp) orelse return error.TestExpectedNotesFileOpen;
+    // Opened where the place is — the absolute path the relative name has
+    // in it — never as a path relative to wherever the process stands.
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.mem.sliceTo(std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd, 0);
+    const abs = try std.fs.path.join(gpa, &.{ cwd, tmp });
+    defer gpa.free(abs);
+    try t.expect(env.buffers.findByPath(tmp) == null);
+    const id = env.buffers.findByPath(abs) orelse return error.TestExpectedNotesFileOpen;
     const buf = env.buffers.get(id).?;
     const s = try buf.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -4190,11 +4200,10 @@ test "context: a wasm plugin publishes at a scope, a predicate reads it, and unl
     // anything else in the same place now satisfy a predicate on the key.
     try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "weft://here/proc/7", "place"));
     try t.expect(gated.matches(intent_mod.factsFor(&env.ctx)));
-    var scratch: [facts.Facts.scratch_len]u8 = undefined;
-    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("demo.session", &scratch).?);
+    try t.expectEqualStrings("weft://here/proc/7", intent_mod.factsFor(&env.ctx).get("demo.session").?);
     // An entry-scoped value is more specific than the place's.
     try t.expectEqualStrings("ok", try S.set(&env, "demo.session", "mine", "entry"));
-    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("demo.session", &scratch).?);
+    try t.expectEqualStrings("mine", intent_mod.factsFor(&env.ctx).get("demo.session").?);
 
     // A builtin, or a key with no namespace, is refused at the door.
     try t.expectEqualStrings("refused", try S.set(&env, "mode", "normal", "global"));

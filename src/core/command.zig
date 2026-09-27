@@ -174,6 +174,13 @@ pub const Context = struct {
     /// declaration is then reported as dropped rather than silently staged
     /// against nothing.
     viewports: ?*@import("viewport.zig").Registry = null,
+    /// Who re-runs each projection kind (`designation.Openers`): what `open`
+    /// of a `weft://here/<kind>/…` with no live entry asks. `null` in
+    /// embeddings with no producers, where such a designation is refused.
+    designations: ?*@import("designation.zig").Openers = null,
+    /// Who turns a peer authority into a name a person reads (titles, the
+    /// jumplist). Installed by the shell that knows who it connected to.
+    peer_names: ?@import("designation.zig").PeerNames = null,
     /// The entry an ASYNC delivery captured at spawn, bound for the duration
     /// of its callback (`wasm_host/proc.zig`). While set, `buffer`/
     /// `textEditor`/`document` mean THAT entry rather than whatever is active,

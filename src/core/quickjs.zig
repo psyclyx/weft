@@ -1852,6 +1852,15 @@ fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(subject);
     const presenter = readStr(br, caller, args[4], args[5]) orelse return;
     defer gpa.free(presenter);
+    // A subject names what the viewport shows wherever it is read, so it is
+    // a designation or an absolute path — refused here, where it is written,
+    // rather than resolved later against the directory the process was
+    // launched in (doc/model.md §2.1).
+    if (subject.len != 0) switch (@import("weft_semantic").durable.Spec.of(subject)) {
+        .designation, .path => {},
+        .relative => return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\"}}): a relative path names nothing — give a weft:// designation, an absolute path, or a presenting command", .{ name, subject }),
+        .malformed => return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\"}}): not a designation (weft://<authority>/<kind>/<ref>)", .{ name, subject }),
+    };
     if (br.manifest) |m| {
         m.addPresent(name, subject, presenter) catch {};
         return;

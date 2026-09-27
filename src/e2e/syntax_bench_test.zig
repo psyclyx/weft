@@ -251,7 +251,8 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
     for (0..iters) |i| {
         // Open: a fresh buffer each time, so the initial parse is paid again.
         var t0 = nowNs();
-        command(ed, "open", &.{.{ .string = "bench.js" }});
+        var bench_at: [std.fs.max_path_bytes]u8 = undefined;
+        command(ed, "open", &.{.{ .string = h.Editor.asTyped("bench.js", &bench_at) }});
         results[@intFromEnum(Scenario.open)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
         const syn = lang.attachedSyntax(ed) orelse return error.SyntaxDidNotAttach;
         const te = ed.buffers.active().textEditor().?;

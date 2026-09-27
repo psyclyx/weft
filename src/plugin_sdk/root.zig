@@ -1166,7 +1166,20 @@ pub const ContextSetError = error{
 /// published. Keys are namespaced by convention (`<plugin>.<what>`), and a
 /// builtin (`mode`, `entry`, …) cannot be published at all.
 pub fn contextSet(key: []const u8, value: []const u8, scope: ContextScope) ContextSetError!void {
-    return switch (e.wl_context_set(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len), @intFromEnum(scope))) {
+    return contextSetIn(key, value, scope, "");
+}
+
+/// `contextSet` at the place scope of a place NAMED by its designation
+/// (`weft://here/dir/…` — what `contextGet("place")` answered when the value
+/// was published) rather than the calling entry's. How a plugin retracts
+/// what it said about one project while the user is in another: a REPL
+/// quit from elsewhere names the place its session was published at.
+pub fn contextSetAt(key: []const u8, value: []const u8, place: []const u8) ContextSetError!void {
+    return contextSetIn(key, value, .place, place);
+}
+
+fn contextSetIn(key: []const u8, value: []const u8, scope: ContextScope, place: []const u8) ContextSetError!void {
+    return switch (e.wl_context_set(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len), @intFromEnum(scope), p(place.ptr), @intCast(place.len))) {
         0 => {},
         -2 => error.Held,
         else => error.Refused,
@@ -1961,6 +1974,88 @@ var subfact_scratch: [512]u8 = undefined;
 /// this plugin registers for `When{ .tool = "<name>" }` — no core special-case.
 pub fn toolBacking(name: []const u8) void {
     e.wl_tool_backing(p(name.ptr), @intCast(name.len));
+}
+
+// ── Designations (doc/model.md §2.1) ─────────────────────────────────
+// The only way content is named across the membrane. `open` takes one (or an
+// absolute path standing in for `weft://here/file|dir/…`); a relative path is
+// refused, because the only thing it could be relative to is the directory
+// the editor was launched in.
+
+var designation_scratch: [8192]u8 = undefined;
+
+/// The designation of the entry this call is about — `weft://here/file/…`,
+/// `…/doc/<id>`, `…/git.status/…` — or null when it has none. Borrowed until
+/// the next call.
+pub fn designation() ?[]const u8 {
+    const n = e.wl_entry_designation(p(&designation_scratch), designation_scratch.len);
+    if (n < 0) return null;
+    return designation_scratch[0..@min(@as(usize, @intCast(n)), designation_scratch.len)];
+}
+
+/// Declare the designation the entry this call is about represents: a
+/// `weft://here/proc/<id>` for a live resource this plugin runs, or
+/// `weft://here/<kind>/…` for a projection kind it claimed with
+/// `designationOpener`. Returns whether the host took it; empty clears.
+pub fn designate(text: []const u8) bool {
+    return e.wl_entry_designate(p(text.ptr), @intCast(text.len)) == 0;
+}
+
+/// Claim projection `kind` for this plugin: `open` of a
+/// `weft://here/<kind>/…` no entry shows runs `command` with the designation
+/// as its one argument — how a jump back to a closed status buffer, or a
+/// viewport re-showing one, re-runs the producer. False when `kind` is one of
+/// the grammar's own (`file`, `dir`, `doc`, `proc`) or another plugin's.
+pub fn designationOpener(kind: []const u8, command: []const u8) bool {
+    return e.wl_designation_opener(p(kind.ptr), @intCast(kind.len), p(command.ptr), @intCast(command.len)) == 0;
+}
+
+/// Open a designation — or an absolute path — through the ordinary `open`.
+pub fn openDesignation(target: []const u8) void {
+    runStr("open", target);
+}
+
+var open_under_scratch: [8192]u8 = undefined;
+
+/// Open `name` found below `root`: as given when it is already a designation
+/// or absolute, else joined onto `root` (an absolute directory — the place a
+/// picker listed, the directory a search ran in). The explicit spelling of
+/// "relative to where I listed it", so nothing resolves a relative name
+/// against wherever the editor happens to have been launched.
+pub fn openUnder(root: []const u8, name: []const u8) void {
+    if (std.mem.startsWith(u8, name, semantic.durable.scheme) or std.fs.path.isAbsolutePosix(name))
+        return openDesignation(name);
+    if (root.len == 0) return echo("open: no directory to find that name in");
+    const base = std.mem.trimEnd(u8, root, "/");
+    const joined = std.fmt.bufPrint(&open_under_scratch, "{s}/{s}", .{ base, name }) catch
+        return echo("open: that name does not fit");
+    openDesignation(joined);
+}
+
+/// The designation of a projection that is ABOUT a place — a status, a
+/// search, a build — as `weft://here/<kind>/<place directory>[?params]`:
+/// the place's directory is the ref, spelled without its leading `/`
+/// (`placeOf` reads it back). Null when this dispatch has no local place.
+pub fn placeProjection(kind: []const u8, params: []const u8, out: []u8) ?[]const u8 {
+    const root = placeRoot();
+    if (root.len < 2) return null;
+    const d: semantic.durable.Designation = .{ .kind = .{ .projection = kind }, .ref = root[1..], .params = params };
+    return d.render(out) catch null;
+}
+
+/// The designation of the place this dispatch is in, `weft://here/dir/<its
+/// directory>` — the string a place-scoped context value is keyed by, and
+/// what `contextSetAt` names a place with. Null when the place has no local
+/// directory.
+pub fn placeDesignation(out: []u8) ?[]const u8 {
+    const d = semantic.durable.Designation.ofPath(.directory, placeRoot()) orelse return null;
+    return d.render(out) catch null;
+}
+
+/// The place directory a `placeProjection` designation names, into `out`.
+pub fn placeOf(d: semantic.durable.Designation, out: []u8) ?[]const u8 {
+    if (d.kind != .projection or d.authority != .here) return null;
+    return std.fmt.bufPrint(out, "/{s}", .{d.ref}) catch null;
 }
 
 // ── Register / kill (core, shared by every editor) ───────────────────

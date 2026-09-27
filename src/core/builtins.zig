@@ -17,6 +17,7 @@ const target_open = @import("target_open.zig");
 const semantic_model = @import("weft_semantic");
 const placement = @import("placement.zig");
 const action_here = @import("action_here.zig");
+const designation = @import("designation.zig");
 
 const ok: Value = .nil;
 
@@ -580,7 +581,35 @@ fn cBufferCloseForce(ctx: *Context, args: struct {}) anyerror!Value {
 /// Open a local file in a buffer (existing buffer wins — dedupe by
 /// path). The graphical shell rebinds this with a provider-aware,
 /// remote-capable version; this core one keeps headless hosts honest.
+/// `open <designation>` — the kernel's own: a local file (a designation, or
+/// an absolute path standing in for one), and whatever core alone can answer
+/// (`designation.openHeld`: documents, processes, projections). A shell
+/// shadows this with one that also reaches directories, shells and peers,
+/// and routes the same way. A relative path is refused: it could only be
+/// relative to wherever the process was launched.
 fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
+    switch (designation.durable.Spec.of(args.path)) {
+        .relative => return .{ .string = "open: " ++ designation.durable.Spec.relative_refusal },
+        .malformed => return .{ .string = "open: " ++ designation.durable.Spec.malformed_refusal },
+        .path => |path| return openFilePath(ctx, path),
+        .designation => |d| {
+            if (try designation.openHeld(ctx, d, args.path)) |outcome| switch (outcome) {
+                .opened => |id| {
+                    designation.applyPosition(ctx, d);
+                    return .{ .integer = @intCast(id) };
+                },
+                .refused => |why| return .{ .string = why },
+            };
+            if (d.authority != .here or d.kind != .file) return .{ .string = designation.refuse_unreachable };
+            const opened = try openFilePath(ctx, d.ref);
+            designation.applyPosition(ctx, d);
+            return opened;
+        },
+    }
+}
+
+fn openFilePath(ctx: *Context, path: []const u8) anyerror!Value {
+    const args = .{ .path = path };
     if (ctx.buffers.findByPath(args.path)) |id| {
         try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
@@ -692,7 +721,14 @@ fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Va
 /// what it showed; the layout phase realizes the move.
 fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
-    registry.takeEntry(args.name, ctx.buffers.active().ref()) catch return .{ .string = "no viewport by that name" };
+    // A viewport holds WHAT it shows, never the slot it was shown from.
+    var buf: [designation.max_len]u8 = undefined;
+    const held = designation.of(ctx.buffers.active(), &buf) orelse
+        return .{ .string = "this entry has no designation for a viewport to hold" };
+    registry.takeEntry(ctx.gpa, args.name, held) catch |err| return switch (err) {
+        error.UnknownViewport => .{ .string = "no viewport by that name" },
+        else => err,
+    };
     return ok;
 }
 

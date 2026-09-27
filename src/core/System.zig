@@ -232,6 +232,10 @@ context: context_mod.Context,
 /// `weft.present`). Declarations, plus the layout phase's note of which are
 /// realized — the workspace materializes them; nothing here draws.
 viewports: viewport_mod.Registry = .empty,
+/// Who re-runs each projection kind (`designation.Openers`, doc/model.md
+/// §2.1): claimed by producers through `wl_designation_opener`, released when
+/// they unload.
+designations: @import("designation.zig").Openers = .empty,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -257,6 +261,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .context = .init(gpa),
     };
     errdefer self.context.deinit();
+    // A place is named by whoever bound its directory (`context.placeName`).
+    self.context.filesystems = &self.filesystems;
     errdefer self.buffers.deinit(gpa);
     errdefer self.semantic.deinit(gpa);
     errdefer self.filesystems.deinit();
@@ -322,6 +328,7 @@ pub fn destroy(self: *System) void {
     self.placement.deinit(gpa);
     self.context.deinit();
     self.viewports.deinit(gpa);
+    self.designations.deinit(gpa);
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
@@ -354,6 +361,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .intent = &self.intent,
         .context = &self.context,
         .viewports = &self.viewports,
+        .designations = &self.designations,
         .environments = &self.environments,
         .place_ids = &self.place_ids,
     };
@@ -624,6 +632,8 @@ pub const Host = struct {
         c.filesystems = &to.filesystems;
         c.intent = &to.intent;
         c.context = &to.context;
+        c.viewports = &to.viewports;
+        c.designations = &to.designations;
         try to.attachHead(gpa, head);
     }
 };

@@ -1395,7 +1395,14 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     // Open dedupes by path.
     var tmp_dir = t.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
+    const relative = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
+    defer gpa.free(relative);
+    // A relative path names nothing: refused in words, nothing opened.
+    const refused = try run(&host.commands, &host.ctx, "open", &.{.{ .string = relative }});
+    try t.expect(refused == .string);
+    try t.expectEqualStrings("*tool*", host.buffers.active().name);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fs.path.resolve(gpa, &.{ @import("file.zig").processDirectory(&cwd_buf).?, relative });
     defer gpa.free(path);
     const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
     const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});

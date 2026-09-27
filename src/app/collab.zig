@@ -14,6 +14,7 @@ const fs_platform = @import("weft_fs_platform");
 const fs_remote = @import("weft_fs_remote");
 const fs_runtime = @import("weft_fs_runtime");
 const semantic = @import("weft_semantic");
+const target_runtime = @import("weft_target_runtime");
 
 /// Status-line chip for a peer's trust grade (null = don't show).
 pub fn hostTrustChip(trust: core.known_peers.Trust) ?[]const u8 {
@@ -106,6 +107,15 @@ pub const ShareCtx = struct {
     /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
     /// ordinary located target and use the generic target resolver.
     remote_fs_target: ?semantic.target.Located = null,
+    /// The owner that tree is published under, and the directories below its
+    /// root published on the way to one a designation named
+    /// (`remoteChild`) — retired with the tree (`closeRemoteChildren`).
+    remote_fs_owner: ?semantic.owner.Id = null,
+    remote_children: std.ArrayList(RemoteChild) = .empty,
+    /// What the person called the host they connected out to — the address
+    /// they gave, owned. How that peer's authority reads in a title
+    /// (`collab_cmds.peerName`); the fingerprint stays the authority.
+    peer_label: ?[]u8 = null,
     /// Commands record INTENTS here; the frame loop applies them
     /// outside the input hot section (connect blocks on TCP, disconnect
     /// joins session threads).
@@ -126,6 +136,61 @@ pub const ShareCtx = struct {
     /// sentinel keeps `initBase` infallible rather than threading a second
     /// optional through every call site.
     conn_wake_fd: std.posix.fd_t = -1,
+
+    pub const RemoteChild = struct {
+        parent: semantic.target.Located,
+        name: []u8,
+        registration: fs_runtime.publication.ChildRegistration,
+    };
+
+    /// The directory `name` directly below `parent` in the peer's shared
+    /// tree, published once and reused: looked up in the provider's own
+    /// listing of `parent`, so it is what the peer really has. Null when
+    /// there is no such directory (a file by that name included).
+    pub fn remoteChild(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?semantic.target.Located {
+        for (self.remote_children.items) |c| {
+            if (c.registration.active and c.parent.target.eql(parent.target) and
+                c.parent.revision == parent.revision and std.mem.eql(u8, c.name, name))
+                return c.registration.located();
+        }
+        const owner = self.remote_fs_owner orelse return null;
+        const services = ctx.semantic orelse return null;
+        const router = ctx.filesystems orelse return null;
+        const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
+        switch (published) {
+            .file => |registration| {
+                var file = registration;
+                _ = file.close(self.gpa, &services.targets, router);
+                return null;
+            },
+            .directory => |registration| {
+                var directory = registration;
+                errdefer _ = directory.close(self.gpa, &services.targets);
+                const owned = try self.gpa.dupe(u8, name);
+                errdefer self.gpa.free(owned);
+                try self.remote_children.append(self.gpa, .{ .parent = parent, .name = owned, .registration = directory });
+                return directory.located();
+            },
+        }
+    }
+
+    /// Remember what the person called the host they connected to: the
+    /// address without its port, which is what a title shows the peer as.
+    pub fn setPeerLabel(self: *ShareCtx, hostport: []const u8) void {
+        const host = if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| hostport[0..colon] else hostport;
+        const owned = self.gpa.dupe(u8, if (host.len == 0) hostport else host) catch return;
+        if (self.peer_label) |old| self.gpa.free(old);
+        self.peer_label = owned;
+    }
+
+    /// Retire every directory `remoteChild` published — the tree is going.
+    pub fn closeRemoteChildren(self: *ShareCtx, targets: *target_runtime.target.Registry) void {
+        while (self.remote_children.pop()) |child| {
+            var c = child;
+            _ = c.registration.close(self.gpa, targets);
+            self.gpa.free(c.name);
+        }
+    }
 
     /// Compile this surface's selection into a publication descriptor.
     /// The filesystem surfaces stay at their legacy width: what a peer may
@@ -332,6 +397,7 @@ pub const Collab = struct {
         self.collab_session = try core.session.Session.create(gpa, self.fd_link.link(), .client, token, .own, my_identity);
         if (self.share_ctx.conn_wake_fd >= 0) self.collab_session.?.setWakeFd(self.share_ctx.conn_wake_fd);
         self.conn = try core.session.Conn.init(gpa, self.collab_session.?, user, .client);
+        self.share_ctx.setPeerLabel(hp);
         const col = try self.conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
         col.publish_presence = self.share_ctx.publish_presence;
@@ -378,6 +444,7 @@ pub const Collab = struct {
         for (self.share_ctx.shared.items) |s| gpa.free(s.name);
         self.share_ctx.shared.deinit(gpa);
         if (self.share_ctx.pending_connect) |hp| gpa.free(hp);
+        if (self.share_ctx.peer_label) |label| gpa.free(label);
         {
             var pit = self.peer_fs_inflight.valueIterator();
             while (pit.next()) |v| gpa.free(v.*);
@@ -387,6 +454,7 @@ pub const Collab = struct {
         self.peer_fs_bridge.deinit();
         self.detachRemoteFilesystem();
         self.remote_fs.deinit();
+        self.share_ctx.remote_children.deinit(gpa);
         if (self.shared_fs_server) |*server| server.deinit();
         if (self.shared_fs_root) |root| self.shared_fs_provider.releaseRoot(root);
         self.shared_fs_provider.deinit();
@@ -439,12 +507,21 @@ pub const Collab = struct {
         const root = try self.remote_provider.?.acquireRoot();
         var root_owned = true;
         errdefer if (root_owned) self.remote_provider.?.releaseRoot(root);
+        // The shared root is the peer's `/`: `weft://<fingerprint>/dir/`, and
+        // every row below it designates itself from there. The fingerprint,
+        // not the address, is the authority (substrate §7, R2), so the name
+        // survives a reconnect from somewhere else.
+        var designation_buf: [64]u8 = undefined;
+        const designation: []const u8 = if (active_session.peerFingerprint()) |fp|
+            (semantic.durable.Designation{ .authority = .{ .peer = &fp }, .kind = .directory, .ref = "/" }).render(&designation_buf) catch ""
+        else
+            "";
         var publication = try fs_runtime.publication.publish(
             self.gpa,
             &system.semantic.targets,
             &system.filesystems,
             owner,
-            .{ .display_name = "peer shared files", .directory = .{ .root = root } },
+            .{ .display_name = "peer shared files", .directory = .{ .root = root }, .designation = designation },
         );
         errdefer _ = publication.close(self.gpa, &system.semantic.targets, &system.filesystems);
 
@@ -453,6 +530,7 @@ pub const Collab = struct {
         self.remote_root = root;
         self.remote_publication = publication;
         self.share_ctx.remote_fs_target = publication.located();
+        self.share_ctx.remote_fs_owner = owner;
         owner_owned = false;
         root_owned = false;
         provider_registered = false;
@@ -462,6 +540,8 @@ pub const Collab = struct {
     fn detachRemoteFilesystem(self: *Collab) void {
         const system = self.remote_system orelse return;
         self.share_ctx.remote_fs_target = null;
+        self.share_ctx.closeRemoteChildren(&system.semantic.targets);
+        self.share_ctx.remote_fs_owner = null;
         if (self.remote_publication) |*publication|
             _ = publication.close(self.gpa, &system.semantic.targets, &system.filesystems);
         const transport_live = if (self.collab_session) |session| switch (session.liveness()) {
@@ -906,6 +986,7 @@ pub fn runtimeConnectFinish(
     col.publish_presence = sc.publish_presence;
     sc.session.* = sess;
     sc.conn.* = c;
+    sc.setPeerLabel(hostport);
     try ctx.buffers.switchTo(gpa, id, ctx.head, ctx.keymap);
     std.log.info("connected to {s} ({s})", .{ hostport, presenceNote(sc.publish_presence) });
 }

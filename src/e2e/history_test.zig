@@ -178,7 +178,7 @@ test "e2e/jumplist: vim's jumps go back and forward, and ride edits" {
     try t.expectEqual(@as(u8, 'l'), ed.buffers.active().textEditor().?.text().byteAt(cursor(&ed)));
 }
 
-test "e2e/jumplist: moving between entries is recorded; a closed entry is skipped" {
+test "e2e/jumplist: moving between entries is recorded; a closed file is opened again, never its reused slot" {
     const gpa = t.allocator;
     var proj: Project = undefined;
     try proj.init(gpa);
@@ -200,22 +200,31 @@ test "e2e/jumplist: moving between entries is recorded; a closed entry is skippe
     ed.run("jump-forward");
     try t.expectEqualStrings("b.txt", ed.bufferName());
 
-    // Close b: the list keeps its entries, but none of them lands on it.
+    // Close b, and let an unrelated entry take its slot. The jump into b
+    // names b.txt (doc/model.md §2.2), not the slot it was open in: going
+    // back there opens b.txt again from disk, and the stranger in b's old
+    // slot is never landed on.
+    const b_slot = ed.buffers.active_id;
     ed.run("buffer-close");
     try t.expect(!std.mem.eql(u8, "b.txt", ed.bufferName()));
-    for (0..4) |_| {
-        ed.run("jump-back");
-        try t.expect(!std.mem.eql(u8, "b.txt", ed.bufferName()));
-    }
-    for (0..4) |_| {
-        ed.run("jump-forward");
-        try t.expect(!std.mem.eql(u8, "b.txt", ed.bufferName()));
-    }
+    // Created, not visited: making it is not a jump.
+    try t.expectEqual(b_slot, try ed.buffers.create(gpa, "*stranger*"));
+    ed.run("jump-back");
+    try t.expectEqualStrings("a.txt", ed.bufferName());
+    ed.run("jump-forward");
+    try t.expectEqualStrings("b.txt", ed.bufferName());
+    try t.expect(ed.buffers.active_id != b_slot);
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("bravo\n", text);
 
-    // The picker lists what is live, and accepting a row lands there.
+    // The picker lists every position, a closed one by what it names, and
+    // accepting a row lands there.
     ed.run("jumplist-pick");
     try t.expect(ed.head.pick.active);
-    for (ed.head.pick.items.items) |row| try t.expect(std.mem.indexOf(u8, row, "b.txt") == null);
+    var saw_b = false;
+    for (ed.head.pick.items.items) |row| saw_b = saw_b or std.mem.indexOf(u8, row, "b.txt") != null;
+    try t.expect(saw_b);
     ed.press("Escape", "");
 }
 

@@ -1300,11 +1300,11 @@ fn opLine() void {
 // ── Files ──────────────────────────────────────────────────────────────
 fn findFile() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", weft.placeRoot(), file_pick);
 }
 fn openChosen(choice: []const u8) void {
     if (choice.len == 0) return;
-    weft.runStr("open", choice);
+    weft.openUnder(weft.placeRoot(), choice);
 }
 
 // ── Leader / prefix chords (bound as mode-preserving SEQUENCES) ──

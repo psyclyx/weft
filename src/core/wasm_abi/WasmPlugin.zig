@@ -839,6 +839,9 @@ pub fn deinit(self: *WasmPlugin) void {
     // So does every context value it published (`wl_context_set`): a claim
     // about the plugin's work must not outlive the code that knew it true.
     if (self.ctx.context) |context| _ = context.store.retractOwner(self.resources.name);
+    // The projection kinds it claimed go with it: a designation of one is
+    // then refused as having no producer, not handed to a dead command.
+    if (self.ctx.designations) |openers| openers.release(gpa, self.name);
     // D2 slot providers (wl_slot_bind) die with it too — same shape. Slots
     // THEMSELVES (wl_slot_declare) persist, exactly like declared actions —
     // Container has no slot-removal API (matches every other domain's

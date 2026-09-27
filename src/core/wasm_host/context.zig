@@ -32,11 +32,17 @@ const WasmPlugin = shared.WasmPlugin;
 pub const refused: i32 = -1;
 pub const held: i32 = -2;
 
-/// `contextSet(key, value, scope) -> 0 | -1 | -2`: publish `value` for `key`
-/// at `scope` (0 entry, 1 place, 2 global) of the entry this call is about,
-/// as this plugin. An empty value retracts. -1 for a key that is not
-/// namespaced (`repl.session`), an oversized value, an unknown scope, or no
-/// context to publish into; -2 when another plugin holds the key there.
+/// `contextSet(key, value, scope, place) -> 0 | -1 | -2`: publish `value`
+/// for `key` at `scope` (0 entry, 1 place, 2 global) of the entry this call
+/// is about, as this plugin — or, at the place scope with a non-empty
+/// `place`, at the place that `dir` designation names. An empty value
+/// retracts. -1 for a key that is not namespaced (`repl.session`), an
+/// oversized value, an unknown scope, a `place` that is not a `dir`
+/// designation (or given at another scope), an entry in no nameable place,
+/// or no context to publish into; -2 when another plugin holds the key there.
+///
+/// Naming a place grants nothing: a value is a claim about the publisher's
+/// own work, and the one-owner rule still holds per (place, key).
 pub fn setBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     results[0] = refused;
     const context = d.ctx.context orelse return;
@@ -47,7 +53,14 @@ pub fn setBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32)
     defer gpa.free(key);
     const value = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(value);
-    _ = context.store.set(d.resources.name, context_mod.scopeFor(kind, entry), key, value) catch |err| {
+    const place = caller.readMemory(gpa, @intCast(args[5]), @intCast(args[6])) catch return;
+    defer gpa.free(place);
+    if (place.len != 0) {
+        if (kind != .place) return;
+        const named = @import("weft_semantic").durable.parse(place) orelse return;
+        if (named.kind != .directory) return;
+    }
+    _ = context.store.set(d.resources.name, context.scopeFor(kind, entry, place), key, value) catch |err| {
         if (err == error.Held) results[0] = held;
         return;
     };
@@ -64,14 +77,14 @@ pub fn getBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32)
     const gpa = d.ctx.gpa;
     const key = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(key);
-    var scratch: [facts.Facts.scratch_len]u8 = undefined;
+    var scratch: [32]u8 = undefined;
     const value: []const u8 = if (std.mem.eql(u8, key, "offers")) blk: {
         const context = d.ctx.context orelse return;
         const fp = context.fingerprint("offers") orelse return;
         break :blk std.fmt.bufPrint(&scratch, "{x}", .{fp}) catch return;
     } else blk: {
         const scope = intent.primaryScopeOf(d.ctx) orelse return;
-        break :blk intent.factsIn(scope).get(key, &scratch) orelse return;
+        break :blk intent.factsIn(scope).get(key) orelse return;
     };
     const cap: usize = @intCast(@max(args[3], 0));
     _ = caller.writeMemory(@intCast(args[2]), cap, value) catch return;

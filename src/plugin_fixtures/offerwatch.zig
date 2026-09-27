@@ -51,7 +51,7 @@ fn lastKeys() void {
     weft.setResultStr(keys_buf[0..keys_len]);
 }
 
-var arg_bufs: [3][256]u8 = undefined;
+var arg_bufs: [3][1024]u8 = undefined;
 
 /// Copy argument `i` out of the SDK's scratch, which the next read reuses.
 fn arg(i: usize) []const u8 {
@@ -74,6 +74,31 @@ fn contextSet() void {
 
 fn contextGet() void {
     weft.setResultStr(weft.contextGet(arg(0)) orelse "<unset>");
+}
+
+/// `contextSetAt(key, value, place)`: the same publication at a place named
+/// by its designation.
+fn contextSetAt() void {
+    const key = arg(0);
+    const value = arg(1);
+    const place = arg(2);
+    weft.contextSetAt(key, value, place) catch |err| return weft.setResultStr(switch (err) {
+        error.Held => "held",
+        error.Refused => "refused",
+    });
+    weft.setResultStr("ok");
+}
+
+/// The designation doors, answered as a test reads them.
+fn designation() void {
+    weft.setResultStr(weft.designation() orelse "<none>");
+}
+fn designate() void {
+    weft.setResultStr(if (weft.designate(arg(0))) "ok" else "refused");
+}
+fn claim() void {
+    const kind = arg(0);
+    weft.setResultStr(if (weft.designationOpener(kind, arg(1))) "ok" else "refused");
 }
 
 fn whereArg(i: usize) weft.OfferContext {
@@ -121,6 +146,10 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ow-keys", .call = lastKeys },
     .{ .name = "ow-context-set", .call = contextSet },
     .{ .name = "ow-context-get", .call = contextGet },
+    .{ .name = "ow-context-set-at", .call = contextSetAt },
+    .{ .name = "ow-designation", .call = designation },
+    .{ .name = "ow-designate", .call = designate },
+    .{ .name = "ow-claim", .call = claim },
     .{ .name = "ow-list", .call = list },
     .{ .name = "ow-invoke", .call = invoke },
     .{ .name = "ow-probe", .call = probe },

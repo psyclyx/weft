@@ -89,11 +89,11 @@ fn yank() void {
 // ── find-file (like vim's: this editor owns the file picker) ──
 fn findFile() void {
     weft.pickCategory("file");
-    weft.openFilePick("open", ".", file_pick);
+    weft.openFilePick("open", weft.placeRoot(), file_pick);
 }
 fn openChosen(choice: []const u8) void {
     if (choice.len == 0) return;
-    weft.runStr("open", choice);
+    weft.openUnder(weft.placeRoot(), choice);
 }
 
 // ── Command table (registration order == on_command id) ──

@@ -55,14 +55,12 @@ pub fn invokeHere(
                         if (entry.id == source.id and entry.generation == source.generation and entry.editor == null) {
                             _ = try services.focusView(ctx.head, ctx.gpa, ref, entry.viewCursor(ref));
                             try entry.semantic_focus.copyFrom(ctx.gpa, &ctx.head.semantic_focus);
+                            // The entry now represents what it presents: its
+                            // designation and its title follow the target, so
+                            // a descent reads as absolute as the first open.
                             if (services.views.get(ref)) |instance| {
-                                if (instance.descriptor.target) |binding| {
-                                    if (services.targets.get(binding.ref)) |target| {
-                                        const name = try std.fmt.allocPrint(ctx.gpa, "{s}: {s}", .{ entry.tool, target.display_name });
-                                        ctx.gpa.free(entry.name);
-                                        entry.name = name;
-                                    }
-                                }
+                                if (instance.descriptor.target) |binding|
+                                    try @import("designation.zig").presentTarget(ctx, entry, .{ .target = binding.ref, .revision = binding.revision });
                             }
                         }
                     },

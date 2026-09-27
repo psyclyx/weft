@@ -565,6 +565,7 @@ pub fn factsIn(scope: Scope) catalog_mod.Facts {
 pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.SemanticFocus, pane: u32, open: @import("weft_facts").context.Open) catalog_mod.Facts {
     return .{
         .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
+        .designation = entry.designationText(),
         .name = entry.name,
         .mode = mode,
         .lang = Actions.langOfName(entry.name),

@@ -38,50 +38,21 @@ const command = @import("command.zig");
 const intent = @import("intent.zig");
 const Buffers = @import("Buffers.zig");
 const place_mod = @import("place.zig");
+const file = @import("file.zig");
+const durable = @import("weft_semantic").durable;
+const Router = @import("weft_fs_runtime").Router;
 
 pub const Store = facts.context.Store;
 pub const Open = facts.context.Open;
 pub const Scope = facts.context.Scope;
 pub const ScopeKind = facts.context.ScopeKind;
 
-/// A place's exact coordinate in the store: its identity fields packed, the
-/// same fields `Place.eql` compares (never the revision). `.process` is 0; a
-/// container's handle generation is never 0, so no container packs to it.
-pub fn placeCoord(p: place_mod.Place) u128 {
-    return switch (p) {
-        .process => 0,
-        .container => |c| @as(u128, @intFromEnum(c.locus)) << 96 |
-            @as(u128, @intFromEnum(c.ref.authority)) << 64 |
-            @as(u128, c.ref.slot) << 32 |
-            c.ref.generation,
-    };
-}
-
-/// The store's coordinates for `entry`: its generation (unique for the life
-/// of the process, so a closed entry's values can never be read by the entry
-/// that reuses its slot) and its place.
-pub fn at(entry: *const Buffers.Buffer) facts.context.At {
-    return .{ .entry = entry.generation, .place = placeCoord(entry.place) };
-}
-
 /// A reader into `context`'s store at `entry` — what `Facts.context` holds.
 /// No context (a bare fixture) is a reader with no store: every open key
 /// reads as unset.
 pub fn openAt(context: ?*const Context, entry: *const Buffers.Buffer) Open {
     const c = context orelse return .{};
-    return .{ .store = &c.store, .at = at(entry) };
-}
-
-/// The coordinate a publication at `kind` lands on, for the entry a call is
-/// about. The place is the ENTRY's own, the level the stack names — not the
-/// head's working-target pin, which is where effects run, not what an entry
-/// is in.
-pub fn scopeFor(kind: ScopeKind, entry: *const Buffers.Buffer) Scope {
-    return switch (kind) {
-        .entry => .{ .entry = entry.generation },
-        .place => .{ .place = placeCoord(entry.place) },
-        .global => .global,
-    };
+    return .{ .store = &c.store, .at = c.at(entry) };
 }
 
 /// A Zig consumer of the primary-context event: told, at the frame boundary,
@@ -107,12 +78,60 @@ pub const Context = struct {
     /// replaced by the next `observe`.
     moved: std.ArrayList([]u8) = .empty,
     listeners: std.ArrayList(Listener) = .empty,
+    /// Who names a container place (`Router.designationOf`): the same system's
+    /// filesystem router, set by whoever owns both. Absent, only the
+    /// degenerate place has a name.
+    filesystems: ?*const Router = null,
+    /// The degenerate place's designation — the process directory, as
+    /// `weft://here/dir/<path>` — taken once, when the context is made.
+    /// Owned; empty when the directory cannot be named.
+    process_place: []u8 = &.{},
 
     pub fn init(gpa: Allocator) Context {
-        return .{ .gpa = gpa, .store = .init(gpa) };
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var named: [std.fs.max_path_bytes + 32]u8 = undefined;
+        const dir = file.processDirectory(&buf) orelse "";
+        const text: []const u8 = if (durable.Designation.ofPath(.directory, dir)) |d| d.render(&named) catch "" else "";
+        return .{ .gpa = gpa, .store = .init(gpa), .process_place = gpa.dupe(u8, text) catch &.{} };
+    }
+
+    /// The designation a place is named by — the key a place-scoped value is
+    /// published at and the `place` builtin's value. A container is named by
+    /// whoever bound it; one nothing names (a directory since closed) is ""
+    /// and covers nothing.
+    pub fn placeName(self: *const Context, p: place_mod.Place) []const u8 {
+        return switch (p) {
+            .process => self.process_place,
+            .container => |c| blk: {
+                const router = self.filesystems orelse break :blk "";
+                break :blk router.designationOf(c.ref, c.revision) orelse "";
+            },
+        };
+    }
+
+    /// The store's coordinates for `entry`: its generation (unique for the
+    /// life of the process, so a closed entry's values can never be read by
+    /// the entry that reuses its slot) and its place's designation.
+    pub fn at(self: *const Context, entry: *const Buffers.Buffer) facts.context.At {
+        return .{ .entry = entry.generation, .place = self.placeName(entry.place) };
+    }
+
+    /// The coordinate a publication at `kind` lands on, for the entry a call
+    /// is about. The place is the ENTRY's own, the level the stack names —
+    /// not the head's working-target pin, which is where effects run, not
+    /// what an entry is in — unless the publisher names one (`place`, a
+    /// place's designation): a REPL retracting its session from wherever it
+    /// is asked to quit names the place it published at, by the same string.
+    pub fn scopeFor(self: *const Context, kind: ScopeKind, entry: *const Buffers.Buffer, place: []const u8) Scope {
+        return switch (kind) {
+            .entry => .{ .entry = entry.generation },
+            .place => .{ .place = if (place.len != 0) place else self.placeName(entry.place) },
+            .global => .global,
+        };
     }
 
     pub fn deinit(self: *Context) void {
+        self.gpa.free(self.process_place);
         for (self.seen.items) |s| self.gpa.free(s.key);
         self.seen.deinit(self.gpa);
         self.clearMoved();
@@ -222,14 +241,14 @@ const Builder = struct {
 
     fn primary(self: *Builder, ctx: *command.Context, scope: intent.Scope) Allocator.Error!void {
         const f = intent.factsIn(scope);
-        var scratch: [facts.Facts.scratch_len]u8 = undefined;
+
         for (facts.context.builtin_keys) |key| {
             if (std.mem.eql(u8, key, "offers")) {
                 const plane = ctx.intent orelse continue;
                 self.add(key, plane.offersFingerprint(ctx, .primary));
                 continue;
             }
-            const v = f.get(key, &scratch) orelse continue;
+            const v = f.get(key) orelse continue;
             var h = std.hash.Wyhash.init(0);
             h.update(v);
             // Two entries can share a name (two `*scratch*`s): the entry key
@@ -243,14 +262,13 @@ const Builder = struct {
 
 const t = std.testing;
 
-test "context: a place packs exactly, and the process place is its own coordinate" {
-    try t.expectEqual(@as(u128, 0), placeCoord(.process));
-    const a: place_mod.Place = .{ .container = .{ .locus = .here, .ref = .{ .authority = .here, .slot = 1, .generation = 1 }, .revision = 3 } };
-    var b = a;
-    b.container.revision = 9; // a republish is the same place
-    try t.expectEqual(placeCoord(a), placeCoord(b));
-    var c = a;
-    c.container.ref.slot = 2;
-    try t.expect(placeCoord(a) != placeCoord(c));
-    try t.expect(placeCoord(a) != 0);
+test "context: a place is named by its designation, and one nothing names is no place" {
+    var context = Context.init(t.allocator);
+    defer context.deinit();
+    // The degenerate place is the process directory, as a designation.
+    try t.expect(std.mem.startsWith(u8, context.placeName(.process), "weft://here/dir/"));
+    // A container nothing binds (no router, or a closed directory) has no
+    // name, so nothing can be published at it or read from it.
+    const unnamed: place_mod.Place = .{ .container = .{ .locus = .here, .ref = .{ .authority = .here, .slot = 1, .generation = 1 }, .revision = 3 } };
+    try t.expectEqualStrings("", context.placeName(unnamed));
 }

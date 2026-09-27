@@ -23,6 +23,11 @@ weft.viewport("sidebar", {
   followFocus: false,
 });
 
-// "Present resource R in viewport V" — an ordinary operation, declared. The
-// subject opens through the same `open` every other locus runs.
-weft.present("sidebar", { subject: "." });
+// "Present resource R in viewport V" — an ordinary operation, declared. What
+// the sidebar shows is the PLACE's container: the files producer's `files`
+// opens the directory of the place the presentation runs in, by its
+// designation (`weft://here/dir/…`), so the tree is titled absolute and names
+// the project rather than wherever the editor was launched. A subject never
+// says "." — a relative path names nothing (doc/model.md §2.1). Phase 3 binds
+// this to the `place` context key instead: `{subject: {context: "place"}}`.
+weft.present("sidebar", { command: "files" });

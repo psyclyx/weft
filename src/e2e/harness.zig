@@ -23,6 +23,9 @@ pub const semantic_model = weft.semantic_model;
 pub const view_runtime = weft.view_runtime;
 pub const target_runtime = weft.target_runtime;
 pub const fs = weft.fs;
+pub const fs_runtime = weft.fs_runtime;
+pub const fs_platform = weft.fs_platform;
+pub const fs_remote = weft.fs_remote;
 const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
@@ -355,6 +358,8 @@ pub const Editor = struct {
             .known = &self.frame_known_peers,
         };
         try app_collab_cmds.registerCommands(self.gpa, self.commands, &self.share_ctx, &self.frame_known_peers);
+        self.buffer_commands.peers = .{ .context = &self.share_ctx, .open = app_collab_cmds.openPeer };
+        self.ctx.peer_names = .{ .context = &self.share_ctx, .name = app_collab_cmds.peerName };
     }
 
     /// Set a plugin's config value (`weft.set("<plugin>", key, value)`), for
@@ -487,9 +492,27 @@ pub const Editor = struct {
 
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
-        _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
+        var at_shell: [std.fs.max_path_bytes]u8 = undefined;
+        const value = if (std.mem.eql(u8, cmd, "open")) asTyped(arg, &at_shell) else arg;
+        _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = value }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    /// A test names a file the way a person at a shell does: relative to the
+    /// project it runs in, which is the process directory while a `Project`
+    /// lives. `open` refuses a relative path — it could only mean the launch
+    /// directory (doc/model.md §2.1) — so the harness resolves it here, at its
+    /// boundary, exactly as `main.zig` resolves the command line's file. A
+    /// designation, an absolute path and `host:path` pass through as typed.
+    pub fn asTyped(arg: []const u8, buf: *[std.fs.max_path_bytes]u8) []const u8 {
+        if (core.designation.durable.Spec.of(arg) != .relative) return arg;
+        if (std.mem.indexOfScalar(u8, arg, ':')) |colon|
+            if (colon > 0 and std.mem.indexOfScalar(u8, arg[0..colon], '/') == null) return arg;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = core.file.processDirectory(&cwd_buf) orelse return arg;
+        var fba: std.heap.FixedBufferAllocator = .init(buf);
+        return std.fs.path.resolve(fba.allocator(), &.{ cwd, arg }) catch arg;
     }
 
     // ── The pointer ──

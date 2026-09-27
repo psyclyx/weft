@@ -29,6 +29,7 @@ const BindingFacet = @import("weft_input").BindingFacet;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const jumplist = @import("jumplist.zig");
+const Document = @import("Document.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
@@ -63,6 +64,16 @@ posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
 /// are announced on — this system's, beside its entries, so a second system
 /// in the process never shows this one's chip.
 status: @import("status_feed.zig").Feed = .{},
+/// Documents whose entries closed, newest last (doc/model.md §2.2). An entry
+/// is a local OPENING of a designation, so closing the entry is not deleting
+/// what it opened: a scratch document — which has no file to be reopened
+/// from — is parked here, whole, so `weft://here/doc/<id>` (a jumplist entry,
+/// an embed, a viewport's subject) can open it again. Bounded: past
+/// `parked_cap` the oldest is released for good, and a designation naming
+/// it is refused as gone rather than answered with something else.
+parked: std.ArrayList(*Buffer) = .empty,
+
+pub const parked_cap = 16;
 
 pub const Id = u32;
 
@@ -83,6 +94,18 @@ pub const Buffer = struct {
     editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
+    /// The designation this entry's producer DECLARED (doc/model.md §2.2),
+    /// owned, or empty — in which case it is derived (`designation.zig`): a
+    /// file-backed entry is named by its file, a scratch entry by its
+    /// document's minted id, a view by the target it presents. Only what a
+    /// producer alone knows is declared here: a projection kind and its
+    /// arguments, a live process, a peer's document. Set through
+    /// `setDesignation`, whose callers check who may say what.
+    designation: []u8 = &.{},
+    /// Where `designationText` spells this entry's designation, so a reader
+    /// that must not allocate (a fact builder) can borrow it for as long as
+    /// the entry lives. Re-spelled on every ask, from the entry as it is.
+    spelled: [designation_cap]u8 = undefined,
     /// The plugin projection this entry represents (`files`, `files`), or
     /// empty. An ambient fact providers scope on — a projection registers its
     /// `save` under `When{ .tool = … }` so it wins in its own entry, in any
@@ -284,9 +307,37 @@ pub const Buffer = struct {
         gpa.free(self.tool);
         self.tool = owned;
     }
+
+    /// Declare the designation this entry represents (see `designation`).
+    /// Mechanism only: the door a guest reaches this through decides which
+    /// kinds it may declare. Empty returns the entry to derivation.
+    pub fn setDesignation(self: *Buffer, gpa: Allocator, text: []const u8) Error!void {
+        const owned = try gpa.dupe(u8, text);
+        gpa.free(self.designation);
+        self.designation = owned;
+    }
+
+    /// This entry's designation (`designation.of`), spelled into the entry's
+    /// own storage — borrowed until the entry closes, and re-spelled by the
+    /// next ask. Empty when it has none.
+    pub fn designationText(self: *Buffer) []const u8 {
+        return @import("designation.zig").of(self, &self.spelled) orelse "";
+    }
+
+    /// Whether this entry is a DOCUMENT and nothing else — scratch text with
+    /// no file, no producer, and no declared name. Such an entry is named by
+    /// its document's minted id, and its document outlives it (`park`).
+    pub fn isBareDocument(self: *Buffer) bool {
+        const ed = self.textEditor() orelse return false;
+        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and !self.read_only;
+    }
 };
 
 pub const Error = Allocator.Error;
+
+/// Room for any designation an entry is named by (`designation.max_len`): a
+/// path at the OS limit plus scheme, authority and kind.
+pub const designation_cap = std.fs.max_path_bytes + 96;
 
 /// Starts with one active scratch buffer (id 0).
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Error!Buffers {
@@ -304,6 +355,8 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
         if (slot) |b| self.destroyBuffer(gpa, b);
     }
     self.slots.deinit(gpa);
+    for (self.parked.items) |b| self.destroyBuffer(gpa, b);
+    self.parked.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
     for (&self.posture_modes.values) |mode| gpa.free(mode);
@@ -355,6 +408,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.tool);
+    gpa.free(b.designation);
     gpa.free(b.mode);
     gpa.destroy(b);
 }
@@ -434,17 +488,8 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
     const owned_tool = try gpa.dupe(u8, tool);
     errdefer gpa.free(owned_tool);
 
-    // Reuse the lowest free slot, else append.
-    const id: Id = blk: {
-        for (self.slots.items, 0..) |slot, i| {
-            if (slot == null) break :blk @intCast(i);
-        }
-        try self.slots.append(gpa, null);
-        break :blk @intCast(self.slots.items.len - 1);
-    };
-    const generation = self.next_generation;
-    self.next_generation +%= 1;
-    if (self.next_generation == 0) self.next_generation = 1;
+    const id = try self.freeSlot(gpa);
+    const generation = self.mintGeneration();
     // A new entry starts where the entry that produced it is (`doc/place.md`
     // §2.1) — so `*grep*` belongs to the project grep was run in, and keeps
     // belonging to it after focus moves on.
@@ -471,6 +516,73 @@ fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, too
     };
     self.slots.items[id] = b;
     return id;
+}
+
+/// The lowest free slot, else a new one at the end (left null for the caller
+/// to fill before anything else runs).
+fn freeSlot(self: *Buffers, gpa: Allocator) Error!Id {
+    for (self.slots.items, 0..) |slot, i| {
+        if (slot == null) return @intCast(i);
+    }
+    try self.slots.append(gpa, null);
+    return @intCast(self.slots.items.len - 1);
+}
+
+fn mintGeneration(self: *Buffers) u64 {
+    const generation = self.next_generation;
+    self.next_generation +%= 1;
+    if (self.next_generation == 0) self.next_generation = 1;
+    return generation;
+}
+
+/// Keep a closing entry's document (see `parked`). The entry is gone — its
+/// slot is free and every `Ref` to it is dead — but the `Buffer` holding the
+/// document is kept whole, so its anchors (a jumplist's remembered spots)
+/// still resolve when it is reopened.
+fn park(self: *Buffers, gpa: Allocator, b: *Buffer) Error!void {
+    try self.parked.ensureUnusedCapacity(gpa, 1);
+    if (self.parked.items.len >= parked_cap) self.destroyBuffer(gpa, self.parked.orderedRemove(0));
+    self.parked.appendAssumeCapacity(b);
+}
+
+/// Open the parked document `doc` again as a live entry, under a fresh
+/// identity (a new slot and generation: nothing that held the closed entry
+/// resolves to this one). Does not focus it. Null when no parked document is
+/// that one — never released, or released past the bound.
+pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
+    for (self.parked.items, 0..) |b, i| {
+        const ed = b.textEditor() orelse continue;
+        if (!ed.doc.id.eql(doc)) continue;
+        const id = try self.freeSlot(gpa);
+        _ = self.parked.orderedRemove(i);
+        b.id = id;
+        b.generation = self.mintGeneration();
+        self.slots.items[id] = b;
+        return id;
+    }
+    return null;
+}
+
+/// Document `doc` wherever it is held — a live entry or the parked store —
+/// or null once it has been released. What an anchor into a document needs:
+/// the document, not whether anything has it open right now.
+pub fn documentById(self: *const Buffers, doc: Document.Id) ?*Document {
+    if (self.findByDocument(doc)) |id| return &self.get(id).?.textEditor().?.doc;
+    for (self.parked.items) |b| {
+        const ed = b.textEditor() orelse continue;
+        if (ed.doc.id.eql(doc)) return &ed.doc;
+    }
+    return null;
+}
+
+/// The live entry holding document `doc`, if any.
+pub fn findByDocument(self: *const Buffers, doc: Document.Id) ?Id {
+    var it = self.iterator();
+    while (it.next()) |b| {
+        const ed = b.textEditor() orelse continue;
+        if (ed.doc.id.eql(doc)) return b.id;
+    }
+    return null;
 }
 
 /// The buffer already backed by `path`, if any (dedupe on open).
@@ -527,7 +639,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // one: remember where this head was (`jumplist.zig`). Travel along the
     // list itself, and a borrow that puts the head back (`withEntry`,
     // `quietly`), is muted there.
-    try jumplist.push(&head.jumps, gpa, self, jumplist.here(self));
+    try jumplist.pushHere(&head.jumps, gpa, self);
     // Semantic focus is buffer-local, just like the saved keymap posture.
     // Save before leaving and restore the incoming buffer's cursor. This also
     // guarantees a text buffer never inherits a tool's editable field.
@@ -719,8 +831,13 @@ pub fn prevId(self: *const Buffers) Id {
 
 /// Close a buffer. Closing the active buffer focuses the next one;
 /// closing the last replaces it with a fresh scratch. Dirty checks are
-/// the caller's policy. Leaving an entry that is about to die is no jump: a
-/// position in it could never be returned to.
+/// the caller's policy. Leaving an entry that is about to die is not
+/// recorded as a jump from here: the entry's own jumps already name its
+/// designation, which is what a return goes back to.
+///
+/// A bare document with anything in it is parked rather than destroyed (see
+/// `parked`); every other entry's document dies with it, and `head`'s jumps
+/// into it keep their offsets for when its designation is opened afresh.
 pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const b = self.get(id) orelse return;
     if (self.count() == 1) {
@@ -730,6 +847,11 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const
         try self.switchQuietly(gpa, self.nextId(), head, keymap);
     }
     self.slots.items[id] = null;
+    if (b.isBareDocument() and b.textEditor().?.doc.commitCount() > 0) {
+        self.park(gpa, b) catch self.destroyBuffer(gpa, b);
+        return;
+    }
+    if (b.textEditor()) |ed| jumplist.settle(&head.jumps, &ed.doc);
     self.destroyBuffer(gpa, b);
 }
 

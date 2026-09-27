@@ -68,7 +68,8 @@ test "e2e/notes: a note's directory and file embeds render, and typing never pay
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try seed(&proj, gpa, "printf '# journal\\n@embed weft://here/dir/tree?lines=3\\n@embed weft://here/file/readme.md?lines=2\\nend\\n' > journal.md");
+    // Designations name absolute paths: the note spells the project's own.
+    try seed(&proj, gpa, "p=\"$(pwd -P)\"; printf '# journal\\n@embed weft://here/dir%s/tree?lines=3\\n@embed weft://here/file%s/readme.md?lines=2\\nend\\n' \"$p\" \"$p\" > journal.md");
     gpa.free(try proj.oracle("printf 'plain note\\nno embeds here\\nend\\n' > plain.md"));
 
     // Opening the note is the whole interaction: activation drives the round,
@@ -137,7 +138,7 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try seed(&proj, gpa, "printf '@embed weft://here/dir/tree?lines=4\\n@embed weft://here/file/readme.md\\n@embed weft://here/commit/deadbeefcafe\\n' > journal.md");
+    try seed(&proj, gpa, "p=\"$(pwd -P)\"; printf '@embed weft://here/dir%s/tree?lines=4\\n@embed weft://here/file%s/readme.md\\n@embed weft://here/commit/deadbeefcafe\\n' \"$p\" \"$p\" > journal.md");
 
     ed.runStr("open", "journal.md");
     ed.settle(6);
@@ -168,8 +169,12 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
     // the note, untouched by anything the embed machinery did.
     const text = try ed.textAlloc();
     defer gpa.free(text);
-    try t.expect(has(text, "@embed weft://here/dir/tree?lines=4"));
-    try t.expect(has(text, "@embed weft://here/file/readme.md"));
+    const dir_line = try std.fmt.allocPrint(gpa, "@embed weft://here/dir{s}/tree?lines=4", .{proj.root});
+    defer gpa.free(dir_line);
+    const file_line = try std.fmt.allocPrint(gpa, "@embed weft://here/file{s}/readme.md", .{proj.root});
+    defer gpa.free(file_line);
+    try t.expect(has(text, dir_line));
+    try t.expect(has(text, file_line));
 }
 
 // ── GATE N3: a captured location round-trips ──
@@ -205,7 +210,11 @@ test "e2e/notes: a captured location round-trips through the note and back" {
     ed.settle(6);
     const note = try ed.textAlloc();
     defer gpa.free(note);
-    try t.expect(has(note, "@embed weft://here/file/main.zig?at="));
+    // What was captured is the entry's designation — the file's absolute
+    // name — and the position rides in the locator.
+    const captured_line = try std.fmt.allocPrint(gpa, "@embed weft://here/file{s}/main.zig?at=", .{proj.root});
+    defer gpa.free(captured_line);
+    try t.expect(has(note, captured_line));
 
     // The embed is the note's first line; `Return` is `std.target.activate`,
     // and notes is what answers it here.

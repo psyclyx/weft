@@ -303,44 +303,100 @@ pub fn materializeViewports(
             continue;
         }
         // A pending take, only while its entry is still open.
-        const take: ?core.Buffers.Id = if (decl.take) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
-        decl.take = null;
+        const take: ?core.Buffers.Id = if (decl.take) |held| (if (core.designation.findText(buffers, held)) |b| b.id else null) else null;
+        core.viewport.Registry.hold(gpa, &decl.take, null) catch {};
+        // Docking again after a hide: show what it showed last. That is a
+        // designation, so it is whichever entry opens it now — or, when that
+        // entry has closed since, the designation opened again below; never
+        // the stranger that took the closed entry's slot.
+        var kept: ?core.Buffers.Id = null;
+        var docked = false;
         if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
+            kept = if (decl.entry) |held| (if (core.designation.findText(buffers, held)) |b| b.id else null) else null;
             // Dock showing what it showed last (or is being handed), never a
             // second view of the active document when there is one.
-            const kept: ?core.Buffers.Id = if (decl.entry) |ref| (if (buffers.resolve(ref)) |b| b.id else null) else null;
             const first = take orelse kept orelse buffers.active_id;
             const panel = win_layout.dock(edge, decl.extent, first, decl.attrs) catch continue;
             decl.pane = panel.leaf.id;
             // Something to show already: an entry kept across a hide stays
             // what it was, rather than being re-presented over.
             decl.presented = kept != null and take == null;
+            docked = true;
             dirty = true;
         }
         const node = win_layout.paneById(decl.pane.?) orelse continue;
         if (take) |id| {
             takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
-            decl.entry = heldRef(buffers, id);
+            hold(gpa, buffers, decl, id);
             decl.presented = true; // what was taken replaces what was declared
             dirty = true;
             continue;
         }
+        if (docked and kept == null) if (decl.entry) |held| {
+            const again = gpa.dupe(u8, held) catch continue;
+            defer gpa.free(again);
+            if (core.Buffers.quietly(head, reopenInto, .{ ctx, buffers, gpa, head, keymap, node, again })) {
+                decl.presented = true;
+                continue;
+            }
+            // Gone for good (a process that exited): forget it, and present
+            // what the viewport declares instead.
+            core.viewport.Registry.hold(gpa, &decl.entry, null) catch {};
+            decl.presented = false;
+        };
         if (decl.presented or !decl.hasPresentation()) {
-            if (decl.entry == null) decl.entry = heldRef(buffers, node.pane().buffer_id);
+            // What it holds follows what it shows: navigating inside a
+            // listing moves the listing's designation, and that is what
+            // showing it again must bring back.
+            hold(gpa, buffers, decl, node.pane().buffer_id);
             continue;
         }
         decl.presented = true;
         presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
-        decl.entry = heldRef(buffers, node.pane().buffer_id);
+        hold(gpa, buffers, decl, node.pane().buffer_id);
         dirty = true;
     }
     return dirty;
 }
 
-/// What a viewport remembers of the entry it shows: its generation-checked
-/// ref, so a slot reused after that entry closes is never taken for it.
-fn heldRef(buffers: *core.Buffers, id: core.Buffers.Id) ?core.Buffers.Ref {
-    return (buffers.get(id) orelse return null).ref();
+/// Open `designation` again and show it in `node` — a viewport's closed
+/// entry coming back. Unlike `presentBy`, the pane changes only when the
+/// designation really opened: a process that has exited is refused, and the
+/// pane must not be handed whatever happened to be active instead. The head
+/// goes back where it was either way.
+fn reopenInto(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: anytype,
+    designation: []const u8,
+) bool {
+    const restore = buffers.active_id;
+    const prev = buffers.prev_id;
+    defer if (buffers.active_id != restore and buffers.get(restore) != null) {
+        buffers.switchTo(gpa, restore, head, keymap) catch {};
+        buffers.prev_id = prev;
+    };
+    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = designation }}) catch return false;
+    const opened = core.designation.findText(buffers, designation) orelse return false;
+    node.pane().buffer_id = opened.id;
+    node.pane().top_row = 0;
+    return true;
+}
+
+/// What a viewport remembers of the entry it shows: that entry's
+/// designation, so a slot reused after the entry closes is never taken for
+/// it, and a closed entry is opened again instead of lost. An entry with no
+/// designation leaves nothing to remember.
+fn hold(gpa: std.mem.Allocator, buffers: *core.Buffers, decl: *core.viewport.Declaration, id: core.Buffers.Id) void {
+    var buf: [core.designation.max_len]u8 = undefined;
+    const held = if (buffers.get(id)) |b| core.designation.of(b, &buf) else null;
+    // Asked every frame for a shown viewport: unchanged is the common case,
+    // and costs no allocation.
+    if (held) |text| if (decl.entry) |old| if (std.mem.eql(u8, old, text)) return;
+    core.viewport.Registry.hold(gpa, &decl.entry, held) catch {};
 }
 
 /// Realize a `viewport-take` (`core.viewport.Registry.takeEntry`): `node`

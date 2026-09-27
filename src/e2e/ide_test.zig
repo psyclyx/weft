@@ -545,7 +545,8 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     ed.runStr("open", "a.txt");
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
-    try t.expectEqualStrings("*repl*", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
+    // Its value is the REPL's designation: a live resource, by name.
+    try t.expectEqualStrings("weft://here/proc/repl", runStr(ed, &buf, "ow-context-get", &.{.{ .string = "repl.session" }}));
     // Back on the source, the entry moved — the REPL key did not.
     try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow-keys", &.{}), "repl.session") == null);
 

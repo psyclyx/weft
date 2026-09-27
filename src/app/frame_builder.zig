@@ -641,7 +641,7 @@ pub const FrameBuilder = struct {
 
         var status_args: view_mod.ui_mesh.StatuslineArgs = .{
             .facts = spec.facts,
-            .file = name,
+            .file = if (ed) |e| (if (e.backingPath()) |p| core.designation.placeRelative(spec.buffer, fx.cmd_ctx.realizer, p, try arena.alloc(u8, core.designation.max_len)) else name) else name,
             .buffer_pos = spec.buffer_pos,
             .diag_layer = live.diagnostics,
             .link = spec.link,
@@ -821,7 +821,8 @@ pub const FrameBuilder = struct {
             while (bit3.next()) |b| {
                 // A docked companion's entry (the file tree, a panel, a
                 // toolbar) is chrome, not a document: never a tab.
-                if (fx.viewports.holdsEntry(b.ref())) continue;
+                var held_buf: [core.designation.max_len]u8 = undefined;
+                if (core.designation.of(b, &held_buf)) |held| if (fx.viewports.holdsEntry(held)) continue;
                 const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
                 tab_list.append(arena, .{ .name = std.fs.path.basename(nm), .active = b == abuf, .id = b.id }) catch {};
             }

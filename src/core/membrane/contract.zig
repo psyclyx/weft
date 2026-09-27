@@ -281,6 +281,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
+    .{ .name = "wl_entry_designation", .handler = tool.hEntryDesignation },
+    .{ .name = "wl_entry_designate", .handler = tool.hEntryDesignate },
+    .{ .name = "wl_designation_opener", .handler = tool.hDesignationOpener },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────
     .{ .name = "wl_yank_range", .handler = register.hYankRange },

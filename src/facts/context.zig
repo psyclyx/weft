@@ -79,18 +79,23 @@ pub fn isKeyName(key: []const u8) bool {
 /// integer (`wl_context_set`'s last argument).
 pub const ScopeKind = enum(u32) { entry = 0, place = 1, global = 2 };
 
-/// A publication's coordinate. The host packs its identities into these
-/// integers exactly (no hashing): an entry is its generation, unique for the
-/// life of the process and never reused; a place is its identity fields.
+/// A publication's coordinate, exact (no hashing): an entry is its
+/// generation, unique for the life of the process and never reused; a place
+/// is its DESIGNATION (`weft://here/dir/…`, doc/model.md §2.1) — the durable
+/// name of its container, so two handles to one directory are one place,
+/// and a publisher can name a place it is not standing in (a REPL retracting
+/// its session from another project) by the same string it published at.
+/// In a stored value the place bytes are the store's; in a question they
+/// are borrowed.
 pub const Scope = union(ScopeKind) {
     entry: u64,
-    place: u128,
+    place: []const u8,
     global,
 
     pub fn eql(a: Scope, b: Scope) bool {
         return switch (a) {
             .entry => |e| b == .entry and b.entry == e,
-            .place => |p| b == .place and b.place == p,
+            .place => |p| b == .place and std.mem.eql(u8, b.place, p),
             .global => b == .global,
         };
     }
@@ -106,16 +111,17 @@ pub const Scope = union(ScopeKind) {
     }
 };
 
-/// WHERE a question is asked: the entry (0 = none) and the place it is in.
-/// Every value whose scope covers these coordinates is a candidate.
+/// WHERE a question is asked: the entry (0 = none) and the designation of
+/// the place it is in ("" = none). Every value whose scope covers these
+/// coordinates is a candidate.
 pub const At = struct {
     entry: u64 = 0,
-    place: u128 = 0,
+    place: []const u8 = "",
 
     fn covers(self: At, s: Scope) bool {
         return switch (s) {
             .entry => |e| e != 0 and e == self.entry,
-            .place => |p| p == self.place,
+            .place => |p| p.len != 0 and std.mem.eql(u8, p, self.place),
             .global => true,
         };
     }
@@ -128,6 +134,7 @@ const Value = struct {
     value: []u8,
 
     fn free(self: Value, gpa: Allocator) void {
+        if (self.scope == .place) gpa.free(self.scope.place);
         gpa.free(self.owner);
         gpa.free(self.key);
         gpa.free(self.value);
@@ -141,6 +148,9 @@ pub const SetError = error{
     BadValue,
     /// Another owner already publishes this key at this scope.
     Held,
+    /// A place scope that names no place (the entry is in none this editor
+    /// can name, or the publisher gave an empty designation).
+    NoPlace,
 } || Allocator.Error;
 
 pub const Store = struct {
@@ -177,6 +187,7 @@ pub const Store = struct {
     /// Returns whether anything changed.
     pub fn set(self: *Store, owner: []const u8, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
         if (!isPublishableKey(key)) return error.BadKey;
+        if (scope == .place and scope.place.len == 0) return error.NoPlace;
         if (value.len > max_value_len) return error.BadValue;
         if (self.find(scope, key)) |i| {
             const held = &self.values.items[i];
@@ -199,7 +210,12 @@ pub const Store = struct {
         errdefer self.gpa.free(owned_key);
         const owned_value = try self.gpa.dupe(u8, value);
         errdefer self.gpa.free(owned_value);
-        try self.values.append(self.gpa, .{ .owner = owned_owner, .scope = scope, .key = owned_key, .value = owned_value });
+        const owned_scope: Scope = switch (scope) {
+            .place => |p| .{ .place = try self.gpa.dupe(u8, p) },
+            else => scope,
+        };
+        errdefer if (owned_scope == .place) self.gpa.free(owned_scope.place);
+        try self.values.append(self.gpa, .{ .owner = owned_owner, .scope = owned_scope, .key = owned_key, .value = owned_value });
         self.revision += 1;
         return true;
     }
@@ -268,7 +284,7 @@ pub const Open = struct {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.asBytes(&s.revision));
         h.update(std.mem.asBytes(&self.at.entry));
-        h.update(std.mem.asBytes(&self.at.place));
+        h.update(self.at.place);
         return h.final();
     }
 };
@@ -279,38 +295,55 @@ test "context: the most specific scope wins, and each scope is only seen where i
     var s = Store.init(t.allocator);
     defer s.deinit();
     _ = try s.set("a", .global, "x.k", "global");
-    _ = try s.set("a", .{ .place = 7 }, "x.k", "place");
+    _ = try s.set("a", .{ .place = "weft://here/dir/p7" }, "x.k", "place");
     _ = try s.set("a", .{ .entry = 3 }, "x.k", "entry");
 
-    try t.expectEqualStrings("entry", s.get(.{ .entry = 3, .place = 7 }, "x.k").?);
+    try t.expectEqualStrings("entry", s.get(.{ .entry = 3, .place = "weft://here/dir/p7" }, "x.k").?);
     // Another entry in the same place sees the place's value…
-    try t.expectEqualStrings("place", s.get(.{ .entry = 4, .place = 7 }, "x.k").?);
+    try t.expectEqualStrings("place", s.get(.{ .entry = 4, .place = "weft://here/dir/p7" }, "x.k").?);
     // …another place sees the workspace's…
-    try t.expectEqualStrings("global", s.get(.{ .entry = 4, .place = 8 }, "x.k").?);
+    try t.expectEqualStrings("global", s.get(.{ .entry = 4, .place = "weft://here/dir/p8" }, "x.k").?);
     // …and an entry value never leaks to an entryless question.
-    try t.expectEqualStrings("place", s.get(.{ .place = 7 }, "x.k").?);
+    try t.expectEqualStrings("place", s.get(.{ .place = "weft://here/dir/p7" }, "x.k").?);
     try t.expectEqual(@as(?[]const u8, null), s.get(.{}, "y.k"));
 
     // Retracting the entry's value uncovers the place's.
     _ = try s.set("a", .{ .entry = 3 }, "x.k", "");
-    try t.expectEqualStrings("place", s.get(.{ .entry = 3, .place = 7 }, "x.k").?);
+    try t.expectEqualStrings("place", s.get(.{ .entry = 3, .place = "weft://here/dir/p7" }, "x.k").?);
 }
 
 test "context: a key at a scope has one owner, and unloading retracts it" {
     var s = Store.init(t.allocator);
     defer s.deinit();
-    try t.expect(try s.set("repl", .{ .place = 1 }, "repl.session", "*repl*"));
+    try t.expect(try s.set("repl", .{ .place = "weft://here/dir/p1" }, "repl.session", "*repl*"));
     // The same write again changes nothing.
-    try t.expect(!try s.set("repl", .{ .place = 1 }, "repl.session", "*repl*"));
-    try t.expectError(error.Held, s.set("other", .{ .place = 1 }, "repl.session", "mine"));
+    try t.expect(!try s.set("repl", .{ .place = "weft://here/dir/p1" }, "repl.session", "*repl*"));
+    try t.expectError(error.Held, s.set("other", .{ .place = "weft://here/dir/p1" }, "repl.session", "mine"));
     // A different scope is a different claim.
-    try t.expect(try s.set("other", .{ .place = 2 }, "repl.session", "mine"));
+    try t.expect(try s.set("other", .{ .place = "weft://here/dir/p2" }, "repl.session", "mine"));
 
     const rev = s.revision;
     try t.expectEqual(@as(usize, 1), s.retractOwner("repl"));
     try t.expect(s.revision != rev);
-    try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = 1 }, "repl.session"));
-    try t.expectEqualStrings("mine", s.get(.{ .place = 2 }, "repl.session").?);
+    try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = "weft://here/dir/p1" }, "repl.session"));
+    try t.expectEqualStrings("mine", s.get(.{ .place = "weft://here/dir/p2" }, "repl.session").?);
+}
+
+test "context: a place is its designation — named by value, held by the store, never empty" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    var named = "weft://here/dir/srv/proj".*;
+    _ = try s.set("repl", .{ .place = &named }, "repl.session", "weft://here/proc/repl.1");
+    // The store keeps its own copy: the publisher's bytes can go.
+    @memset(&named, 'x');
+    try t.expectEqualStrings("weft://here/proc/repl.1", s.get(.{ .entry = 9, .place = "weft://here/dir/srv/proj" }, "repl.session").?);
+    // An entry in no nameable place sees no place's values…
+    try t.expectEqual(@as(?[]const u8, null), s.get(.{ .entry = 9 }, "repl.session"));
+    // …and nothing can be published at one.
+    try t.expectError(error.NoPlace, s.set("repl", .{ .place = "" }, "repl.session", "v"));
+    // Retracting names the place by the same string, from anywhere.
+    _ = try s.set("repl", .{ .place = "weft://here/dir/srv/proj" }, "repl.session", "");
+    try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = "weft://here/dir/srv/proj" }, "repl.session"));
 }
 
 test "context: no plugin can publish a builtin, or a key that is not namespaced" {
@@ -330,7 +363,7 @@ test "context: each visits every resolved key once, with its winner" {
     _ = try s.set("a", .global, "a.k", "g");
     _ = try s.set("a", .{ .entry = 1 }, "a.k", "e");
     _ = try s.set("b", .global, "b.k", "g2");
-    _ = try s.set("b", .{ .place = 9 }, "c.k", "elsewhere");
+    _ = try s.set("b", .{ .place = "weft://here/dir/p9" }, "c.k", "elsewhere");
     const Seen = struct {
         buf: [4][2][]const u8 = undefined,
         n: usize = 0,

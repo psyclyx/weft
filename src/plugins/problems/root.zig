@@ -48,12 +48,15 @@ fn init() void {
     // The signal name is read ONCE, here: a subscription is for the life of
     // the plugin.
     _ = weft.signalSubscribe(orDefault("signal", "diagnostics"));
+    _ = weft.designationOpener("problems", "problems");
 }
 
 /// `problems`: show the list in the panel and focus it there.
 fn open() void {
     weft.focusOrCreateBuffer(buffer_name);
     weft.toolBacking("problems");
+    // The entry IS the problems list (doc/model.md §2.1), re-run by name.
+    _ = weft.designate("weft://here/problems/all");
     rebuild(true);
     if (view_ref) |ref| _ = weft.semanticViewFocus(ref, null);
     weft.runStr("viewport-take", orDefault("viewport", "panel"));
@@ -157,7 +160,7 @@ fn onSemanticAction() callconv(.c) void {
 /// Open the row's file (placement puts it in the primary pane, never in the
 /// panel) and put the caret at its line and column.
 fn jumpTo(row: Row) void {
-    weft.runStr("open", row.path);
+    weft.openUnder(weft.placeRoot(), row.path);
     weft.jumpPush();
     var off: usize = 0;
     var line: usize = 1;

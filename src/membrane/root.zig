@@ -369,6 +369,9 @@ pub const imports = [_]Entry{
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
+    .{ .name = "wl_entry_designation", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "the designation (`weft://…`) of the entry this call is about into guest memory, or -1 when it has none" },
+    .{ .name = "wl_entry_designate", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "declare the designation the entry this call is about represents: `proc`, or a projection kind this plugin claimed; 0 ok, negative refused" },
+    .{ .name = "wl_designation_opener", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .tool, .doc = "claim projection kind `kind` for this plugin, re-run by `command` given the designation; 0 ok, -1 not a projection kind, -2 claimed by another" },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────
     .{ .name = "wl_yank_range", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture `[start,end)` into an explicit register slot" },
@@ -387,7 +390,7 @@ pub const imports = [_]Entry{
     // ── history.zig — the dispatching head's jumplist and macro recorder ──
     .{ .name = "wl_jump_push", .params = &.{}, .results = &.{}, .group = .history, .doc = "remember the caret as a jump in the head's jumplist (a grammar decides what a jump is)" },
     .{ .name = "wl_macro_recording", .params = &.{}, .results = &.{.u32}, .group = .history, .doc = "the register a macro is recording into (its byte), or 0 when none is" },
-    .{ .name = "wl_context_set", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "publish (key, value) at a scope (0 entry, 1 place, 2 global) of the entry this call is about; an empty value retracts; 0 done, -1 refused (key not namespaced, value too long, bad scope), -2 another plugin holds the key there" },
+    .{ .name = "wl_context_set", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "publish (key, value) at a scope (0 entry, 1 place, 2 global) of the entry this call is about — or, at the place scope, of the place a `dir` designation names; an empty value retracts; 0 done, -1 refused (key not namespaced, value too long, bad scope), -2 another plugin holds the key there" },
     .{ .name = "wl_context_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the primary context's value for any key (builtin or published) into guest memory (clamped); returns the full length, -1 when unset" },
     .{ .name = "wl_context_changed", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .context, .doc = "the keys the on_context_changed being delivered reports as moved, one per line (clamped); returns the full length" },
 
@@ -603,9 +606,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 259;
+const max_import_count: usize = 262;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 279;
+const max_semantic_operation_count: usize = 282;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -760,7 +763,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 259), census.imports);
+    try t.expectEqual(@as(usize, 262), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 279), census.semantic_operations);
+    try t.expectEqual(@as(usize, 282), census.semantic_operations);
 }
