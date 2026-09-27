@@ -126,8 +126,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_edit_range", .handler = edit.hEditRange },
     .{ .name = "wl_selections_get", .handler = edit.hSelectionsGet },
     .{ .name = "wl_selections_set", .handler = edit.hSelectionsSet },
-    .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
-    .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
     .{ .name = "wl_undo_unit", .handler = edit.hUndoUnit },
     .{ .name = "wl_visit", .handler = edit.hVisit },
 
@@ -288,9 +286,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_register_text", .handler = register.hRegisterText },
     .{ .name = "wl_register_linewise", .handler = register.hRegisterLinewise },
     .{ .name = "wl_paste_at", .handler = register.hPasteAt },
-    .{ .name = "wl_yank_each", .handler = register.hYankEach },
-    .{ .name = "wl_register_paste_value", .handler = register.hRegisterPasteValue },
-    .{ .name = "wl_paste_value_at", .handler = register.hPasteValueAt },
     .{ .name = "wl_register_set", .handler = register.hRegisterSet },
 
     // ── clipboard.zig — the head's system clipboard (config-only grant) ──

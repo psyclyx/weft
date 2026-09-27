@@ -611,32 +611,10 @@ pub fn collapseSelections() bool {
     return setSelections(set.items[set.primary..][0..1], 0);
 }
 
-/// Run a motion once per selection (each read as "the cursor") and fill
-/// `out` with one live-range handle per selection, null where the motion
-/// returned none. Returns the filled prefix of `out`.
-pub fn runRangeEach(cmd: []const u8, out: []?u32) []?u32 {
-    var raw: [max_selections]i32 = undefined;
-    const cap = @min(out.len, max_selections);
-    const total: usize = @intCast(@max(0, e.wl_run_range_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(cap))));
-    const n = @min(total, cap);
-    for (out[0..n], raw[0..n]) |*o, h| o.* = if (h < 0) null else @intCast(h);
-    return out[0..n];
-}
-
-/// Run an operator once per range handle — reverse offset order, one undo
-/// unit. Null entries (a selection the motion found nothing for) are skipped.
-pub fn runRangeArgEach(cmd: []const u8, handles: []const ?u32) void {
-    var raw: [max_selections]i32 = undefined;
-    const n = @min(handles.len, max_selections);
-    for (raw[0..n], handles[0..n]) |*r, h| r.* = if (h) |v| @intCast(v) else -1;
-    if (n == 0) return;
-    e.wl_run_range_arg_each(p(cmd.ptr), @intCast(cmd.len), p(&raw), @intCast(n));
-}
-
 /// Call `f(args…)` as ONE undo unit of the entry this command is about:
 /// whatever it edits, across however many commands, one undo takes back. Units
-/// nest and the outermost owns the unit, so a count loop over operators that
-/// are each one unit (`runRangeArgEach`) is one unit too. The host closes the
+/// nest and the outermost owns the unit, so a loop over edits that are each
+/// their own unit is one unit too. The host closes the
 /// unit if `f` does not return (a unit never outlives the command dispatch).
 pub fn undoUnit(comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
     _ = e.wl_undo_unit(1);
@@ -2091,32 +2069,6 @@ pub fn pasteAt(base: usize) void {
 }
 pub fn pasteAtIn(name: u8, base: usize) void {
     e.wl_paste_at(@intCast(base), name);
-}
-
-/// Yank one value per selection: each of `ranges` (selection order) becomes
-/// its own value in register `name`.
-pub fn yankEachIn(name: u8, ranges: []const Range, linewise: bool) void {
-    // `sel_words` is free here: `ranges` may alias `sel_items`, never it.
-    const words = sel_words[0 .. 2 * max_selections];
-    const n = @min(ranges.len, max_selections);
-    if (n == 0) return;
-    for (ranges[0..n], 0..) |r, i| {
-        words[2 * i] = @intCast(r.start);
-        words[2 * i + 1] = @intCast(r.end);
-    }
-    e.wl_yank_each(p(words.ptr), @intCast(n), @intFromBool(linewise), name);
-}
-/// What selection `index` of `count` pastes from register `name` — its own
-/// value when the register holds exactly `count`, else every value joined
-/// (core's one distribution rule, `register.zig`'s `pasteSpan`). Private
-/// scratch, valid until the next call.
-pub fn registerPasteValueIn(name: u8, index: usize, count: usize) []const u8 {
-    const n = e.wl_register_paste_value(@intCast(index), @intCast(count), p(&reg_scratch), reg_scratch.len, name);
-    return reg_scratch[0..@intCast(n)];
-}
-/// `pasteAtIn` for the value selection `index` of `count` pasted at `base`.
-pub fn pasteValueAtIn(name: u8, base: usize, index: usize, count: usize) void {
-    e.wl_paste_value_at(@intCast(base), @intCast(index), @intCast(count), name);
 }
 
 // ── System clipboard (grant: clipboard — CONFIG-ONLY) ─────────────────

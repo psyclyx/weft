@@ -10,7 +10,7 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ts-node-kind", .call = nodeKind, .summary = "say what syntax node the cursor is in" },
+    .{ .name = "ts-node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
     .{ .name = "ts-select-node", .call = selectNode, .summary = "select the syntax node under the cursor" },
     .{ .name = "ts-expand-selection", .call = expandSelection, .summary = "grow the selection to the enclosing node" },
     .{ .name = "ts-goto-parent", .call = gotoParent, .summary = "move to the enclosing node" },
@@ -22,10 +22,10 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ts-goto-first-child", .call = gotoFirstChild, .summary = "move to the first child node" },
     .{ .name = "ts-select-child", .call = selectChild, .summary = "select the first child node" },
     .{ .name = "ts-raise", .call = raise, .summary = "replace the enclosing node with this one" },
-    .{ .name = "ts-query", .call = queryCount, .summary = "count what a tree-sitter query matches here" },
+    .{ .name = "ts-query", .call = queryCount, .arity = .whole, .summary = "count what a tree-sitter query matches here" },
     // Range-returning forms (like `textobjects`: an absolute span, not a
-    // move). A grammar runs them once per selection through `runRangeEach`,
-    // so none of them touches the selection itself.
+    // move). Each answers for THE selection, so dispatch maps them over
+    // every selection a grammar has; none touches the selection itself.
     .{ .name = "ts.expand", .call = rangeExpand, .summary = "the node enclosing the selection" },
     .{ .name = "ts.shrink", .call = rangeShrink, .summary = "the first child node inside the selection" },
     .{ .name = "ts.sibling-next", .call = rangeSiblingNext, .summary = "the node after the selection's node" },
@@ -130,8 +130,8 @@ fn queryCount() void {
 }
 
 // ── Range forms ───────────────────────────────────────────────────────
-// Each answers a span for "the selection" (the primary; `runRangeEach` makes
-// every selection the primary in turn), or nothing. The tree is read through
+// Each answers a span for "the selection" (the one a mapping's run visits,
+// else the primary), or nothing. The tree is read through
 // the same three doors as the verbs above: no new door, no language name.
 
 fn ret(r: weft.Range) void {
@@ -286,5 +286,5 @@ fn rangeFunctionPrev() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
 }

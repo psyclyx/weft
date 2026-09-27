@@ -289,9 +289,6 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_run_argv", .args = 2 },
     .{ .name = "wl_run_range", .args = 0 },
     .{ .name = "wl_run_range_arg", .args = 1 },
-    // The per-selection twins: the same calls, once per selection.
-    .{ .name = "wl_run_range_each", .args = 0 },
-    .{ .name = "wl_run_range_arg_each", .args = 1 },
     // In the `.commands` group, but they only intern a name or read the
     // registry — no `command.run` at all.
     .{ .name = "wl_register", .args = 0 },

@@ -212,8 +212,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over an anchored live-range handle through the gated edit door" },
     .{ .name = "wl_selections_get", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "write the primary index then up to `cap` `{anchor,head}` pairs (document order); returns the selection count" },
     .{ .name = "wl_selections_set", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "replace every selection from a `{primary, n × {anchor,head}}` record (normalized: sorted, overlaps merged); 0 on success" },
-    .{ .name = "wl_run_range_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a motion once per selection (each as the primary) and write one live-range handle per selection (-1 for none); returns the count" },
-    .{ .name = "wl_run_range_arg_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run an operator once per live-range handle, in reverse offset order, as ONE undo unit" },
     .{ .name = "wl_undo_unit", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "open (1) or close (0) an undo unit on the addressed entry; nests (the outermost owns the unit), scoped to the dispatch that opened it; 0 on success" },
     .{ .name = "wl_visit", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "whether this dispatch is one run of a selection mapping: the runs still to come after it, or -1 outside a mapping" },
 
@@ -376,9 +374,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_register_text", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "read an explicit register slot's bytes into guest memory" },
     .{ .name = "wl_register_linewise", .params = &.{.u32}, .results = &.{.u32}, .group = .register, .doc = "whether an explicit register slot holds a linewise yank" },
     .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
-    .{ .name = "wl_yank_each", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture n `[start,end)` ranges as one value each (one per selection) into an explicit register slot" },
-    .{ .name = "wl_register_paste_value", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the value selection `index` of `count` pastes (own value when counts match, else the joined text) into guest memory" },
-    .{ .name = "wl_paste_value_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim the payloads of the value selection `index` of `count` pasted, over text inserted at `base`" },
     .{ .name = "wl_register_set", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "put typed bytes in an explicit register slot as one value, leaving unnamed alone (the `/` search register)" },
 
     // ── clipboard.zig — the dispatching head's system clipboard ───────────
@@ -605,9 +600,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 261;
+const max_import_count: usize = 256;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 281;
+const max_semantic_operation_count: usize = 276;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -762,7 +757,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 261), census.imports);
+    try t.expectEqual(@as(usize, 256), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 281), census.semantic_operations);
+    try t.expectEqual(@as(usize, 276), census.semantic_operations);
 }

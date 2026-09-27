@@ -52,8 +52,7 @@ const Guest = struct {
 /// motions, text objects and C-d all ask, and `search` the query → matches
 /// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
 /// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
-/// draw over the visible text, and `put` the one-write-per-selection edit
-/// (one undo unit) helix's verbs and ide's transfer and line keys share.
+/// draw over the visible text.
 const Library = enum {
     prompt,
     invoke,
@@ -71,7 +70,6 @@ const Library = enum {
     affordances,
     offers,
     statusline,
-    put,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -93,7 +91,6 @@ const Library = enum {
             .affordances => "weft_affordances",
             .offers => "weft_offers",
             .statusline => "weft_statusline",
-            .put => "weft_put",
         };
     }
 
@@ -113,9 +110,7 @@ const Library = enum {
             // projection and the palette share.
             .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
             .invoke => .interaction_orchestration,
-            // `put` edits a document on a grammar's behalf, as `ex` runs
-            // its commands: the top of the stack, depending on nothing.
-            .ex, .put => .editor_composition,
+            .ex => .editor_composition,
         };
     }
 

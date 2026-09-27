@@ -727,8 +727,8 @@ pub fn rangeOf(self: *const Editor, sel: Selection) ?Range {
     return .{ .start = @min(a, b), .end = @max(a, b) };
 }
 
-// ── Visiting: the per-selection runners' primitive ──────────────────
-// `wl_run_range_each` and `wl_run_range_arg_each` run a command once per
+// ── Visiting: the selection mapping's primitive ─────────────────────
+// A selection mapping (`selection.zig`) runs a command once per
 // selection, and that command speaks the single-selection API. Inside a visit
 // that API addresses the visited selection alone: the one context where "the
 // selection" is one of several on purpose.

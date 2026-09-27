@@ -88,8 +88,6 @@ pub extern "weft:abi/1" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
 // per-selection motion/operator pair runs a command once per selection.
 pub extern "weft:abi/1" fn wl_selections_get(out_ptr: u32, cap: u32) u32;
 pub extern "weft:abi/1" fn wl_selections_set(ptr: u32, n: u32) i32;
-pub extern "weft:abi/1" fn wl_run_range_each(ptr: u32, len: u32, out_ptr: u32, cap: u32) i32;
-pub extern "weft:abi/1" fn wl_run_range_arg_each(ptr: u32, len: u32, handles_ptr: u32, n: u32) void;
 pub extern "weft:abi/1" fn wl_undo_unit(open: u32) i32;
 pub extern "weft:abi/1" fn wl_visit() i32;
 pub extern "weft:abi/1" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
@@ -210,9 +208,6 @@ pub extern "weft:abi/1" fn wl_register_linewise(name: u32) u32;
 pub extern "weft:abi/1" fn wl_paste_at(base: u32, name: u32) void;
 // One value per selection: yank n ranges; read/restamp what selection
 // `index` of `count` pastes under the core distribution rule.
-pub extern "weft:abi/1" fn wl_yank_each(ptr: u32, n: u32, linewise: u32, name: u32) void;
-pub extern "weft:abi/1" fn wl_register_paste_value(index: u32, count: u32, out_ptr: u32, out_cap: u32, name: u32) u32;
-pub extern "weft:abi/1" fn wl_paste_value_at(base: u32, index: u32, count: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_clipboard_set(ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_clipboard_get(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_jump_push() void;

@@ -335,8 +335,7 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 }
 
 /// Run `cmd` and import the live range it returns as a handle in this
-/// plugin's table; -1 when it returned none. The shared body of `run_range`
-/// and `run_range_each`.
+/// plugin's table; -1 when it returned none.
 fn runForRange(p: *WasmPlugin, cmd: []const u8) i32 {
     const rv = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch return -1;
     if (rv != .range) return -1;
@@ -548,114 +547,6 @@ pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
         ed.replaceVisited(p.gpa, ends) catch return;
     } else ed.setSelections(p.gpa, ends, primary) catch return;
     results[0] = 0;
-}
-
-/// `run_range_each(cmd, out_ptr, cap) -> count`: run a motion ONCE PER
-/// SELECTION, each time with that selection as the primary — so the motion,
-/// which reads "the cursor", reads that selection's head — and write one
-/// live-range handle per selection (-1 where it returned no range), in the
-/// document order the selections had when this began. The primary is restored
-/// afterwards. With one selection this is `run_range`.
-pub fn hRunRangeEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = 0;
-    const cmd = caller.readMemory(p.gpa, word(args[0]), word(args[1])) catch return;
-    defer p.gpa.free(cmd);
-    const entry = p.activeCtx().entry() orelse return;
-    const at = entry.ref();
-    const ed = entry.textEditor() orelse return;
-    // Iterate by HANDLE, not index: a motion is free to reshape the set, and
-    // the head handle is the selection's stable identity meanwhile.
-    const heads = p.gpa.alloc(SelectionHead, ed.selectionCount()) catch return;
-    defer p.gpa.free(heads);
-    for (heads, ed.selections.items) |*h, sel| h.* = sel.head;
-    const out = p.gpa.alloc(i32, heads.len) catch return;
-    defer p.gpa.free(out);
-    const primary_head = ed.selections.items[ed.primary].head;
-    // A VISIT: the motion speaks the single-selection API, and here that
-    // means the visited selection, not a collapse of its siblings.
-    ed.beginVisit();
-    for (heads, out) |h, *o| {
-        o.* = -1;
-        // The motion may have closed or switched the entry: stop, honestly.
-        if (visitedEditor(p, at) != ed) continue;
-        ed.visit(selectionIndexOf(ed, h) orelse continue);
-        o.* = runForRange(p, cmd);
-    }
-    if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |still| {
-        still.visit(selectionIndexOf(still, primary_head) orelse @min(still.primary, still.selectionCount() - 1));
-        still.endVisit();
-    };
-    const bytes = std.mem.sliceAsBytes(out[0..@min(word(args[3]), out.len)]);
-    if (bytes.len > 0) _ = caller.writeMemory(word(args[2]), bytes.len, bytes) catch {};
-    results[0] = @intCast(heads.len);
-}
-
-const SelectionHead = @FieldType(Editor.Selection, "head");
-
-/// The editor a visit began on, found again by its entry ref — only while that
-/// entry is still the one this dispatch addresses. A command run inside the
-/// visit may switch or close the entry; a closed one's editor is gone (and
-/// took its visit with it). The visit still ENDS on a merely switched one.
-fn visitedEditor(p: *WasmPlugin, at: anytype) ?*Editor {
-    const b = p.ctx.buffers.resolve(at) orelse return null;
-    const ed = b.textEditor() orelse return null;
-    return if (activeEditor(p.activeCtx()) == ed) ed else null;
-}
-
-fn selectionIndexOf(ed: *const Editor, head: SelectionHead) ?usize {
-    for (ed.selections.items, 0..) |sel, i| {
-        if (sel.head == head) return i;
-    }
-    return null;
-}
-
-/// `run_range_arg_each(cmd, handles_ptr, n)`: run an operator once per live
-/// range handle, in REVERSE offset order (a later edit never shifts an
-/// earlier range's bytes under an operator that reads them), all inside ONE
-/// undo unit of the active editor — the operator's own cursor moves are
-/// barriers `beginUnit` holds shut. Stale or foreign handles are skipped.
-pub fn hRunRangeArgEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const cmd = caller.readMemory(p.gpa, word(args[0]), word(args[1])) catch return;
-    defer p.gpa.free(cmd);
-    const n = word(args[3]);
-    if (n == 0 or n > max_selections) return;
-    const raw = caller.readMemory(p.gpa, word(args[2]), @as(usize, n) * 4) catch return;
-    defer p.gpa.free(raw);
-    const Job = struct { handle: u32, start: usize, end: usize };
-    var jobs: std.ArrayList(Job) = .empty;
-    defer jobs.deinit(p.gpa);
-    for (0..n) |i| {
-        const h = opaqueHandle(std.mem.readInt(i32, raw[4 * i ..][0..4], .little)) orelse continue;
-        const slot = p.activeRange(h) orelse continue;
-        const cur = p.resolveRange(slot) orelse continue;
-        jobs.append(p.gpa, .{ .handle = h, .start = cur.start, .end = cur.end }) catch return;
-    }
-    std.mem.sort(Job, jobs.items, {}, struct {
-        fn gt(_: void, a: Job, b: Job) bool {
-            return a.start > b.start or (a.start == b.start and a.end > b.end);
-        }
-    }.gt);
-    // Close the unit (and the visit: an operator that places "the" caret
-    // places its own, not a collapse of the set) on the editor this began on,
-    // found again by its entry ref: an operator may switch (or close) the
-    // entry meanwhile.
-    const entry = p.activeCtx().entry() orelse return;
-    const at = entry.ref();
-    const began = entry.textEditor() orelse return;
-    began.history.beginUnit();
-    began.beginVisit();
-    defer if (p.ctx.buffers.resolve(at)) |b| if (b.textEditor()) |ed| {
-        ed.endVisit();
-        ed.history.endUnit();
-    };
-    for (jobs.items) |job| {
-        const slot = p.activeRange(job.handle) orelse continue;
-        const rv = command.Value{ .range = p.borrowedRange(slot) orelse continue };
-        _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{rv}) catch {};
-    }
 }
 
 /// `visit() -> remaining | -1`: whether this dispatch is one run of a

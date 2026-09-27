@@ -148,7 +148,9 @@ const cmds = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init }).exportAll();
+    // Nothing here maps over selections: the bar searches the document, and
+    // a replace-all or select-all-matches answers for the whole of it.
+    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
 }
 
 /// The bar's keys. Bound here rather than by a config because they are the
