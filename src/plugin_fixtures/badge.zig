@@ -7,8 +7,8 @@
 //! `range` field and a passthrough `anchor` field, no core recompile
 //! anywhere in the loop — see `src/core/wasm_abi/tests.zig`'s "D2" test for
 //! the host-side consumer half. Asked to (request bytes `act-…`), it also
-//! tries to act from inside its answer, which the render-phase door policy
-//! must refuse.
+//! acts from inside its answer — which it may: no fire happens while a frame
+//! is drawn (doc/model.md §2.7), so what it does is just the next version.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -48,9 +48,9 @@ fn init() callconv(.c) void {
 }
 
 fn on_slot_fire(session: i32) callconv(.c) void {
-    // A provider that tries to ACT from inside its answer — what a gutter or
-    // status segment must never do mid-layout. Asked for with the request
-    // bytes `act-…`; each door below must trap before it lands.
+    // A provider that ACTS from inside its answer, asked for with the request
+    // bytes `act-…`. Answers are asked for between frames, so each of these
+    // lands like any background entry's call would.
     const req = weft.payloadRead(@bitCast(session));
     if (std.mem.eql(u8, req, "act-edit")) weft.edit(.{ .start = 0, .end = 0 }, "ACTED");
     if (std.mem.eql(u8, req, "act-flash")) weft.flash(0, 1);
