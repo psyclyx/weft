@@ -74,6 +74,11 @@ __attribute__((import_module("weft"), import_name("qjs_declare_command_doc")))
 extern void host_declare_command_doc(const char *name, int name_len,
                                      const char *params, int params_len,
                                      const char *summary, int summary_len);
+// How a declared command maps over several selections (`wl_declare_arity`,
+// same body): 0 each, 1 whole, 2 homogeneous.
+__attribute__((import_module("weft"), import_name("qjs_declare_arity")))
+extern void host_declare_arity(const char *name, int name_len, int code,
+                               const char *over, int over_len);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
@@ -815,16 +820,28 @@ static JSValue g_on_exit; // handler (handle) => void for a proc-stream child ex
 static JSValue js_command(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]))
-        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params]])");
+        return JS_ThrowTypeError(ctx, "command(name, fn[, summary[, params[, arity]]])");
     size_t nl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     if (!name) return JS_EXCEPTION;
-    size_t sl = 0, pl = 0;
-    const char *summary = argc >= 3 ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
-    const char *params = argc >= 4 ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
-    if (summary || params)
+    size_t sl = 0, pl = 0, al = 0;
+    const char *summary = argc >= 3 && !JS_IsUndefined(argv[2]) ? JS_ToCStringLen(ctx, &sl, argv[2]) : NULL;
+    const char *params = argc >= 4 && !JS_IsUndefined(argv[3]) ? JS_ToCStringLen(ctx, &pl, argv[3]) : NULL;
+    // `arity` — "each", "whole" or "homogeneous" — is how the command maps
+    // over several selections. Left out, it is undeclared, and dispatch
+    // refuses it on several selections rather than guess.
+    const char *arity = argc >= 5 && !JS_IsUndefined(argv[4]) ? JS_ToCStringLen(ctx, &al, argv[4]) : NULL;
+    if (summary || params || arity)
         host_declare_command_doc(name, (int)nl, params ? params : "", (int)pl,
                                  summary ? summary : "", (int)sl);
+    if (arity) {
+        int code = -1;
+        if (al == 4 && memcmp(arity, "each", 4) == 0) code = 0;
+        else if (al == 5 && memcmp(arity, "whole", 5) == 0) code = 1;
+        else if (al == 11 && memcmp(arity, "homogeneous", 11) == 0) code = 2;
+        if (code >= 0) host_declare_arity(name, (int)nl, code, "", 0);
+        JS_FreeCString(ctx, arity);
+    }
     if (summary) JS_FreeCString(ctx, summary);
     if (params) JS_FreeCString(ctx, params);
     int id = host_register(name, (int)nl);

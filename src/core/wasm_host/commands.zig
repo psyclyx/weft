@@ -103,6 +103,7 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         // every command it registers.
         .owner = p.name,
         .handler = wpCmdTrampoline,
+        .arity = decl.arity,
         .data = wc,
     }) catch {
         results[0] = -1;

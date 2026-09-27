@@ -39,6 +39,11 @@ pub fn hYankRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
         sr.interface.readSliceAll(buf) catch return;
     }
+    if (p.activeCtx().visit) |v| {
+        // One value per extent of the mapping in flight, landed as it ends.
+        v.stage.yank(reg, name, v.index, p.subbuffers, &ed.doc, .{ .start = s, .end = e }, buf, linewise) catch {};
+        return;
+    }
     reg.yank(p.gpa, name, p.subbuffers, &ed.doc, .{ .start = s, .end = e }, buf, linewise) catch {};
 }
 
@@ -57,8 +62,17 @@ pub fn hRegisterSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     reg.set(p.gpa, name, bytes) catch {};
 }
 
-/// `registerText(out_ptr, out_cap) -> len`: the register bytes into guest
-/// memory (clamped to `cap`), for the editor to build its paste.
+/// Which value a read answers for: the visited extent of the mapping in
+/// flight (`selection.Visit`), else the one selection — which reads every
+/// value joined unless the register holds exactly one (`Register.pasteSpan`).
+fn visited(p: *WasmPlugin) struct { index: usize, count: usize } {
+    const v = p.activeCtx().visit orelse return .{ .index = 0, .count = 1 };
+    return .{ .index = v.index, .count = v.count };
+}
+
+/// `registerText(out_ptr, out_cap) -> len`: the bytes THIS selection pastes
+/// into guest memory (clamped to `cap`), for the editor to build its paste —
+/// inside a mapping, the visited extent's value under the distribution rule.
 pub fn hRegisterText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const reg = p.register orelse {
@@ -69,7 +83,8 @@ pub fn hRegisterText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         results[0] = 0;
         return;
     }) orelse return;
-    const n = caller.writeMemory(@intCast(args[0]), @intCast(args[1]), slot.slice()) catch 0;
+    const at = visited(p);
+    const n = caller.writeMemory(@intCast(args[0]), @intCast(args[1]), slot.pasteValue(at.index, at.count)) catch 0;
     results[0] = @intCast(n);
 }
 
@@ -99,7 +114,8 @@ pub fn hPasteAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const subs = p.subbuffers orelse return;
     const ed = (p.activeCtx().entry() orelse return).textEditor() orelse return;
     const slot = reg.get(slotArg(args[1]) orelse return) orelse return;
-    slot.restamp(p.gpa, subs, &ed.doc, @intCast(args[0]));
+    const at = visited(p);
+    slot.restampValue(p.gpa, subs, &ed.doc, @intCast(args[0]), at.index, at.count);
 }
 
 // ── One value per selection ──────────────────────────────────────────

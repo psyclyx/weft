@@ -21,6 +21,14 @@ pub fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     const ctx = p.activeCtx();
     const doc = ctx.document() orelse return;
     const r: core_flash.Range = .{ .start = @as(u32, @bitCast(args[0])), .end = @as(u32, @bitCast(args[1])) };
+    // A mapping's runs flash ONE set: the first run starts it, the rest add.
+    if (ctx.visit) |v| {
+        if (v.stage.flashed) {
+            ctx.caps.flash.add(p.gpa, &ctx.caps.layers, doc, r) catch {};
+            return;
+        }
+        v.stage.flashed = true;
+    }
     ctx.caps.flash.set(p.gpa, &ctx.caps.layers, doc, r, .edit) catch {};
 }
 

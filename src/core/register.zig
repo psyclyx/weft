@@ -105,6 +105,28 @@ pub const Bank = struct {
     }
 };
 
+/// Land `parts` (each a one-value register, in document order — what a
+/// selection mapping staged, one per extent that yanked) in slot `name`
+/// as one value each, identities and all. Named slots update unnamed too,
+/// atomically, as a yank does.
+pub fn putEachIn(bank: *Bank, gpa: Allocator, name: u8, parts: []const *const Register) !void {
+    const selected = bank.get(name) orelse return error.InvalidRegister;
+    var next_selected = Register.empty;
+    errdefer next_selected.deinit(gpa);
+    try next_selected.join(gpa, parts);
+    var next_unnamed = Register.empty;
+    if (name != 0) {
+        errdefer next_unnamed.deinit(gpa);
+        try next_unnamed.join(gpa, parts);
+    }
+    selected.deinit(gpa);
+    selected.* = next_selected;
+    if (name != 0) {
+        bank.slots[0].deinit(gpa);
+        bank.slots[0] = next_unnamed;
+    }
+}
+
 /// One captured value: the range it came from and its live bytes.
 pub const Piece = struct { range: Range, bytes: []const u8 };
 
@@ -222,6 +244,44 @@ pub fn yankEach(
             const st = @max(r.start, range.start);
             const en = @min(r.end, range.end);
             try self.snapshot(gpa, s, base + st - range.start, en - st);
+        }
+    }
+}
+
+/// Become the values of `parts`, in order, each its own value: their texts
+/// joined by the rule `text` documents, their ferried identities shifted to
+/// where each value now starts. Linewise only when every part is.
+pub fn join(self: *Register, gpa: Allocator, parts: []const *const Register) Allocator.Error!void {
+    self.text.clearRetainingCapacity();
+    self.spans.clearRetainingCapacity();
+    self.clearPayloads(gpa);
+    self.linewise = parts.len > 0;
+    for (parts) |part| {
+        self.linewise = self.linewise and part.linewise;
+        const t_items = self.text.items;
+        if (t_items.len > 0 and t_items[t_items.len - 1] != '\n') try self.text.append(gpa, '\n');
+        const base = self.text.items.len;
+        try self.text.appendSlice(gpa, part.text.items);
+        try self.spans.append(gpa, .{ .start = base, .end = self.text.items.len });
+        for (part.payloads.items) |pl| {
+            var facts: std.ArrayList(Fact) = .empty;
+            errdefer {
+                for (facts.items) |f| {
+                    gpa.free(f.name);
+                    gpa.free(f.value);
+                }
+                facts.deinit(gpa);
+            }
+            for (pl.facts) |f| {
+                const name = try gpa.dupe(u8, f.name);
+                errdefer gpa.free(name);
+                const value = try gpa.dupe(u8, f.value);
+                errdefer gpa.free(value);
+                try facts.append(gpa, .{ .name = name, .value = value });
+            }
+            const owned = try facts.toOwnedSlice(gpa);
+            errdefer freePayload(gpa, .{ .offset = 0, .len = 0, .facts = owned });
+            try self.payloads.append(gpa, .{ .offset = base + pl.offset, .len = pl.len, .facts = owned });
         }
     }
 }

@@ -150,6 +150,10 @@ pub const Resources = struct {
         /// `ArgSpec` names below borrow slices of it.
         params: []u8 = &.{},
         args: []command_mod.ArgSpec = &.{},
+        /// How it maps over several extents (`declare_arity`), null undeclared;
+        /// an `over` target command borrows `over`, which this owns.
+        arity: ?@import("selection.zig").Arity = null,
+        over: []u8 = &.{},
 
         /// Parse a declared parameter list into `ArgSpec`s. Every guest argument
         /// crosses as a string (the membrane carries nothing else), so the only
@@ -181,6 +185,7 @@ pub const Resources = struct {
             gpa.free(self.summary);
             gpa.free(self.params);
             gpa.free(self.args);
+            gpa.free(self.over);
         }
     };
 
@@ -188,6 +193,13 @@ pub const Resources = struct {
     /// register doors go through, so a command's summary and argument shape
     /// have a single origin.
     pub fn declaration(self: *const Resources, name: []const u8) ?*const DeclaredCommand {
+        for (self.declared.items) |*d| if (std.mem.eql(u8, d.name, name)) return d;
+        return null;
+    }
+
+    /// The same lookup, for the describe-phase door that adds to a
+    /// declaration (`declare_arity`).
+    pub fn declarationMut(self: *Resources, name: []const u8) ?*DeclaredCommand {
         for (self.declared.items) |*d| if (std.mem.eql(u8, d.name, name)) return d;
         return null;
     }

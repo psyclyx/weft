@@ -138,6 +138,7 @@ test {
     // Core is its own module now, and a module owns its tests.
     _ = @import("target_open.zig");
     _ = @import("TextSnapshot.zig");
+    _ = @import("selection.zig");
     _ = @import("intentions.zig");
     _ = @import("tests.zig");
     _ = @import("markdown.zig");

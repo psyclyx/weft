@@ -55,6 +55,47 @@ pub const Entry = struct {
     /// `describeCommand`, so the palette can ask for the arguments.
     params: []const u8 = "",
     summary: []const u8 = "",
+    /// How it maps over several selections; null takes the table's
+    /// `Hooks.arity`, and null there is undeclared.
+    arity: ?Arity = null,
+};
+
+/// How a command maps over a selection of several extents (doc/model.md
+/// §2.6; core's `selection.Arity`, which dispatch maps by):
+///
+///   - `.each` — once per extent, last first, one undo unit; each run sees
+///     its extent as THE selection, so the handler is a one-selection program.
+///     `.over` names a range command that maps each extent to its target
+///     first (identical targets run once); the handler then gets the target
+///     as its range argument (`argRange(0)`). `.merge` unions overlapping
+///     targets (lines) instead of refusing them.
+///   - `.whole` — once; the handler reads (or ignores) the whole set.
+///   - `.homogeneous` — once, refused when the extents differ in kind.
+///
+/// A command that declares none is refused on several extents.
+pub const Arity = union(enum) {
+    each: Each,
+    whole,
+    homogeneous,
+
+    pub const Each = struct { over: ?[]const u8 = null, merge: bool = false };
+    /// The plain per-extent mapping.
+    pub const each_extent: Arity = .{ .each = .{} };
+
+    pub fn code(self: Arity) u32 {
+        return switch (self) {
+            .each => |e| if (e.over == null) 0 else if (e.merge) 4 else 3,
+            .whole => 1,
+            .homogeneous => 2,
+        };
+    }
+
+    pub fn over(self: Arity) []const u8 {
+        return switch (self) {
+            .each => |e| e.over orelse "",
+            .whole, .homogeneous => "",
+        };
+    }
 };
 
 /// What a plugin still says for itself. Everything here is optional; a plugin
@@ -62,6 +103,10 @@ pub const Entry = struct {
 pub const Hooks = struct {
     /// Requested at describe time, before any authority exists.
     perms: []const weft.Perm = &.{},
+    /// The arity of every command in the table that declares none of its
+    /// own. A plugin none of whose commands reads the selection says `.whole`
+    /// here once; null leaves such commands undeclared.
+    arity: ?Arity = null,
     /// Capabilities this plugin provides, cross-checked host-side at init.
     capabilities: []const []const u8 = &.{},
     /// Extra describe-phase work (declarations only — no authority yet).
@@ -119,6 +164,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                     weft.describeCommand(c.name, c.params, c.summary)
                 else
                     weft.declareCommand(c.name);
+                if (c.arity orelse hooks.arity) |a| weft.declareArity(c.name, a);
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);
@@ -130,13 +176,22 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             if (hooks.init) |f| f();
         }
 
+        /// How deep in this plugin's own dispatches the current one is: a
+        /// command that runs another of this plugin's commands re-enters here.
+        var depth: u32 = 0;
+
         fn onCommand(id: u32) callconv(.c) void {
             const index = indexOf(id) orelse return;
             if (hooks.before) |f| {
                 if (!f(index)) return;
             }
+            depth += 1;
             cmds[index].call();
-            if (hooks.after) |f| f(index);
+            depth -= 1;
+            // The epilogue ends the COMMAND, so it runs once: not after a
+            // command this one ran, and not before a mapping's last run — a
+            // typed count read by the first run is still due to the rest.
+            if (hooks.after) |f| if (depth == 0 and (weft.visitsLeft() orelse 0) == 0) f(index);
         }
 
         /// The table index for a host id. Linear over a table this small, and

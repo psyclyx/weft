@@ -21,6 +21,7 @@ const position = @import("position.zig");
 const grants_mod = @import("grants.zig");
 const undo_mod = @import("undo.zig");
 const status_feed = @import("status_feed.zig");
+const selection = @import("selection.zig");
 const semantic_model = @import("weft_semantic");
 
 pub const Principal = authority.Principal;
@@ -189,6 +190,12 @@ pub const Context = struct {
     /// generation-checked: an entry closed mid-callback resolves to nothing
     /// and the text doors refuse rather than fall through to the active one.
     bound_entry: ?Buffers.Ref = null,
+    /// The run of a selection mapping in flight (`selection.Visit`), or null.
+    /// Set by `run` around each run of an `.each` command over several
+    /// extents: nested dispatches map nothing, the register and flash doors
+    /// file under the visited extent, and nothing edits while targets are
+    /// found. A bracket like `principal`, never set by a caller.
+    visit: ?*selection.Visit = null,
 
     /// Bind (or clear, with `null`) the async-delivery entry, returning the
     /// previous binding for the caller to restore.
@@ -458,6 +465,7 @@ pub const Context = struct {
     /// PRODUCTION (a re-render from a model), not a principal editing text
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
+        if (self.targeting()) return self.refuse("a target is being found: nothing edits");
         if (self.buffer().read_only) return self.refuse("read-only buffer");
         if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
@@ -477,6 +485,7 @@ pub const Context = struct {
     pub fn editEach(self: *Context, ranges: []const Document.Range, bytes: []const u8) EditError!void {
         if (ranges.len == 1) return self.edit(ranges[0], bytes);
         if (ranges.len == 0) return;
+        if (self.targeting()) return self.refuse("a target is being found: nothing edits");
         if (self.buffer().read_only) return self.refuse("read-only buffer");
         for (ranges) |r| {
             if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
@@ -538,6 +547,13 @@ pub const Context = struct {
 
     /// The visibility half of a refusal, for the callers that own the error
     /// value themselves.
+    /// Whether a mapping is finding its targets — the phase that must see the
+    /// untouched text, so no edit lands in it.
+    fn targeting(self: *const Context) bool {
+        const v = self.visit orelse return false;
+        return v.targeting;
+    }
+
     fn noteRefusal(self: *Context, why: []const u8) void {
         self.head.echo.clearRetainingCapacity();
         self.head.echo.appendSlice(self.gpa, why) catch {};
@@ -777,6 +793,25 @@ pub const Command = struct {
     /// commands; a VM trampoline for scripted ones).
     handler: *const fn (ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value,
     data: ?*anyopaque = null,
+    /// How it maps over a selection of several extents (`selection.Arity`):
+    /// once per extent, once over the whole set, or once over a set of one
+    /// kind. Null is UNDECLARED, and dispatch refuses an undeclared command
+    /// on several extents rather than let it act on the primary alone.
+    ///
+    /// The field's default is CORE's declaration, not a fallback: core's
+    /// command tables are audited, every builtin that reads or writes the
+    /// selection says `.each` at its definition (`maps`), and the rest never
+    /// read it, so running once is their mapping. A GUEST command's arity is
+    /// always what its plugin declared (`declare_arity`) — null when it said
+    /// nothing — never this default.
+    arity: ?selection.Arity = .whole,
+
+    /// This command, declaring `arity`.
+    pub fn maps(self: Command, arity: ?selection.Arity) Command {
+        var c = self;
+        c.arity = arity;
+        return c;
+    }
 };
 
 pub const Commands = registry.Registry(Command);
@@ -799,7 +834,9 @@ pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []c
     defer if (outermost) {
         ctx.dispatch_place = null;
     };
-    return cmd.handler(ctx, cmd.data, args);
+    // The selection mapping the command declared (`selection.zig`): once, once
+    // per extent inside one undo unit, or a refusal said out loud.
+    return selection.run(ctx, &cmd, args);
 }
 
 /// How many of `args` a caller MUST supply. Optional arguments trail, so this
@@ -883,6 +920,10 @@ fn refusal(buf: []u8, commands: *const Commands, name: []const u8, args: []const
             }) catch sig;
         }
         return std.fmt.bufPrint(buf, "{s} takes no arguments, given {d}", .{ name, args.len }) catch name;
+    }
+    if (err == error.UndeclaredMapping or err == error.MixedExtents or err == error.OverlappingTargets) {
+        const why = selection.reason(@errorCast(err));
+        return std.fmt.bufPrint(buf, "{s}: {s}", .{ name, why.message }) catch name;
     }
     return std.fmt.bufPrint(buf, "{s} failed: {t}", .{ name, err }) catch name;
 }

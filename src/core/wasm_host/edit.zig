@@ -502,15 +502,18 @@ pub fn hSelectionsGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
         results[0] = 0;
         return;
     };
-    const n = ed.selectionCount();
+    // Inside a visit the visited extent is the whole selection.
+    const visiting = ed.visiting > 0;
+    const n: usize = if (visiting) 1 else ed.selectionCount();
+    const base: usize = if (visiting) ed.primary else 0;
     results[0] = @intCast(n);
     const cap = @min(word(args[1]), n);
     if (cap == 0) return;
     const words = p.gpa.alloc(u32, 1 + 2 * cap) catch return;
     defer p.gpa.free(words);
-    words[0] = @intCast(ed.primary);
+    words[0] = @intCast(ed.primary - base);
     for (0..cap) |i| {
-        const e = ed.selectionEnds(i);
+        const e = ed.selectionEnds(base + i);
         words[1 + 2 * i] = @intCast(e.anchor);
         words[2 + 2 * i] = @intCast(e.head);
     }
@@ -540,7 +543,10 @@ pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
             .head = std.mem.readInt(u32, raw[at + 4 ..][0..4], .little),
         };
     }
-    ed.setSelections(p.gpa, ends, primary) catch return;
+    // Inside a visit the record replaces the visited extent alone.
+    if (ed.visiting > 0) {
+        ed.replaceVisited(p.gpa, ends) catch return;
+    } else ed.setSelections(p.gpa, ends, primary) catch return;
     results[0] = 0;
 }
 
@@ -650,6 +656,21 @@ pub fn hRunRangeArgEach(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
         const rv = command.Value{ .range = p.borrowedRange(slot) orelse continue };
         _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{rv}) catch {};
     }
+}
+
+/// `visit() -> remaining | -1`: whether this dispatch is one run of a
+/// selection mapping (`selection.Visit`), and how many runs come after it;
+/// -1 outside one. What a guest's per-command epilogue — clearing a typed
+/// count or register — waits on: the LAST run, not the first.
+pub fn hVisit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const v = p.activeCtx().visit orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(@min(v.remaining, std.math.maxInt(i32)));
 }
 
 /// `undo_unit(open) -> 0 | -1`: open (1) or close (0) an undo unit on the

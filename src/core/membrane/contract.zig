@@ -94,6 +94,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_log", .handler = declare.hLog },
     .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
     .{ .name = "wl_declare_command_doc", .handler = declare.hDeclareCommandDoc },
+    .{ .name = "wl_declare_arity", .handler = declare.hDeclareArity },
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
@@ -128,6 +129,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_run_range_each", .handler = edit.hRunRangeEach },
     .{ .name = "wl_run_range_arg_each", .handler = edit.hRunRangeArgEach },
     .{ .name = "wl_undo_unit", .handler = edit.hUndoUnit },
+    .{ .name = "wl_visit", .handler = edit.hVisit },
 
     // ── pointer.zig — the pointer facts of the dispatch in flight ─────────
     .{ .name = "wl_pointer", .handler = pointer.hPointer },

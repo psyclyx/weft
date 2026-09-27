@@ -537,7 +537,10 @@ pub fn editRangeOf(self: *const Editor, sel: Selection, target: EditTarget) ?Ran
 pub fn editRanges(self: *const Editor, gpa: Allocator, target: EditTarget) Allocator.Error![]Range {
     var out: std.ArrayList(Range) = .empty;
     errdefer out.deinit(gpa);
-    for (self.selections.items) |sel| {
+    // Inside a visit the visited selection is the only one: a mapping runs
+    // the edit once per selection itself.
+    const all = self.selections.items;
+    for (if (self.visiting > 0) all[self.primary..][0..1] else all) |sel| {
         if (self.editRangeOf(sel, target)) |r| try out.append(gpa, r);
     }
     sortRanges(out.items);
@@ -689,8 +692,11 @@ pub fn selectRange(self: *Editor, gpa: Allocator, anchor: usize, head: usize) Al
 
 /// Lift every selection's anchor, keeping every caret — what an edit at every
 /// selection leaves behind. Internal: the public verb is one selection's.
+/// Inside a visit only the visited selection edited: its siblings keep
+/// their ranges for their own runs.
 fn liftAnchors(self: *Editor) void {
-    for (self.selections.items) |*sel| {
+    const all = self.selections.items;
+    for (if (self.visiting > 0) all[self.primary..][0..1] else all) |*sel| {
         if (sel.anchor) |m| {
             self.doc.removeAnchor(m);
             sel.anchor = null;
@@ -781,6 +787,35 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
     self.normalize();
     self.clearGoal();
     self.history.barrier(); // a selection change is a motion
+}
+
+/// Inside a visit: replace the VISITED selection with `ends` (at least one),
+/// the first of them becoming the one the visit addresses; its siblings stay.
+/// How a run splits its extent (`s`), or reshapes it. Allocates first: on
+/// failure the set is untouched.
+pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocator.Error!void {
+    assert(self.visiting > 0 and ends.len > 0);
+    const len = self.text().byteLen();
+    try self.selections.ensureUnusedCapacity(gpa, ends.len);
+    const fresh = try gpa.alloc(Selection, ends.len);
+    defer gpa.free(fresh);
+    var made: usize = 0;
+    errdefer for (fresh[0..made]) |sel| self.releaseSelection(sel);
+    for (ends, fresh) |e, *slot| {
+        const head_off = @min(e.head, len);
+        const anchor_off = @min(e.anchor, len);
+        const head = try self.doc.addAnchor(gpa, head_off, .right);
+        errdefer self.doc.removeAnchor(head);
+        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        slot.* = .{ .head = head, .anchor = anchor };
+        made += 1;
+    }
+    self.releaseSelection(self.selections.orderedRemove(self.primary));
+    self.primary = self.selections.items.len;
+    self.selections.appendSliceAssumeCapacity(fresh);
+    self.normalize(); // carries the primary to wherever the first one lands
+    self.clearGoal();
+    self.history.barrier();
 }
 
 /// Add one selection and make it primary (helix `C`, ide's add-next-match).
@@ -928,7 +963,7 @@ pub fn moveTo(self: *Editor, offset: usize) void {
 
 /// Both vertical goals reset together: any horizontal or edit motion
 /// abandons the column/x the user was aiming for.
-fn clearGoal(self: *Editor) void {
+pub fn clearGoal(self: *Editor) void {
     self.goal_col = null;
     self.goal_x = null;
 }

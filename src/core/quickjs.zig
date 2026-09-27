@@ -229,6 +229,7 @@ pub const plugin_handlers = .{
     // one of its commands that a `.wasm` plugin cannot, or the reverse.
     .{ .name = "qjs_declare_command", .handler = cDeclareCommand },
     .{ .name = "qjs_declare_command_doc", .handler = cDeclareCommandDoc },
+    .{ .name = "qjs_declare_arity", .handler = cDeclareArity },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
@@ -756,6 +757,7 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
 
 const cDeclareCommand = jsDoor(declare_doors.declareBody, null);
 const cDeclareCommandDoc = jsDoor(declare_doors.declareDocBody, null);
+const cDeclareArity = jsDoor(declare_doors.declareArityBody, null);
 
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
@@ -1437,6 +1439,7 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         // A `.js` plugin owns its commands exactly as a `.wasm` one does.
         .owner = self.name,
         .handler = jsCmdTramp,
+        .arity = if (decl) |d| d.arity else null,
         .data = c,
     }) catch {
         results[0] = -1;

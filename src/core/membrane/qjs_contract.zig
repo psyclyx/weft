@@ -131,6 +131,7 @@ pub const imports = [_]Entry{
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
     e("qjs_declare_command", 2, 0, .plugin, "declare a command name — the twin of wl_declare_command, same body"),
     e("qjs_declare_command_doc", 6, 0, .plugin, "declare a command with its parameter list and one-line summary — the twin of wl_declare_command_doc, same body"),
+    e("qjs_declare_arity", 5, 0, .plugin, "say how a declared command maps over several selections — the twin of wl_declare_arity, same body"),
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
@@ -260,7 +261,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 50;
+const expected_count = 51;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -331,7 +332,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 16), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 34), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 35), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -388,7 +389,7 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     //
     // 48 → 50 with the context pair (publish a key, read the primary
     // context), shared from birth.
-    try t.expectEqual(@as(usize, 50), imports.len);
+    try t.expectEqual(@as(usize, 51), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

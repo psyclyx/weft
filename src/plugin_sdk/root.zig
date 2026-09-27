@@ -132,6 +132,18 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
         @intCast(summary.len),
     );
 }
+/// Say how a declared command maps over a selection of several extents
+/// (`Arity`). The manifest calls this for every entry that declares one.
+pub fn declareArity(name: []const u8, arity: Arity) void {
+    const over = arity.over();
+    e.wl_declare_arity(p(name.ptr), @intCast(name.len), arity.code(), p(over.ptr), @intCast(over.len));
+}
+/// Whether this dispatch is one run of a selection mapping, and how many runs
+/// come after it — null outside one.
+pub fn visitsLeft() ?u32 {
+    const n = e.wl_visit();
+    return if (n < 0) null else @intCast(n);
+}
 /// Declare a capability this plugin will provide (e.g. "edit/completion").
 /// Cross-checked host-side against the matching `provide*` at init time.
 pub fn declareCapability(name: []const u8) void {
@@ -148,6 +160,7 @@ pub fn requestPerm(perm: Perm) void {
 // return value, and `thunk` is the only place a command argument is
 // copied off the shared shim scratch before a handler can be handed it.
 pub const CommandEntry = @import("plugin.zig").Entry;
+pub const Arity = @import("plugin.zig").Arity;
 pub const PluginHooks = @import("plugin.zig").Hooks;
 pub const plugin = @import("plugin.zig").plugin;
 pub const exportCallback = @import("plugin.zig").exportCallback;
