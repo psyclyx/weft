@@ -5496,3 +5496,52 @@ test "conn: a share carries its document's minted id, a reconnect re-announces t
     try t.expect(replica.id.eql(doc_a.id));
     try t.expect(!replica.id.eql(minted_locally));
 }
+
+test "conn: closing a peer document's replica and opening it again binds it once more — never twice at once, never an assert" {
+    const gpa = t.allocator;
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared scratch\n");
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+    _ = try ca.share(&doc_a, "notes", 1);
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const index = cb.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+
+    // `open weft://<alice>/doc/<id>`: a replica bound under entry 2.
+    var first = try Document.init(gpa, "bob");
+    defer first.deinit(gpa);
+    _ = try cb.openOffer(index, &first, 2);
+    try t.expect(cb.findBase(cb.offers.items[index].base) != null);
+
+    // The entry closes: its replica is unbound, and the share is open to
+    // opening again — the same document, found by the same id, bound once.
+    cb.unbindTag(2);
+    try t.expect(cb.findBase(cb.offers.items[index].base) == null);
+    const again = cb.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+    var second = try Document.init(gpa, "bob");
+    defer second.deinit(gpa);
+    _ = try cb.openOffer(again, &second, 3);
+    try t.expect(second.id.eql(doc_a.id));
+    try t.expectEqual(@as(usize, 1), cb.collabs.items.len);
+
+    // While it is bound, a second bind of the same share is refused.
+    var dup = try Document.init(gpa, "bob");
+    defer dup.deinit(gpa);
+    try t.expectError(error.AlreadyBound, cb.openOffer(again, &dup, 5));
+}

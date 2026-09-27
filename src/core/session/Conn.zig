@@ -73,7 +73,6 @@ pub const Offer = struct {
     /// from a sender that predates it (or for a graph quad): the offer still
     /// opens, and only its durable name degrades.
     doc_id: ?Document.Id = null,
-    opened: bool = false,
     /// The owner unpublished this quad: its exports are revoked and any
     /// reference translated out of it is invalid.
     stale: bool = false,
@@ -116,8 +115,9 @@ pub fn deinit(self: *Conn) void {
 
 /// Unbind every Collab tagged `tag` (buffer close): a quad we published is
 /// unpublished first, so the peer learns its exports are gone instead of
-/// watching a quad go quiet. The offer, if any, stays consumed —
-/// re-sharing allocates a fresh quad.
+/// watching a quad go quiet — re-sharing allocates a fresh quad. A replica
+/// of a PEER's quad just stops being bound, so that peer's offer can be
+/// opened again (`isOpen`).
 pub fn unbindTag(self: *Conn, tag: u64) void {
     var i: usize = 0;
     while (i < self.collabs.items.len) {
@@ -154,14 +154,14 @@ pub fn unpublish(self: *Conn, base: u64) void {
         std.log.warn("publication: could not announce unpublish of quad {d}", .{base});
 }
 
-pub fn findBase(self: *Conn, base: u64) ?*Collab {
+pub fn findBase(self: *const Conn, base: u64) ?*Collab {
     for (self.collabs.items) |c| {
         if (c.base == base) return c;
     }
     return null;
 }
 
-pub fn findGraphBase(self: *Conn, base: u64) ?*GraphCollab {
+pub fn findGraphBase(self: *const Conn, base: u64) ?*GraphCollab {
     for (self.graph_collabs.items) |c| {
         if (c.base == base) return c;
     }
@@ -300,19 +300,33 @@ fn announceShare(self: *Conn, base: u64, display_name: []const u8, kind: DocKind
 /// replica takes the sharer's minted id when the announcement carried one:
 /// it is a replica of THAT document, not a new one, so both ends name it
 /// alike.
+///
+/// Whether an offer is open is not remembered beside it: it is whether a
+/// replica of its quad is BOUND (`isOpen`), which is exactly what closing
+/// the replica's entry undoes (`unbindTag`). So a share closed and opened
+/// again binds again — the same document by its id, one binding at a time —
+/// and a second bind while one stands is refused, not asserted away.
 pub fn openOffer(self: *Conn, index: usize, doc: *Document, tag: u64) !*Collab {
     const o = &self.offers.items[index];
-    assert(!o.opened);
-    assert(o.kind == .text);
+    if (o.kind != .text) return error.NotText;
+    if (self.isOpen(o.*)) return error.AlreadyBound;
     const c = try self.bind(doc, o.base, tag);
     if (o.doc_id) |id| doc.id = id;
-    o.opened = true;
     return c;
 }
 
-/// The index of the unopened text offer naming document `id`, if the peer
+/// Whether a replica of offer `o`'s quad is bound on this connection.
+pub fn isOpen(self: *const Conn, o: Offer) bool {
+    return switch (o.kind) {
+        .text => self.findBase(o.base) != null,
+        .graph => self.findGraphBase(o.base) != null,
+    };
+}
+
+/// The index of the live text offer naming document `id`, if the peer
 /// announced one — how `weft://<peer>/doc/<id>` finds its document again on
-/// a connection whose bases were all re-allocated.
+/// a connection whose bases were all re-allocated. It may be open already
+/// (`isOpen`): the caller then shows the entry bound to it.
 pub fn offerFor(self: *const Conn, id: Document.Id) ?usize {
     for (self.offers.items, 0..) |o, i| {
         const offered = o.doc_id orelse continue;
@@ -329,11 +343,9 @@ pub fn offerFor(self: *const Conn, id: Document.Id) ?usize {
 /// fills it.
 pub fn openGraphOffer(self: *Conn, index: usize, doc: *GraphDoc, tag: u64) !*GraphCollab {
     const o = &self.offers.items[index];
-    assert(!o.opened);
-    assert(o.kind == .graph);
-    const c = try self.bindGraph(doc, o.base, tag);
-    o.opened = true;
-    return c;
+    if (o.kind != .graph) return error.NotGraph;
+    if (self.isOpen(o.*)) return error.AlreadyBound;
+    return self.bindGraph(doc, o.base, tag);
 }
 
 /// Point every bound buffer at a fresh session after a reconnect

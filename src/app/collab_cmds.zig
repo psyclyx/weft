@@ -508,7 +508,7 @@ fn resolveOfferOnConn(
         !std.mem.eql(u8, &incarnation, &target.incarnation) or
         !std.mem.eql(u8, &fingerprint, &target.fingerprint)) return null;
     for (conn.offers.items, 0..) |offer, i| {
-        if (offer.base == target.base and !offer.opened)
+        if (offer.base == target.base and !conn.isOpen(offer))
             return .{ .conn = conn, .peer = peer, .index = i };
     }
     return null;
@@ -538,7 +538,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
     if (sc.conn.*) |*c| {
         const fingerprint = c.session.peerFingerprint();
         for (c.offers.items) |o| {
-            if (!o.opened and fingerprint != null) try out.append(gpa, .{
+            if (!c.isOpen(o) and fingerprint != null) try out.append(gpa, .{
                 .conn = c,
                 .incarnation = c.session.incarnation(),
                 .fingerprint = fingerprint.?,
@@ -551,7 +551,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
         for (h.clients.items) |peer| {
             const fingerprint = peer.sess.peerFingerprint();
             for (peer.conn.offers.items) |o| {
-                if (!o.opened and fingerprint != null) try out.append(gpa, .{
+                if (!peer.conn.isOpen(o) and fingerprint != null) try out.append(gpa, .{
                     .conn = &peer.conn,
                     .incarnation = peer.sess.incarnation(),
                     .fingerprint = fingerprint.?,
@@ -626,6 +626,14 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core
 /// which is all this side can honestly name.
 fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerprint: *const [24]u8) !core.Buffers.Id {
     const offer = ref.conn.offers.items[ref.index];
+    // Bound already: the entry that holds the replica is the one to show —
+    // a share is bound once, never a second replica beside the first.
+    if (ref.conn.findBase(offer.base)) |bound| {
+        const shown = std.math.cast(core.Buffers.Id, bound.tag) orelse return error.AlreadyBound;
+        if (ctx.buffers.get(shown) == null) return error.AlreadyBound;
+        try ctx.buffers.switchTo(ctx.gpa, shown, ctx.head, ctx.keymap);
+        return shown;
+    }
     const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{offer.name});
     defer ctx.gpa.free(display);
     const id = try ctx.buffers.create(ctx.gpa, display);
@@ -801,9 +809,13 @@ test "open-shared resolves the snapshotted offer base after display reordering" 
     try std.testing.expectEqual(@as(usize, 2), resolved.index);
     try std.testing.expectEqual(@as(u64, 24), resolved.conn.offers.items[resolved.index].base);
 
-    // Once that same offer is consumed, acceptance degrades to a no-op rather
-    // than opening whichever row now occupies its old slot.
-    conn.offers.items[resolved.index].opened = true;
+    // Once that same offer is bound, acceptance degrades to a no-op rather
+    // than opening whichever row now occupies its old slot. (Open IS bound:
+    // a replica of the quad on this connection — only its base is read.)
+    var bound: core.session.Collab = undefined;
+    bound.base = 24;
+    try conn.collabs.append(gpa, &bound);
+    defer conn.collabs.deinit(gpa);
     try std.testing.expect(resolveOfferOnConn(target, conn, incarnation, fingerprint, null) == null);
 
     // A vanished offer follows the same safe path.
