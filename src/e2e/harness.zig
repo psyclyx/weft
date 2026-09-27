@@ -2283,6 +2283,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "snipe", @embedFile("guest_snipe_wasm") },
     .{ "find", @embedFile("guest_find_wasm") },
     .{ "offers", @embedFile("guest_offers_wasm") },
+    .{ "menu", @embedFile("guest_menu_wasm") },
     .{ "symbols", @embedFile("guest_symbols_wasm") },
     .{ "panel", @embedFile("guest_panel_wasm") },
     .{ "problems", @embedFile("guest_problems_wasm") },

@@ -73,7 +73,8 @@ pub const Entry = struct {
     order: ?i32 = null,
     icon: []const u8 = "",
     prompts: bool = false,
-    /// A context key whose truthy value shows a check mark.
+    /// A context key whose truthy value shows a check mark, or `key=value`
+    /// for one choice among several.
     toggle: []const u8 = "",
     /// Keymap machinery: never listed in the palette, a menu or which-key.
     internal: bool = false,

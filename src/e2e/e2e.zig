@@ -40,6 +40,7 @@ test {
     _ = @import("history_test.zig");
     _ = @import("chrome_test.zig");
     _ = @import("chrome_style_test.zig");
+    _ = @import("menubar_test.zig");
     _ = @import("panels_test.zig");
     _ = @import("designation_test.zig");
     _ = @import("snapshot_frames_test.zig");

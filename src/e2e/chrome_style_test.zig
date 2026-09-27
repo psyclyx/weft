@@ -28,7 +28,7 @@ const Style = h.view.chrome.Style;
 const Rect = h.region.Rect;
 
 fn toolbarButton(ed: *Editor, label: []const u8) !Rect {
-    const pane = ed.win_layout.dockedPanel(.top) orelse return error.NoToolbar;
+    const pane = try @import("chrome_test.zig").viewportPane(ed, "toolbar");
     const entry = ed.buffers.get(pane.pane().buffer_id) orelse return error.NoToolbarEntry;
     const ref = entry.scene_selection.view orelse return error.ToolbarNotPresented;
     const view = ed.ctx.semantic.?.views.get(ref) orelse return error.ToolbarViewGone;

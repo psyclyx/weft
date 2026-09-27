@@ -81,7 +81,7 @@ pub fn registerCursorCommands(
         .args = &.{},
         .handler = dispatch.whichKeyNowHandler,
         .data = which_key_now,
-        .meta = .{ .label = "Show Key Hints", .menu = "View", .group = "help", .order = 20, .icon = "keyboard" },
+        .meta = .{ .label = "Show Key Hints", .menu = "Help", .group = "keys", .order = 10, .icon = "keyboard" },
     });
     _ = try commands.bind(gpa, "cursor.set-style", .{
         .name = "cursor.set-style",

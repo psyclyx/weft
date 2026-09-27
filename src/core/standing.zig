@@ -38,7 +38,35 @@ pub const Standing = struct {
 /// null when nothing by that name exists here.
 pub fn of(ctx: *command.Context, gpa: Allocator, name: []const u8, where: intent.Where) Allocator.Error!?Standing {
     const reason = (try reasonAt(ctx, name, where)) orelse return null;
-    const keys = try keys_for.keysForAt(ctx, gpa, name, keys_for.modeAt(ctx, where), where);
+    const mode = keys_for.modeAt(ctx, where);
+    var keys = try keys_for.keysForAt(ctx, gpa, name, mode, where);
+    // A command no key runs right now may still have a key that MEANS it: an
+    // intention whose offer here runs it, refused for the moment. A greyed
+    // Undo shows C-z — pressing it says the same thing the greying does.
+    if (keys.len == 0) if (ctx.intent) |plane| if (plane.snapshotAt(ctx, where)) |snap| {
+        // The intentions first: asking for their keys consults the snapshot
+        // again, which may rebuild it in place.
+        var meant: [8]catalog.IntentionId = undefined;
+        var n: usize = 0;
+        for (snap.candidates) |c| {
+            if (n == meant.len) break;
+            const runs = plane.invokers.commandOf(ctx, c.endpoint) orelse continue;
+            if (std.mem.eql(u8, runs, name)) {
+                meant[n] = c.intention;
+                n += 1;
+            }
+        }
+        for (meant[0..n]) |id| {
+            const by_intention = try keys_for.keysForAt(ctx, gpa, plane.catalog.intentionName(id), mode, where);
+            if (by_intention.len == 0) {
+                keys_for.free(gpa, by_intention);
+                continue;
+            }
+            keys_for.free(gpa, keys);
+            keys = by_intention;
+            break;
+        }
+    };
     return .{ .reason = reason.why, .keys = keys };
 }
 

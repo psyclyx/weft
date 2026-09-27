@@ -16,8 +16,8 @@ var candidates: [1024]ordering.Candidate = undefined;
 var order: [1024]usize = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "buffer.pick", .arity = .whole, .call = bufPick, .summary = "Switch to another open buffer.", .label = "Switch Editor", .menu = "Go", .group = "editors", .order = 1, .prompts = true },
-    .{ .name = "buffer.scratch", .arity = .whole, .call = bufScratch, .summary = "Open a new scratch buffer.", .label = "New Buffer", .menu = "File", .group = "new", .order = 1, .icon = "file-plus" },
+    .{ .name = "buffer.pick", .arity = .whole, .call = bufPick, .summary = "Switch to another open buffer.", .label = "Switch Editor", .menu = "Go", .group = "buffers", .order = 1, .prompts = true },
+    .{ .name = "buffer.scratch", .arity = .whole, .call = bufScratch, .summary = "Open a new, untitled scratch buffer.", .label = "New File", .menu = "File", .group = "new", .order = 1, .icon = "file-plus" },
 };
 
 fn onPickAccept(pick_id: u32) void {

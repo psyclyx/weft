@@ -887,6 +887,7 @@ pub const FrameBuilder = struct {
         // frame, so whatever last bound it — config, theme, the live switch —
         // is what this frame draws (doc/chrome.md §3.2).
         self.view.resolveChrome(fx.ui_mesh, fx.cmd_ctx.capturedCtx().mergedFacts());
+        @import("theme_cmds.zig").publishStyle(fx.cmd_ctx, self.view.chrome);
         const projection = scene.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         input.world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 

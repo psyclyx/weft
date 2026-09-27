@@ -70,6 +70,7 @@ const Library = enum {
     affordances,
     offers,
     statusline,
+    menu,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -91,6 +92,7 @@ const Library = enum {
             .affordances => "weft_affordances",
             .offers => "weft_offers",
             .statusline => "weft_statusline",
+            .menu => "weft_menu",
         };
     }
 
@@ -109,7 +111,9 @@ const Library = enum {
             // first, then arranged by `affordances`) that the offers
             // projection and the palette share.
             .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
-            .invoke => .interaction_orchestration,
+            // `menu` is a menu's behaviour, scene and interaction — what the
+            // context menu and the menubar share (doc/chrome.md §2).
+            .invoke, .menu => .interaction_orchestration,
             .ex => .editor_composition,
         };
     }
@@ -496,7 +500,11 @@ const guests = [_]Guest{
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
     // The offers projection (doc/model.md §2.4): what a context offers, as a
     // strip a toolbar viewport presents, a list, or a menu at the pointer.
-    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{.offers} },
+    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{ .offers, .menu } },
+    // The main menu (doc/chrome.md §2): every command that says where it
+    // lives, as a menubar a viewport presents (config/menubar.js) or a menu
+    // at the caret.
+    .{ .name = "menu", .import = "guest_menu_wasm", .install = true, .libraries = &.{ .menu, .invoke } },
     // The symbols projection: an entry's outline as a tree of rows — what an
     // outline viewport presents `as: "symbols"` (config/outline.js).
     .{ .name = "symbols", .import = "guest_symbols_wasm", .install = true },
@@ -1178,6 +1186,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = affordances_lib })).step);
+
+    // A menu's behaviour — the cascade, its keys, its mnemonics — is plain
+    // data under the `menu` library's scene and interaction.
+    const menu_cascade = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/menu/cascade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = menu_cascade })).step);
 
     // The `search` library (query → regex, the prefilter, the match
     // planning — the find bar and helix both link it) imports nothing but

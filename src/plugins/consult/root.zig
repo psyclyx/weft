@@ -57,8 +57,8 @@ fn beginTargets() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "consult.line", .arity = .one, .call = consultLine, .summary = "Jump to a line by searching this buffer.", .label = "Go to Line by Search", .menu = "Go", .group = "goto", .order = 2, .prompts = true },
-    .{ .name = "consult.imenu", .arity = .one, .call = consultImenu, .summary = "Jump to a definition in this buffer.", .label = "Go to Symbol in Buffer", .menu = "Go", .group = "symbols", .order = 1, .prompts = true },
+    .{ .name = "consult.line", .arity = .one, .call = consultLine, .summary = "Jump to a line by searching this buffer.", .label = "Go to Line by Search", .menu = "Go", .group = "line", .order = 2, .prompts = true },
+    .{ .name = "consult.imenu", .arity = .one, .call = consultImenu, .summary = "Jump to a definition in this buffer.", .label = "Go to Symbol in Buffer", .menu = "Go", .group = "symbol", .order = 6, .prompts = true },
 };
 
 fn onPickAccept(pick_id: u32) void {

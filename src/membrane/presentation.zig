@@ -32,7 +32,9 @@ pub const Presentation = struct {
     /// It asks for more input before it acts, so its label reads `Open File…`.
     prompts: bool = false,
     /// A context key whose truthy value shows a check mark beside it
-    /// (`viewport.sidebar.shown`).
+    /// (`viewport.sidebar.shown`) — or `key=value`, one choice among several,
+    /// shown with a dot while the key holds that value
+    /// (`theme.chrome=widget`).
     toggle: []const u8 = "",
     /// Keymap machinery, never listed in the palette, a menu or which-key.
     internal: bool = false,

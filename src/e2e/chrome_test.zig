@@ -37,8 +37,18 @@ const NodeId = semantic_model.scene.NodeId;
 
 // ── Reading the strip ────────────────────────────────────────────────
 
+/// The pane a declared viewport is docked in, by the name its fragment
+/// declares it under (two strips share the top edge: the menubar and the
+/// toolbar).
+pub fn viewportPane(ed: *Editor, name: []const u8) !*window_layout.Node {
+    const registry = ed.ctx.viewports orelse return error.NoViewports;
+    const decl = registry.find(name) orelse return error.NoSuchViewport;
+    const id = decl.pane orelse return error.ViewportNotDocked;
+    return ed.win_layout.paneById(id) orelse error.ViewportNotDocked;
+}
+
 fn toolbarPane(ed: *Editor) !*window_layout.Node {
-    return ed.win_layout.dockedPanel(.top) orelse error.NoToolbar;
+    return viewportPane(ed, "toolbar");
 }
 
 /// The toolbar's retained view, read where the host keeps it: the entry the
@@ -127,16 +137,16 @@ fn menuView(ed: *Editor) ?*const view_runtime.view.Instance {
     return ed.ctx.semantic.?.views.get(active.descriptor.view);
 }
 
-/// The menu's entries (each row's action node), in order.
-fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*const Node {
+/// The menu's rows (its root panel's `menu-item` action nodes), in order.
+pub fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*const Node {
     var n: usize = 0;
     const rows = switch (view.scene.content) {
         .container => |c| c.children,
         else => return out[0..0],
     };
     for (rows) |*row| switch (row.content) {
-        .container => |c| if (c.children.len > 0 and n < out.len) {
-            out[n] = &c.children[0];
+        .action => if (n < out.len) {
+            out[n] = row;
             n += 1;
         },
         else => {},
@@ -144,24 +154,36 @@ fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*con
     return out[0..n];
 }
 
-fn menuText(buf: []u8, view: *const view_runtime.view.Instance) []const u8 {
+/// A menu panel as a person reads it: labels in order, `|` for a rule, a `~`
+/// on each greyed row.
+pub fn panelText(buf: []u8, panel: *const Node) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    const rows = switch (view.scene.content) {
+    const rows = switch (panel.content) {
         .container => |c| c.children,
         else => return "",
     };
-    for (rows, 0..) |*row, i| {
-        if (i > 0) w.writeAll(" ") catch {};
+    var first = true;
+    for (rows) |*row| {
         switch (row.content) {
-            .container => |c| {
-                const item = &c.children[0];
-                w.writeAll(item.content.action.label) catch {};
-                if (fact(item, "tone") != null) w.writeAll("~") catch {};
+            .action => |a| {
+                if (!first) w.writeAll(" ") catch {};
+                w.writeAll(a.label) catch {};
+                if (fact(row, "reason") != null) w.writeAll("~") catch {};
             },
-            else => w.writeAll("|") catch {},
+            .label => {
+                if (!first) w.writeAll(" ") catch {};
+                w.writeAll("|") catch {};
+            },
+            // An open submenu is its own panel.
+            else => continue,
         }
+        first = false;
     }
     return w.buffered();
+}
+
+fn menuText(buf: []u8, view: *const view_runtime.view.Instance) []const u8 {
+    return panelText(buf, &view.scene);
 }
 
 fn expectMenu(ed: *Editor, want: []const u8) !void {
@@ -182,11 +204,15 @@ fn selectInMenu(ed: *Editor, label: []const u8) !void {
     var at: ?usize = null;
     var want: ?usize = null;
     for (items, 0..) |item, i| {
-        if (item.focusable) at = i;
+        if (fact(item, "lit") != null) at = i;
         if (std.mem.eql(u8, item.content.action.label, label)) want = i;
     }
-    const from = at orelse return error.NoHighlight;
     const to = want orelse return error.NoSuchMenuItem;
+    // Opened by a click, nothing is lit: the first Down lights the first row.
+    const from = at orelse blk: {
+        ed.press("Down", "");
+        break :blk 0;
+    };
     if (to > from) {
         for (0..to - from) |_| ed.press("Down", "");
     } else for (0..from - to) |_| ed.press("Up", "");
@@ -209,8 +235,9 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const editor_entry = ed.buffers.active_id;
     ed.applyWindow();
 
-    // Docked at the top, as tall as one text row plus the pane margins —
-    // no status line of its own — and never where the keys are.
+    // Docked at the top — beneath the menubar — as tall as one text row plus
+    // the pane margins, no status line of its own, and never where the keys
+    // are.
     const pane = try toolbarPane(ed);
     try t.expect(!pane.pane().attrs.takes_focus);
     try t.expect(!pane.pane().attrs.status_line);
@@ -218,7 +245,7 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const rect = for (view.pane_maps[0..view.pane_map_count]) |m| {
         if (m.pane == pane.pane().id) break m.rect;
     } else return error.ToolbarNotDrawn;
-    try t.expectEqual(@as(f32, 0), rect.y);
+    try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.y, 0.5);
     try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.h, 0.5);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_w)), rect.w);
     try t.expectEqual(editor_entry, ed.buffers.active_id);

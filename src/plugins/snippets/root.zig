@@ -23,7 +23,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "snippets.expand", .arity = .one, .call = expand, .params = "trigger [file]", .summary = "Insert the named snippet's body at the cursor.", .label = "Insert Snippet", .menu = "Edit", .group = "insert", .order = 1, .prompts = true },
+    .{ .name = "snippets.expand", .arity = .one, .call = expand, .params = "trigger [file]", .summary = "Insert the named snippet's body at the cursor.", .label = "Insert Snippet", .menu = "Edit/Insert", .group = "insert", .order = 1, .prompts = true },
 };
 
 fn describeExtra() void {

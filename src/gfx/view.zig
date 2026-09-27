@@ -40,6 +40,9 @@ pub const Theme = @import("view/Theme.zig");
 /// `popup.layoutCaretSurface`/`popup.layoutDockSurface` directly, over a
 /// live `Pick` or plain text, without hand-building a `core.surface.Surface`.
 pub const popup = @import("view/popup.zig");
+/// The menu widget: every menu's look — the menubar's and the context menu's
+/// (doc/chrome.md §2).
+pub const menu = @import("view/menu.zig");
 pub const semantic = @import("view/semantic.zig");
 pub const semantic_data = @import("view/semantic_data.zig");
 
@@ -64,5 +67,6 @@ test {
     _ = @import("view/linelayout.zig");
     _ = @import("view/render.zig");
     _ = semantic;
+    _ = menu;
     _ = ui_mesh;
 }

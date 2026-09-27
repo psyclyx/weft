@@ -29,6 +29,7 @@ const icons = @import("../icons.zig");
 const View = @import("View.zig");
 const popup = @import("popup.zig");
 const hud_mod = @import("hud.zig");
+const menu = @import("menu.zig");
 
 const Run = View.Run;
 const Rect = View.Rect;
@@ -70,7 +71,9 @@ pub const Style = enum {
     }
 };
 
-pub const Role = enum { button, tab, menu_item, status_segment, chip, separator, row, header };
+/// `menu_title` is a menubar's title (File, Edit, …): a padded label with its
+/// mnemonic underlined, lit while its menu is open.
+pub const Role = enum { button, tab, menu_item, menu_title, status_segment, chip, separator, row, header };
 
 pub const State = packed struct(u8) {
     hover: bool = false,
@@ -93,6 +96,14 @@ pub const Content = struct {
     fg: ?[4]f32 = null,
     /// A chip's own background.
     bg: ?[4]f32 = null,
+    /// The codepoint of the label a menu item or title underlines: its
+    /// mnemonic, the letter that chooses it from the keyboard.
+    mnemonic: ?usize = null,
+    /// A menu item that opens a submenu: a chevron at the far right.
+    submenu: bool = false,
+    /// A checked menu item that is one choice among several: a dot, not a
+    /// check.
+    radio: bool = false,
 };
 
 /// Where a style's items go: the frame's run and rect lists.
@@ -205,7 +216,9 @@ pub fn buttonCols(v: *const View, content: Content) usize {
 pub fn paint(s: Sink, role: Role, state: State, content: Content, box: region.Rect) !void {
     switch (role) {
         .button => try paintButton(s, state, content, box),
-        .menu_item, .row => try paintItem(s, role, state, content, box),
+        .menu_item => try paintMenuRow(s, state, content, box, defaultColumns(s.v, content)),
+        .menu_title => try paintTitle(s, state, content, box),
+        .row => try paintRow(s, state, content, box),
         .status_segment, .chip => try paintSegment(s, role, state, content, box),
         .header => try paintHeader(s, content, box),
         .separator => try paintSeparator(s, box, if (box.w >= box.h) .horizontal else .vertical),
@@ -240,44 +253,127 @@ fn paintButton(s: Sink, state: State, content: Content, box: region.Rect) !void 
     try s.label(content.label, x, box.y, fg, box);
 }
 
-/// A menu item or a plain row: a hover (or, for a menu item, focus) wash
-/// behind an optional check and icon column, the label, and a key hint
-/// right-aligned. The wash here is hover's — a row's focus and selection
-/// highlights belong to the presenter that knows what focus means there.
-fn paintItem(s: Sink, role: Role, state: State, content: Content, box: region.Rect) !void {
+/// The wash behind a lit row (hover, the keyboard's place, a press): the whole
+/// cell row under the text styles, an inset rounded bar under `widget`.
+fn rowWash(s: Sink, state: State, box: region.Rect) !void {
     const v = s.v;
     const th = &v.theme;
-    const lit = state.hover or state.pressed;
-    if (lit) switch (v.chrome) {
-        .text, .text_icons => try s.fill(box, mix(th.background, th.selection, if (state.pressed) 0.8 else 0.45)),
-        .widget => try s.rounded(.{ .x = box.x + 2, .y = box.y + 1, .w = @max(0, box.w - 4), .h = @max(0, box.h - 2) }, mix(th.background, th.selection, if (state.pressed) 0.9 else 0.55), .{ .radius = 4 }),
-    };
-    const fg = textColor(v, state, content);
-    var x = box.x;
-    if (role == .menu_item and v.chrome.showsIcons()) {
-        // An icon column, so labels align whether or not an item has one;
-        // a checked item shows its check there.
-        const cx = x + v.cell_w;
-        if (state.checked) {
-            _ = try s.icon("check", cx, box.y + v.line_h / 2, iconSide(v), th.accent);
-        } else if (content.icon) |name| {
-            _ = try s.icon(name, cx, box.y + v.line_h / 2, iconSide(v), fg);
-        }
-        x += 2 * v.cell_w;
-    } else if (state.checked) {
-        try s.label("✓", x, box.y, th.accent, box);
-        x += 2 * v.cell_w;
+    if (!(state.hover or state.pressed or state.focused)) return;
+    const strong = state.pressed or state.focused;
+    switch (v.chrome) {
+        .text, .text_icons => try s.fill(box, mix(th.background, th.selection, if (state.pressed) 0.95 else if (strong) 0.8 else 0.5)),
+        .widget => try s.rounded(.{ .x = box.x, .y = box.y + 1, .w = box.w, .h = @max(0, box.h - 2) }, mix(th.background, th.selection, if (state.pressed) 1 else if (strong) 0.85 else 0.6), .{ .radius = 5 }),
     }
+}
+
+/// A plain row: a hover wash, the label, and a key hint right-aligned. The
+/// wash here is hover's — a row's focus and selection highlights belong to
+/// the presenter that knows what focus means there.
+fn paintRow(s: Sink, state: State, content: Content, box: region.Rect) !void {
+    const v = s.v;
+    var hover = state;
+    hover.focused = false;
+    try rowWash(s, hover, box);
+    const fg = textColor(v, state, content);
     var label_clip = box;
     if (content.key_hint.len != 0) {
         const hint_w = colsW(v, cols(content.key_hint));
         const hx = box.x + box.w - hint_w - v.cell_w;
-        if (hx > x) {
-            try s.label(content.key_hint, hx, box.y, th.status, box);
+        if (hx > box.x) {
+            try s.label(content.key_hint, hx, box.y, v.theme.status, box);
             label_clip.w = @max(0, hx - v.cell_w - box.x);
         }
     }
-    try s.label(content.label, x, box.y, fg, label_clip);
+    try s.label(content.label, box.x, box.y, fg, label_clip);
+}
+
+/// A lone menu item's columns (a panel's are `menu.layout`'s, shared by all
+/// its rows).
+fn defaultColumns(v: *const View, content: Content) menu.Columns {
+    const lead: f32 = if (v.chrome == .widget) iconSide(v) + 12 else 2 * v.cell_w;
+    const chevron: f32 = if (!content.submenu) 0 else if (v.chrome == .widget) iconSide(v) + 6 else 2 * v.cell_w;
+    const pad: f32 = if (v.chrome == .widget) 10 else v.cell_w;
+    return .{ .lead = lead, .label = lead, .keys_right = pad + chevron, .chevron = chevron };
+}
+
+/// One row of a menu (doc/chrome.md §2.1): a wash while it is lit — the
+/// keyboard's place, or under the pointer — then, in `columns`, a check mark,
+/// a choice's dot or the icon in the lead column, the label with its mnemonic
+/// underlined, the key hint right-aligned, and a chevron when it opens a
+/// submenu. A disabled row is greyed and never washed as pressed.
+pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, columns: menu.Columns) !void {
+    const v = s.v;
+    const th = &v.theme;
+    var wash = state;
+    if (state.disabled) wash.pressed = false;
+    try rowWash(s, wash, box);
+    const fg = textColor(v, state, content);
+    // The text row sits in the middle of a taller `widget` row.
+    const ty = box.y + @round((box.h - v.line_h) / 2);
+    const cy = box.y + box.h / 2;
+    if (columns.lead > 0) {
+        const cx = box.x + columns.lead / 2;
+        if (state.checked and content.radio) {
+            // The chosen one of several: a dot — a filled disc under
+            // `widget`, the bullet glyph on the cell grid.
+            if (v.chrome == .widget) {
+                const d = @round(iconSide(v) * 0.42);
+                try s.rounded(.{ .x = @round(cx - d / 2), .y = @round(cy - d / 2), .w = d, .h = d }, th.accent, .{ .radius = d / 2 });
+            } else try s.label("•", cx - v.cell_w / 2, ty, th.accent, box);
+        } else if (state.checked) {
+            if (!try s.icon("check", cx, cy, iconSide(v), th.accent))
+                try s.label("✓", cx - v.cell_w / 2, ty, th.accent, box);
+        } else if (content.icon) |name| {
+            _ = try s.icon(name, cx, cy, iconSide(v), fg);
+        }
+    }
+    const lx = box.x + columns.label;
+    const right = box.x + box.w - columns.keys_right;
+    var label_clip = box;
+    if (content.key_hint.len != 0) {
+        const hx = right - colsW(v, cols(content.key_hint));
+        if (hx > lx) {
+            try s.label(content.key_hint, hx, ty, if (state.disabled) mix(th.background, th.status, 0.7) else th.status, box);
+            label_clip.w = @max(0, hx - v.cell_w - box.x);
+        }
+    }
+    try s.label(content.label, lx, ty, fg, label_clip);
+    if (content.mnemonic) |at| try underline(s, content.label, at, lx, ty, fg);
+    if (content.submenu and columns.chevron > 0) {
+        const cx = box.x + box.w - columns.chevron / 2 - (if (v.chrome == .widget) @as(f32, 4) else 0);
+        if (!try s.icon("chevron-right", cx, cy, iconSide(v) * 0.9, fg))
+            try s.label("›", cx - v.cell_w / 2, ty, fg, box);
+    }
+}
+
+/// A menubar title: a padded label, its mnemonic underlined, washed while its
+/// menu is open (`focused`) or the pointer is on it.
+fn paintTitle(s: Sink, state: State, content: Content, box: region.Rect) !void {
+    const v = s.v;
+    const th = &v.theme;
+    const lit = state.focused or state.hover or state.pressed;
+    if (lit) switch (v.chrome) {
+        .text, .text_icons => try s.fill(box, mix(th.background, th.selection, if (state.focused) 0.85 else 0.45)),
+        .widget => try s.rounded(.{ .x = box.x, .y = box.y + 2, .w = box.w, .h = @max(0, box.h - 4) }, mix(th.background, th.selection, if (state.focused) 0.85 else 0.5), .{ .radius = 5 }),
+    };
+    const x = box.x + v.cell_w;
+    try s.label(content.label, x, box.y, textColor(v, state, content), box);
+    if (content.mnemonic) |at| try underline(s, content.label, at, x, box.y, textColor(v, state, content));
+}
+
+/// Underline codepoint `at` of `label`, drawn from `x` on the text row whose
+/// top is `row_y`: a mnemonic.
+fn underline(s: Sink, label: []const u8, at: usize, x: f32, row_y: f32, color: [4]f32) !void {
+    const v = s.v;
+    if (at >= cols(label)) return;
+    const ux = x + colsW(v, at);
+    const uy = @round(row_y + v.ascent + @max(1, (v.line_h - v.ascent) * 0.35));
+    try s.fill(.{ .x = @round(ux + 1), .y = uy, .w = @max(1, @round(v.cell_w - 2)), .h = 1 }, color);
+}
+
+/// A menubar title's width in cells: its label and a cell either side.
+pub fn titleCols(content: Content) usize {
+    return cols(content.label) + 2;
 }
 
 /// A status segment (text in its own colour) or a chip (a label on its own
@@ -513,6 +609,8 @@ test "chrome: every role renders under all three styles, switched live between f
         .{ .role = .button, .state = .{ .disabled = true }, .content = .{ .label = "Redo", .icon = "redo" } },
         .{ .role = .menu_item, .state = .{ .hover = true }, .content = .{ .label = "Split Right", .icon = "split-right", .key_hint = "C-w v" } },
         .{ .role = .menu_item, .state = .{ .checked = true }, .content = .{ .label = "Sidebar" } },
+        .{ .role = .menu_item, .state = .{ .focused = true }, .content = .{ .label = "Appearance", .submenu = true, .mnemonic = 0 } },
+        .{ .role = .menu_title, .state = .{ .focused = true }, .content = .{ .label = "File", .mnemonic = 0 } },
         .{ .role = .status_segment, .state = .{ .hover = true }, .content = .{ .label = "" } },
         .{ .role = .chip, .state = .{}, .content = .{ .bg = v.theme.diag_error } },
         .{ .role = .row, .state = .{ .hover = true }, .content = .{ .label = "a.zig" } },

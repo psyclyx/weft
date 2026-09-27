@@ -206,11 +206,11 @@ test "e2e/ide: ide.js boots whole, every bound key is answerable, and the sideba
 
     // The sidebar is open from the first frame: the fragment's declaration,
     // realized by the ordinary layout phase, with the editor still focused.
-    // Four panes: the editor, the sidebar, the toolbar along the top, and the
-    // status bar along the bottom.
+    // Five panes: the editor, the sidebar, the menubar and the toolbar along
+    // the top, and the status bar along the bottom.
     const editor_entry = ed.buffers.active_id;
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 4), ed.paneCount());
+    try t.expectEqual(@as(usize, 5), ed.paneCount());
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
     const listing = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
@@ -222,11 +222,11 @@ test "e2e/ide: ide.js boots whole, every bound key is answerable, and the sideba
     // no command anywhere knows the word "sidebar" but the config's value.
     ed.press("C-b", "");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 3), ed.paneCount());
+    try t.expectEqual(@as(usize, 4), ed.paneCount());
     try t.expect(ed.win_layout.dockedPanel(.left) == null);
     ed.press("C-b", "");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 4), ed.paneCount());
+    try t.expectEqual(@as(usize, 5), ed.paneCount());
     const again = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const shown = ed.buffers.get(again.pane().buffer_id) orelse return error.NoSidebarEntry;
     try t.expect(std.mem.startsWith(u8, shown.name, "files:"));

@@ -27,8 +27,8 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "grep.search", .call = grep, .arity = .whole, .params = "pattern", .summary = "Search the project for a pattern, listing the matches in *grep*.", .label = "Find in Project", .menu = "Edit", .group = "find", .order = 10, .icon = "text-search", .prompts = true },
-    .{ .name = "grep.search-word", .arity = .one, .call = grepWord, .summary = "Search the project for the word under the cursor.", .label = "Find Word in Project", .menu = "Edit", .group = "find", .order = 11 },
+    .{ .name = "grep.search", .call = grep, .arity = .whole, .params = "pattern", .summary = "Search the project for a pattern, listing the matches in *grep*.", .label = "Find in Files", .menu = "Edit", .group = "search", .order = 1, .icon = "text-search", .prompts = true },
+    .{ .name = "grep.search-word", .arity = .one, .call = grepWord, .summary = "Search the project for the word under the cursor.", .label = "Find Word in Files", .menu = "Edit", .group = "search", .order = 2 },
     .{ .name = "grep.visit", .call = output.visit, .arity = .one, .summary = "Open the location the focused result row names.", .internal = true },
     .{ .name = "grep.open", .call = reopen, .arity = .whole, .params = "designation", .summary = "Run the search a `weft://here/grep/…` designation names.", .internal = true },
 };

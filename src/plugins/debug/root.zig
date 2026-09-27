@@ -17,9 +17,9 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "debug.toggle-breakpoint", .arity = .one, .call = toggle, .summary = "Set or clear a breakpoint on this line.", .label = "Toggle Breakpoint", .menu = "Run/Debug", .group = "breakpoints", .order = 1, .icon = "circle-dot" },
-    .{ .name = "debug.clear-breakpoints", .call = clearAll, .arity = .whole, .summary = "Clear every breakpoint.", .label = "Clear All Breakpoints", .menu = "Run/Debug", .group = "breakpoints", .order = 2 },
-    .{ .name = "debug.list-breakpoints", .call = list, .arity = .whole, .summary = "List the breakpoints.", .label = "List Breakpoints", .menu = "Run/Debug", .group = "breakpoints", .order = 3 },
+    .{ .name = "debug.toggle-breakpoint", .arity = .one, .call = toggle, .summary = "Set or clear a breakpoint on this line.", .label = "Toggle Breakpoint", .menu = "Run", .group = "breakpoints", .order = 1, .icon = "circle-dot" },
+    .{ .name = "debug.clear-breakpoints", .call = clearAll, .arity = .whole, .summary = "Clear every breakpoint.", .label = "Clear All Breakpoints", .menu = "Run", .group = "breakpoints", .order = 2 },
+    .{ .name = "debug.list-breakpoints", .call = list, .arity = .whole, .summary = "List the breakpoints.", .label = "List Breakpoints", .menu = "Run", .group = "breakpoints", .order = 3 },
 };
 
 /// The focused buffer changed: paint ITS breakpoints (the decorations layer is

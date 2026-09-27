@@ -94,6 +94,18 @@ weft.use("sidebar");
 // plus the pinned entries below. It takes no focus, so clicking it acts on
 // the editor and leaves the keys there.
 weft.use("toolbar");
+// The menubar: File, Edit, Selection, View, Go, Run, Terminal, Help — every
+// command that says where it lives, with the key that runs it here beside
+// it (doc/chrome.md §2). Used AFTER the toolbar, so it docks above it: a
+// later top dock wraps the ones before it. Alt with a title's letter opens
+// its menu; F10 below lights the bar when no debugger claims the key.
+weft.use("menubar");
+// The View ▸ Appearance toggles for the chrome this file composes — the
+// menubar's own, and the toolbar's.
+weft.set("menu", "items", [
+  "View/Appearance\tMenu Bar\tviewport.toggle menubar\tviewport.menubar.shown\tviewports\t1",
+  "View/Appearance\tToolbar\tviewport.toggle toolbar\tviewport.toolbar.shown\tviewports\t2",
+]);
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
@@ -171,6 +183,15 @@ weft.action("plugin.code.rename");
 provideInSource("plugin.code.rename", {}, "rename", { label: "Rename", group: "edit", order: 11 });
 weft.provide("plugin.code.rename", { tool: "files" }, "field.edit", { label: "Rename", group: "edit", order: 11 });
 
+// Where these actions sit in the menubar: each runs whichever provider
+// answers it in the editor, so Run ▸ Run builds a Zig file and runs a line
+// elsewhere, and its key is the one bound below.
+weft.command("plugin.code.run", { label: "Run", menu: "Run", group: "run", order: 1, icon: "play" });
+weft.command("plugin.code.test", { label: "Test", menu: "Run", group: "run", order: 2, icon: "test" });
+weft.command("plugin.code.debug", { label: "Start Debugging", menu: "Run", group: "debug", order: 1, icon: "bug" });
+weft.command("plugin.code.format", { label: "Format Document", menu: "Edit", group: "format", order: 1, icon: "format" });
+weft.command("plugin.code.rename", { label: "Rename Symbol", menu: "Edit", group: "refactor", order: 1, icon: "rename", prompts: true });
+
 // ── Keys ─────────────────────────────────────────────────────────────
 // The GRAMMAR binds the editing keys (arrows, shift-selection, Home/End, Tab,
 // C-/, A-Up/Down, C-c/C-x/C-v, C-z/C-y, Escape) — see src/plugins/ide. What
@@ -233,10 +254,16 @@ weft.bind("ide", "C-space", "complete.show");
 weft.bind("ide", "C-S-b", "plugin.code.run");   // build / run, by language
 weft.bind("ide", "M-S-f", "plugin.code.format");  // format the buffer
 
-// The debugger: the IDE-standard F-keys.
+// The debugger: the IDE-standard F-keys. F10 steps over while a debug
+// session is live — dap.js publishes `dap.session` — and otherwise lights the
+// menubar, the other thing F10 conventionally does: an intention is offered
+// only where its provider's facts hold, so the key falls through to the
+// menubar the moment no session is there to step.
 bindWorkspace("F5", "debug.continue");
 weft.bind("ide", "F9", "debug.toggle-breakpoint");
-bindWorkspace("F10", "debug.step-over");
+weft.action("plugin.debug.step-over");
+weft.provide("plugin.debug.step-over", { context: { "dap.session": "*" } }, "debug.step-over", { label: "Step Over", group: "debug", order: 2 });
+bindWorkspace("F10", ["plugin.debug.step-over", "menu.focus-bar"]);
 bindWorkspace("F11", "debug.step-into");
 
 weft.bind("global", "F1", "which-key.show");

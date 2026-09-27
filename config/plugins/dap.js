@@ -73,6 +73,13 @@ function retire(s) {
   const i = sessions.indexOf(s);
   if (i >= 0) sessions.splice(i, 1);
   if (recent === s) recent = sessions.length ? sessions[sessions.length - 1] : null;
+  published();
+}
+
+// `dap.session` names a live session while there is one, so a provider can
+// be offered only while there is something to step (ide.js's F10).
+function published() {
+  weft.contextSet("dap.session", sessions.length ? sessions[sessions.length - 1].buf : "", "global");
 }
 
 // Send a DAP request with Content-Length framing (bytes; ASCII bodies here).
@@ -177,6 +184,7 @@ weft.command("debug.start", () => {
     line: parseInt(weft.config("line") || "1", 10),
   };
   sessions.push(s);
+  published();
   recent = s;
   log(s, "debug: launching " + cmd + " → " + s.program + "\n", ST.muted);
   setStatus(s, "starting");
@@ -194,8 +202,8 @@ weft.command("debug.start", () => {
   summary: "Start a debug session.",
   arity: "whole",
   label: "Start Debugging",
-  menu: "Run/Debug",
-  group: "session",
+  menu: "Run",
+  group: "debug",
   order: 1,
   icon: "bug",
 });
@@ -209,7 +217,7 @@ function stepCmd(name, command, options) {
       return;
     }
     send(s, command, { threadId: s.thread });
-  }, { ...options, arity: "whole", menu: "Run/Debug", group: "step" });
+  }, { ...options, arity: "whole", menu: "Run", group: "step" });
 }
 stepCmd("debug.continue", "continue", { summary: "Let the program run on.", label: "Continue", order: 1, icon: "play" });
 stepCmd("debug.step-over", "next", { summary: "Step over this line.", label: "Step Over", order: 2, icon: "step-forward" });
@@ -233,8 +241,8 @@ weft.command("debug.stop", () => {
   summary: "Stop the focused debug session.",
   arity: "whole",
   label: "Stop Debugging",
-  menu: "Run/Debug",
-  group: "session",
+  menu: "Run",
+  group: "debug",
   order: 2,
   icon: "stop",
 });
