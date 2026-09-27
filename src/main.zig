@@ -352,6 +352,7 @@ pub fn main(init: std.process.Init) !void {
         },
     };
     try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);
+    session.file_opener = buffer_command_context.fileOpener();
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     // `Collab` owns the whole connection cluster (outbound conn/session/partial,

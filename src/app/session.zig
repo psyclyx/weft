@@ -95,6 +95,12 @@ pub const Session = struct {
     /// every OTHER holder of `&self.cmd_ctx` sees the new system from its
     /// next read on, exactly like `core/System.zig`'s own gate tests.
     cmd_ctx: core.command.Context,
+    /// How this shell opens a file from bytes already read
+    /// (`buffers_cmds.FileOpener`), installed with the shell's commands. A
+    /// listing's file row opens through it (`openWorkspaceEntry`); until it is
+    /// installed, such a row opens nothing rather than falling back to a read
+    /// by path.
+    file_opener: ?@import("buffers_cmds.zig").FileOpener = null,
 
     // ── Capability-consumer UIs (written against capability names only) ──
     completion_ui: core.complete_ui.CompletionUi,
@@ -524,16 +530,42 @@ pub const Session = struct {
         const named = system.filesystems.designationOf(located.target, located.revision) orelse return false;
         const designation = semantic.durable.parse(named) orelse return false;
         if (designation.kind != .file) return false;
-        if (designation.authority == .here) {
-            const directory = std.fs.path.dirname(designation.ref) orelse return false;
-            if (!self.namesRoot(directory, entry.root)) return false;
-        }
         // Owned across the open: opening may republish, and the binding's
         // bytes go with it.
         const owned = try ctx.gpa.dupe(u8, named);
         defer ctx.gpa.free(owned);
+        if (designation.authority == .here) {
+            const directory = std.fs.path.dirname(designation.ref) orelse return false;
+            if (!self.namesRoot(directory, entry.root)) return false;
+            // The bytes come through the provider, relative to the directory
+            // handle the listing pinned, at the revision it authorized (no
+            // link followed): a path swapped since the check changes nothing
+            // that opens. The path is only where a save goes.
+            const opener = self.file_opener orelse return false;
+            const bytes = readEntry(system, ctx.gpa, entry) catch return false;
+            defer ctx.gpa.free(bytes);
+            try opener.open(ctx, (semantic.durable.parse(owned) orelse return false).ref, bytes);
+            return true;
+        }
         _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = owned }});
         return true;
+    }
+
+    /// Every byte of the authorized `entry`, read by the provider relative to
+    /// its root (`openat`, no link followed, revision-checked). Caller frees.
+    fn readEntry(system: anytype, gpa: std.mem.Allocator, entry: fs.target.Entry) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        while (true) {
+            var chunk = try system.filesystems.read(gpa, .{
+                .source = .{ .entry = .{ .root = entry.root, .ref = entry.ref, .revision = entry.revision } },
+                .offset = out.items.len,
+            });
+            defer chunk.deinit();
+            try out.appendSlice(gpa, chunk.value.bytes);
+            if (chunk.value.eof or chunk.value.bytes.len == 0) break;
+        }
+        return out.toOwnedSlice(gpa);
     }
 
     /// Whether `path` names, by the provider's own identity, the directory

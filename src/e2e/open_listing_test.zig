@@ -285,6 +285,29 @@ fn rowsFlaggedDeleted(ed: *Editor) usize {
     return n;
 }
 
+test "e2e/files: a row whose file was swapped for a link after listing opens what was listed, never the link's target" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytesMakingDirs(gpa, "private", "private/secret.txt", "SECRET\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+    // Between the listing and the activation, the leaf becomes a link to a
+    // file the listing never showed. The directory is the same directory.
+    _ = try app.proj.oracle("rm alpha.txt && ln -s -- private/secret.txt alpha.txt");
+    ed.press("Return", "");
+    ed.applyWindow();
+    var it = ed.buffers.iterator();
+    while (it.next()) |b| if (b.textEditor()) |text_editor| {
+        const text = try text_editor.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        try t.expect(!std.mem.eql(u8, text, "SECRET\n"));
+    };
+}
+
 test "e2e/files: config.js — V j d over rows removes every row of the range, and nothing past it" {
     const gpa = t.allocator;
     var app: ConfigApp = undefined;

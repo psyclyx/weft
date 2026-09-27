@@ -235,6 +235,15 @@ pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Erro
     assert(self.backing == .none);
     const bytes = try file.readAlloc(gpa, path);
     defer gpa.free(bytes);
+    try self.openFileContent(gpa, path, bytes);
+}
+
+/// `openFile` with the file's bytes already read — by a caller that read them
+/// through something stronger than the path (a filesystem provider, relative
+/// to a directory handle it checked), so what the entry shows is exactly
+/// what was authorized, and the path is only where a save goes.
+pub fn openFileContent(self: *Editor, gpa: Allocator, path: []const u8, bytes: []const u8) (Allocator.Error || Document.AddPeerError)!void {
+    assert(self.backing == .none);
     const token = backing_mod.localToken(bytes);
     try self.doc.adoptContent(gpa, bytes);
     var sync = try backing_mod.Sync.init(gpa, &self.doc);

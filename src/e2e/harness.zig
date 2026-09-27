@@ -259,6 +259,7 @@ pub const Editor = struct {
             },
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
+        self.session.file_opener = self.buffer_commands.fileOpener();
     }
 
     pub fn deinit(self: *Editor) void {

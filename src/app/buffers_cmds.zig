@@ -41,6 +41,11 @@ pub const Context = struct {
     attachments: *AttachDeps,
     directories: ?DirectoryOpener = null,
     peers: ?PeerOpener = null,
+
+    /// This shell's way to open a file from bytes already read (`FileOpener`).
+    pub fn fileOpener(self: *Context) FileOpener {
+        return .{ .context = self };
+    }
 };
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
@@ -131,6 +136,25 @@ fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: dur
 /// A local path — absolute by the time it gets here — as a file entry, or as
 /// the directory's listing.
 fn openLocal(ctx: *core.command.Context, command_context: *Context, raw: []const u8) anyerror!core.command.Value {
+    return openLocalWith(ctx, command_context, raw, null);
+}
+
+/// How a caller that has READ a local file through something stronger than
+/// its path opens it: the same entry `open` makes (deduped, placed, with its
+/// providers), showing those bytes (`Editor.openFileContent`). The session
+/// opens a listing's file row this way, from bytes read relative to the
+/// directory handle it checked, so no swap of the path between the check
+/// and the read can change what opens.
+pub const FileOpener = struct {
+    context: *Context,
+
+    pub fn open(self: FileOpener, ctx: *core.command.Context, path: []const u8, bytes: []const u8) anyerror!void {
+        _ = try openLocalWith(ctx, self.context, path, bytes);
+    }
+};
+
+/// `openLocal`, with the file's bytes when the caller already has them.
+fn openLocalWith(ctx: *core.command.Context, command_context: *Context, raw: []const u8, content: ?[]const u8) anyerror!core.command.Value {
     const deps = command_context.attachments;
     // One spelling per file: `a/../b` and `b` are one entry.
     const spec = try std.fs.path.resolve(ctx.gpa, &.{raw});
@@ -139,14 +163,14 @@ fn openLocal(ctx: *core.command.Context, command_context: *Context, raw: []const
         try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
     }
-    if (command_context.directories) |directories|
+    if (content == null) if (command_context.directories) |directories|
         if (try directories.open(directories.context, ctx, spec)) return .nil;
 
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
     errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
     const buf = ctx.buffers.get(id).?;
     const editor = buf.textEditor().?;
-    editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
+    if (content) |bytes| try editor.openFileContent(ctx.gpa, spec, bytes) else editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
         error.FileNotFound => try editor.adoptPath(ctx.gpa, spec),
         else => |e| return e,
     };

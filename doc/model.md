@@ -394,7 +394,9 @@ kept alive past its phase.
    bind (`Router.designate`, never the guest-writable descriptor), and a
    child row's designation is its parent's plus the provider's leaf — so
    `Session.openWorkspaceEntry` opens a file row by its designation, with
-   one provider-identity check on the containing directory, and the
+   one provider-identity check on the containing directory and the bytes
+   read by the provider relative to that directory's handle (`openat`, no
+   link followed, at the listed revision — `Editor.openFileContent`), and the
    container walk f3fd272 added is gone (its tests pass unchanged). Titles
    read the designation (`designation.title`, `$HOME` as `~`, a peer by the
    address it was reached at); the status line shows a file relative to its
