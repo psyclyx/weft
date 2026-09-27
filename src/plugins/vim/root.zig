@@ -370,8 +370,12 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-open-below", .call = openBelow, .arity = each },
     .{ .name = "vim-open-above", .call = openAbove, .arity = each },
     .{ .name = "vim-visual", .call = visual, .arity = each },
-    .{ .name = "vim-visual-delete", .call = visualDelete, .arity = each },
-    .{ .name = "vim-visual-yank", .call = visualYank, .arity = each },
+    .{ .name = "vim-visual-delete", .call = visualDelete, .arity = .whole },
+    .{ .name = "vim-visual-delete-text", .call = visualDeleteText, .arity = each },
+    .{ .name = "vim-visual-yank", .call = visualYank, .arity = .whole },
+    .{ .name = "vim-visual-yank-text", .call = visualYankText, .arity = each },
+    .{ .name = "vim-visual-paste", .call = visualPaste(true), .arity = .whole },
+    .{ .name = "vim-visual-paste-before", .call = visualPaste(false), .arity = .whole },
     .{ .name = "vim-visual-change", .call = visualChange, .arity = each },
     .{ .name = "vim-visual-comment", .call = visualOp("op.comment"), .arity = each },
     .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase"), .arity = each },
@@ -736,6 +740,8 @@ fn initExtra() void {
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");
     weft.bindKey("visual", "y", "vim-visual-yank");
+    weft.bindKey("visual", "p", "vim-visual-paste");
+    weft.bindKey("visual", "P", "vim-visual-paste-before");
     weft.bindKey("visual", "c", "vim-visual-change");
     weft.bindKey("visual", "s", "vim-visual-change"); // `s` in visual = change too
     weft.bindKey("visual", "Escape", "vim-normal");
@@ -930,25 +936,34 @@ fn visualLine() void { // V — linewise
     weft.run(if (weft.posture() == .text) "set-mark" else "mark-rows");
     weft.setMode("visual");
 }
-/// Whether the selection is a range of more than one row of a scene.
-fn rowRange() bool {
-    const set = weft.selections();
-    if (set.items.len == 0) return false;
-    const s = set.items[set.primary];
-    return s.kind == .rows and s.anchor != s.head;
+/// Leave visual mode: the selection is spent.
+fn endVisual() void {
+    weft.run("clear-selection");
+    visual_linewise = false;
+    weft.exitToResting();
 }
 
+// Visual `y`/`d`/`p` are transfer keys, routed as `yy`/`dd`/`p` are (see
+// `yankLine`): over `V`'s rows the view's transfer takes every selected row
+// as ONE request, else the text half maps per caret.
 fn visualDelete() void {
-    if (visual_linewise and rowRange()) {
-        // `V j d` over rows: the rows selected are the view's to delete — a
-        // range of them is one request (the files listing flags each). One
-        // row goes the transfer's way, below: yanked, then flagged.
-        weft.run("selection-delete");
-        weft.run("clear-selection");
-        visual_linewise = false;
-        weft.exitToResting();
-        return;
-    }
+    if (visual_linewise and yankRows(true)) return endVisual();
+    weft.run("vim-visual-delete-text");
+}
+fn visualYank() void {
+    if (visual_linewise and yankRows(false)) return endVisual();
+    weft.run("vim-visual-yank-text");
+}
+fn visualPaste(comptime after: bool) fn () void {
+    return struct {
+        fn h() void {
+            if (pastedRows(after)) return endVisual();
+            weft.run(if (after) "vim-paste-text" else "vim-paste-before-text");
+        }
+    }.h;
+}
+
+fn visualDeleteText() void {
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
@@ -971,7 +986,7 @@ fn visualDelete() void {
     visual_linewise = false;
     weft.exitToResting();
 }
-fn visualYank() void {
+fn visualYankText() void {
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
@@ -1148,7 +1163,7 @@ fn openContainer() void {
 // transfer when something offers it, else to its text half, a command of
 // its own that maps `each`.
 fn yankLine() void {
-    if (transferred(std_yank, semantic_action.copy)) return;
+    if (yankRows(false)) return;
     weft.run("vim-yank-line-text");
 }
 fn yankLineText() void {
@@ -1157,12 +1172,28 @@ fn yankLineText() void {
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
-    if (!clip_register and transferred(std_paste, semantic_action.paste_after)) return;
+    if (pastedRows(true)) return;
     weft.run("vim-paste-text");
 }
 fn pasteBefore() void {
-    if (!clip_register and transferred(std_paste, semantic_action.paste_before)) return;
+    if (pastedRows(false)) return;
     weft.run("vim-paste-before-text");
+}
+/// The row half of a yank or a delete (`yy`/`dd`/`cc`, visual `y`/`d`): ONE
+/// copy of every selected row, then for a delete the view's own
+/// `selection-delete` — the files view FLAGS the rows, a retained delete, not
+/// a removal of the register's content — reached by the name a key would
+/// reach it by. False when nothing offers the transfer word: the caller's
+/// text half runs.
+fn yankRows(delete: bool) bool {
+    if (!transferred(std_yank, semantic_action.copy)) return false;
+    if (delete) weft.run("selection-delete");
+    return true;
+}
+/// The row half of a put (`p`/`P`, visual too). `"+` names the desktop
+/// clipboard, which only the text half reads.
+fn pastedRows(after: bool) bool {
+    return !clip_register and transferred(std_paste, if (after) semantic_action.paste_after else semantic_action.paste_before);
 }
 fn pasteText(comptime after: bool) fn () void {
     return struct {
@@ -1297,19 +1328,13 @@ fn opCancel() void {
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
-    // `yy`/`dd`/`cc` on a row that offers the transfer word: the capture is
-    // the standard vocabulary's, while `dd`'s other half FLAGS the row for
-    // removal — the files view's retained delete, not a removal of the register's
-    // content — which is the view's own `selection-delete` route, reached by
-    // the name a key would reach it by.
-    if (op_copies and transferred(std_yank, semantic_action.copy)) {
-        const semantic_edit = op_edit_cmd orelse {
-            weft.exitToResting();
+    // `yy`/`dd`/`cc` on a row that offers the transfer word (see `yankRows`).
+    if (op_copies) {
+        const edit = op_edit_cmd;
+        if (yankRows(if (edit) |e| std.mem.eql(u8, e, "op.delete") else false)) {
+            if (edit == null) weft.exitToResting() else enterAfterOp();
             return;
-        };
-        if (std.mem.eql(u8, semantic_edit, "op.delete")) weft.run("selection-delete");
-        enterAfterOp();
-        return;
+        }
     }
     // The text half, per caret (see `yankLine`).
     weft.run("vim-op-line-text");
