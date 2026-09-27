@@ -351,10 +351,18 @@ test "e2e/designation: a peer's shared tree opens by designation — the same pa
     try t.expectEqualStrings("files: alice.example:/src", b.bufferName());
     // Nothing the peer does not have.
     try t.expect(openRaw(&b, "weft://" ++ "nobody" ++ "/dir/src") != null);
-    // A peer's file is refused by name: it opens as a document the peer shares.
+    // A peer's file opens READ-ONLY, read once through the peer's tree and
+    // named by what it is: there is no remote file backing to write through
+    // (editing it together is sharing it as a document).
     var file_name: [128]u8 = undefined;
     const file_designation = try (durable.Designation{ .authority = .{ .peer = &fp }, .kind = .file, .ref = "/src/main.zig" }).render(&file_name);
-    try t.expect(std.mem.indexOf(u8, openRaw(&b, file_designation).?, "document") != null);
+    try t.expect(openRaw(&b, file_designation) == null);
+    try t.expectEqualStrings(file_designation, named(&b));
+    try t.expect(b.buffers.active().read_only);
+    // One the peer does not have is refused by name.
+    var missing_name: [128]u8 = undefined;
+    const missing = try (durable.Designation{ .authority = .{ .peer = &fp }, .kind = .file, .ref = "/src/nope.zig" }).render(&missing_name);
+    try t.expect(std.mem.indexOf(u8, openRaw(&b, missing).?, "no such file") != null);
 }
 
 /// Run a command and copy its string result.

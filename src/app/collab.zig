@@ -174,6 +174,43 @@ pub const ShareCtx = struct {
         }
     }
 
+    /// The bytes of the file `name` in the peer's directory `parent`, owned
+    /// by `gpa` — looked up in the provider's own listing of `parent` and
+    /// read through the router at the revision that listing observed, then
+    /// the file's publication retired again. Null when the peer has no such
+    /// regular file there.
+    pub fn readRemoteFile(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?[]u8 {
+        const owner = self.remote_fs_owner orelse return null;
+        const services = ctx.semantic orelse return null;
+        const router = ctx.filesystems orelse return null;
+        const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
+        var file = switch (published) {
+            .file => |registration| registration,
+            .directory => |registration| {
+                var directory = registration;
+                _ = directory.close(self.gpa, &services.targets);
+                return null;
+            },
+        };
+        defer _ = file.close(self.gpa, &services.targets, router);
+        const entry = try router.authorizedEntry(file.ref, file.revision);
+        var read = try router.read(ctx.gpa, .{ .source = .{ .entry = .{ .root = entry.root, .ref = entry.ref, .revision = entry.revision } } });
+        defer read.deinit();
+        return try ctx.gpa.dupe(u8, read.value.bytes);
+    }
+
+    /// The place a peer's shared tree is (doc/place.md): its root container,
+    /// named by the designation it was published under (`weft://<peer>/dir/`),
+    /// so the `place` context key of an entry opened from the peer's tree is
+    /// the tree, and a sidebar following that key lists it. Bound in this
+    /// process's router, hence the `here` locus — which also means nothing
+    /// local can be realized there: a spawn from a peer's file has no
+    /// directory of ours to run in, and says so.
+    pub fn remotePlace(self: *const ShareCtx) ?core.Place {
+        const root = self.remote_fs_target orelse return null;
+        return .{ .container = .{ .locus = .here, .ref = root.target, .revision = root.revision } };
+    }
+
     /// Remember what the person called the host they connected to: the
     /// address without its port, which is what a title shows the peer as.
     pub fn setPeerLabel(self: *ShareCtx, hostport: []const u8) void {

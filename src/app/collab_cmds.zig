@@ -266,9 +266,66 @@ pub fn openPeer(raw: *anyopaque, ctx: *core.command.Context, d: core.designation
     return switch (d.kind) {
         .directory => openPeerDirectory(sc, ctx, fingerprint, d.ref),
         .doc => openPeerDocument(sc, ctx, fingerprint, d.docId() orelse return .{ .string = core.designation.refuse_doc_gone }),
-        .file => .{ .string = "open: a peer's file opens once they share it as a document (open-shared); weft has no remote file backing" },
+        .file => openPeerFile(sc, ctx, fingerprint, d),
         else => .{ .string = core.designation.refuse_unreachable },
     };
+}
+
+/// The directory `path` names in the tree peer `fingerprint` shares with us,
+/// reached from the root by names in the provider's own listings — or null
+/// (with the refusal in `why`) when it is not the peer we are connected to,
+/// or it has no such directory.
+fn peerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8, why: *[]const u8) !?@import("weft_semantic").target.Located {
+    const root = sc.remote_fs_target orelse {
+        why.* = "open: that peer shares no filesystem with us";
+        return null;
+    };
+    const s = sc.session.* orelse {
+        why.* = core.designation.refuse_unreachable;
+        return null;
+    };
+    const connected = s.peerFingerprint() orelse {
+        why.* = core.designation.refuse_unreachable;
+        return null;
+    };
+    if (!std.mem.eql(u8, &connected, fingerprint)) {
+        why.* = "open: that peer is not the one we are connected to";
+        return null;
+    }
+    var at = root;
+    var names = std.mem.tokenizeScalar(u8, path, '/');
+    while (names.next()) |name| {
+        at = (try sc.remoteChild(ctx, at, name)) orelse {
+            why.* = "open: the peer has no such directory";
+            return null;
+        };
+    }
+    return at;
+}
+
+/// A peer's FILE, as a read-only entry holding what the peer has there now:
+/// read once through the peer's tree, named by its peer designation, and in
+/// the peer's place — so the editor is on the peer's tree while it shows it.
+/// Read-only because there is no remote file backing to write back through;
+/// editing a peer's file together is sharing it as a document (a `doc`).
+fn openPeerFile(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, d: core.designation.Designation) anyerror!core.command.Value {
+    const dir_path = std.fs.path.dirnamePosix(d.ref) orelse "/";
+    const leaf = std.fs.path.basenamePosix(d.ref);
+    if (leaf.len == 0) return .{ .string = "open: that names no file" };
+    var why: []const u8 = "";
+    const parent = (try peerDirectory(sc, ctx, fingerprint, dir_path, &why)) orelse return .{ .string = why };
+    const bytes = (try sc.readRemoteFile(ctx, parent, leaf)) orelse return .{ .string = "open: the peer has no such file" };
+    defer ctx.gpa.free(bytes);
+    const id = try ctx.buffers.create(ctx.gpa, leaf);
+    errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
+    const buf = ctx.buffers.get(id).?;
+    try buf.textEditor().?.doc.adoptContent(ctx.gpa, bytes);
+    buf.read_only = true;
+    var named: [core.designation.max_len]u8 = undefined;
+    try buf.setDesignation(ctx.gpa, try d.bare().render(&named));
+    if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+    return .{ .integer = @intCast(id) };
 }
 
 /// The directory `path` in the tree the peer `fingerprint` shares with us,
@@ -276,16 +333,11 @@ pub fn openPeer(raw: *anyopaque, ctx: *core.command.Context, d: core.designation
 /// looked up in the provider's own listing of its parent
 /// (`publishChildByName`), so what opens is what the peer really has there.
 fn openPeerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8) anyerror!core.command.Value {
-    const root = sc.remote_fs_target orelse return .{ .string = "open: that peer shares no filesystem with us" };
-    const s = sc.session.* orelse return .{ .string = core.designation.refuse_unreachable };
-    const connected = s.peerFingerprint() orelse return .{ .string = core.designation.refuse_unreachable };
-    if (!std.mem.eql(u8, &connected, fingerprint)) return .{ .string = "open: that peer is not the one we are connected to" };
-    var at = root;
-    var names = std.mem.tokenizeScalar(u8, path, '/');
-    while (names.next()) |name| {
-        at = (try sc.remoteChild(ctx, at, name)) orelse return .{ .string = "open: the peer has no such directory" };
-    }
+    var why: []const u8 = "";
+    const at = (try peerDirectory(sc, ctx, fingerprint, path, &why)) orelse return .{ .string = why };
     try @import("session.zig").presentDirectory(ctx, at);
+    // The listing is IN the peer's tree, wherever it was opened from.
+    if (sc.remotePlace()) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
     return .nil;
 }
 
@@ -585,6 +637,9 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
         const d = core.designation.Designation.ofDoc(.{ .peer = fingerprint }, &spelled);
         try buf.setDesignation(ctx.gpa, try d.render(&named));
     }
+    // A document the peer we share a tree with offers is in that tree's
+    // place; any other peer's is in no place of ours.
+    if (ref.peer == null) if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.
