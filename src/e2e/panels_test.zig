@@ -248,31 +248,66 @@ test "e2e/panels: a shell that exits says so, and C-` starts a fresh one" {
     try t.expect(h.drainToolContains(ed, "*terminal*", "echo again\nagain\n"));
 }
 
+/// The prompt the startup files `hermeticShellHome` writes set. A prompt the
+/// test names, rather than "a line ending in a space": startup output reaches
+/// the buffer in whatever pieces the pipe was read in, and a piece ending in a
+/// space (`stty: `, `… Inappropriate `) is not a prompt.
+const test_prompt = "weft-e2e> ";
+
+/// Give the shell the terminal starts here a home of its own: startup files
+/// that set `test_prompt` and nothing else, found through `HOME` (bash),
+/// `ZDOTDIR` (zsh) and `ENV` (sh), published as the environment of the place
+/// the terminal runs in. The user's own rc files — which may take seconds,
+/// print, run `stty` on a pipe or emit terminal reports — are not read, and
+/// zsh skips the system-wide ones too (`no_global_rcs`: a distribution's
+/// /etc/zshrc can run compinit, seconds under load) and marks no partial
+/// line before the prompt (`no_prompt_sp`).
+fn hermeticShellHome(app: *IdeApp) !void {
+    const gpa = app.ed.gpa;
+    const out = try app.proj.oracle("mkdir -p home && " ++
+        "printf \"PS1='" ++ test_prompt ++ "'\\n\" > home/.bashrc && " ++
+        "printf 'setopt no_global_rcs\\n' > home/.zshenv && " ++
+        "printf \"unsetopt prompt_sp\\nPROMPT='" ++ test_prompt ++ "'\\n\" > home/.zshrc && " ++
+        "cp home/.bashrc home/.shrc");
+    gpa.free(out);
+    const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00", .{app.proj.root});
+    defer gpa.free(vars);
+    const system = app.ed.session.system;
+    _ = try system.environments.publish(system.buffers.active().place, "e2e", vars);
+}
+
 /// Run `echo $((6*7)) >&2` in the terminal started by `shell` (null: the
 /// default, `$SHELL`) and say how many times the typed line shows. The answer
 /// goes to stderr — the stream a line editor echoes on — so it cannot
 /// overtake an echo of the line from the other pipe. Null when that shell is
 /// not installed (it exits 127 before answering).
-fn typedLineShows(ed: *Editor, shell: ?[]const u8) !?usize {
+///
+/// Each phase has its own deadline and its own failure: a shell slow to
+/// start cannot spend the answer's time, nor fail as though it never
+/// answered.
+fn typedLineShows(app: *IdeApp, shell: ?[]const u8) !?usize {
+    const ed = &app.ed;
     try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(app);
     if (shell) |s| try ed.setConfig("terminal", "shell", s);
     ed.press("C-grave", "");
-    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     // Type at the prompt, as a person does: what the shell prints while it
-    // starts would otherwise land in the middle of the echoed line. A prompt
-    // is the last line, unfinished, ending in a space (`bash-5.3$ `, `% `).
-    while (core.task.nowNs() < deadline) {
+    // starts would otherwise land in the middle of the echoed line.
+    const prompted = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (true) {
+        if (core.task.nowNs() >= prompted) return terminalFailed(ed, error.PromptNeverShown);
         ed.settle(1);
         const text = h.toolText(ed, "*terminal*") orelse continue;
         defer ed.gpa.free(text);
         if (std.mem.indexOf(u8, text, "[process exited 127]") != null) return null;
-        if (text.len > 0 and text[text.len - 1] == ' ') break;
+        if (std.mem.endsWith(u8, text, test_prompt)) break;
         // A shell that is not there reports its exit on the next C-`.
         ed.press("C-grave", "");
     }
     ed.typeText("echo $((6*7)) >&2");
     ed.press("Return", "");
-    while (core.task.nowNs() < deadline) {
+    const answered = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < answered) {
         // C-` again each round: a shell that is not there reports its exit.
         ed.press("C-grave", "");
         ed.settle(1);
@@ -284,21 +319,31 @@ fn typedLineShows(ed: *Editor, shell: ?[]const u8) !?usize {
         if (shows != 1) std.debug.print("[e2e/panels] the terminal reads:\n{s}\n", .{text});
         return shows;
     }
+    return terminalFailed(ed, error.TerminalNeverAnswered);
+}
+
+/// Say what the terminal reads, then fail with `err`.
+fn terminalFailed(ed: *Editor, err: anyerror) anyerror {
     if (h.toolText(ed, "*terminal*")) |text| {
         defer ed.gpa.free(text);
-        std.debug.print("[e2e/panels] no answer; the terminal reads:\n{s}\n", .{text});
+        std.debug.print("[e2e/panels] {t}; the terminal reads:\n{s}\n", .{ err, text });
     }
-    return error.TerminalNeverAnswered;
+    return err;
 }
 
 test "e2e/panels: the default shell does not echo a typed line a second time" {
     const gpa = t.allocator;
+    // Only a shell `hermeticShellHome` can give its prompt to.
+    const shell = std.fs.path.basename(std.mem.span(std.c.getenv("SHELL") orelse return error.SkipZigTest));
+    for ([_][]const u8{ "bash", "zsh", "sh" }) |known| {
+        if (std.mem.eql(u8, shell, known)) break;
+    } else return error.SkipZigTest;
     var app: IdeApp = undefined;
     try app.init(gpa);
     defer app.deinit();
     // `$SHELL` interactive, as ide.js runs it: the plugin echoes the line,
     // so the shell's own line editor must not echo it again.
-    const shows = (try typedLineShows(&app.ed, null)) orelse return error.SkipZigTest;
+    const shows = (try typedLineShows(&app, null)) orelse return error.SkipZigTest;
     try t.expectEqual(@as(usize, 1), shows);
 }
 
@@ -308,7 +353,7 @@ test "e2e/panels: bash and zsh started by name edit no line of their own" {
         var app: IdeApp = undefined;
         try app.init(gpa);
         defer app.deinit();
-        const shows = (try typedLineShows(&app.ed, shell)) orelse continue; // not installed
+        const shows = (try typedLineShows(&app, shell)) orelse continue; // not installed
         errdefer std.debug.print("[e2e/panels] {s} showed the typed line {d} times\n", .{ shell, shows });
         try t.expectEqual(@as(usize, 1), shows);
     }
