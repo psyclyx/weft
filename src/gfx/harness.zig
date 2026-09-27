@@ -13,6 +13,7 @@ const view_mod = @import("view.zig");
 const region = @import("region.zig");
 const window_layout = @import("window_layout.zig");
 const skia_mod = @import("weft_skia");
+const icons = @import("icons.zig");
 
 /// `view.build` over `editor` as it is now: the snapshot a frame takes
 /// (`core.TextSnapshot`), released once the pane is built.
@@ -173,6 +174,91 @@ test "harness: renderer-neutral paths reach the raster backend" {
     const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
     defer gpa.free(pixels);
     try t.expect(hasContent(pixels, 80, 15, 15, 70, 70));
+}
+
+/// The RGB bytes at (x, y).
+fn pixelAt(pixels: []const u8, w: u32, x: u32, y: u32) [3]u8 {
+    const p = (@as(usize, y) * w + x) * 4;
+    return pixels[p..][0..3].*;
+}
+
+test "harness: a rounded rect fills its middle and leaves its corners to the background" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const red: scene.Color = .{ 1, 0, 0, 1 };
+    var items = [_]scene.DrawItem{
+        .{ .rrect = .{ .x = 10, .y = 10, .w = 60, .h = 40, .radius = 12, .color = red } },
+        // An outline: its middle stays background, its edge is drawn.
+        .{ .rrect = .{ .x = 10, .y = 60, .w = 60, .h = 16, .radius = 8, .color = red, .stroke_width = 2 } },
+    };
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
+    defer gpa.free(pixels);
+    try t.expectEqual([3]u8{ 255, 0, 0 }, pixelAt(pixels, 80, 40, 30)); // centre: fill
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 10, 10)); // corner: rounded away
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 69, 49));
+    try t.expectEqual([3]u8{ 255, 0, 0 }, pixelAt(pixels, 80, 10, 30)); // a straight edge is not
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 40, 68)); // the outline's hollow middle
+    try t.expect(hasContent(pixels, 80, 30, 59, 50, 62)); // ... and its top edge
+}
+
+test "harness: a blurred rect spreads past its box, fading" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var items = [_]scene.DrawItem{.{ .rrect = .{ .x = 20, .y = 20, .w = 40, .h = 40, .radius = 6, .color = .{ 0, 0, 0, 1 }, .blur = 4 } }};
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
+    defer gpa.free(pixels);
+    // Outside the box, a shadow: darker than the background, lighter than
+    // the box's own middle.
+    const halo = pixelAt(pixels, 80, 17, 40);
+    try t.expect(halo[0] < bg[0]);
+    try t.expect(pixelAt(pixels, 80, 40, 40)[0] < halo[0]);
+}
+
+test "harness: a clip keeps glyphs inside it, and lifts for what follows" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const glyph_m: u32 = try view.face_set.monoFont().glyphIndex('M');
+    const white: scene.Color = .{ 1, 1, 1, 1 };
+    var items = [_]scene.DrawItem{
+        .{ .clip = .{ .x = 0, .y = 0, .w = 20, .h = 40 } },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 4, .y = 20, .size = 16, .color = white } },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 40, .y = 20, .size = 16, .color = white } },
+        .{ .clip = null },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 60, .y = 20, .size = 16, .color = white } },
+    };
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 40);
+    defer gpa.free(pixels);
+    try t.expect(hasContent(pixels, 80, 0, 0, 20, 40)); // inside the clip
+    try t.expect(!hasContent(pixels, 80, 36, 0, 56, 40)); // clipped away
+    try t.expect(hasContent(pixels, 80, 58, 0, 80, 40)); // after the lift
+}
+
+test "harness: an icon draws as a tinted path, closed subpaths included" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var set = try icons.Set.parse(gpa, "lucide", &icons.lucide);
+    defer set.deinit();
+    const circle = set.get("circle").?;
+    var items = [_]scene.DrawItem{.{ .path = .{
+        .commands = circle.commands,
+        .x = 8,
+        .y = 8,
+        .scale = 48.0 / circle.size,
+        .stroke_width = circle.stroke_width,
+        .color = .{ 0, 1, 0, 1 },
+        .cap = .round,
+        .join = .round,
+    } }};
+    const pixels = try rasterize(gpa, &view, &.{&items}, 64, 64);
+    defer gpa.free(pixels);
+    // The ring is drawn in the tint; its middle is not.
+    const ring = pixelAt(pixels, 64, 32, 12);
+    try t.expect(ring[1] > 150 and ring[0] < 100);
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 64, 32, 32));
 }
 
 test "harness: a single pane renders text into the body" {

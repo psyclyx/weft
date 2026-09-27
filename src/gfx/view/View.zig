@@ -30,6 +30,7 @@ const core = @import("weft_core");
 const layout = @import("../layout.zig");
 const region = @import("../region.zig");
 const fonts = @import("../fonts.zig");
+const icons = @import("../icons.zig");
 const statusline = @import("statusline.zig");
 const popup = @import("popup.zig");
 const semantic = @import("semantic.zig");
@@ -77,12 +78,39 @@ pub const Run = struct {
         cell: []text_engine.Cell,
         prop: struct { x: f32, em: f32, color: [4]f32 },
     },
+    /// Glyphs outside this box are not drawn — a chrome label that must not
+    /// spill past its tab or menu. Null: unclipped, as every text run is.
+    clip: ?region.Rect = null,
 };
 
-/// A solid rectangle painted through the unit-square record: selection
-/// backgrounds, caret, peer carets, HUD row highlights. `pub` for the
-/// extracted submodules only (see `Run`).
-pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
+/// A box-shaped paint, in paint order with the other rects of its layer:
+/// selection backgrounds, caret, peer carets, HUD row highlights — a sharp
+/// filled rect, the default — and, for chrome (`chrome.zig`), a rounded or
+/// outlined or blurred box, or a vector icon drawn into the box and tinted
+/// `color`. One list, so a chrome style's pill, its icon and a highlight
+/// over it keep the order they were appended in. `pub` for the extracted
+/// submodules only (see `Run`).
+pub const Rect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    shape: Shape = .fill,
+
+    pub const Shape = union(enum) {
+        /// A sharp, pixel-crisp fill.
+        fill,
+        rounded: Rounded,
+        /// The icon scaled into the box (its viewBox is square; the box
+        /// should be too).
+        icon: *const icons.Icon,
+    };
+
+    /// `scene.RRectItem`'s knobs: radius, an outline instead of a fill when
+    /// `stroke_width > 0`, a soft edge when `blur > 0`.
+    pub const Rounded = struct { radius: f32, stroke_width: f32 = 0, blur: f32 = 0 };
+};
 
 /// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
 /// head, or — `inside`, on a forward selection — the start of the last

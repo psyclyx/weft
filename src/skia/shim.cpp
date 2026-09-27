@@ -1,12 +1,14 @@
 // Skia C++ shim behind the C ABI in shim.h. Compiled with g++ (see build.zig
 // addSkia) and linked into the Zig exe. Renders the editor's per-pane content
-// (filled rects + positioned glyphs + stroked paths, decoded on the Zig side) onto
+// (filled rects + positioned glyphs + stroked paths, and for chrome rounded
+// rects and clips — all decoded on the Zig side) onto
 // an SkCanvas, then reads the pixels back for the Vulkan backend to copy into
 // its target image. Backends: Ganesh Vulkan (sharing weft's VkDevice) or,
 // when there is no real GPU / WEFT_SKIA_CPU is set, the CPU raster path.
 
 #include "shim.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -18,8 +20,11 @@
 #include "core/SkFontMgr.h"
 #include "core/SkFontTypes.h"
 #include "core/SkImageInfo.h"
+#include "core/SkBlurTypes.h"
+#include "core/SkMaskFilter.h"
 #include "core/SkPaint.h"
 #include "core/SkPathBuilder.h"
+#include "core/SkRRect.h"
 #include "core/SkSurface.h"
 #include "core/SkTypeface.h"
 #include "ports/SkFontMgr_empty.h"
@@ -35,6 +40,7 @@
 
 static_assert(sizeof(WeftSkiaPathCommand) == 28);
 static_assert(sizeof(WeftSkiaPathStyle) == 40);
+static_assert(sizeof(WeftSkiaRRect) == 44);
 
 struct WeftSkia {
     bool gpu = false;
@@ -49,6 +55,8 @@ struct WeftSkia {
     std::vector<uint8_t> pixels;        // width*height*4, the readback buffer
     sk_sp<SkSurface> surface;
     SkCanvas* canvas = nullptr;
+    // A clip in force (one save() deep); `weft_skia_clip` replaces it.
+    bool clipped = false;
 
     // Glyph run accumulator. The view emits glyphs in reading order, so a text
     // row is a long stretch sharing one (face, size, color) — drawing them one
@@ -176,6 +184,7 @@ extern "C" int weft_skia_begin(WeftSkia* s, uint32_t width, uint32_t height) {
         if (!s->surface) return 1;
     }
     s->canvas = s->surface->getCanvas();
+    s->clipped = false;
     // A frame always ends with a flush, so this is belt-and-braces: never carry
     // a partial run across a frame boundary or a surface recreation.
     s->run_gids.clear();
@@ -234,6 +243,7 @@ extern "C" void weft_skia_draw_path(WeftSkia* s, const WeftSkiaPathCommand* comm
                              px(command.points[2]), py(command.points[3]),
                              px(command.points[4]), py(command.points[5]));
                 break;
+            case 3: path.close(); break;
             default: return;
         }
     }
@@ -249,9 +259,41 @@ extern "C" void weft_skia_draw_path(WeftSkia* s, const WeftSkiaPathCommand* comm
     s->canvas->drawPath(path.detach(), paint);
 }
 
+extern "C" void weft_skia_draw_rrect(WeftSkia* s, const WeftSkiaRRect* rr) {
+    if (!s || !s->canvas || !rr || rr->w <= 0 || rr->h <= 0) return;
+    weftFlushGlyphs(s);  // z-order, as for a rect
+    const float radius = std::max(0.0f, std::min(rr->radius, std::min(rr->w, rr->h) / 2));
+    SkPaint paint;
+    paint.setColor4f(SkColor4f{rr->r, rr->g, rr->b, rr->a}, nullptr);
+    paint.setAntiAlias(true);  // a curve needs coverage; a flat rect stays crisp
+    if (rr->stroke_width > 0) {
+        paint.setStyle(SkPaint::kStroke_Style);
+        paint.setStrokeWidth(rr->stroke_width);
+    }
+    if (rr->blur > 0) paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, rr->blur));
+    s->canvas->drawRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(rr->x, rr->y, rr->w, rr->h), radius, radius), paint);
+}
+
+extern "C" void weft_skia_clip(WeftSkia* s, int on, float x, float y, float w, float h) {
+    if (!s || !s->canvas) return;
+    weftFlushGlyphs(s);  // a pending run was emitted under the old clip
+    if (s->clipped) {
+        s->canvas->restore();
+        s->clipped = false;
+    }
+    if (!on) return;
+    s->canvas->save();
+    s->canvas->clipRect(SkRect::MakeXYWH(x, y, w, h), false);
+    s->clipped = true;
+}
+
 extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
     if (!s || !s->surface) return nullptr;
     weftFlushGlyphs(s);
+    if (s->clipped && s->canvas) {
+        s->canvas->restore();
+        s->clipped = false;
+    }
     const size_t rb = static_cast<size_t>(s->width) * 4;
     if (row_bytes) *row_bytes = rb;
 
