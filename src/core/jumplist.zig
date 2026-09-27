@@ -44,7 +44,8 @@ const designation = @import("designation.zig");
 pub const cap = 100;
 
 pub const Jump = struct {
-    /// What was open: the entry's designation, bare, owned by the list.
+    /// What was open: the entry's designation with every view parameter but
+    /// the position (a query is part of WHICH view), owned by the list.
     designation: []u8,
     /// The document `anchor` lives in — the one that was open when the jump
     /// was taken. An anchor is meaningless in any other document, so it is
@@ -90,8 +91,12 @@ pub fn here(buffers: *Buffers, out: *[designation.max_len]u8) ?Here {
     var full: [designation.max_len]u8 = undefined;
     const d = designation.parsed(b, &full) orelse return null;
     const ed = b.textEditor();
+    // The view the entry shows, all of it but the position: the jump keeps
+    // its own position, and a query or a layout is part of WHICH view.
+    var params: [designation.max_len]u8 = undefined;
+    const view = d.without(designation.durable.Designation.at_param, &params) catch return null;
     return .{
-        .designation = d.bare().render(out) catch return null,
+        .designation = view.render(out) catch return null,
         .doc = if (ed) |e| e.doc.id else null,
         .offset = if (ed) |e| e.cursorOffset() else null,
     };
@@ -122,7 +127,9 @@ fn release(buffers: *Buffers, gpa: Allocator, jump: Jump) void {
 }
 
 fn same(buffers: *Buffers, jump: Jump, at: Here) bool {
-    if (!std.mem.eql(u8, jump.designation, at.designation)) return false;
+    const a = designation.durable.parse(jump.designation) orelse return false;
+    const b = designation.durable.parse(at.designation) orelse return false;
+    if (!a.sameView(b)) return false;
     const r = resolve(buffers, jump);
     return std.meta.eql(r.offset, at.offset);
 }
@@ -652,6 +659,26 @@ test "jumplist: a borrow (withEntry) goes and comes back without recording a jum
     try (try f.bufs.withEntry(t.allocator, b, &f.head, &f.km, Close.run, .{ &f.bufs, b, &f.head, &f.km }));
     try t.expectEqual(a, f.bufs.active_id);
     try t.expectEqual(jumps, f.head.jumps.items.items.len);
+}
+
+test "jumplist: two views of one projection are two places — a jump keeps its view parameters" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // `grep bar` is live beside `grep foo`: one kind, one place, two queries.
+    const bar = try f.bufs.create(t.allocator, "*grep*");
+    try f.bufs.get(bar).?.setDesignation(t.allocator, "weft://here/grep/srv/p?q=bar");
+    try f.fill(bar, "bar hits\n");
+    const foo = try f.bufs.create(t.allocator, "*grep*");
+    try f.bufs.get(foo).?.setDesignation(t.allocator, "weft://here/grep/srv/p?q=foo");
+    try f.fill(foo, "foo hits\nmore foo\n");
+    try f.bufs.switchTo(t.allocator, foo, &f.head, &f.km);
+    f.at(11);
+    try f.bufs.switchTo(t.allocator, bar, &f.head, &f.km); // pushes foo@11
+    try t.expectEqualStrings("weft://here/grep/srv/p?q=foo", f.head.jumps.items.items[f.head.jumps.items.items.len - 1].designation);
+    try t.expect(try f.back());
+    try t.expectEqual(foo, f.bufs.active_id);
+    try t.expectEqual(@as(usize, 11), f.cursor());
 }
 
 test "jumplist: a push part-way back drops the forward half" {

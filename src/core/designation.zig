@@ -60,20 +60,24 @@ pub fn parsed(entry: *Buffers.Buffer, out: []u8) ?Designation {
     return durable.parse(of(entry, out) orelse return null);
 }
 
-/// The live entry that opens `want` (view parameters ignored), if any.
+/// The live entry showing the VIEW `want` asks for (`Designation.sameView`:
+/// the same thing, the same view parameters but the position), if any. One
+/// comparison for everything that holds a designation and looks for its
+/// entry — a jump, a viewport, an `open` — so two queries of one projection
+/// are never mistaken for each other by one holder and kept apart by another.
 pub fn find(buffers: *const Buffers, want: Designation) ?*Buffers.Buffer {
     // The common case asks by path; answer it without rendering every entry.
     if (want.authority == .here and want.kind == .file) {
         if (buffers.findByPath(want.ref)) |id| {
             const b = buffers.get(id).?;
-            if (b.designation.len == 0) return b;
+            if (b.designation.len == 0 and want.sameView(want.bare())) return b;
         }
     }
     var buf: [max_len]u8 = undefined;
     var it = buffers.iterator();
     while (it.next()) |b| {
         const have = parsed(b, &buf) orelse continue;
-        if (have.designates(want)) return b;
+        if (have.sameView(want)) return b;
     }
     return null;
 }
@@ -213,10 +217,10 @@ pub const refuse_relative_elsewhere = "this place has no local directory to reso
 
 pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outcome {
     if (d.param(as_param)) |as| if (try openAs(ctx, d, text, as)) |outcome| return outcome;
-    if (find(ctx.buffers, d)) |b| if (sameProjection(b, d)) {
+    if (find(ctx.buffers, d)) |b| {
         try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
         return .{ .opened = b.id };
-    };
+    }
     if (d.kind.isPath()) return null;
     if (d.authority != .here) return if (d.kind == .doc) null else .{ .refused = refuse_unreachable };
     switch (d.kind) {
@@ -261,18 +265,6 @@ pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outco
     }
 }
 
-/// Whether live entry `b` shows `d` as the projection `d` asks for: the
-/// same `as`, or neither names one. View parameters are otherwise advisory
-/// (`Designation.designates`), but a strip of offers is not the menu of the
-/// same offers, and opening one must not focus the other.
-fn sameProjection(b: *Buffers.Buffer, d: Designation) bool {
-    const wanted = d.param(as_param) orelse return true;
-    var buf: [max_len]u8 = undefined;
-    const have = parsed(b, &buf) orelse return false;
-    const shown = have.param(as_param) orelse return false;
-    return std.mem.eql(u8, shown, wanted);
-}
-
 /// `d?as=<kind>` where a producer claims `<kind>` and `d` is not already of
 /// it: that producer's projection OF `d` — the symbols of an entry, the
 /// diagnostics of a place. The producer is run with the whole designation,
@@ -287,7 +279,10 @@ fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u
         .projection => |kind| if (std.mem.eql(u8, kind, as)) return null,
         else => {},
     }
-    const subject = find(ctx.buffers, d);
+    // The subject is `d` as its own entry shows it: without the `as` that
+    // asks for another producer's projection of it.
+    var params_buf: [max_len]u8 = undefined;
+    const subject = find(ctx.buffers, d.without(as_param, &params_buf) catch d);
     if (subject) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
     const before = ctx.buffers.active_id;
     var name_buf: [256]u8 = undefined;

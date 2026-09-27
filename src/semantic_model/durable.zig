@@ -219,6 +219,52 @@ pub const Designation = struct {
             std.mem.eql(u8, self.ref, other.ref);
     }
 
+    /// Whether `other` asks for the same VIEW of the same thing: it
+    /// `designates` it, and its view parameters are the same set — except the
+    /// position (`at`), which says where in a view, never which view. Two
+    /// queries of one projection (`grep/p?q=foo`, `grep/p?q=bar`) are two
+    /// views; a file and the file at line 9 are one. The one comparison
+    /// everything that finds a live entry by what it shows makes.
+    pub fn sameView(self: Designation, other: Designation) bool {
+        if (!self.designates(other)) return false;
+        return self.viewParamsIn(other) and other.viewParamsIn(self);
+    }
+
+    /// Every view parameter of `self` but `at` is in `other`, with its value.
+    fn viewParamsIn(self: Designation, other: Designation) bool {
+        var it = std.mem.splitScalar(u8, self.params, '&');
+        while (it.next()) |pair| {
+            if (pair.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+            const name = pair[0..eq];
+            if (std.mem.eql(u8, name, at_param)) continue;
+            const value = if (eq < pair.len) pair[eq + 1 ..] else "";
+            const theirs = other.param(name) orelse return false;
+            if (!std.mem.eql(u8, theirs, value)) return false;
+        }
+        return true;
+    }
+
+    /// This designation without view parameter `name`; the rest are written
+    /// into `out`, which the result borrows.
+    pub fn without(self: Designation, name: []const u8, out: []u8) error{NoSpaceLeft}!Designation {
+        var d = self;
+        var len: usize = 0;
+        var it = std.mem.splitScalar(u8, self.params, '&');
+        while (it.next()) |pair| {
+            if (pair.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+            if (std.mem.eql(u8, pair[0..eq], name)) continue;
+            const sep: usize = @intFromBool(len != 0);
+            if (len + sep + pair.len > out.len) return error.NoSpaceLeft;
+            if (sep != 0) out[len] = '&';
+            @memcpy(out[len + sep ..][0..pair.len], pair);
+            len += sep + pair.len;
+        }
+        d.params = out[0..len];
+        return d;
+    }
+
     /// The same designation without its view parameters.
     pub fn bare(self: Designation) Designation {
         var d = self;
@@ -504,6 +550,17 @@ test "authority and view parameters are read, not guessed" {
     try t.expect(parse("weft://here/commit/abc").?.designates(parse("weft://here/commit/abc").?));
     try t.expect(!parse("weft://here/commit/abc").?.designates(parse("weft://here/tag/abc").?));
     try t.expectEqualStrings("", d.bare().params);
+
+    // A view is the designated thing plus every parameter but the position.
+    try t.expect(d.sameView(parse("weft://here/dir/src?label=source&lines=5&at=3").?));
+    try t.expect(!d.sameView(parse("weft://here/dir/src?lines=5").?));
+    try t.expect(!d.sameView(parse("weft://here/dir/src?lines=6&label=source").?));
+    const grep = parse("weft://here/grep/p?q=foo&at=4").?;
+    try t.expect(!grep.sameView(parse("weft://here/grep/p?q=bar").?));
+    try t.expect(parse("weft://here/file/a").?.sameView(parse("weft://here/file/a?at=9").?));
+    var buf: [64]u8 = undefined;
+    try t.expectEqualStrings("q=foo", (try grep.without("at", &buf)).params);
+    try t.expectEqualStrings("lines=5", (try d.without("label", &buf)).params);
 
     const peer = parse("weft://alice/file/a.zig").?;
     try t.expect(peer.authority.eql(.{ .peer = "alice" }));
