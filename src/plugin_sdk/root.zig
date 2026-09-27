@@ -1191,6 +1191,21 @@ pub fn places() ContextKeys {
     return .{ .it = std.mem.splitScalar(u8, places_scratch[0..len], '\n'), .empty = len == 0 };
 }
 
+/// Hear `on_subject_changed` whenever the entry opening `subject` (a
+/// designation) reads differently — an edit, or a parse that landed later —
+/// at the frame boundary, bound to that entry, so `outline`, `byteLen`,
+/// `designation` and the other document reads answer for it. A projection
+/// watches what it presents. False when refused (not a designation, or past
+/// the per-plugin bound). Watches end when the plugin unloads.
+pub fn subjectWatch(subject: []const u8) bool {
+    return e.wl_subject_watch(p(subject.ptr), @intCast(subject.len), 1) == 0;
+}
+
+/// Stop hearing about `subject`.
+pub fn subjectUnwatch(subject: []const u8) void {
+    _ = e.wl_subject_watch(p(subject.ptr), @intCast(subject.len), 0);
+}
+
 var changed_scratch: [4096]u8 = undefined;
 
 /// The keys the `on_context_changed` being delivered reports as moved.

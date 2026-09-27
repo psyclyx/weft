@@ -1,7 +1,9 @@
-//! `wl_context_set` / `wl_context_get` / `wl_context_changed` and the
-//! `on_context_changed` event — a guest's view of context (doc/model.md
-//! §2.5, `core/context.zig`). The set and get bodies are shared with the JS
-//! plane (`qjs_context_*`), one body each, like the edit reads.
+//! `wl_context_set` / `wl_context_get` / `wl_context_changed` / `wl_places` /
+//! `wl_subject_watch` and the `on_context_changed` and `on_subject_changed`
+//! events — a guest's view of context (doc/model.md §2.5,
+//! `core/context.zig`). Every door's body is shared with the JS plane
+//! (`qjs_context_*`, `qjs_places`, `qjs_subject_watch`), one body each, like
+//! the edit reads.
 //!
 //! PUBLISHING is not sensitive: a value is a claim about the plugin's own
 //! work ("my REPL is live in this place"), it grants nothing, and a
@@ -97,43 +99,82 @@ pub const hContextGet = shared.wasmDoor(getBody, null);
 
 /// `contextChanged(out, cap) -> len`: the keys the event being delivered
 /// reports as moved, one per line, clamped to `cap`; the full length is
-/// returned. Outside a delivery it answers the last one's. Wasm only: the JS
-/// plane has no `on_context_changed` yet.
-pub fn hContextChanged(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+/// returned. Outside a delivery it answers the last one's. The JS plane reads
+/// it the same way, inside its own `on_context_changed`.
+pub fn changedBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     results[0] = 0;
-    const context = p.activeCtx().context orelse return;
+    const context = d.ctx.context orelse return;
+    writeLines(d.ctx.gpa, caller, args, results, context.movedKeys());
+}
+pub const hContextChanged = shared.wasmDoor(changedBody, null);
+
+/// `places(out, cap) -> len`: the places the workspace is working in
+/// (`context.Context.places`), one designation per line (clamped); returns
+/// the full length. A read of the workspace, like `wl_context_get`.
+pub fn placesBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = 0;
+    const context = d.ctx.context orelse return;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(d.ctx.gpa);
+    context.places(d.ctx.gpa, d.ctx.buffers, &names) catch return;
+    writeLines(d.ctx.gpa, caller, args, results, names.items);
+}
+pub const hPlaces = shared.wasmDoor(placesBody, null);
+
+/// `lines` joined by newlines into guest memory at `(args[0], args[1])`,
+/// clamped; `results[0]` is the full length.
+fn writeLines(gpa: std.mem.Allocator, caller: *wasm.Caller, args: []const i32, results: []i32, lines: []const []const u8) void {
     var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(p.gpa);
-    for (context.movedKeys(), 0..) |key, i| {
-        if (i > 0) out.append(p.gpa, '\n') catch return;
-        out.appendSlice(p.gpa, key) catch return;
+    defer out.deinit(gpa);
+    for (lines, 0..) |line, i| {
+        if (i > 0) out.append(gpa, '\n') catch return;
+        out.appendSlice(gpa, line) catch return;
     }
     const cap: usize = @intCast(@max(args[1], 0));
     _ = caller.writeMemory(@intCast(args[0]), cap, out.items) catch return;
     results[0] = @intCast(@min(out.items.len, @as(usize, std.math.maxInt(i32))));
 }
 
-/// `places(out, cap) -> len`: the places the workspace is working in
-/// (`context.Context.places`), one designation per line (clamped); returns
-/// the full length. A read of the workspace, like `wl_context_get`.
-pub fn hPlaces(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = 0;
-    const ctx = p.activeCtx();
-    const context = ctx.context orelse return;
-    var names: std.ArrayList([]const u8) = .empty;
-    defer names.deinit(p.gpa);
-    context.places(p.gpa, ctx.buffers, &names) catch return;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(p.gpa);
-    for (names.items, 0..) |name, i| {
-        if (i > 0) out.append(p.gpa, '\n') catch return;
-        out.appendSlice(p.gpa, name) catch return;
+/// `subjectWatch(designation, watching) -> 0 | -1 | -2`: hear
+/// `on_subject_changed` whenever the entry opening `designation` reads
+/// differently — an edit, a parse that landed — from the next frame boundary
+/// on (`context.Context.watch`); `watching` 0 stops. -1 for text that is not
+/// a designation or no context to watch in; -2 past `context.max_watches`.
+///
+/// Not sensitive, like `contextGet`: a watch learns only THAT content moved,
+/// at the boundary, and reading it is the ordinary doors' business under the
+/// ordinary rules. Watches end when the plugin unloads.
+pub fn watchBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const context = d.ctx.context orelse return;
+    const gpa = d.ctx.gpa;
+    const subject = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(subject);
+    if (args[2] == 0) {
+        context.unwatch(d.resources.name, subject);
+        results[0] = 0;
+        return;
     }
-    const cap: usize = @intCast(@max(args[1], 0));
-    _ = caller.writeMemory(@intCast(args[0]), cap, out.items) catch return;
-    results[0] = @intCast(@min(out.items.len, @as(usize, std.math.maxInt(i32))));
+    context.watch(d.resources.name, subject, d.ctx.buffers) catch |err| {
+        if (err == error.TooMany) results[0] = -2;
+        return;
+    };
+    results[0] = 0;
+}
+pub const hSubjectWatch = shared.wasmDoor(watchBody, null);
+
+/// Fire `on_subject_changed` at one plugin for one moved subject, BOUND to
+/// the subject's entry (`command.Context.bindEntry`) for the call: every
+/// door the callback reads — the text, the outline, the designation — is
+/// the subject's, whichever entry is in front. The caller
+/// (`app/application.zig`) decides WHEN — the frame boundary, beside
+/// `on_context_changed` — and this only delivers. Returns whether it ran.
+pub fn notifySubjectChanged(p: *WasmPlugin, entry: @import("../Buffers.zig").Ref) bool {
+    const ctx = p.activeCtx();
+    const was = ctx.bindEntry(entry);
+    defer _ = ctx.bindEntry(was);
+    contract.callOptionalExport("on_subject_changed", p, .{}) catch return false;
+    return true;
 }
 
 /// Fire the context-changed event (`on_context_changed`) at one plugin: keys

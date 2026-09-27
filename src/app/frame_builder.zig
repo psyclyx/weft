@@ -225,12 +225,15 @@ pub fn paneFacts(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, pane: u32) c
 
 /// What an answer about `buffer` depends on besides the ask itself: which
 /// entry, at which revision, under which facts. Every chrome key starts here.
-fn entryKey(tag: []const u8, buffer: *core.Buffers.Buffer, facts: core.facts.Facts) std.hash.Wyhash {
+/// The revision is the subject's (`Context.revisionOf`): its text AND its
+/// tree, so an answer read from the outline before a parse landed (empty
+/// breadcrumbs) is a different question once it has, and is asked again.
+fn entryKey(tag: []const u8, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, facts: core.facts.Facts) std.hash.Wyhash {
     var h = std.hash.Wyhash.init(0);
     h.update(tag);
     h.update(std.mem.asBytes(&buffer.id));
     h.update(std.mem.asBytes(&buffer.generation));
-    const revision: u64 = if (buffer.textEditor()) |ed| @intFromEnum(ed.doc.revision()) else 0;
+    const revision: u64 = if (fx.cmd_ctx.context) |c| c.revisionOf(buffer) else if (buffer.textEditor()) |ed| @intFromEnum(ed.doc.revision()) else 0;
     h.update(std.mem.asBytes(&revision));
     h.update(std.mem.asBytes(&facts.digest()));
     return h;
@@ -240,17 +243,17 @@ fn entryKey(tag: []const u8, buffer: *core.Buffers.Buffer, facts: core.facts.Fac
 /// No caret in it: the gutter's question does not carry one (`core.gutter`),
 /// so a caret move is not a new question — a column counted from the caret
 /// is a formula the frame evaluates against its own snapshot.
-fn gutterKey(buffer: *core.Buffers.Buffer, facts: core.facts.Facts, line_count: usize) answers_mod.Key {
-    var h = entryKey("gutter", buffer, facts);
+fn gutterKey(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, line_count: usize) answers_mod.Key {
+    var h = entryKey("gutter", fx, buffer, facts);
     h.update(std.mem.asBytes(&line_count));
     return h.final();
 }
 
 /// The question a pane's status line asks this frame, and the ask that
 /// carries it.
-fn statusQuestion(buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) struct { key: answers_mod.Key, ask: ?core.status_segment.Ask } {
+fn statusQuestion(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) struct { key: answers_mod.Key, ask: ?core.status_segment.Ask } {
     const caret: usize = if (buffer.textEditor()) |ed| ed.cursorOffset() else 0;
-    var h = entryKey("status", buffer, facts);
+    var h = entryKey("status", fx, buffer, facts);
     h.update(std.mem.asBytes(&caret));
     h.update(&.{@intFromBool(focused)});
     const c32 = std.math.cast(u32, caret) orelse return .{ .key = h.final(), .ask = null };
@@ -287,7 +290,7 @@ pub fn gutterFrame(
         const batch = try arena.create(view_mod.ui_mesh.GutterBatch);
         batch.* = .{
             .windows = try answers.gutterWindows(arena, pane, answers_mod.subjectOf(buffer)),
-            .key = gutterKey(buffer, facts, gf.line_count),
+            .key = gutterKey(fx, buffer, facts, gf.line_count),
             .caret_line = gf.caret_line,
         };
         gf.batch = batch;
@@ -298,8 +301,8 @@ pub fn gutterFrame(
 
 /// Ask for this frame's status question after the frame, unless the answer
 /// `pane` has is already to it.
-fn wantStatus(answers: *answers_mod.Answers, pane: u32, subject: answers_mod.Subject, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) void {
-    const q = statusQuestion(buffer, facts, focused);
+fn wantStatus(fx: *const FrameCtx, answers: *answers_mod.Answers, pane: u32, subject: answers_mod.Subject, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) void {
+    const q = statusQuestion(fx, buffer, facts, focused);
     if (answers.status(pane, subject)) |e| if (e.key == q.key) return;
     const ask = q.ask orelse return;
     answers.want(.{ .pane = pane, .entry = buffer.ref(), .subject = subject, .key = q.key, .ask = .{ .status = ask } });
@@ -672,7 +675,7 @@ pub const FrameBuilder = struct {
             .plugin_answers = if (self.answers.status(spec.pane, subject)) |e| e.answer.status else &.{},
         };
         hud.statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena, &status_args);
-        if (status_args.plugin_reached) wantStatus(&self.answers, spec.pane, subject, spec.buffer, spec.facts, spec.focused);
+        if (status_args.plugin_reached) wantStatus(fx, &self.answers, spec.pane, subject, spec.buffer, spec.facts, spec.focused);
         hud.gutter = try gutterFrame(arena, fx, &self.answers, spec.pane, spec.buffer, spec.facts, layers.diagnostics, bpLines(arena, fx.caps, ed));
 
         try input.panes.append(arena, .{

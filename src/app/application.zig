@@ -218,6 +218,7 @@ pub const Application = struct {
     pub fn applyWindowIntents(self: *Application) bool {
         var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
         if (self.notifyContextChanged()) damaged = true;
+        if (self.notifySubjectsChanged()) damaged = true;
         // Named signals plugins raised this wake (`wl_signal_emit`), heard at
         // the same boundary and for the same reason: never inside the
         // dispatch or poll that raised them.
@@ -272,6 +273,36 @@ pub const Application = struct {
         }
         if (viewports.follow(context.movedKeys())) {
             if (self.driver.applyWindowIntents(ctx)) ran = true;
+        }
+        return ran;
+    }
+
+    /// The subject event (doc/model.md §2.5, `context.Context.watch`): tell
+    /// each producer watching a subject that the subject reads differently —
+    /// an edit, or a parse that landed with no edit — so a projection of it
+    /// (the outline of a document) reads it again, once, bound to the
+    /// subject's entry. The same boundary and the same guarantees as the
+    /// context event: coalesced over the wake, never inside a dispatch, and
+    /// a change the listener makes is the next frame's.
+    fn notifySubjectsChanged(self: *Application) bool {
+        const ctx = &self.session.cmd_ctx;
+        const context = ctx.context orelse return false;
+        if (context.watches.items.len == 0) return false;
+        const moved = context.observeSubjects(ctx.buffers) catch |err| {
+            std.log.warn("context: observing watched subjects failed: {t}", .{err});
+            return false;
+        };
+        if (!moved) return false;
+        var ran = false;
+        // By index: a listener may watch or unwatch, but `subjects_moved` is
+        // replaced only by the next observation.
+        var i: usize = 0;
+        while (i < context.subjects_moved.items.len) : (i += 1) {
+            const m = context.subjects_moved.items[i];
+            for (self.driver.ctx.plugins.items) |pl| {
+                if (!std.mem.eql(u8, pl.name, m.owner)) continue;
+                if (core.wasm_host.notifySubjectChanged(pl, m.entry)) ran = true;
+            }
         }
         return ran;
     }

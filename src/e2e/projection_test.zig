@@ -248,15 +248,13 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
     defer gpa.free(config_dir);
     try core.quickjs.evalConfig(&ed.engine, ed.ctx, app.loader.loader(), &ed.config_kv, config_dir, "weft.use(\"outline\");");
 
-    // Two sources. The outline reads the tree the entry has when it is
-    // presented, and an open presents at once — possibly before the parse
-    // lands (there is no event for it yet) — so once tools.zig's tree is in,
-    // `symbols-refresh` reads it again.
+    // Two sources. An open presents at once — before its parse lands — and
+    // the outline hears the tree land (it watches its subject), so once
+    // tools.zig's tree is in, one boundary shows its symbols.
     try ide.openFile(ed, "shapes.zig", "const Point = struct {\n    fn norm(self: Point) u32 {\n        return 0;\n    }\n};\n");
     try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
     try ide.openFile(ed, "tools.zig", "fn hammer() void {}\nfn saw() void {}\n");
     try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
-    ed.run("symbols-refresh");
     ed.applyWindow();
 
     const outline = ed.win_layout.dockedPanel(.right) orelse return error.NoOutline;
@@ -286,6 +284,48 @@ test "e2e/projection: the outline follows the entry, as the symbols projection o
     app.proj.shot(ed, "projection-outline");
 }
 
+test "e2e/projection: the outline hears its subject change — an edit and a later parse — without presenting it again" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{app.proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, app.loader.loader(), &ed.config_kv, config_dir, "weft.use(\"outline\");");
+
+    try ide.openFile(ed, "tools.zig", "fn hammer() void {}\n");
+    try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
+    ed.applyWindow();
+    const outline = ed.win_layout.dockedPanel(.right) orelse return error.NoOutline;
+    const tree = try paneEntry(ed, outline);
+    try t.expect(try outlineHas(ed, tree, "hammer"));
+    try t.expect(!try outlineHas(ed, tree, "drill"));
+
+    // An edit to the subject: the same tree entry (nothing presented it
+    // again) shows the new symbol after one boundary.
+    const doc = &ide.textEd(ed).doc;
+    try doc.insert(gpa, doc.text().byteLen(), "fn drill() void {}\n");
+    ed.applyWindow();
+    try t.expectEqual(tree.id, outline.pane().buffer_id);
+    try t.expect(try outlineHas(ed, tree, "drill"));
+
+    // A boundary with nothing new re-reads nothing: the view's revision
+    // stays where the edit left it.
+    const view = tree.scene_selection.view orelse return error.NoOutlineView;
+    const revision = ed.session.system.semantic.views.get(view).?.descriptor.revision;
+    ed.applyWindow();
+    ed.applyWindow();
+    try t.expectEqual(revision, ed.session.system.semantic.views.get(view).?.descriptor.revision);
+}
+
+/// Whether the outline entry `tree` lists a symbol named `name`.
+fn outlineHas(ed: *Editor, tree: *core.Buffers.Buffer, name: []const u8) !bool {
+    const text = try ed.semanticText(tree.scene_selection.view orelse return error.NoOutlineView);
+    defer ed.gpa.free(text);
+    return std.mem.indexOf(u8, text, name) != null;
+}
+
 test "e2e/projection: two viewports on two entries' symbols each keep their own tree" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
@@ -300,11 +340,6 @@ test "e2e/projection: two viewports on two entries' symbols each keep their own 
     try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
     try ide.openFile(ed, "tools.zig", "fn hammer() void {}\nfn saw() void {}\n");
     try t.expect(lang.waitForTree(ed, lang.attachedSyntax(ed) orelse return error.NoSyntax));
-    // The outline reads the tree an entry has when it is presented, and an
-    // open presents at once — possibly before its parse lands. Both are
-    // parsed now: move to each again so the outline reads their trees.
-    ed.runStr("open", "shapes.zig");
-    ed.runStr("open", "tools.zig");
 
     // A second viewport pinned to shapes.zig's symbols, beside the outline
     // that follows the editor (on tools.zig).
