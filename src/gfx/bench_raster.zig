@@ -29,13 +29,45 @@ const Case = struct {
     path: []const u8,
     w: u32,
     h: u32,
+    /// Draw chrome too — a tab strip, status chips, a hovered tab — in this
+    /// style (doc/chrome.md §3). Null: the bare editor, as before.
+    chrome: ?view_mod.chrome.Style = null,
 };
 
 /// Two shapes of the same question: a typical editor window over ordinary
-/// source, and a maximized one. Both over a real file.
+/// source, and a maximized one. Both over a real file. Then the typical
+/// window again with chrome, once per style, so what a style costs a frame
+/// is a number rather than a guess.
 const cases = [_]Case{
     .{ .name = "window-1600x1000", .path = "src/core/Document.zig", .w = 1600, .h = 1000 },
     .{ .name = "maximized-1920x1080", .path = "src/core/Document.zig", .w = 1920, .h = 1080 },
+    .{ .name = "window+chrome text", .path = "src/core/Document.zig", .w = 1600, .h = 1000, .chrome = .text },
+    .{ .name = "window+chrome text-icons", .path = "src/core/Document.zig", .w = 1600, .h = 1000, .chrome = .text_icons },
+    .{ .name = "window+chrome widget", .path = "src/core/Document.zig", .w = 1600, .h = 1000, .chrome = .widget },
+};
+
+const chrome_tabs = [_]view_mod.Tab{
+    .{ .name = "Document.zig", .active = true, .id = 1 },
+    .{ .name = "View.zig", .active = false, .id = 2 },
+    .{ .name = "chrome.zig", .active = false, .id = 3 },
+    .{ .name = "README.md", .active = false, .id = 4 },
+    .{ .name = "build.zig", .active = false, .id = 5 },
+    .{ .name = "config.js", .active = false, .id = 6 },
+};
+const chrome_segs = [_]view_mod.ui_mesh.Seg{
+    .{ .text = " NORMAL ", .bg_override = .{ 0.3, 0.6, 0.3, 1 }, .gap_after = 1 },
+    .{ .text = "1/6", .gap_after = 1 },
+    .{ .text = "src/core/Document.zig", .command = "open" },
+    .{ .text = "E:2 W:5", .align_right = true, .command = "problems" },
+};
+const chrome_hud: view_mod.Hud = .{
+    .mode = "normal",
+    .tabs = &chrome_tabs,
+    .statusline_segs = &chrome_segs,
+    .dirty = true,
+    .save_note = "saving…",
+    .pane_border = .{ .left = true },
+    .pointer = .{ .at = .{ 200, 16 }, .chrome = .{ .kind = .tab, .index = 1, .part = .close } },
 };
 
 fn fnv1a(bytes: []const u8) u64 {
@@ -73,6 +105,7 @@ pub fn main() !void {
         defer pool.deinit();
         var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
         defer view.deinit();
+        if (case.chrome) |style| view.chrome = style;
         var ed = try core.Editor.init(gpa, pool, "bench");
         defer ed.deinit(gpa);
         try ed.insertText(gpa, text);
@@ -118,7 +151,7 @@ pub fn main() !void {
             defer snap.release(gpa);
 
             t0 = nowNs();
-            var built = try view.build(arena.allocator(), &snap, .{ .mode = "normal" }, &top_row, frame_rect, .{}, w2p);
+            var built = try view.build(arena.allocator(), &snap, if (case.chrome != null) chrome_hud else .{ .mode = "normal" }, &top_row, frame_rect, .{}, w2p);
             build_ns[i] = nowNs() - t0;
             defer built.deinit(gpa);
 
