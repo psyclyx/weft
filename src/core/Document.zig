@@ -98,6 +98,20 @@ pub const AnchorHandle = stemma.AnchorSet.Handle;
 
 const Document = @This();
 
+/// A document's minted identity (doc/model.md §2.1). Re-exported so a caller
+/// holding a `Document` names its id without importing the grammar.
+pub const Id = @import("weft_semantic").durable.DocId;
+
+/// WHO this document is: 128 random bits given at creation (`init`), never
+/// derived from content. The history root cannot be a name — a bulk-loaded
+/// document's root is its content hash on purpose, so any two empty files
+/// share one — and a share's wire base is per connection, so a reconnect
+/// loses it. This survives both: `adoptContent`/`adoptPartial` replace the
+/// graph, never the identity, and a joined replica takes the sharer's id from
+/// the announcement (`Conn.openOffer`), because it is a replica of THAT
+/// document. Identity and revision stay separate, the split doc/place.md
+/// makes for places.
+id: Id = .{ .bytes = @splat(0) },
 doc: ObjectDoc = .empty,
 /// `self.doc`'s body text object — resolved once (`resolveBody`) and
 /// cached, not re-resolved on every use. Why that is safe: `ObjId` IS
@@ -251,7 +265,23 @@ pub fn init(gpa: Allocator, user_agent: []const u8) Error!Document {
     };
     self.body = resolveBody(&self.doc);
     try self.doc.setAgent(gpa, user_agent);
+    self.id = mintId();
     return self;
+}
+
+/// A fresh document identity from the kernel CSPRNG (getrandom(2), the same
+/// source the channel keys use — no `std.Io` plumbing). 128 bits, so two
+/// replicas minting independently never collide in any history this editor
+/// will see.
+pub fn mintId() Id {
+    var id: Id = .{ .bytes = undefined };
+    var got: usize = 0;
+    while (got < id.bytes.len) {
+        const rc = std.os.linux.getrandom(id.bytes[got..].ptr, id.bytes.len - got, 0);
+        if (std.os.linux.errno(rc) != .SUCCESS) @panic("getrandom failed");
+        got += rc;
+    }
+    return id;
 }
 
 pub fn deinit(self: *Document, gpa: Allocator) void {
@@ -738,6 +768,24 @@ pub fn textAt(self: *const Document, gpa: Allocator, version_token: []const u8) 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "a document's id is minted, not derived: two empty documents are two, and a bulk load keeps the id" {
+    const gpa = std.testing.allocator;
+    var a = try Document.init(gpa, "u");
+    defer a.deinit(gpa);
+    var b = try Document.init(gpa, "u");
+    defer b.deinit(gpa);
+    // Same (empty) content, same history root — different documents.
+    try std.testing.expect(!a.id.eql(b.id));
+    try std.testing.expect(!a.id.eql(.{ .bytes = @splat(0) }));
+    // A bulk load replaces the graph, never the identity.
+    const before = a.id;
+    try a.adoptContent(gpa, "loaded\n");
+    try std.testing.expect(a.id.eql(before));
+    // Nor do edits.
+    try a.insert(gpa, 0, "x");
+    try std.testing.expect(a.id.eql(before));
 }
 
 test "portable anchor rejects a projected offset outside the document" {

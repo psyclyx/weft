@@ -67,6 +67,12 @@ pub const Offer = struct {
     base: u64,
     name: []u8,
     kind: DocKind = .text,
+    /// The shared document's minted identity (doc/model.md §2.1), carried
+    /// after the kind byte. What makes `weft://<peer>/doc/<id>` name the
+    /// same document across a reconnect, where `base` is re-allocated. Null
+    /// from a sender that predates it (or for a graph quad): the offer still
+    /// opens, and only its durable name degrades.
+    doc_id: ?Document.Id = null,
     opened: bool = false,
     /// The owner unpublished this quad: its exports are revoked and any
     /// reference translated out of it is invalid.
@@ -221,7 +227,7 @@ pub fn shareExports(self: *Conn, doc: *Document, display_name: []const u8, tag: 
     const owned = try self.gpa.dupe(u8, display_name);
     errdefer self.gpa.free(owned);
     try self.share_names.put(self.gpa, base, owned);
-    try self.announceShare(base, display_name, .text);
+    try self.announceShare(base, display_name, .text, doc.id);
     try self.publish(base, display_name, spec);
     return c;
 }
@@ -237,7 +243,7 @@ pub fn shareGraph(self: *Conn, doc: *GraphDoc, display_name: []const u8, tag: u6
     const owned = try self.gpa.dupe(u8, display_name);
     errdefer self.gpa.free(owned);
     try self.graph_share_names.put(self.gpa, base, owned);
-    try self.announceShare(base, display_name, .graph);
+    try self.announceShare(base, display_name, .graph, null);
     // Graph quads run the per-region admission hook on top of the grade.
     try self.publish(base, display_name, .{ .replica = .{ .kind = .graph, .admission = .by_region } });
     return c;
@@ -274,25 +280,45 @@ fn ownsBase(self: *const Conn, base: u64) bool {
     return self.share_names.contains(base) or self.graph_share_names.contains(base);
 }
 
-fn announceShare(self: *Conn, base: u64, display_name: []const u8, kind: DocKind) !void {
+/// `base | name | kind | [doc id]`. The id is a second ADDITIVE trailer, after
+/// the kind byte, on the same terms the kind byte was added: an older decoder
+/// reads `trailer[0]` and stops, so it never sees the id, and the wire
+/// version is unchanged (doc/wire.md, "Shares").
+fn announceShare(self: *Conn, base: u64, display_name: []const u8, kind: DocKind, id: ?Document.Id) !void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(self.gpa);
     try wire.putUv(self.gpa, &payload, base);
     try wire.putUv(self.gpa, &payload, display_name.len);
     try payload.appendSlice(self.gpa, display_name);
     try payload.append(self.gpa, @intFromEnum(kind));
+    if (id) |minted| try payload.appendSlice(self.gpa, &minted.bytes);
     try self.session.post(.op, @intFromEnum(wire.OpKind.share), 0, payload.items);
 }
 
 /// Open one of the peer's announced buffers into `doc` (typically a
-/// fresh empty document: the frontier exchange bootstraps content).
+/// fresh empty document: the frontier exchange bootstraps content). The
+/// replica takes the sharer's minted id when the announcement carried one:
+/// it is a replica of THAT document, not a new one, so both ends name it
+/// alike.
 pub fn openOffer(self: *Conn, index: usize, doc: *Document, tag: u64) !*Collab {
     const o = &self.offers.items[index];
     assert(!o.opened);
     assert(o.kind == .text);
     const c = try self.bind(doc, o.base, tag);
+    if (o.doc_id) |id| doc.id = id;
     o.opened = true;
     return c;
+}
+
+/// The index of the unopened text offer naming document `id`, if the peer
+/// announced one — how `weft://<peer>/doc/<id>` finds its document again on
+/// a connection whose bases were all re-allocated.
+pub fn offerFor(self: *const Conn, id: Document.Id) ?usize {
+    for (self.offers.items, 0..) |o, i| {
+        const offered = o.doc_id orelse continue;
+        if (o.kind == .text and !o.stale and offered.eql(id)) return i;
+    }
+    return null;
 }
 
 /// Open one of the peer's announced GRAPH docs into `doc` — same shape as
@@ -318,14 +344,14 @@ pub fn rebind(self: *Conn, new_session: *Session) !void {
     for (self.collabs.items) |c| {
         c.rebind(new_session);
         if (self.share_names.get(c.base)) |dn| {
-            try self.announceShare(c.base, dn, .text);
+            try self.announceShare(c.base, dn, .text, c.doc.id);
             try self.announcePublication(c.base);
         }
     }
     for (self.graph_collabs.items) |c| {
         c.rebind(new_session);
         if (self.graph_share_names.get(c.base)) |dn| {
-            try self.announceShare(c.base, dn, .graph);
+            try self.announceShare(c.base, dn, .graph, null);
             try self.announcePublication(c.base);
         }
     }
@@ -403,9 +429,17 @@ fn acceptOffer(self: *Conn, payload: []const u8) !void {
     // costs only that one offer and leaves the connection whole.
     const trailer = cur[nlen..];
     const kind: DocKind = if (trailer.len == 0) .text else std.enums.fromInt(DocKind, trailer[0]) orelse return;
+    // The minted id rides after the kind byte. Absent (an older sender) or
+    // short is no id — the offer opens all the same; anything past the id
+    // is a newer sender's and is ignored, like every trailer before it.
+    const id_bytes = @sizeOf(Document.Id);
+    const doc_id: ?Document.Id = if (kind == .text and trailer.len >= 1 + id_bytes)
+        .{ .bytes = trailer[1..][0..id_bytes].* }
+    else
+        null;
     const name = try self.gpa.dupe(u8, cur[0..nlen]);
     errdefer self.gpa.free(name);
-    try self.offers.append(self.gpa, .{ .base = base, .name = name, .kind = kind });
+    try self.offers.append(self.gpa, .{ .base = base, .name = name, .kind = kind, .doc_id = doc_id });
 }
 
 /// Record the peer's descriptor for one of ITS quads. The owner is the

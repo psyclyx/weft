@@ -248,8 +248,8 @@ fn render(d: durable.Designation) []const u8 {
     return switch (d.kind) {
         .directory => renderDirectory(d),
         .file => renderFile(d),
-        .synthetic => |kind| reasonOf("no provider resolves ", kind),
-        .unknown => reason("that designation names no kind"),
+        .projection => |kind| reasonOf("no provider resolves ", kind),
+        .doc, .proc => reasonOf("an embed does not preview a ", d.kind.name()),
     };
 }
 

@@ -5417,3 +5417,82 @@ test "lsp export: a definition outside the granted document set is withheld owne
     try t.expectEqual(peer_lsp.Status.out_of_scope, peer_lsp.decodeReply(outside).?.status);
     try t.expectEqual(before, service.asked);
 }
+
+test "conn: a share carries its document's minted id, a reconnect re-announces the same id, and a pre-id announce still opens" {
+    const gpa = t.allocator;
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared scratch\n");
+    // Two documents with the same bytes are two documents.
+    var twin = try Document.init(gpa, "alice");
+    defer twin.deinit(gpa);
+    try twin.insert(gpa, 0, "shared scratch\n");
+    try t.expect(!doc_a.id.eql(twin.id));
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    _ = try ca.share(&doc_a, "notes", 1);
+    // A sender that predates the id: base, name and the kind byte only.
+    const legacy = try craftAnnounce(gpa, 64, "legacy-doc", &.{0});
+    defer gpa.free(legacy);
+    try sa.post(.op, @intFromEnum(wire.OpKind.share), 0, legacy);
+
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline and cb.offers.items.len < 2) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 2), cb.offers.items.len);
+    var legacy_index: ?usize = null;
+    for (cb.offers.items, 0..) |o, i| {
+        if (std.mem.eql(u8, o.name, "legacy-doc")) {
+            // Version skew narrows the durable name, never the offer.
+            try t.expect(o.doc_id == null);
+            legacy_index = i;
+        } else {
+            try t.expect(o.doc_id.?.eql(doc_a.id));
+        }
+    }
+    try t.expect(cb.offerFor(doc_a.id) != null);
+    var old_replica = try Document.init(gpa, "bob");
+    defer old_replica.deinit(gpa);
+    _ = try cb.openOffer(legacy_index.?, &old_replica, 3);
+    try t.expect(!old_replica.id.eql(doc_a.id));
+    cb.deinit();
+    sb.destroy();
+    sa.destroy();
+
+    // Reconnect: a fresh link and a fresh peer connection. The base is the
+    // connection's to allocate; the id is the document's.
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    sa = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb2 = try Session.create(gpa, lb2.link(), .client, "tok", .own, null);
+    defer sb2.destroy();
+    try ca.rebind(sa);
+    var cb2 = try Conn.init(gpa, sb2, "bob", .client);
+    defer cb2.deinit();
+    const again = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < again and cb2.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb2.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const index = cb2.offerFor(doc_a.id) orelse return error.TestUnexpectedResult;
+    var replica = try Document.init(gpa, "bob");
+    defer replica.deinit(gpa);
+    const minted_locally = replica.id;
+    _ = try cb2.openOffer(index, &replica, 2);
+    // The replica IS the shared document, so it answers to the sharer's id.
+    try t.expect(replica.id.eql(doc_a.id));
+    try t.expect(!replica.id.eql(minted_locally));
+}

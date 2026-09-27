@@ -549,7 +549,7 @@ test "embed: the bound text is the portable grammar, and the window it asks for 
     const plain = try designationIn("@embed weft://here/dir/src/core");
     try t.expect(plain.authority == .here);
     try t.expect(plain.kind == .directory);
-    try t.expectEqualStrings("src/core", plain.ref);
+    try t.expectEqualStrings("/src/core", plain.ref);
     try t.expectEqual(@as(u16, default_window), windowOf(plain));
 
     const windowed = try designationIn("@embed weft://ab12cd/commit/9f3a?lines=3");
