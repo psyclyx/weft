@@ -142,6 +142,8 @@ const Value = struct {
     scope: Scope,
     key: []u8,
     value: []u8,
+    /// The store's clock when this value was last written (`Store.revision`).
+    stamp: u64,
 
     fn free(self: Value, gpa: Allocator) void {
         if (self.scope == .place) gpa.free(self.scope.place);
@@ -167,9 +169,14 @@ pub const SetError = error{
 
 pub const Store = struct {
     gpa: Allocator,
+    /// Every publication, GROUPED BY KEY — sorted by the key's bytes, so one
+    /// key's candidates are one contiguous run: resolving a key is a binary
+    /// search and a run, and resolving every key at a coordinate (`each`,
+    /// every frame) is one pass.
     values: std.ArrayList(Value) = .empty,
-    /// Bumps on every change that could move a resolution — a cache key for
-    /// anything that folds the open context into a signature.
+    /// The store's clock: every write stamps the value it leaves with the
+    /// next tick (`Value.stamp`), so a reader's digest can fold exactly the
+    /// values it sees, and moves for nothing else.
     revision: u64 = 0,
 
     pub fn init(gpa: Allocator) Store {
@@ -182,16 +189,38 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    fn find(self: *const Store, scope: Scope, key: []const u8) ?usize {
-        for (self.values.items, 0..) |v, i| {
-            if (v.scope.eql(scope) and std.mem.eql(u8, v.key, key)) return i;
+    fn tick(self: *Store) u64 {
+        self.revision += 1;
+        return self.revision;
+    }
+
+    /// The first index whose key is not below `key` (`upper`: not at or
+    /// below it).
+    fn bound(self: *const Store, key: []const u8, comptime upper: bool) usize {
+        var lo: usize = 0;
+        var hi: usize = self.values.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const order = std.mem.order(u8, self.values.items[mid].key, key);
+            if (order == .lt or (upper and order == .eq)) lo = mid + 1 else hi = mid;
         }
+        return lo;
+    }
+
+    /// The run of values published for `key`.
+    fn group(self: *const Store, key: []const u8) []const Value {
+        return self.values.items[self.bound(key, false)..self.bound(key, true)];
+    }
+
+    fn find(self: *const Store, scope: Scope, key: []const u8) ?usize {
+        const start = self.bound(key, false);
+        for (self.group(key), start..) |v, i| if (v.scope.eql(scope)) return i;
         return null;
     }
 
     fn removeAt(self: *Store, i: usize) void {
         self.values.orderedRemove(i).free(self.gpa);
-        self.revision += 1;
+        _ = self.tick();
     }
 
     /// Publish `value` for `key` at `scope`, as `owner`. An EMPTY value
@@ -213,7 +242,7 @@ pub const Store = struct {
             const copy = try self.gpa.dupe(u8, value);
             self.gpa.free(held.value);
             held.value = copy;
-            self.revision += 1;
+            held.stamp = self.tick();
             return true;
         }
         if (value.len == 0) return false;
@@ -228,19 +257,26 @@ pub const Store = struct {
             else => scope,
         };
         errdefer if (owned_scope == .place) self.gpa.free(owned_scope.place);
-        try self.values.append(self.gpa, .{ .owner = owned_owner, .scope = owned_scope, .key = owned_key, .value = owned_value });
-        self.revision += 1;
+        // At the end of its key's run: the grouping holds, and one key's
+        // values keep the order they were published in.
+        try self.values.insert(self.gpa, self.bound(key, true), .{
+            .owner = owned_owner,
+            .scope = owned_scope,
+            .key = owned_key,
+            .value = owned_value,
+            .stamp = self.revision + 1,
+        });
+        _ = self.tick();
         return true;
     }
 
-    /// Retract everything `owner` published — what unloading a plugin does,
-    /// so a value can never outlive the code that knew it was true.
-    pub fn retractOwner(self: *Store, owner: []const u8) usize {
+    /// Retract every value `drop` says to.
+    fn retractWhere(self: *Store, context: anytype, comptime drop: fn (@TypeOf(context), *const Value) bool) usize {
         var n: usize = 0;
         var i = self.values.items.len;
         while (i > 0) {
             i -= 1;
-            if (std.mem.eql(u8, self.values.items[i].owner, owner)) {
+            if (drop(context, &self.values.items[i])) {
                 self.removeAt(i);
                 n += 1;
             }
@@ -248,29 +284,72 @@ pub const Store = struct {
         return n;
     }
 
+    /// Retract everything `owner` published — what unloading a plugin does,
+    /// so a value can never outlive the code that knew it was true.
+    pub fn retractOwner(self: *Store, owner: []const u8) usize {
+        return self.retractWhere(owner, struct {
+            fn drop(o: []const u8, v: *const Value) bool {
+                return std.mem.eql(u8, v.owner, o);
+            }
+        }.drop);
+    }
+
+    /// Retract every value published at the entry of `generation` — what
+    /// closing that entry does. A generation is never reused, so nothing
+    /// could read them again; retracting is what stops them costing every
+    /// reader that walks the store.
+    pub fn retractEntry(self: *Store, generation: u64) usize {
+        return self.retractWhere(generation, struct {
+            fn drop(g: u64, v: *const Value) bool {
+                return v.scope == .entry and v.scope.entry == g;
+            }
+        }.drop);
+    }
+
+    /// The winner among `run` (one key's values) at `at`: the most specific
+    /// scope that covers it.
+    fn winner(run: []const Value, at: At) ?*const Value {
+        var best: ?*const Value = null;
+        for (run) |*v| {
+            if (!at.covers(v.scope)) continue;
+            if (best == null or v.scope.rank() > best.?.scope.rank()) best = v;
+        }
+        return best;
+    }
+
     /// The winning value for `key` at `at`: the most specific scope that
     /// covers it. Null when nothing is published there.
     pub fn get(self: *const Store, at: At, key: []const u8) ?[]const u8 {
-        var best: ?*const Value = null;
-        for (self.values.items) |*v| {
-            if (!at.covers(v.scope) or !std.mem.eql(u8, v.key, key)) continue;
-            if (best == null or v.scope.rank() > best.?.scope.rank()) best = v;
-        }
-        return if (best) |b| b.value else null;
+        return if (winner(self.group(key), at)) |w| w.value else null;
     }
 
-    /// Visit every key resolved at `at`, once each, with its winning value.
+    /// Visit every key resolved at `at`, once each, with its winning value,
+    /// in key order. One pass: a key's values are one run.
     pub fn each(self: *const Store, at: At, context: anytype, comptime visit: fn (@TypeOf(context), []const u8, []const u8) void) void {
-        for (self.values.items, 0..) |v, i| {
-            if (!at.covers(v.scope)) continue;
-            // Visit a key once: at its first covering occurrence.
-            const first = for (self.values.items[0..i]) |prior| {
-                if (at.covers(prior.scope) and std.mem.eql(u8, prior.key, v.key)) break false;
-            } else true;
-            if (!first) continue;
-            visit(context, v.key, self.get(at, v.key).?);
-        }
+        var it = self.winners(at);
+        while (it.next()) |w| visit(context, w.key, w.value);
     }
+
+    /// The value that wins each key resolved at `at`, in key order.
+    fn winners(self: *const Store, at: At) Winners {
+        return .{ .values = self.values.items, .at = at };
+    }
+
+    const Winners = struct {
+        values: []const Value,
+        at: At,
+        i: usize = 0,
+
+        fn next(self: *Winners) ?*const Value {
+            while (self.i < self.values.len) {
+                const start = self.i;
+                const key = self.values[start].key;
+                while (self.i < self.values.len and std.mem.eql(u8, self.values[self.i].key, key)) self.i += 1;
+                if (winner(self.values[start..self.i], self.at)) |w| return w;
+            }
+            return null;
+        }
+    };
 };
 
 /// A reader into a store at fixed coordinates — what `Facts.context` holds.
@@ -289,15 +368,20 @@ pub const Open = struct {
         return s.get(self.at, key);
     }
 
-    /// Moves whenever a resolution through this reader could: the store's
-    /// revision and the coordinates. For signatures and catalog clocks — a
-    /// fact a cache key omits changes resolution without invalidating it.
+    /// Moves exactly when a resolution through this reader could: it folds
+    /// the value that wins each key here (its key and stamp) and nothing
+    /// else, so a publication in another place, at another entry, or
+    /// shadowed here by a more specific one leaves every cache keyed on this
+    /// reader standing (a pane's answers, a catalog snapshot). For
+    /// signatures and catalog clocks.
     pub fn digest(self: Open) u64 {
         const s = self.store orelse return 0;
         var h = std.hash.Wyhash.init(0);
-        h.update(std.mem.asBytes(&s.revision));
-        h.update(std.mem.asBytes(&self.at.entry));
-        h.update(self.at.place);
+        var it = s.winners(self.at);
+        while (it.next()) |w| {
+            h.update(w.key);
+            h.update(std.mem.asBytes(&w.stamp));
+        }
         return h.final();
     }
 };
@@ -393,4 +477,43 @@ test "context: each visits every resolved key once, with its winner" {
     try t.expectEqualStrings("a.k", seen.buf[0][0]);
     try t.expectEqualStrings("e", seen.buf[0][1]);
     try t.expectEqualStrings("b.k", seen.buf[1][0]);
+}
+
+test "context: a reader's digest moves only for what it can see" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    const here: Open = .{ .store = &s, .at = .{ .entry = 1, .place = "weft://here/dir/p1" } };
+    const other: Open = .{ .store = &s, .at = .{ .entry = 2, .place = "weft://here/dir/p2" } };
+    _ = try s.set("a", .{ .place = "weft://here/dir/p1" }, "a.k", "one");
+    const before = here.digest();
+    const other_before = other.digest();
+
+    // Another place's publication and another entry's are not visible here…
+    _ = try s.set("b", .{ .place = "weft://here/dir/p2" }, "b.k", "two");
+    _ = try s.set("b", .{ .entry = 2 }, "b.j", "three");
+    try t.expectEqual(before, here.digest());
+    try t.expect(other.digest() != other_before);
+    // …nor is a value shadowed here by a more specific one.
+    _ = try s.set("a", .{ .entry = 1 }, "a.k", "mine");
+    const shadowed = here.digest();
+    try t.expect(shadowed != before);
+    _ = try s.set("a", .global, "a.k", "under");
+    try t.expectEqual(shadowed, here.digest());
+
+    // What it does see moves it: a change, and a retraction.
+    _ = try s.set("a", .{ .entry = 1 }, "a.k", "");
+    try t.expect(here.digest() != shadowed);
+    _ = try s.set("a", .{ .place = "weft://here/dir/p1" }, "a.k", "");
+    try t.expect(here.digest() != before);
+}
+
+test "context: an entry's values go with its generation" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    _ = try s.set("a", .{ .entry = 7 }, "a.k", "x");
+    _ = try s.set("b", .{ .entry = 7 }, "b.k", "y");
+    _ = try s.set("a", .{ .entry = 8 }, "a.k", "z");
+    try t.expectEqual(@as(usize, 2), s.retractEntry(7));
+    try t.expectEqual(@as(usize, 1), s.values.items.len);
+    try t.expectEqualStrings("z", s.get(.{ .entry = 8 }, "a.k").?);
 }

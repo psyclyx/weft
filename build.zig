@@ -991,6 +991,7 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         architecture.wire,
         architecture.schema,
+        architecture.facts,
         architecture.membrane,
         architecture.semantic,
         architecture.scene_codec,

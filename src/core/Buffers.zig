@@ -78,6 +78,10 @@ parked: std.ArrayList(*Buffer) = .empty,
 /// makes — by `buffer-create`, `open`, a door that spawns — is that guest's,
 /// however it came to be made. Borrowed for the bracket's duration.
 acting: []const u8 = "",
+/// Generations of entries closed since the last `drainClosed` — what the
+/// context store retracts entry-scoped values by (`core/context.zig`).
+/// Buffers knows nothing of the store; it only says who is gone.
+closed: std.ArrayList(u64) = .empty,
 
 pub const parked_cap = 16;
 
@@ -369,10 +373,19 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.slots.deinit(gpa);
     for (self.parked.items) |b| self.destroyBuffer(gpa, b);
     self.parked.deinit(gpa);
+    self.closed.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
     for (&self.posture_modes.values) |mode| gpa.free(mode);
     self.* = undefined;
+}
+
+/// The generations closed since the last drain, handed over and forgotten.
+/// Borrowed until the next `close`.
+pub fn drainClosed(self: *Buffers) []const u64 {
+    const gone = self.closed.items;
+    self.closed.items.len = 0;
+    return gone;
 }
 
 /// Set the base mode fresh buffers start in (the config's editing mode).
@@ -873,6 +886,9 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const
         try self.switchQuietly(gpa, self.nextId(), head, keymap);
     }
     self.slots.items[id] = null;
+    // Best effort: a generation missed here is never read again anyway
+    // (generations are not reused); it only lingers until the store goes.
+    self.closed.append(gpa, b.generation) catch {};
     if (b.isBareDocument() and b.textEditor().?.doc.commitCount() > 0) {
         self.park(gpa, b) catch self.destroyBuffer(gpa, b);
         return;

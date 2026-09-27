@@ -209,6 +209,8 @@ pub const Context = struct {
     /// moved since the last call. Returns whether any did. The caller (the
     /// app's frame boundary) decides WHEN, and calls `notify` after.
     pub fn observe(self: *Context, ctx: *command.Context) Allocator.Error!bool {
+        // An entry that closed took its entry-scoped values with it.
+        for (ctx.buffers.drainClosed()) |generation| _ = self.store.retractEntry(generation);
         var now: Builder = .{ .gpa = self.gpa };
         defer now.list.deinit(self.gpa);
         if (intent.primaryScopeOf(ctx)) |scope| try now.primary(self, ctx, scope);
@@ -319,4 +321,19 @@ test "context: a place is named by its designation, and one nothing names is no 
     // name, so nothing can be published at it or read from it.
     const unnamed: place_mod.Place = .{ .container = .{ .locus = .here, .ref = .{ .authority = .here, .slot = 1, .generation = 1 }, .revision = 3 } };
     try t.expectEqualStrings("", context.placeName(unnamed));
+}
+
+test "context: closing an entry retracts what was published at it" {
+    const gpa = t.allocator;
+    var env: @import("TestHost.zig") = undefined;
+    try @import("TestHost.zig").init(gpa, &env);
+    defer env.deinit(gpa);
+    const id = try env.buffers.create(gpa, "*tool*");
+    const generation = env.buffers.get(id).?.generation;
+    _ = try env.context.store.set("x", .{ .entry = generation }, "x.k", "v");
+    _ = try env.context.store.set("x", .global, "x.g", "stays");
+    try env.buffers.close(gpa, id, &env.head, &env.keymap);
+    _ = try env.context.observe(&env.ctx);
+    try t.expectEqual(@as(usize, 1), env.context.store.values.items.len);
+    try t.expectEqualStrings("stays", env.context.store.get(.{}, "x.g").?);
 }

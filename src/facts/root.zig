@@ -673,9 +673,9 @@ test "facts: the digest moves with every fact, the open keys included" {
     var store = context.Store.init(std.testing.allocator);
     defer store.deinit();
     var open = base;
-    open.context = .{ .store = &store, .at = .{ .entry = 1, .place = 1 } };
+    open.context = .{ .store = &store, .at = .{ .entry = 1, .place = "weft://here/dir/p1" } };
     const before = open.digest();
-    _ = try store.set("p", .global, "repl.session", "weft://here/proc/1");
+    _ = try store.set("repl", .global, "repl.session", "weft://here/proc/1");
     try std.testing.expect(open.digest() != before);
 }
 
@@ -947,6 +947,7 @@ test "facts: merge carries EVERY field — the class, not one field" {
         .locality = .local,
         .path = "/p",
         .name = "n",
+        .designation = "weft://here/file/p",
         .first_line = "#!x",
         .tags = &.{"tg"},
         .size = 7,
