@@ -187,13 +187,6 @@ pub const refuse_produced_nothing = "open: that projection produced nothing to s
 /// producer's projection OF the subject (`…/main.zig?as=symbols`).
 pub const as_param = "as";
 
-/// Open what `d` designates, for the kinds core itself can answer: a live
-/// entry already showing it (any kind), a document (live, or reopened from
-/// the parked store), a process (only while its entry lives), a projection
-/// (its producer re-run with `text`, the designation, as the one argument).
-/// Paths and peers are the shell's — it owns the filesystems and the
-/// connections — so for those this answers only the live-entry case and
-/// null otherwise. Focuses what it opens.
 /// Resolve a relative path someone TYPED (or a stored name that predates
 /// designations) against the place the command runs in: the dispatching
 /// entry's place directory, or the process directory for the degenerate place.
@@ -216,6 +209,13 @@ pub fn resolveRelative(ctx: *command.Context, gpa: Allocator, rel: []const u8) !
 /// The words for a relative name in a place that has no local directory.
 pub const refuse_relative_elsewhere = "this place has no local directory to resolve a relative name against: give an absolute path or a weft:// designation";
 
+/// Open what `d` designates, for the kinds core itself can answer: a live
+/// entry already showing it (any kind), a document (live, or reopened from
+/// the parked store), a process (only while its entry lives), a projection
+/// (its producer re-run with `text`, the designation, as the one argument).
+/// Paths and peers are the shell's — it owns the filesystems and the
+/// connections — so for those this answers only the live-entry case and
+/// null otherwise. Focuses what it opens.
 pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) anyerror!?Outcome {
     if (d.param(as_param)) |as| if (try openAs(ctx, d, text, as)) |outcome| return outcome;
     if (find(ctx.buffers, d)) |b| {

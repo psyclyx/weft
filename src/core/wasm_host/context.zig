@@ -7,8 +7,10 @@
 //! work ("my REPL is live in this place"), it grants nothing, and a
 //! predicate that reads it only narrows where a provider is OFFERED —
 //! invocation still rechecks everything at the effect door. So the set door
-//! carries no permission, like `wl_provide`. It is refused while answering a
-//! provider round (it is not render-safe: a publication moves resolution).
+//! carries no permission, like `wl_provide`. A plugin publishes only under
+//! its own name (`repl` → `repl.session`). It may publish while answering a
+//! provider round: frames are drawn from snapshots (doc/model.md §2.7), so a
+//! publication is simply part of the next version.
 //!
 //! READING is a decision, and the default is open: any plugin may read the
 //! PRIMARY context — what the user is looking at, which every piece of chrome

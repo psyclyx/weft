@@ -463,8 +463,9 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
   F2 listing provider keys on `{ tool: "files" }`: the sidebar is a scene entry, and
   `role` is only derived for text projections today.
 - Chosen contexts: `intent.Where` is `active` or `primary`. `Head.primary_focus` is
-  recorded in the layout phase, beside the focus-feed publish and by the same
-  `focus_source` attribute. `Plane.snapshotAt(ctx, where)` feeds one builder a `Scope`
+  recorded in the layout phase, only for a pane whose viewport is a
+  `focus_source` (the focus feed it once sat beside is deleted; the primary
+  context, `core/context.zig`, reads this record). `Plane.snapshotAt(ctx, where)` feeds one builder a `Scope`
   (the entry, its saved mode and semantic focus, and its own catalog clock), so the
   primary context isn't a second resolver. `Plane.invokeNamedAt` runs an offer in the
   primary entry by bringing it to the head for the call and restoring it afterwards.

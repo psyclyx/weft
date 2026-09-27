@@ -61,8 +61,10 @@ const detachProviders = providers.detachProviders;
 ///   (`designation.openHeld`) — a live entry, a parked document, a producer
 ///   re-run.
 ///
-/// A relative path is refused rather than resolved against the directory the
-/// process was launched in. A position locator (`?at=`) lands the caret.
+/// A relative path is resolved once, here, against the place the command runs
+/// in (`designation.resolveRelative`) — never against the directory the
+/// process was launched in — and refused where that place has no local
+/// directory. A position locator (`?at=`) lands the caret.
 pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const command_context: *Context = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;

@@ -175,7 +175,12 @@ pub const PrimaryFocus = struct {
     /// A `window_layout` pane slot id, plain data for the reason
     /// `focused_pane` is.
     pane: u32,
-    /// The `Buffers.Id` that pane shows.
+    /// The `Buffers.Id` that pane shows. A raw slot, not a `Buffers.Ref` or
+    /// a designation, and knowingly so: it is not state that outlives the
+    /// entry — the layout phase re-reads it from the pane every frame
+    /// (`window_cmds`), and the pane itself holds the same raw id — so a
+    /// closed entry's reused slot is corrected within the frame that reuses
+    /// it. It becomes a `Ref` when panes hold refs.
     entry: u32,
 };
 
