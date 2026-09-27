@@ -97,6 +97,10 @@ pub const catalog = @import("catalog.zig");
 /// The one selection model: extents of text or rows, and how a command maps
 /// over them (doc/model.md §2.6).
 pub const selection = @import("selection.zig");
+/// Focus and editing in structural views, and type-ahead over their rows
+/// (doc/chrome.md §5.2).
+pub const scene_edit = @import("scene_edit.zig");
+pub const type_ahead = @import("type_ahead.zig");
 pub const intent = @import("intent.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");

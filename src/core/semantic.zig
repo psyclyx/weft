@@ -8,6 +8,7 @@ const target_runtime = @import("weft_target_runtime");
 const view_runtime = @import("weft_view_runtime");
 const input = @import("weft_input");
 const Head = @import("Head.zig");
+const scene_edit = @import("scene_edit.zig");
 
 pub const Services = struct {
     targets: target_runtime.target.Registry,
@@ -23,6 +24,10 @@ pub const Services = struct {
     transfer: ?semantic.transfer.OwnedItem = null,
     named_transfers: [26]?semantic.transfer.OwnedItem = @splat(null),
     next_owner: u64 = 1,
+    /// How the loaded grammar focuses a row that holds a field (doc/chrome.md
+    /// §5.2) — its declaration (`structural-focus`), `row` when it made none.
+    /// Read only where a focus lands (`scene_edit.land`).
+    granularity: input.Granularity = .row,
 
     pub const Released = struct {
         targets: usize = 0,
@@ -533,11 +538,24 @@ pub const Services = struct {
     /// focusable. The path is copied into the head, so no view or scene
     /// storage escapes this call.
     pub fn focusView(
-        self: *const Services,
+        self: *Services,
         head: *Head,
         gpa: std.mem.Allocator,
         ref: semantic.view.Ref,
         preferred: ?semantic.scene.NodeId,
+    ) FocusError!semantic.scene.NodeId {
+        return self.focusViewAs(head, gpa, ref, preferred, .navigate);
+    }
+
+    /// `focusView`, saying how the focus arrives (`scene_edit.How`): a
+    /// provider ENTERING a node is an edit where navigating to it may not be.
+    pub fn focusViewAs(
+        self: *Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        ref: semantic.view.Ref,
+        preferred: ?semantic.scene.NodeId,
+        how: scene_edit.How,
     ) FocusError!semantic.scene.NodeId {
         const instance = self.views.get(ref) orelse return error.StaleView;
         const selected = if (preferred) |candidate|
@@ -546,7 +564,7 @@ pub const Services = struct {
             instance.reconcileFocus(null) orelse instance.descriptor.root;
         var storage: [1026]semantic.scene.NodeId = undefined;
         const path = (try instance.focusPath(selected, &storage)) orelse return error.StaleView;
-        try head.scene_selection.set(gpa, path);
+        try scene_edit.land(self, head, gpa, path, how);
         return selected;
     }
 
@@ -857,8 +875,10 @@ pub const Services = struct {
         // Only a selection this head is making (`set-mark`, i.e. visual mode
         // or C-space) turns a transfer into a text transfer. A provider's
         // resting field selection must not capture node-level actions such
-        // as `SPC v y` on the focused row.
-        if (path.field != null and head.scene_selection.selection_mark and
+        // as `SPC v y` on the focused row. A BEGUN edit (doc/chrome.md §5.2) is
+        // such a selection too: while a row's name is being typed, Delete
+        // deletes text, never the row.
+        if (path.field != null and (head.scene_selection.selection_mark or head.scene_selection.began) and
             (std.mem.eql(u8, action, semantic.action.standard.copy) or
                 std.mem.eql(u8, action, semantic.action.standard.cut) or
                 std.mem.eql(u8, action, semantic.action.standard.delete)))
@@ -1022,7 +1042,13 @@ pub const Services = struct {
         const caret: usize = @intCast(snapshot.value.selection.caret);
         const start = @min(anchor, caret);
         const end = @max(anchor, caret);
-        if (start == end) return null;
+        if (start == end) {
+            if (!head.scene_selection.began) return null;
+            // Mid-edit with nothing selected: a delete takes the character
+            // after the caret, and there is no text to copy or cut.
+            if (std.mem.eql(u8, action, semantic.action.standard.delete)) _ = try self.inputFocusedField(head, gpa, .delete_next);
+            return .handled;
+        }
 
         if (std.mem.eql(u8, action, semantic.action.standard.delete)) {
             _ = try self.inputFocusedField(head, gpa, .delete_selection);
@@ -1038,7 +1064,7 @@ pub const Services = struct {
     }
 
     fn applyActionFocus(
-        self: *const Services,
+        self: *Services,
         head: *Head,
         gpa: std.mem.Allocator,
         prior_focus: ?semantic.focus.Path,
@@ -1055,7 +1081,7 @@ pub const Services = struct {
                         null
                 else
                     null;
-                _ = try self.focusView(head, gpa, focus.view, focus.node);
+                _ = try self.focusViewAs(head, gpa, focus.view, focus.node, .enter);
                 if (anchor) |node| head.scene_selection.setNavigationAnchor(node);
             },
             .working_target_requested => |target| head.working_target = target,
@@ -1115,7 +1141,7 @@ pub const Services = struct {
     /// its text-editor movement. A live view consumes the intent even when it
     /// has no focusable nodes or is already at an edge.
     pub fn moveHeadFocus(
-        self: *const Services,
+        self: *Services,
         head: *Head,
         gpa: std.mem.Allocator,
         movement: semantic.focus.Movement,
@@ -1133,7 +1159,7 @@ pub const Services = struct {
         const next = instance.move(current, movement) orelse return true;
         var storage: [1026]semantic.scene.NodeId = undefined;
         const next_path = (try instance.focusPath(next, &storage)) orelse return true;
-        try head.scene_selection.set(gpa, next_path);
+        try scene_edit.land(self, head, gpa, next_path, .navigate);
         return true;
     }
 
@@ -1225,34 +1251,6 @@ pub const Services = struct {
             .anchor = if (extend) selection.anchor else @intCast(offset),
             .caret = @intCast(offset),
         } };
-    }
-
-    /// Resolve an ordinary "edit this field" request without choosing an
-    /// editing model. This proves the endpoint is live and writable; Vim,
-    /// Helix, Emacs, or a modeless input plugin independently decides how its
-    /// subsequent keystrokes become the generic field edits above.
-    pub fn requestFocusedFieldEdit(
-        self: *const Services,
-        head: *Head,
-        gpa: std.mem.Allocator,
-    ) FieldInputError!bool {
-        const path = head.scene_selection.path() orelse return false;
-        const instance = self.views.get(path.view) orelse {
-            head.scene_selection.clear();
-            return false;
-        };
-        const field_ref = path.field orelse return false;
-        const leaf = path.leaf() orelse return error.StaleField;
-        const node = instance.node(leaf) orelse return error.StaleField;
-        switch (node.content) {
-            .field => |field| if (!field.ref.eql(field_ref)) return error.StaleField,
-            else => return error.StaleField,
-        }
-        const provider = self.fields.get(field_ref) orelse return error.StaleField;
-        var snapshot = try provider.snapshot(gpa);
-        defer snapshot.deinit();
-        if (snapshot.value.read_only) return error.ReadOnly;
-        return true;
     }
 };
 
@@ -2269,6 +2267,9 @@ test "ordinary editor input targets semantic fields and focus order" {
 
     var services = Services.init(.here);
     defer services.deinit(std.testing.allocator);
+    // The field-editing vocabulary, as a `text` granularity grammar reaches it:
+    // focus lands editing.
+    services.granularity = .text;
     const owner = try services.acquireOwner();
     const first_ref = try services.insertField(std.testing.allocator, owner, .init(&first));
     const second_ref = try services.insertField(std.testing.allocator, owner, .init(&second));
@@ -2313,8 +2314,6 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expect(!head.scene_selection.selection_mark);
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.scene_selection.path().?.leaf().?);
     try std.testing.expect(head.scene_selection.path().?.field.?.eql(second_ref));
-    try std.testing.expect(try services.requestFocusedFieldEdit(&head, std.testing.allocator));
-    try std.testing.expectEqual(@as(u64, 1), second.revision); // request is mode- and mutation-free
     try std.testing.expect((try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, semantic.action.standard.copy)).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), actions.calls);
 

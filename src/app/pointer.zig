@@ -109,10 +109,15 @@ pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.Po
     var name_buf: [32]u8 = undefined;
     switch (ev.kind) {
         .press => {
+            // Where the PREVIOUS press went down, before this one replaces it:
+            // a slow second click means something only on the same node.
+            const prior = g.origin.node;
             g.* = .{
                 .kind = .press,
                 .button = ev.button,
                 .clicks = ev.clicks,
+                .slow = ev.slow,
+                .prior = prior,
                 .mods = mods,
                 .hit = hit,
                 .origin = hit,

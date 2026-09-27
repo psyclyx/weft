@@ -25,6 +25,11 @@ pub const PointerEvent = struct {
     /// Press only: 1, 2 or 3 (single, double, triple). A fourth quick press
     /// starts over at 1.
     clicks: u8 = 0,
+    /// Press only: a single click that came AFTER the multi-click window of
+    /// the previous press of this button but within `slow_click_ms` of it —
+    /// the slow second click a list control reads as "rename" (anywhere:
+    /// whether it hit the same thing is the consumer's question).
+    slow: bool = false,
     /// Surface-local position in logical pixels. The consumer scales to
     /// framebuffer pixels; the platform owns the scale.
     x: f64,
@@ -48,6 +53,11 @@ pub const Axis = enum { vertical, horizontal };
 /// needs no second threshold.
 pub const multi_click_ms: u32 = 400;
 pub const multi_click_px: f64 = 4;
+/// A second press of a button later than a double click but within this
+/// is a SLOW second click (`PointerEvent.slow`). Bounded by the multi-click
+/// interval below, so it can never be half of a double click, and above,
+/// so two unrelated clicks a while apart are not one gesture.
+pub const slow_click_ms: u32 = 3 * multi_click_ms;
 /// Continuous wheel travel per step when the protocol gives no discrete
 /// count (touchpads, and pre-v5 Wayland seats). Ten is the wl_pointer
 /// convention for one wheel detent.
@@ -112,8 +122,13 @@ pub const Gestures = struct {
                 @abs(self.y - p.y) <= multi_click_px;
             break :blk if (same) p.clicks % 3 + 1 else 1;
         } else 1;
+        const slow = if (self.last_press) |p|
+            p.button == b and clicks == 1 and
+                time_ms -% p.time_ms > multi_click_ms and time_ms -% p.time_ms <= slow_click_ms
+        else
+            false;
         self.last_press = .{ .button = b, .time_ms = time_ms, .x = self.x, .y = self.y, .clicks = clicks };
-        self.push(.{ .kind = .press, .button = b, .clicks = clicks, .x = self.x, .y = self.y, .mods = mods });
+        self.push(.{ .kind = .press, .button = b, .clicks = clicks, .slow = slow, .x = self.x, .y = self.y, .mods = mods });
     }
 
     /// Continuous wheel travel in wl_pointer axis units.
@@ -224,6 +239,26 @@ test "pointer: a slow, distant, or different-button press is a new single click"
     const evs = drain(&g, &buf);
     for (evs) |ev| if (ev.kind == .press) try t.expectEqual(@as(u8, 1), ev.clicks);
     try t.expectEqual(@as(u8, 3), evs[evs.len - 1].button);
+}
+
+test "pointer: a second click after the double-click window, within the slow window, is slow" {
+    var g: Gestures = .{};
+    g.warp(10, 10);
+    g.button(1, true, 1000, .{});
+    g.button(1, false, 1010, .{});
+    g.button(1, true, 1000 + multi_click_ms + 100, .{}); // slow: not a double, not a new gesture
+    g.button(1, false, 1000 + multi_click_ms + 110, .{});
+    g.button(1, true, 1000 + multi_click_ms + 150, .{}); // a double click: never slow
+    g.button(1, false, 1000 + multi_click_ms + 160, .{});
+    g.button(1, true, 10_000, .{}); // long after: a fresh click
+    var buf: [16]PointerEvent = undefined;
+    const evs = drain(&g, &buf);
+    try t.expect(!evs[0].slow);
+    try t.expect(evs[2].slow);
+    try t.expectEqual(@as(u8, 1), evs[2].clicks);
+    try t.expect(!evs[4].slow);
+    try t.expectEqual(@as(u8, 2), evs[4].clicks);
+    try t.expect(!evs[6].slow);
 }
 
 test "pointer: the click window survives the 32-bit millisecond wrap" {

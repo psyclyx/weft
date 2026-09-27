@@ -197,7 +197,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, d
         .facts = try nameFacts(arena, row, indent),
         .target = binding.target,
         .focusable = true,
-        .content = .{ .field = .{ .ref = binding.field, .single_line = true } },
+        .content = .{ .field = .{ .ref = binding.field, .single_line = true, .primary = true } },
     };
     children[3] = .{
         .id = try stableId(row.id, size_domain),

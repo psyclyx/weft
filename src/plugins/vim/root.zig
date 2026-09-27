@@ -614,6 +614,8 @@ fn initExtra() void {
     // nobody wrote down is one nobody can change.
     weft.restingPosture(.text, "normal");
     weft.restingPosture(.structural, "normal");
+    // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
+    weft.runStr("structural-focus", "text");
     // The break-out chord capture can never take away (§10.4), retained in
     // both the state vim rests in and the one it types in.
     for ([_][]const u8{ "normal", "insert" }) |m|

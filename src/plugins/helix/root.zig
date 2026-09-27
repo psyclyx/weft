@@ -871,6 +871,9 @@ fn initExtra() void {
     // (`enterInsert`), rather than resting somewhere its keys are dead.
     weft.restingPosture(.text, "helix-normal");
     weft.restingPosture(.structural, "helix-normal");
+    // A listing row IS its name to a modal grammar: focusing it edits the
+    // name, and `helix-normal` keeps every key (doc/chrome.md §5.2).
+    weft.runStr("structural-focus", "text");
     // The key layers over `helix-normal`, declared rather than named in core:
     // a document's code chords, and a listing's structured-view group. The
     // head stays in `helix-normal` either way.

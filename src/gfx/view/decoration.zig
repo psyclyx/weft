@@ -71,6 +71,14 @@ fn hslToSrgb(h: f32, s: f32, l: f32, a: f32) [4]f32 {
     return .{ r + m, g + m, b + m, a };
 }
 
+/// Wash the visual line holding `off`, from `x` for `w` pixels: a text
+/// projection's focused row under `row` granularity (`Hud.row_focus`).
+pub fn rowRect(v: *View, scratch: Allocator, rects: *std.ArrayList(Rect), off: usize, x: f32, w: f32, color: [4]f32) !void {
+    const li = v.frame_layout.lineForOffset(off) orelse return;
+    const c = v.frame_layout.lines[li].caretAt(off);
+    try rects.append(scratch, .{ .x = x, .y = c.y_top, .w = w, .h = c.height, .color = color });
+}
+
 pub fn caretRect(v: *View, scratch: Allocator, rects: *std.ArrayList(Rect), off: usize, style: CursorStyle, color: [4]f32) !void {
     const li = v.frame_layout.lineForOffset(off) orelse return;
     const vl = &v.frame_layout.lines[li];

@@ -145,6 +145,11 @@ pub const Hud = struct {
     cursor_style: CursorStyle = .block,
     caret_place: CaretPlace = .head,
     cursor_on: bool = true,
+    /// The focus is a ROW of a text projection, not a position in its text
+    /// (`row` granularity, doc/chrome.md §5.2): the caret's line is washed
+    /// as the focused row, and no caret is drawn — typing inserts nothing
+    /// there, and a caret would say it does.
+    row_focus: bool = false,
     /// Retained plugin overlays (which-key/files/git) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).

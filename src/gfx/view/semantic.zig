@@ -158,11 +158,15 @@ const Builder = struct {
                     break :blk try self.arena.dupe(u8, "<field unavailable>");
                 defer snapshot.deinit();
                 const bytes = snapshot.value.bytes;
-                if (self.document.focused != node.id) {
+                // Only the field being EDITED shows its text raw and wears a
+                // caret; a field that is merely on the focused row reads like
+                // every other row (doc/chrome.md §5.2).
+                const edited = if (self.document.editing) |ref| ref.eql(field.ref) else false;
+                if (!edited) {
                     for (node.facts) |fact| if (std.mem.eql(u8, fact.name, "display"))
                         break :blk try displayBytes(self.arena, fact.value);
                 }
-                if (self.document.active and self.document.focused == node.id) {
+                if (self.document.active and edited) {
                     const anchor = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.anchor)]);
                     const caret = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.caret)]);
                     selection = .{ .anchor = visualWidth(anchor), .caret = visualWidth(caret) };
@@ -558,7 +562,12 @@ test "field presentation preserves kind styling, suffix, and escaped selection p
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const doc: data.Document = .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = root.id, .fields = &fields };
+    // Focused as a ROW, the field is not being edited: no caret, and no
+    // selection to draw one from (doc/chrome.md §5.2).
+    const row_focus: data.Document = .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = root.id, .fields = &fields };
+    try std.testing.expect((try rowsFor(arena.allocator(), row_focus))[0].spans[0].selection == null);
+    var doc = row_focus;
+    doc.editing = field;
     const rows = try rowsFor(arena.allocator(), doc);
     const span = rows[0].spans[0];
     try std.testing.expectEqualStrings("a\\né/", span.text);

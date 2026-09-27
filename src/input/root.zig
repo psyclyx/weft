@@ -83,6 +83,26 @@ pub const Posture = enum(u32) {
     }
 };
 
+/// How the loaded grammar focuses a ROW of a structural view that holds an
+/// editable field (doc/chrome.md §5.2). Declared by the grammar
+/// (`structural-focus text|row`); a grammar that declares nothing gets `row`,
+/// which can never show a caret where typing does nothing.
+///
+///   text  editable-listing style: focusing a row edits its primary field, and the
+///         grammar's own modes decide what a keystroke does there.
+///   row   list-control style: the focus IS the row — a highlight, no caret.
+///         Editing is begun explicitly (`std.editing.begin`, a slow second
+///         click), committed by activating or leaving the row, cancelled by
+///         `std.gesture.cancel`; printable keys jump by type-ahead.
+pub const Granularity = enum(u32) {
+    text,
+    row,
+
+    pub fn parse(name: []const u8) ?Granularity {
+        return std.meta.stringToEnum(Granularity, name);
+    }
+};
+
 /// A fact about an entry that a grammar may give its OWN key layer, bound
 /// over the mode the head is actually in. The head's mode never changes for
 /// it — insert/visual transitions stay the grammar's — only the table a key

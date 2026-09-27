@@ -55,6 +55,10 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.navigation.right", .doc = "Move to the neighbour right on the horizontal axis.", .label = "Right" },
     .{ .name = "std.editing.insert-before", .doc = "Insert an editable item before the focused item.", .label = "Insert Before" },
     .{ .name = "std.editing.insert-after", .doc = "Insert an editable item after the focused item.", .label = "Insert After" },
+    // Focusing a row and editing its text are different states (doc/chrome.md
+    // §5.2): this is the step from one to the other. Committed by activating
+    // the edit, cancelled by `std.gesture.cancel`.
+    .{ .name = "std.editing.begin", .doc = "Start editing the focused item's text in place.", .label = "Edit" },
     .{ .name = "std.history.undo", .doc = "Reverse the most recent reversible change.", .label = "Undo" },
     .{ .name = "std.history.redo", .doc = "Reapply the most recently undone change.", .label = "Redo" },
     .{ .name = "std.persistence.save", .doc = "Commit pending changes to durable storage.", .label = "Save" },

@@ -8,7 +8,7 @@ const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
 
 pub const CursorConfig = struct {
-    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, place: view_mod.CaretPlace = .head, blink: bool = false };
+    const Entry = struct { mode: []u8, style: ?view_mod.CursorStyle = null, place: view_mod.CaretPlace = .head, blink: bool = false };
     gpa: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
@@ -30,9 +30,20 @@ pub const CursorConfig = struct {
         if (keymap.modeHasTag(mode, "menu")) if (head.menuReturn(mode)) |ret| return ret;
         return mode;
     }
-    pub fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
-        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
-        return .block;
+    /// The caret's shape in `mode` — DERIVED from whether a printable key
+    /// inserts there (`Head.textCommit`), not chosen (doc/chrome.md §5.2).
+    /// A bar says "type here", so it is drawn only where typing inserts: a
+    /// mode that declared one and commits nothing gets a block, which is
+    /// honest about a position that matters but takes no text. Where typing
+    /// inserts, the bar is the default and a grammar may still choose
+    /// otherwise; `underline` (a capture awaiting one key) is a grammar's to
+    /// keep either way.
+    pub fn styleFor(self: *const CursorConfig, mode: []const u8, inserts: bool) view_mod.CursorStyle {
+        const declared: ?view_mod.CursorStyle = for (self.entries.items) |e| {
+            if (std.mem.eql(u8, e.mode, mode)) break e.style;
+        } else null;
+        if (inserts) return declared orelse .bar;
+        return if (declared == .underline) .underline else .block;
     }
     pub fn placeFor(self: *const CursorConfig, mode: []const u8) view_mod.CaretPlace {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.place;

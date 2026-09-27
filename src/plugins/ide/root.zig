@@ -754,6 +754,9 @@ fn initExtra() void {
     weft.bindingVariant(.source, "ide", "ide-source");
     weft.restingPosture(.text, "ide");
     weft.restingPosture(.structural, "ide-structural");
+    // A listing is a list control here: focus is the row, and its name is
+    // edited only when asked (F2, a slow second click) — doc/chrome.md §5.2.
+    weft.runStr("structural-focus", "row");
     // The break-out capture can never take away, retained in both resting
     // states (§10.4). Escape reaches it too, from a capture.
     for ([_][]const u8{ "ide", "ide-structural" }) |m|
@@ -782,6 +785,10 @@ fn initExtra() void {
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
+    // Escape cancels what is pending where something offers that — a row's
+    // name being edited, put back as it was — and is ide's own way out
+    // everywhere else.
+    weft.bindKeys("ide", "Escape", &.{ "std.gesture.cancel", "ide-escape" });
     // In a listing Tab is fold-or-nothing: never a character (GATE 2).
     weft.bindKeys("ide-structural", "Tab", &.{"std.hierarchy.toggle-expanded"});
     // Delete removes the selected rows — every one, marked or in a range.
@@ -796,25 +803,26 @@ fn initExtra() void {
         .{ "S-Home", "ide-select-home" },                    .{ "S-End", "ide-select-end" },
         .{ "C-Home", "ide-doc-start" },                      .{ "C-End", "ide-doc-end" },
         .{ "C-S-Home", "ide-select-doc-start" },             .{ "C-S-End", "ide-select-doc-end" },
-        .{ "C-a", "ide-select-all" },                        .{ "Escape", "ide-escape" },
-        .{ "S-Tab", "ide-dedent" },                          .{ "ISO_Left_Tab", "ide-dedent" },
-        .{ "C-slash", "comment-selection" },                 .{ "M-Up", "ide-move-line-up" },
-        .{ "M-Down", "ide-move-line-down" },                 .{ "C-S-k", "ide-delete-line" },
-        .{ "C-Return", "ide-open-below" },                   .{ "C-S-Return", "ide-open-above" },
-        .{ "C-d", "ide-add-next-match" },                    .{ "C-S-l", "ide-select-all-matches" },
+        .{ "C-a", "ide-select-all" },                        .{ "S-Tab", "ide-dedent" },
+        .{ "ISO_Left_Tab", "ide-dedent" },                   .{ "C-slash", "comment-selection" },
+        .{ "M-Up", "ide-move-line-up" },                     .{ "M-Down", "ide-move-line-down" },
+        .{ "C-S-k", "ide-delete-line" },                     .{ "C-Return", "ide-open-below" },
+        .{ "C-S-Return", "ide-open-above" },                 .{ "C-d", "ide-add-next-match" },
+        .{ "C-S-l", "ide-select-all-matches" },
         // The pointer's share of the grammar: what a second and third quick
         // click mean, and C-click's extra selection — a caret in text, a
         // marked row in a listing (core's, one act on either kind).
-        .{ "double-mouse-1", "ide-select-word-at-pointer" }, .{ "triple-mouse-1", "ide-select-line-at-pointer" },
-        .{ "C-mouse-1", "pointer-add-selection" },
+                     .{ "double-mouse-1", "ide-select-word-at-pointer" },
+        .{ "triple-mouse-1", "ide-select-line-at-pointer" }, .{ "C-mouse-1", "pointer-add-selection" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
 
-    // A bar caret: a modeless editor is always between cells.
-    for ([_][]const u8{ "ide", "ide-structural" }) |m| {
-        weft.runStr2("set-cursor", m, "bar");
-        weft.runStr2("cursor-blink", m, "on");
-    }
+    // A bar caret where `ide` types: a modeless editor is always between
+    // cells. `ide-structural` declares no shape — typing inserts nothing
+    // there, so core derives its caret (doc/chrome.md §5.2): none on a
+    // focused row, a bar only while a row's name is being edited.
+    weft.runStr2("set-cursor", "ide", "bar");
+    for ([_][]const u8{ "ide", "ide-structural" }) |m| weft.runStr2("cursor-blink", m, "on");
 
     weft.setMode("ide");
 }

@@ -408,6 +408,15 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
     return null;
 }
 
+/// Whether the entry's focus is a ROW of its text: a produced projection (a
+/// status listing) whose point is on no editable span, under a grammar that
+/// focuses rows (doc/chrome.md §5.2). Such a pane shows the row, not a caret.
+fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer) bool {
+    if (fx.semantic.granularity != .row) return false;
+    if (buffer.projection == null) return false;
+    return buffer.posture(buffer.fieldAtPoint()) == .structural;
+}
+
 fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
     const path = focus.path() orelse return null;
     const instance = fx.semantic.views.get(path.view) orelse return null;
@@ -416,6 +425,7 @@ fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *c
         .root = &instance.scene,
         .title = buffer.name,
         .focused = if (path.leaf()) |node| if (instance.node(node) != null) node else instance.reconcileFocus(null) else instance.reconcileFocus(null),
+        .editing = focus.field,
         .selected = selectedRows(arena, instance, focus),
         .revealed = fx.semantic.views.revealed(path.view),
         .active = active,
@@ -477,6 +487,7 @@ fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
             .view = descriptor.view,
             .root = root,
             .focused = focusedSemanticNode(fx.head, descriptor.view, root),
+            .editing = if (fx.head.scene_selection.path()) |path| if (path.view.eql(descriptor.view)) path.field else null else null,
             .fields = &fx.semantic.fields,
         },
         .presentation = descriptor.presentation,
@@ -946,9 +957,10 @@ pub const FrameBuilder = struct {
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
-            .cursor_style = fx.cursor_cfg.styleFor(cursor_mode),
+            .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, fx.head.textCommitIn(fx.keymap, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
+            .row_focus = rowFocused(fx, abuf),
             .dirty = doc_status.dirty,
             .save_failed = doc_status.save_failed,
             .backing = backing_chip,

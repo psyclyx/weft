@@ -91,6 +91,9 @@ pub const bindings = [_]Binding{
     .{ .intent = .back, .intention = "std.navigation.back", .route = "navigate-back" },
     .{ .intent = .insert_before, .intention = "std.editing.insert-before", .route = "item-insert-before" },
     .{ .intent = .insert_after, .intention = "std.editing.insert-after", .route = "item-insert-after" },
+    .{ .intent = .begin_edit, .intention = "std.editing.begin", .route = "field-edit" },
+    .{ .intent = .commit_edit, .intention = "std.target.activate", .route = "field-edit-commit" },
+    .{ .intent = .cancel_edit, .intention = "std.gesture.cancel", .route = "field-edit-cancel" },
 };
 
 comptime {
@@ -115,6 +118,10 @@ const Signature = struct {
     view: model.view.Ref,
     leaf: model.scene.NodeId,
     scene: u64,
+    /// Whether a field is edited, and whether that edit was begun: the same
+    /// leaf offers different verbs as a row, as a field, and mid-edit.
+    field: bool,
+    editing: bool,
 };
 
 /// Owns one provider slot in the catalog and the offer storage behind it.
@@ -137,6 +144,8 @@ pub const Publisher = struct {
     /// Storage for a path SYNTHESIZED from a projection subject. Borrowed by
     /// the `focus.Path` handed to `derive`, so it must outlive that call.
     path_buf: [max_path]model.scene.NodeId = undefined,
+    /// The published `begin_edit` row's label (`editLabel`).
+    edit_label_buf: [64]u8 = undefined,
     count: usize = 0,
     revision: u64 = 0,
     signature: ?Signature = null,
@@ -177,15 +186,20 @@ pub const Publisher = struct {
         const path = self.pathHere(services, focus, here) orelse return self.withdraw(cat);
         const instance = services.views.get(path.view) orelse return self.withdraw(cat);
         const leaf = path.leaf() orelse return self.withdraw(cat);
+        // A begun edit belongs to the head's own focus, never to a path
+        // synthesized from a text projection.
+        const editing = focus.began and focus.path() != null;
         const next: Signature = .{
             .view = path.view,
             .leaf = leaf,
             .scene = instance.descriptor.revision,
+            .field = path.field != null,
+            .editing = editing,
         };
         if (self.signature) |current| if (std.meta.eql(current, next)) return false;
 
         var buffer: offers.Buffer = undefined;
-        const items = offers.derive(instance, .{ .path = path }, &buffer);
+        const items = offers.derive(instance, .{ .path = path, .editing = editing }, &buffer);
         for (items, self.table[0..items.len]) |item, *offer| {
             const index = @intFromEnum(item.intent);
             offer.* = .{
@@ -196,9 +210,14 @@ pub const Publisher = struct {
                 else
                     .enabled,
             };
+            // Beginning an edit reads as the provider names editing THIS row
+            // (a file's "Edit name"), where it says so.
+            if (item.intent == .begin_edit) if (self.editLabel(instance, path)) |label| {
+                offer.affordance = .{ .label = label };
+            };
         }
         self.count = items.len;
-        self.count += try self.publishNodeActions(cat, instance, path, self.table[self.count..]);
+        self.count += try self.publishNodeActions(cat, instance, path, self.table[self.count..], offers.find(items, .begin_edit) != null);
         self.revision += 1;
         _ = try cat.publish(.{
             .provider = self.provider,
@@ -208,6 +227,23 @@ pub const Publisher = struct {
         });
         self.signature = next;
         return true;
+    }
+
+    /// The label the path's `field.edit` advertiser gives it, copied (the
+    /// scene can be replaced while the row is published).
+    fn editLabel(self: *Publisher, instance: *const view_runtime.view.Instance, path: model.focus.Path) ?[]const u8 {
+        var index = path.nodes.len;
+        while (index > 0) {
+            index -= 1;
+            const node = instance.node(path.nodes[index]) orelse continue;
+            for (node.actions) |action| {
+                if (!std.mem.eql(u8, action.id, standard.edit) or action.label.len == 0) continue;
+                const len = @min(action.label.len, self.edit_label_buf.len);
+                @memcpy(self.edit_label_buf[0..len], action.label[0..len]);
+                return self.edit_label_buf[0..len];
+            }
+        }
+        return null;
     }
 
     /// The focused scene's path, or one synthesized from what point is on in a
@@ -250,6 +286,9 @@ pub const Publisher = struct {
         instance: *const view_runtime.view.Instance,
         path: model.focus.Path,
         out: []catalog.Offer,
+        /// `std.editing.begin` is published for this focus, and carries the
+        /// row's `field.edit`: one verb, one row.
+        edit_covered: bool,
     ) Allocator.Error!usize {
         self.node_action_count = 0;
         var index = path.nodes.len;
@@ -259,6 +298,7 @@ pub const Publisher = struct {
             for (node.actions) |action| {
                 if (self.node_action_count == max_node_actions) break;
                 if (coveredByStandard(action.id) or self.hasNodeAction(action.id)) continue;
+                if (edit_covered and std.mem.eql(u8, action.id, standard.edit)) continue;
                 const slot = &self.node_actions[self.node_action_count];
                 const name = std.fmt.bufPrint(&slot.name_buf, "plugin.{s}", .{action.id}) catch continue;
                 const id = cat.intention(name) catch |err| switch (err) {

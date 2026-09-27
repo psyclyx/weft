@@ -73,6 +73,9 @@ echo: std.ArrayList(u8) = .empty,
 /// text selections an `Editor` holds (`selection.zig`), which dispatch maps
 /// commands over the same way.
 scene_selection: SceneSelection = .empty,
+/// Type-ahead over the focused scene's rows: the prefix being typed
+/// (`type_ahead.zig`, doc/chrome.md §5.2).
+type_ahead: @import("type_ahead.zig").State = .{},
 /// Dialogs, pickers, and popups are nested semantic interactions local to
 /// this head. Their bindings are resolved here before any global keymap help.
 interactions: view_runtime.interaction.Stack = .empty,
@@ -239,7 +242,24 @@ pub const WorkingTarget = struct {
 pub const SceneSelection = struct {
     view: ?semantic.view.Ref = null,
     nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
+    /// The field being EDITED — a text extent inside the focused row
+    /// (doc/chrome.md §5.2). Null while the focus is the row itself: a row
+    /// whose leaf happens to be a field is not a field being edited, so the
+    /// `field` posture, the field caret and field input all read this, never
+    /// the shape of the focus path. Where the focus LANDS decides it
+    /// (`scene_edit.land`), by the grammar's declared granularity.
     field: ?semantic.scene.FieldRef = null,
+    /// Whether the edit of `field` was BEGUN — `std.editing.begin`, a slow
+    /// second click, a provider entering a field — under `row` granularity.
+    /// A begun edit owns printable input whatever the mode commits
+    /// (`Head.textCommit`), ends when activated (commit) or cancelled, and
+    /// commits when the focus leaves its row. A `text` granularity grammar
+    /// never begins one: it edits the focused field as a matter of course,
+    /// through its own modes.
+    began: bool = false,
+    /// The field's text when the edit began — what cancelling restores.
+    /// Meaningful only while `began`.
+    origin: std.ArrayList(u8) = .empty,
     /// A one-shot row anchor used when an action temporarily focuses a
     /// secondary, non-focusable node in this same view. It is head-local so
     /// another head can navigate the same view independently.
@@ -261,6 +281,7 @@ pub const SceneSelection = struct {
     pub fn deinit(self: *SceneSelection, gpa: Allocator) void {
         self.nodes.deinit(gpa);
         self.others.deinit(gpa);
+        self.origin.deinit(gpa);
         self.* = .{};
     }
 
@@ -273,6 +294,8 @@ pub const SceneSelection = struct {
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(next.nodes);
         self.view = next.view;
+        // An edit belongs to its field: a path naming another (or none) ends it.
+        if (!sameField(self.field, next.field)) self.began = false;
         self.field = next.field;
         self.navigation_anchor = null;
         self.selection_mark = false;
@@ -283,6 +306,7 @@ pub const SceneSelection = struct {
         self.view = null;
         self.nodes.clearRetainingCapacity();
         self.field = null;
+        self.began = false;
         self.navigation_anchor = null;
         self.selection_mark = false;
         self.collapse();
@@ -324,9 +348,18 @@ pub const SceneSelection = struct {
         self.others.appendSliceAssumeCapacity(other.others.items);
         self.view = other.view;
         self.field = other.field;
+        self.began = other.began;
+        self.origin.clearRetainingCapacity();
+        try self.origin.appendSlice(gpa, other.origin.items);
         self.navigation_anchor = other.navigation_anchor;
         self.selection_mark = other.selection_mark;
         self.anchor = other.anchor;
+    }
+
+    fn sameField(a: ?semantic.scene.FieldRef, b: ?semantic.scene.FieldRef) bool {
+        const x = a orelse return b == null;
+        const y = b orelse return false;
+        return x.eql(y);
     }
 
     pub fn setNavigationAnchor(self: *SceneSelection, anchor: ?semantic.scene.NodeId) void {
@@ -694,6 +727,23 @@ pub fn lookup(self: *const Head, km: *const Keymap, key: []const u8) ?[]const u8
 /// the mode does not commit text — see `Keymap.commitCommand`.
 pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
     return km.commitCommand(self.mode);
+}
+
+/// Where a printable keystroke nothing bound goes as TEXT, or null when it
+/// inserts nothing (doc/chrome.md §5.2): the mode's commit command, else
+/// core's own `insert-text` while a begun edit holds a field — the edit took
+/// the keys, whatever the resting mode says. The one question both the
+/// commit path and the caret shape ask, so a bar can never be drawn where
+/// typing does nothing.
+pub fn textCommit(self: *const Head, km: *const Keymap) ?[]const u8 {
+    return self.textCommitIn(km, self.mode);
+}
+
+/// `textCommit` as it would be in `mode` — a menu mode draws the caret of
+/// the mode it returns to, and asks this of that one.
+pub fn textCommitIn(self: *const Head, km: *const Keymap, mode: []const u8) ?[]const u8 {
+    if (km.commitCommand(mode)) |cmd| return cmd;
+    return if (self.scene_selection.began) "insert-text" else null;
 }
 
 /// Feed one keyspec through THIS HEAD's pending sequence — see

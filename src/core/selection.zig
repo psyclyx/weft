@@ -625,7 +625,8 @@ fn focusRows(ctx: *command.Context, instance: anytype, r: Rows) bool {
     var storage: [1026]semantic_model.scene.NodeId = undefined;
     const path = (instance.focusPath(r.head, &storage) catch return false) orelse return false;
     focus.others.clearRetainingCapacity();
-    focus.set(ctx.gpa, path) catch return false;
+    const services = ctx.semantic orelse return false;
+    @import("scene_edit.zig").land(services, ctx.head, ctx.gpa, path, .navigate) catch return false;
     focus.anchor = if (r.anchor != r.head and instance.containsFocusable(r.anchor)) r.anchor else null;
     return true;
 }

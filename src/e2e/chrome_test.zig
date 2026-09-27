@@ -262,11 +262,13 @@ test "e2e/chrome: the toolbar adapts to the primary context — source, a files 
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
 
     // A files listing in the primary pane: the listing's own node actions,
-    // and ide.js's rename keyed on the files tool. Nothing is drafted yet, so
-    // Apply draft is greyed.
+    // and ide.js's rename keyed on the files tool. Its "Edit name" is the
+    // standard `std.editing.begin` now (doc/chrome.md §5.2), which the
+    // toolbar leaves to Rename. Nothing is drafted yet, so Apply draft is
+    // greyed.
     ed.runStr("open", ".");
     ed.applyWindow();
-    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Edit name | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
     app.proj.shot(ed, "chrome-toolbar-files");
 
     // A git status buffer: git's verbs. Nothing durable to save here, so the
@@ -428,7 +430,7 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
     // No greyed words (a menu lists what can run here), and no rule around
     // a lone item.
-    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Save Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
+    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Edit name Save | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
     app.proj.shot(ed, "chrome-contextmenu-row");
 
     // Click Copy — drawn over the editor pane, past the sidebar's edge: the

@@ -18,6 +18,7 @@ const semantic_model = @import("weft_semantic");
 const placement = @import("placement.zig");
 const action_here = @import("action_here.zig");
 const designation = @import("designation.zig");
+const scene_edit = @import("scene_edit.zig");
 
 const ok: Value = .nil;
 
@@ -234,7 +235,47 @@ fn cFieldEdit(ctx: *Context, args: struct {}) anyerror!Value {
         .declined => {},
         else => return ok,
     };
-    _ = try services.requestFocusedFieldEdit(ctx.head, ctx.gpa);
+    // `std.editing.begin` (doc/chrome.md §5.2): edit the focused row's
+    // primary field — begun under `row` granularity, where the focus was
+    // the row; where it already edits (`text`), nothing changes.
+    _ = scene_edit.begin(services, ctx.head, ctx.gpa) catch |err| switch (err) {
+        error.ActionRefused => {
+            echoLine(ctx, "this row cannot be edited now");
+            return ok;
+        },
+        error.ReadOnly => {
+            echoLine(ctx, "this field is read-only");
+            return ok;
+        },
+        else => return err,
+    };
+    return ok;
+}
+
+/// Commit the begun edit (activating what is being edited): keep the text,
+/// apply the view's draft when it changed.
+fn cFieldEditCommit(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const services = ctx.semantic orelse return ok;
+    _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    return ok;
+}
+
+/// Cancel the begun edit, putting back the text it began from.
+fn cFieldEditCancel(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const services = ctx.semantic orelse return ok;
+    _ = try scene_edit.cancel(services, ctx.head, ctx.gpa);
+    return ok;
+}
+
+/// `structural-focus text|row` — the loaded grammar's DECLARATION of how it
+/// focuses a row that holds a field (doc/chrome.md §5.2, `input.Granularity`).
+/// A grammar says it once, like its resting postures; core reads it where a
+/// focus lands and knows no grammar's name.
+fn cStructuralFocus(ctx: *Context, args: struct { granularity: []const u8 }) anyerror!Value {
+    const services = ctx.semantic orelse return ok;
+    services.granularity = @import("weft_input").Granularity.parse(args.granularity) orelse return error.InvalidArgument;
     return ok;
 }
 
@@ -745,6 +786,11 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
 
 /// Show a transient message on the status line — the generic surface
 /// plugins and commands report through (cleared by the next echo).
+fn echoLine(ctx: *Context, text: []const u8) void {
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(ctx.gpa, text) catch {};
+}
+
 fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     ctx.head.echo.clearRetainingCapacity();
     try ctx.head.echo.appendSlice(ctx.gpa, args.text);
@@ -856,7 +902,10 @@ const table = [_]command.Command{
     command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut).maps(null),
     command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore).maps(null),
     command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter).maps(null),
-    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit).maps(null),
+    command.define("field-edit", "Begin editing the focused row's primary field (std.editing.begin).", cFieldEdit).maps(null),
+    command.define("field-edit-commit", "Commit the field edit in progress, applying the view's draft when it changed.", cFieldEditCommit),
+    command.define("field-edit-cancel", "Cancel the field edit in progress, restoring its text.", cFieldEditCancel),
+    command.define("structural-focus", "Declare how the grammar focuses a structural row: text (edit its field) or row.", cStructuralFocus),
     command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
     command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),

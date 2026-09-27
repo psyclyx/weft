@@ -767,8 +767,8 @@ pub const Session = struct {
             .bindings = &.{
                 .{ .input = "y", .action = semantic.action.standard.confirm },
                 .{ .input = "n", .action = semantic.action.standard.cancel },
-                .{ .input = "enter", .action = semantic.action.standard.confirm },
-                .{ .input = "escape", .action = semantic.action.standard.cancel },
+                .{ .input = "Return", .action = semantic.action.standard.confirm },
+                .{ .input = "Escape", .action = semantic.action.standard.cancel },
             },
             .default_action = semantic.action.standard.confirm,
             .cancel_action = semantic.action.standard.cancel,

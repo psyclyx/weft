@@ -12,6 +12,10 @@ pub const Document = struct {
     /// supplies the buffer name without baking file-browser chrome into them.
     title: []const u8 = &.{},
     focused: ?semantic.scene.NodeId = null,
+    /// The field being EDITED (`SceneSelection.field`) — the only field that
+    /// draws a caret. A focused row whose leaf is a field is not an edit, so
+    /// it shows the row's highlight and no caret (doc/chrome.md §5.2).
+    editing: ?semantic.scene.FieldRef = null,
     /// The rows the scene's selection covers beyond the focused one (a range,
     /// marked rows) — washed as selected. Frame-lived.
     selected: []const semantic.scene.NodeId = &.{},

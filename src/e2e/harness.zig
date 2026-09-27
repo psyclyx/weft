@@ -566,6 +566,17 @@ pub const Editor = struct {
         self.pointerButton(1, false, .{});
     }
 
+    /// Another primary click at `xy` AFTER the multi-click window of the
+    /// previous one but inside the slow-click window — a slow second click
+    /// (`platform.pointer.slow_click_ms`).
+    pub fn clickSlow(self: *Editor, xy: [2]f32) void {
+        self.pointer_ms += weft.platform.pointer.multi_click_ms * 2;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(1, true, .{});
+        self.pointer_ms += 30;
+        self.pointerButton(1, false, .{});
+    }
+
     /// Wheel steps at `xy` (positive scrolls toward the end).
     pub fn wheel(self: *Editor, xy: [2]f32, steps: i32) void {
         self.gestures.warp(xy[0], xy[1]);
@@ -763,7 +774,13 @@ pub const Editor = struct {
     /// survive the typing, which is exactly how the row ferry reads it back.
     pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
         if (self.head.scene_selection.path()) |path| {
-            const provider = self.session.system.semantic.fields.get(path.field orelse return gpa.dupe(u8, "")) orelse return error.StaleField;
+            // The field being edited, else — a row focused as a row
+            // (doc/chrome.md §5.2) — the row's primary field: what the row IS.
+            const ref = path.field orelse blk: {
+                const instance = self.session.system.semantic.views.get(path.view) orelse return gpa.dupe(u8, "");
+                break :blk (instance.primaryField(path) orelse return gpa.dupe(u8, "")).ref;
+            };
+            const provider = self.session.system.semantic.fields.get(ref) orelse return error.StaleField;
             var field_snapshot = try provider.snapshot(gpa);
             defer field_snapshot.deinit();
             return gpa.dupe(u8, field_snapshot.value.bytes);
@@ -821,7 +838,9 @@ pub const Editor = struct {
                 var snap = try self.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(self.gpa);
                 defer snap.deinit();
                 if (!std.mem.eql(u8, snap.value.bytes, name)) continue;
-                _ = try self.session.system.semantic.focusView(self.head, self.gpa, view_ref, node.id);
+                // ENTERED, as a provider enters a field: an edit of the name
+                // under any granularity (doc/chrome.md §5.2).
+                _ = try self.session.system.semantic.focusViewAs(self.head, self.gpa, view_ref, node.id, .enter);
                 try self.session.system.semantic.fields.get(node.content.field.ref).?.edit(snap.value.revision, .{ .start = 0, .end = 0, .replacement = "", .selection_after = .{ .anchor = 0, .caret = 0 } });
                 return;
             }

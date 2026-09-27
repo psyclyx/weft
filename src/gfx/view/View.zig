@@ -631,7 +631,7 @@ pub fn build(
         const styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
         // Every block caret flips the glyph it covers, not only the primary's.
         var flips: std.ArrayList(usize) = .empty;
-        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selectionCount()) |i|
+        if (hud.cursor_on and hud.cursor_style == .block and !hud.row_focus) for (0..ed.selectionCount()) |i|
             try flips.append(scratch, caretDrawOffset(ed, i, hud.caret_place));
 
         // Lay out the body's visible rows into the frame arena (the geometry
@@ -657,6 +657,13 @@ pub fn build(
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 
+        // A focus that is a ROW (doc/chrome.md §5.2) wears the wash a scene's
+        // focused row does, beneath any selection, and draws no caret.
+        if (hud.row_focus) {
+            var wash = self.theme.background;
+            for (0..3) |i| wash[i] = wash[i] * 0.8 + self.theme.selection[i] * 0.2;
+            try decoration.rowRect(self, scratch, &rects, cursor_off, body_rect.x, body_rect.w, wash);
+        }
         // Every selection draws, the primary like any other: one wash per
         // selection and one caret per head (the single-selection case is the
         // one-iteration loop of what this always drew).
@@ -664,7 +671,7 @@ pub fn build(
             if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
         }
         for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
-        if (hud.cursor_on) {
+        if (hud.cursor_on and !hud.row_focus) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
             for (0..ed.selectionCount()) |i| {
                 if (i == ed.primary) continue;

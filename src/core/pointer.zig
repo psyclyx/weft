@@ -47,6 +47,7 @@ const command = @import("command.zig");
 const Context = command.Context;
 const Value = command.Value;
 const Buffers = @import("Buffers.zig");
+const scene_edit = @import("scene_edit.zig");
 
 const ok: Value = .nil;
 
@@ -138,6 +139,12 @@ pub const Gesture = struct {
     kind: Kind = .none,
     button: u8 = 0,
     clicks: u8 = 0,
+    /// A single click that came after the double-click window of the
+    /// previous press, but not long after (the platform's `slow_click_ms`):
+    /// on the row it already focused, a list control's "rename".
+    slow: bool = false,
+    /// The scene node the previous press went down on, if any.
+    prior: ?NodeRef = null,
     mods: Mods = .{},
     /// Where the pointer is now.
     hit: Hit = .{},
@@ -325,10 +332,21 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
+        // A list focused by ROWS reads the pointer as a list control does
+        // (doc/chrome.md §5.2), whatever the grammar bound: a double click
+        // activates the row the first click focused, and a slow second
+        // click on the focused row edits its name.
+        const rows = if (ctx.semantic) |services| services.granularity == .row else false;
+        if (rows and ctx.head.pointer.clicks >= 2) return if (ctx.head.pointer.clicks == 2) cPointerActivate(ctx, .{}) else ok;
+        const again = rows and slowClickOnFocus(ctx, node);
         // A click is THE selection, as it is in text: marked rows go.
         ctx.head.scene_selection.collapse();
         try focusNode(ctx, node);
         if (isActionNode(ctx, node)) _ = try activateActionNode(ctx);
+        if (again) _ = scene_edit.begin(ctx.semantic.?, ctx.head, ctx.gpa) catch |err| switch (err) {
+            error.ActionRefused, error.ReadOnly => {},
+            else => return err,
+        };
         return ok;
     }
     const off = hit.offset orelse return ok;
@@ -428,6 +446,10 @@ fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const node = ctx.head.pointer.hit.node orelse return ok;
+    // A double click whose first click was a slow one began an edit of this
+    // row's name on the way: the gesture was an activation, so the edit ends
+    // (nothing was typed into it, so nothing is applied).
+    if (ctx.semantic) |services| _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
     try focusNode(ctx, node);
     if (isActionNode(ctx, node)) return activateActionNode(ctx);
     // Opening a row's target is what a double click on a listing is FOR.
@@ -464,6 +486,21 @@ fn cScrollWheelDown(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 // ── Action nodes ────────────────────────────────────────────────────
+
+/// Whether this press is a slow second click on the row the head already
+/// focuses, which the previous press went down on too — the list-control
+/// gesture for editing a row's name. Not while that row is being edited:
+/// a click inside an edit places its caret.
+fn slowClickOnFocus(ctx: *Context, node: NodeRef) bool {
+    const g = &ctx.head.pointer;
+    if (!g.slow or g.clicks != 1) return false;
+    const prior = g.prior orelse return false;
+    if (!prior.view.eql(node.view) or prior.node != node.node) return false;
+    const selection = &ctx.head.scene_selection;
+    if (selection.began) return false;
+    const view = selection.view orelse return false;
+    return view.eql(node.view) and selection.head() == node.node;
+}
 
 fn isActionNode(ctx: *Context, node: NodeRef) bool {
     const services = ctx.semantic orelse return false;

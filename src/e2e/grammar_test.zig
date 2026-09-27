@@ -672,7 +672,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
     }
 }
 
-test "e2e/grammar: a focused editable field reports `field`, and rests where structural rests" {
+test "e2e/grammar: a grammar that declares no focus granularity focuses ROWS; an edit it begins reports `field`, and rests where structural rests" {
     const gpa = t.allocator;
     var app: GrammarApp = undefined;
     try app.init(gpa);
@@ -680,17 +680,39 @@ test "e2e/grammar: a focused editable field reports `field`, and rests where str
     const ed = &app.ed;
     try authorTree(ed);
 
-    // Point on a row.s editable NAME is a FIELD: commits belong to it, not to
-    // the listing at large (§11.8). That is a refinement of `structural`, not a
-    // departure from it — the entry still rests where the grammar.s structural
-    // state is, which is what keeps the browser.s own keys live while a name is
-    // being typed.
+    // This grammar declares no `structural-focus`, so it gets `row` — the
+    // default that can never show a caret where typing does nothing
+    // (doc/chrome.md §5.2). Focusing a row whose name is a field is focusing
+    // the ROW: `structural`, and no field is being edited.
     ed.runStr("open", ".");
     try focusRowByName(ed, gpa, "top.txt");
-    // Focus is on the semantic name field; no document is involved.
+    try t.expectEqual(core.input.Granularity.row, ed.session.system.semantic.granularity);
+    try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+    try t.expect(ed.head.scene_selection.field == null);
+    try t.expect(offeredHere(ed, "std.editing.begin"));
+
+    // `std.editing.begin` edits the row's primary field: point on the NAME is a
+    // FIELD, commits belong to it (§11.8). A refinement of `structural`, not a
+    // departure — the entry still rests where the grammar's structural state
+    // is, which keeps the browser's own keys live while a name is typed.
+    ed.run("field-edit");
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try t.expectEqualStrings("gramtest", ed.mode());
     try t.expectEqualStrings("gramtest", ed.buffers.restingModeFor(.field));
+    // Cancelling puts the name back and the focus on the row again.
+    ed.run("field-edit-cancel");
+    try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+    const name = try focusedName(ed, gpa);
+    defer gpa.free(name);
+    try t.expectEqualStrings("top.txt", name);
+}
+
+/// Whether anything offers `intention` in the active context.
+fn offeredHere(ed: *h.Editor, intention: []const u8) bool {
+    const plane = ed.ctx.intent orelse return false;
+    const id = plane.catalog.findIntention(intention) orelse return false;
+    const snap = plane.snapshotFor(ed.ctx) orelse return false;
+    return snap.offersFor(id).len > 0;
 }
 
 test "e2e/grammar: an open interaction owns input first, and the grammar sees exactly what it declines" {

@@ -695,7 +695,13 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // key there is simply unhandled — nothing is synthesized (§10.1). This IS
     // the hot typing→commit path — fence it so an accidental blocking API here
     // trips in Debug.
-    const commit_cmd = ctx.head.commitCommand(ctx.keymap) orelse return;
+    // A begun field edit commits too (`Head.textCommit`); where nothing
+    // does, a list focused by rows takes the key as type-ahead (core's, over
+    // any rows — doc/chrome.md §5.2), and anywhere else it is unhandled.
+    const commit_cmd = ctx.head.textCommit(ctx.keymap) orelse {
+        _ = core.type_ahead.feed(ctx, commit.bytes) catch |err| std.log.warn("type-ahead failed: {t}", .{err});
+        return;
+    };
     core.task.beginHotSection();
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
