@@ -8,6 +8,7 @@ const std = @import("std");
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const Editor = @import("../Editor.zig");
+const selection = @import("../selection.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -470,16 +471,19 @@ pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     };
 }
 
-// ── Multiple selections ──────────────────────────────────────────────
+// ── The selection ────────────────────────────────────────────────────
 // A selection set crosses as ONE u32 record, both ways:
 //
-//     [primary, anchor0, head0, anchor1, head1, …]
+//     [primary, kind0, anchor0, head0, kind1, anchor1, head1, …]
 //
-// in document order. `get` writes it, `set` reads it back — so a guest edits
-// the set it read and hands it back, and add/remove/collapse are SDK
-// compositions over the pair rather than three more doors (plugin_sdk
-// `addSelection`/`removeSelection`/`collapseSelections`). A caret reads
-// `anchor == head`, and `anchor == head` sets one.
+// in document order — the same record for a text entry (kind 0: byte
+// offsets) and a scene (kind 1: rows, as places in the view's focus order),
+// read and written through `selection.read`/`write` (doc/model.md §2.6).
+// `get` writes it, `set` reads it back — so a guest edits the set it read and
+// hands it back, and add/remove/collapse are SDK compositions over the pair
+// rather than three more doors (plugin_sdk `addSelection`/`removeSelection`/
+// `collapseSelections`). A caret (a single row) reads `anchor == head`. Inside
+// a mapping's run, the set is the visited extent alone.
 
 /// Guest words arrive as i32; every one of these is a u32 on the guest side
 /// (offsets, counts, pointers). Reinterpret, never `@intCast` — a sign-bit
@@ -492,61 +496,59 @@ fn word(raw: i32) u32 {
 /// host to allocate gigabytes. Far above any editing use.
 const max_selections: u32 = 1 << 16;
 
+/// Words per extent in the record: kind, anchor, head.
+const extent_words = 3;
+
 /// `selections_get(out_ptr, cap) -> count`: write the primary index and up to
-/// `cap` `{anchor, head}` pairs; return the full count (a `cap` of 0 writes
-/// nothing — the count query). An entry with no text reports 0.
+/// `cap` extents; return the full count (a `cap` of 0 writes nothing — the
+/// count query). An entry with neither text nor a scene reports 0.
 pub fn hSelectionsGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = activeEditor(p.activeCtx()) orelse {
-        results[0] = 0;
-        return;
-    };
-    // Inside a visit the visited extent is the whole selection.
-    const visiting = ed.visiting > 0;
-    const n: usize = if (visiting) 1 else ed.selectionCount();
-    const base: usize = if (visiting) ed.primary else 0;
+    results[0] = 0;
+    const set = selection.read(p.activeCtx(), p.gpa) catch return;
+    defer p.gpa.free(set.extents);
+    const n = set.extents.len;
     results[0] = @intCast(n);
     const cap = @min(word(args[1]), n);
     if (cap == 0) return;
-    const words = p.gpa.alloc(u32, 1 + 2 * cap) catch return;
+    const words = p.gpa.alloc(u32, 1 + extent_words * cap) catch return;
     defer p.gpa.free(words);
-    words[0] = @intCast(ed.primary - base);
-    for (0..cap) |i| {
-        const e = ed.selectionEnds(base + i);
-        words[1 + 2 * i] = @intCast(e.anchor);
-        words[2 + 2 * i] = @intCast(e.head);
+    words[0] = @intCast(set.primary);
+    for (set.extents[0..cap], 0..) |x, i| {
+        const at = 1 + extent_words * i;
+        words[at] = @intFromEnum(x.kind);
+        words[at + 1] = @intCast(@min(x.anchor, std.math.maxInt(u32)));
+        words[at + 2] = @intCast(@min(x.head, std.math.maxInt(u32)));
     }
     const bytes = std.mem.sliceAsBytes(words);
     _ = caller.writeMemory(word(args[0]), bytes.len, bytes) catch {};
 }
 
-/// `selections_set(ptr, n) -> 0 | -1`: replace every selection with the `n`
-/// pairs of the record at `ptr` (n ≥ 1). Offsets clamp to the document; the
-/// set is normalized (sorted, overlaps merged). -1 for no editor, n out of
-/// range, or an unreadable record — the old set is then untouched.
+/// `selections_set(ptr, n) -> 0 | -1`: replace the selection with the `n`
+/// extents of the record at `ptr` (n ≥ 1). Text offsets clamp to the
+/// document and the set is normalized (sorted, overlaps merged); rows must be
+/// in the view. -1 for n out of range, an unreadable record, or an extent of
+/// the wrong kind for the entry — the old set is then untouched.
 pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = -1;
-    const ed = activeEditor(p.activeCtx()) orelse return;
     const n = word(args[1]);
     if (n == 0 or n > max_selections) return;
-    const raw = caller.readMemory(p.gpa, word(args[0]), (1 + 2 * @as(usize, n)) * 4) catch return;
+    const raw = caller.readMemory(p.gpa, word(args[0]), (1 + extent_words * @as(usize, n)) * 4) catch return;
     defer p.gpa.free(raw);
-    const ends = p.gpa.alloc(Editor.Ends, n) catch return;
-    defer p.gpa.free(ends);
+    const extents = p.gpa.alloc(selection.Extent, n) catch return;
+    defer p.gpa.free(extents);
     const primary = std.mem.readInt(u32, raw[0..4], .little);
-    for (ends, 0..) |*e, i| {
-        const at = 4 + 8 * i;
-        e.* = .{
-            .anchor = std.mem.readInt(u32, raw[at..][0..4], .little),
-            .head = std.mem.readInt(u32, raw[at + 4 ..][0..4], .little),
+    for (extents, 0..) |*x, i| {
+        const at = 4 + 4 * extent_words * i;
+        const kind = std.mem.readInt(u32, raw[at..][0..4], .little);
+        x.* = .{
+            .kind = std.enums.fromInt(selection.Kind, kind) orelse return,
+            .anchor = std.mem.readInt(u32, raw[at + 4 ..][0..4], .little),
+            .head = std.mem.readInt(u32, raw[at + 8 ..][0..4], .little),
         };
     }
-    // Inside a visit the record replaces the visited extent alone.
-    if (ed.visiting > 0) {
-        ed.replaceVisited(p.gpa, ends) catch return;
-    } else ed.setSelections(p.gpa, ends, primary) catch return;
-    results[0] = 0;
+    if (selection.write(p.activeCtx(), p.gpa, extents, primary) catch false) results[0] = 0;
 }
 
 /// `visit() -> remaining | -1`: whether this dispatch is one run of a

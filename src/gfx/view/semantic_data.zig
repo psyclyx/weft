@@ -12,6 +12,9 @@ pub const Document = struct {
     /// supplies the buffer name without baking file-browser chrome into them.
     title: []const u8 = &.{},
     focused: ?semantic.scene.NodeId = null,
+    /// The rows the scene's selection covers beyond the focused one (a range,
+    /// marked rows) — washed as selected. Frame-lived.
+    selected: []const semantic.scene.NodeId = &.{},
     active: bool = true,
     fields: *const view_runtime.field.Registry,
 };

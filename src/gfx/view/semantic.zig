@@ -43,6 +43,8 @@ pub const Span = struct {
 pub const Row = struct {
     spans: []const Span,
     focused: bool,
+    /// Inside the scene's selection (a range, a marked row).
+    selected: bool = false,
 };
 
 pub const Hit = struct {
@@ -101,7 +103,14 @@ const Builder = struct {
                 break;
             }
         };
-        try self.rows.append(self.arena, .{ .spans = owned, .focused = focused });
+        var selected = false;
+        for (owned) |span| {
+            if (std.mem.indexOfScalar(semantic.scene.NodeId, self.document.selected, span.node) != null) {
+                selected = true;
+                break;
+            }
+        }
+        try self.rows.append(self.arena, .{ .spans = owned, .focused = focused, .selected = selected });
     }
 
     fn spanFor(self: *Builder, node: *const semantic.scene.Node, depth: usize, preceding: []const Span) Allocator.Error!Span {
@@ -247,7 +256,10 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
-        if (row.focused) {
+        if (row.selected) {
+            // A selected row wears the selection's wash, as selected text does.
+            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = v.theme.selection });
+        } else if (row.focused) {
             var color = v.theme.background;
             for (0..3) |i| color[i] = color[i] * 0.8 + v.theme.selection[i] * 0.2;
             try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = color });

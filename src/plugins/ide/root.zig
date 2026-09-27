@@ -343,13 +343,6 @@ fn selectLineAtPointer() void {
     weft.setSelection(.{ .start = l.start, .end = if (l.end < weft.byteLen()) l.end + 1 else l.end });
 }
 
-/// C-mouse-1: add a caret at the pointer, keeping the ones already there.
-fn addCaretAtPointer() void {
-    weft.run("pointer-focus-pane");
-    const off = pointerOffset() orelse return;
-    _ = weft.addSelection(.{ .anchor = off, .head = off });
-}
-
 // ── Line blocks ──────────────────────────────────────────────────────
 // Keys that edit whole lines map over a TARGET: each selection's lines, found
 // on the untouched text, overlapping blocks merged — so two selections on one
@@ -740,7 +733,6 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-select-all-matches", .call = selectAllMatches, .summary = "select every occurrence of the selection" },
     .{ .name = "ide-select-word-at-pointer", .call = selectWordAtPointer, .summary = "select the word under the pointer (a scene row: open it)" },
     .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .summary = "select the line under the pointer" },
-    .{ .name = "ide-add-caret-at-pointer", .call = addCaretAtPointer, .summary = "add a caret at the pointer" },
     .{ .name = "ide-goto-definition", .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
 };
 
@@ -792,6 +784,8 @@ fn initExtra() void {
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
     // In a listing Tab is fold-or-nothing: never a character (GATE 2).
     weft.bindKeys("ide-structural", "Tab", &.{"std.hierarchy.toggle-expanded"});
+    // Delete removes the selected rows — every one, marked or in a range.
+    weft.bindKey("ide-structural", "Delete", "selection-delete");
 
     // Text-only keys: no standard word names these yet, so they bind the
     // text command outright. S-Tab arrives as ISO_Left_Tab on most layouts.
@@ -809,9 +803,10 @@ fn initExtra() void {
         .{ "C-Return", "ide-open-below" },                   .{ "C-S-Return", "ide-open-above" },
         .{ "C-d", "ide-add-next-match" },                    .{ "C-S-l", "ide-select-all-matches" },
         // The pointer's share of the grammar: what a second and third quick
-        // click mean, and C-click's extra caret.
+        // click mean, and C-click's extra selection — a caret in text, a
+        // marked row in a listing (core's, one act on either kind).
         .{ "double-mouse-1", "ide-select-word-at-pointer" }, .{ "triple-mouse-1", "ide-select-line-at-pointer" },
-        .{ "C-mouse-1", "ide-add-caret-at-pointer" },
+        .{ "C-mouse-1", "pointer-add-selection" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
 

@@ -936,7 +936,11 @@ fn visualDelete() void {
         }
         selected_register = slot;
     }
-    if (weft.selection()) |s0| {
+    if (weft.posture() == .structural) {
+        // `V j d` over rows: the rows selected are the view's to delete —
+        // a range of them is one request (the files listing marks each).
+        weft.run("selection-delete");
+    } else if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);

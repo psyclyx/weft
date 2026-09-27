@@ -534,52 +534,69 @@ pub fn setSelection(r: Range) void {
     e.wl_set_selection(@intCast(r.start), @intCast(r.end));
 }
 
-// ── Multiple selections ───────────────────────────────────────────────
-// Core holds N selections per editor; everything above (`cursor`,
-// `selection`, `jump`, `setSelection`) reads and writes the PRIMARY one. A
-// grammar that works on all of them reads the set, computes the new one, and
-// hands it back — add/remove/collapse below are exactly that, not doors.
+// ── The selection ─────────────────────────────────────────────────────
+// One selection model for every entry (doc/model.md §2.6): one or more
+// extents, a primary, anchor and head. In text an extent is a byte range; in
+// a scene it is a range of rows, counted by their place in the view's focus
+// order. Everything above (`cursor`, `selection`, `jump`, `setSelection`)
+// reads and writes THE selection: during a run dispatch maps a command into,
+// the one it is visiting; otherwise the primary. A command that shapes the
+// whole set (`.whole`) reads it, computes the next one, and hands it back —
+// add/remove/collapse below are exactly that, not doors.
 
-/// One selection's endpoints. `anchor == head` is a caret.
+/// What an extent is a range of.
+pub const SelectionKind = enum(u32) { text = 0, rows = 1 };
+
+/// One extent's endpoints. `anchor == head` is a caret (a single row).
 pub const Selection = struct {
     anchor: usize,
     head: usize,
+    kind: SelectionKind = .text,
 
     pub fn range(s: Selection) Range {
         return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
     }
 };
 
-/// The selection set: document order, `primary` indexing into `items`.
+/// The selection: document order, `primary` indexing into `items`.
 pub const Selections = struct { primary: usize, items: []Selection };
 
-/// How many selections `selections()` can carry in one read.
+/// How many extents `selections()` can carry in one read.
 pub const max_selections = 1024;
-var sel_words: [1 + 2 * max_selections]u32 = undefined;
+/// Words per extent in the door's record: kind, anchor, head.
+const extent_words = 3;
+var sel_words: [1 + extent_words * max_selections]u32 = undefined;
 var sel_items: [max_selections]Selection = undefined;
 
-/// The active editor's selection count (0 for an entry with no text).
+/// How many extents the selection has (0 for an entry with neither text nor
+/// a scene; 1 inside a mapping's run).
 pub fn selectionCount() usize {
     return e.wl_selections_get(p(&sel_words), 0);
 }
 
-/// The active editor's selections, into a private scratch (valid until the
-/// next call). Past `max_selections`, the rest are not reported.
+/// The selection, into a private scratch (valid until the next call). Past
+/// `max_selections`, the rest are not reported.
 pub fn selections() Selections {
     const total = e.wl_selections_get(p(&sel_words), max_selections);
     const n = @min(total, max_selections);
-    for (sel_items[0..n], 0..) |*s, i| s.* = .{ .anchor = sel_words[1 + 2 * i], .head = sel_words[2 + 2 * i] };
+    for (sel_items[0..n], 0..) |*s, i| {
+        const at = 1 + extent_words * i;
+        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2] };
+    }
     return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
 }
 
-/// Replace every selection (at least one). Core normalizes the set — sorted,
-/// overlaps merged — so read it back rather than assume the indices held.
+/// Replace the selection (at least one extent, of the entry's kind). Core
+/// normalizes text — sorted, overlaps merged — so read it back rather than
+/// assume the indices held.
 pub fn setSelections(items: []const Selection, primary: usize) bool {
     if (items.len == 0 or items.len > max_selections) return false;
     sel_words[0] = @intCast(primary);
     for (items, 0..) |s, i| {
-        sel_words[1 + 2 * i] = @intCast(s.anchor);
-        sel_words[2 + 2 * i] = @intCast(s.head);
+        const at = 1 + extent_words * i;
+        sel_words[at] = @intFromEnum(s.kind);
+        sel_words[at + 1] = @intCast(s.anchor);
+        sel_words[at + 2] = @intCast(s.head);
     }
     return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
 }

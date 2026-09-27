@@ -602,6 +602,89 @@ fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const com
     return result;
 }
 
+// ── Reading and writing the one selection ────────────────────────────
+// What the selection doors exchange: extents of either kind, the same record
+// for a text entry and a scene. A row crosses as its place in the view's
+// focus order — the address a guest can count with; the row's own identity
+// stays with the view.
+
+/// The selection of the entry `ctx` is about, in document (view) order, and
+/// which extent is the primary. Inside a visit, the visited extent alone.
+/// Empty for an entry with neither text nor a scene. Caller frees.
+pub fn read(ctx: *command.Context, gpa: Allocator) Allocator.Error!struct { extents: []Extent, primary: usize } {
+    const entry = ctx.entry() orelse return .{ .extents = &.{}, .primary = 0 };
+    if (entry.textEditor()) |ed| {
+        const visiting = ed.visiting > 0;
+        const n: usize = if (visiting) 1 else ed.selectionCount();
+        const base: usize = if (visiting) ed.primary else 0;
+        const out = try gpa.alloc(Extent, n);
+        for (out, 0..) |*x, i| {
+            const e = ed.selectionEnds(base + i);
+            x.* = .{ .kind = .text, .anchor = e.anchor, .head = e.head };
+        }
+        return .{ .extents = out, .primary = ed.primary - base };
+    }
+    const focus = &ctx.head.scene_selection;
+    const services = ctx.semantic orelse return .{ .extents = &.{}, .primary = 0 };
+    const instance = services.views.get(focus.view orelse return .{ .extents = &.{}, .primary = 0 }) orelse
+        return .{ .extents = &.{}, .primary = 0 };
+    const primary = focus.primaryRows() orelse return .{ .extents = &.{}, .primary = 0 };
+    const order = instance.focus_order;
+    const rows = try gpa.alloc(Rows, focus.others.items.len + 1);
+    defer gpa.free(rows);
+    @memcpy(rows[0..focus.others.items.len], focus.others.items);
+    rows[rows.len - 1] = primary;
+    std.mem.sort(Rows, rows, order, struct {
+        fn lt(o: []const semantic_model.scene.NodeId, a: Rows, b: Rows) bool {
+            return orderOf(o, a) < orderOf(o, b);
+        }
+    }.lt);
+    const out = try gpa.alloc(Extent, rows.len);
+    var at: usize = 0;
+    for (rows, out, 0..) |r, *x, i| {
+        if (std.meta.eql(r, primary)) at = i;
+        x.* = .{
+            .kind = .rows,
+            .anchor = std.mem.indexOfScalar(semantic_model.scene.NodeId, order, r.anchor) orelse 0,
+            .head = std.mem.indexOfScalar(semantic_model.scene.NodeId, order, r.head) orelse 0,
+        };
+    }
+    return .{ .extents = out, .primary = at };
+}
+
+/// Replace the selection of the entry `ctx` is about with `extents` (at
+/// least one), `primary` indexing into them — inside a visit, the visited
+/// extent alone. The kind must be the entry's: text in a text entry, rows in
+/// a scene. False (nothing changed) when it is not, or a row is not there.
+pub fn write(ctx: *command.Context, gpa: Allocator, extents: []const Extent, primary: usize) Allocator.Error!bool {
+    if (extents.len == 0) return false;
+    const entry = ctx.entry() orelse return false;
+    if (entry.textEditor()) |ed| {
+        const ends = try gpa.alloc(Editor.Ends, extents.len);
+        defer gpa.free(ends);
+        for (extents, ends) |x, *e| {
+            if (x.kind != .text) return false;
+            e.* = .{ .anchor = @intCast(@min(x.anchor, std.math.maxInt(u32))), .head = @intCast(@min(x.head, std.math.maxInt(u32))) };
+        }
+        if (ed.visiting > 0) try ed.replaceVisited(gpa, ends) else try ed.setSelections(gpa, ends, primary);
+        return true;
+    }
+    const focus = &ctx.head.scene_selection;
+    const services = ctx.semantic orelse return false;
+    const instance = services.views.get(focus.view orelse return false) orelse return false;
+    const order = instance.focus_order;
+    const rows = try gpa.alloc(Rows, extents.len);
+    defer gpa.free(rows);
+    for (extents, rows) |x, *r| {
+        if (x.kind != .rows or x.anchor >= order.len or x.head >= order.len) return false;
+        r.* = .{ .anchor = order[@intCast(x.anchor)], .head = order[@intCast(x.head)] };
+    }
+    const lead = @min(primary, rows.len - 1);
+    if (!focusRows(ctx, instance, rows[lead])) return false;
+    for (rows, 0..) |r, i| if (i != lead) try focus.others.append(gpa, r);
+    return true;
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 const testing = std.testing;

@@ -404,11 +404,7 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
     return null;
 }
 
-fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
-    return semanticDocumentFor(fx, fx.buffers.active(), &fx.head.scene_selection, true);
-}
-
-fn semanticDocumentFor(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
+fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
     const path = focus.path() orelse return null;
     const instance = fx.semantic.views.get(path.view) orelse return null;
     return .{
@@ -416,9 +412,27 @@ fn semanticDocumentFor(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus:
         .root = &instance.scene,
         .title = buffer.name,
         .focused = if (path.leaf()) |node| if (instance.node(node) != null) node else instance.reconcileFocus(null) else instance.reconcileFocus(null),
+        .selected = selectedRows(arena, instance, focus),
         .active = active,
         .fields = &fx.semantic.fields,
     };
+}
+
+/// Every row the scene's selection covers beyond the one focused row: the
+/// primary extent's range, and each marked extent's — what the view washes
+/// as selected. Empty for the one focused row alone.
+fn selectedRows(arena: std.mem.Allocator, instance: anytype, focus: *const core.Head.SceneSelection) []const semantic.scene.NodeId {
+    if (focus.extentCount() <= 1 and focus.anchor == null) return &.{};
+    var out: std.ArrayList(semantic.scene.NodeId) = .empty;
+    const order = instance.focus_order;
+    const primary = focus.primaryRows() orelse return &.{};
+    const extents = [_][]const core.Head.SceneSelection.Rows{ &.{primary}, focus.others.items };
+    for (extents) |list| for (list) |r| {
+        const a = std.mem.indexOfScalar(semantic.scene.NodeId, order, r.anchor) orelse continue;
+        const b = std.mem.indexOfScalar(semantic.scene.NodeId, order, r.head) orelse continue;
+        out.appendSlice(arena, order[@min(a, b) .. @max(a, b) + 1]) catch return out.items;
+    };
+    return out.items;
 }
 
 fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
@@ -859,7 +873,7 @@ pub const FrameBuilder = struct {
             .mode = fx.head.currentMode(),
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
             .surfaces = surfaces.items,
-            .semantic_view = semanticDocument(fx),
+            .semantic_view = semanticDocumentFor(arena, fx, fx.buffers.active(), &fx.head.scene_selection, true),
             .semantic_overlay = semanticOverlay(fx),
             .flash = flash_ranges,
             // Rendering P2: hover is a LIVE producer now — the `lsp` guest
@@ -940,7 +954,7 @@ pub const FrameBuilder = struct {
                     .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
                     .status_line = slot.pane.attrs.status_line,
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
-                    .semantic_view = semanticDocumentFor(fx, ob, &ob.scene_selection, false),
+                    .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
                     .cursor_on = false, // the caret belongs to the focused pane
                     .pane_border = slot.border,
                 },
