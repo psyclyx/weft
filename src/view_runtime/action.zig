@@ -105,6 +105,21 @@ pub const Registry = struct {
         return invokeProvider(self, view_instance, request);
     }
 
+    /// Ask the view's provider something the WORKSPACE asks, not a user:
+    /// `standard.reveal`, carrying a designation in its argument. No node
+    /// advertises it — advertising is how an action becomes an offer a
+    /// person can pick, and this one has an argument no key could supply —
+    /// so a provider that does not answer it simply declines.
+    pub fn ask(
+        self: *const Registry,
+        views: *const view_runtime.Registry,
+        request: semantic.action.Request,
+    ) Error!semantic.action.Outcome {
+        const view_instance = views.get(request.view) orelse return error.StaleView;
+        if (view_instance.node(request.subject) == null) return error.UnknownSubject;
+        return invokeProvider(self, view_instance, request);
+    }
+
     /// Invoke an action already authorized by an active interaction. The
     /// interaction declaration is the action advertisement; requiring the
     /// underlying scene node to duplicate it would couple dialogs to tool

@@ -565,12 +565,13 @@ pub const Services = struct {
         designation: []const u8,
     ) !bool {
         const root = (self.views.get(ref) orelse return false).descriptor.root;
-        const effect = self.invokeAction(stack, gpa, .{
+        const outcome = self.actions.ask(&self.views, .{
             .action = semantic.action.standard.reveal,
             .view = ref,
             .subject = root,
             .argument = designation,
         }) catch return false;
+        const effect = self.absorbActionOutcome(stack, gpa, ref, outcome, 0) catch return false;
         const wanted = switch (effect) {
             .focus_requested => |f| f,
             else => return false,

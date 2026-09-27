@@ -437,12 +437,49 @@ fn presentDeclared(
     const shown = buffers.get(node.pane().buffer_id);
     // What the previous presentation made, and nothing shows any more.
     if (decl.made) |made| if (buffers.resolve(made)) |old| {
+        // Through the shell's own close, borrowed for the one call, so the
+        // entry's providers go with it.
         if (shown != old and old.id != buffers.active_id and !paneShows(win_layout, old.id))
-            core.Buffers.quietly(head, core.Buffers.close, .{ buffers, gpa, old.id, head, keymap }) catch {};
+            _ = buffers.withEntry(gpa, old.id, head, keymap, closeEntry, .{ctx}) catch {};
     };
-    decl.made = if (shown) |b| (if (b.generation >= born) b.ref() else null) else null;
+    // The empty state is the viewport's own: it goes once something real is
+    // shown, rather than lingering as a tab.
+    const own = if (decl.empty) |e| if (shown) |b| b.generation == e.entry_generation else false else false;
+    if (!own) retireEmpty(ctx, win_layout, buffers, gpa, head, keymap, registry, decl);
+    decl.made = if (shown) |b| (if (b.generation >= born and !own) b.ref() else null) else null;
     const after = if (shown) |b| b.ref() else null;
     return !std.meta.eql(before, after);
+}
+
+/// Close `decl`'s empty-state entry and its view, if it has one nothing else
+/// shows.
+fn retireEmpty(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+) void {
+    const empty = decl.empty orelse return;
+    var it = buffers.iterator();
+    const entry = while (it.next()) |b| {
+        if (b.generation == empty.entry_generation) break b;
+    } else null;
+    if (entry) |b| {
+        if (b.id == buffers.active_id or paneShows(win_layout, b.id)) return;
+        _ = buffers.withEntry(gpa, b.id, head, keymap, closeEntry, .{ctx}) catch {};
+    }
+    if (ctx.semantic) |services| if (registry.owner) |owner| {
+        _ = services.closeView(gpa, owner, empty.view);
+    };
+    decl.empty = null;
+}
+
+fn closeEntry(ctx: *core.command.Context) void {
+    _ = core.command.run(ctx.commands, ctx, "buffer-close-force", &.{}) catch {};
 }
 
 fn paneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
@@ -632,7 +669,8 @@ pub fn presentBy(
     const node = win_layout.paneById(pane) orelse return;
     // The head goes and comes back: a presentation, not navigation, so
     // neither switch is a jump (nor is `buffer-back`'s entry disturbed).
-    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject });
+    const here = window_layout.headFocus(win_layout, head) == node;
+    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject, here });
 }
 
 fn presentRoundTrip(
@@ -644,14 +682,22 @@ fn presentRoundTrip(
     node: anytype,
     command: []const u8,
     subject: []const u8,
+    /// The head is IN this pane: what it now shows is what the head is on,
+    /// so the head does not go back.
+    here: bool,
 ) void {
     const restore = buffers.active_id;
     const prev = buffers.prev_id;
+    // A presentation is not an activation: an `open` run while a tool entry
+    // is active asks placement for the editing pane (`buffers_cmds`), which
+    // here would carry what the viewport presents off into the primary pane.
+    const placement = head.placement;
+    defer head.placement = placement;
     const arg = [_]core.command.Value{.{ .string = subject }};
     _ = core.command.run(ctx.commands, ctx, command, if (subject.len > 0) &arg else &.{}) catch return;
     node.pane().buffer_id = buffers.active_id;
     node.pane().top_row = 0;
-    if (buffers.active_id == restore) return;
+    if (here or buffers.active_id == restore) return;
     buffers.switchTo(gpa, restore, head, keymap) catch return;
     buffers.prev_id = prev;
 }

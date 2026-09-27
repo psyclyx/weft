@@ -479,9 +479,10 @@ pub const Session = struct {
         try self.publishDraft(&staged);
     }
 
-    /// `view.reveal`: the row showing `argument`, a designation somewhere
-    /// below this listing's directory, with every directory between opened
-    /// in place so the row is on screen. Null when it is not below this
+    /// `view.reveal`: the name of the row showing `argument` — the node
+    /// navigation rests on — a designation somewhere below this listing's
+    /// directory, with every directory between opened in place so the row
+    /// is on screen. Null when it is not below this
     /// listing (another authority, another tree), or a name on the way is
     /// not here. The listing's own designation is the one its publisher
     /// bound it under, stated on its descriptor; the rest of the way is by
@@ -501,25 +502,27 @@ pub const Session = struct {
         const base = std.mem.trimEnd(u8, own.ref, "/");
         if (want.ref.len <= base.len or !std.mem.startsWith(u8, want.ref, base) or want.ref[base.len] != '/') return null;
 
-        var staged = try self.stage();
-        defer staged.deinit();
-        var opened = false;
         var parent: ?files.NodeId = null;
         var found: ?files.NodeId = null;
         var names = std.mem.tokenizeScalar(u8, want.ref[base.len..], '/');
         while (names.next()) |name| {
-            const row = childNamed(&staged, parent, name) orelse return null;
-            found = row.id;
+            const row = childNamed(&self.draft, parent, name) orelse return null;
+            const id = row.id;
+            found = id;
             if (names.peek() == null) break;
             if (row.draft.kind != .directory) return null;
+            // Opened one folder at a time, each published before the next is
+            // read: a folder is read through its row's own target, which a
+            // row only has once the draft listing it is the live one.
             if (!row.expanded) {
-                try self.readChildren(&staged, row.id);
-                opened = true;
+                var staged = try self.stage();
+                defer staged.deinit();
+                try self.readChildren(&staged, id);
+                try self.publishDraft(&staged);
             }
-            parent = row.id;
+            parent = id;
         }
-        if (opened) try self.publishDraft(&staged);
-        return try files.rowNodeId(found orelse return null);
+        return try files.nameNodeId(found orelse return null);
     }
 
     /// The row named `name` directly under `parent` (null: the listing's own
