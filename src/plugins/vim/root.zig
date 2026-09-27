@@ -57,6 +57,17 @@ fn consumeCount() u32 {
     return c;
 }
 
+/// `vim-count-take`: hand the typed count to ANOTHER plugin's motion and
+/// spend it — "" when none was typed. A motion that is not vim's (snipe's
+/// `3sab`) names this through its own config value, as it names
+/// `vim-operate` for the pending operator, so neither side names the other.
+fn countTake() void {
+    var buf: [12]u8 = undefined;
+    const n = pending_count;
+    pending_count = 0;
+    weft.setResultStr(if (n == 0) "" else std.fmt.bufPrint(&buf, "{d}", .{n}) catch "");
+}
+
 const file_pick = 0;
 
 fn lineStartOff() usize {
@@ -251,7 +262,7 @@ fn flashAfter(hnd: u32) void {
 
 /// `vim-operate <range>`: apply the pending operator over a range ANOTHER
 /// plugin computed. This is the door a motion that has to read keys before
-/// it knows its target (snipe's labelled `f`) composes through: it cannot be
+/// it knows its target (snipe's `d z a b`) composes through: it cannot be
 /// a synchronous range command like `motions`' — its answer arrives a key
 /// or two later — so it hands the range back here, and `d`/`c`/`y`/`gc`
 /// apply exactly as they do over `w` or `iw`.
@@ -458,6 +469,7 @@ const static_cmds = [_]weft.CommandEntry{
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
     .{ .name = "vim-zero", .call = zeroKey, .arity = each },
     .{ .name = "vim-delete-char", .call = deleteCharFwd, .arity = each },
+    .{ .name = "vim-count-take", .call = countTake, .arity = .whole },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
     .{ .name = "vim-ex", .call = ex.enter, .arity = .whole },
@@ -552,8 +564,11 @@ const preserve_register = blk: {
     @setEvalBranchQuota(4000);
     var arr: [cmds.len]bool = .{false} ** cmds.len;
     for (cmds, 0..) |c, i| {
+        // `vim-count-take` too: another plugin's motion reads the count
+        // mid-operator (`"a d 3 z a b`), and the slot is the operator's.
         if (std.mem.startsWith(u8, c.name, "vim-register-") or
-            std.mem.startsWith(u8, c.name, "enter-op-")) arr[i] = true;
+            std.mem.startsWith(u8, c.name, "enter-op-") or
+            std.mem.eql(u8, c.name, "vim-count-take")) arr[i] = true;
     }
     break :blk arr;
 };

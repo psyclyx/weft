@@ -84,7 +84,7 @@ weft.plugin("lsp");         // language server client (hover/def/… over jsonrp
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
 weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
-weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
+weft.plugin("snipe");       // evil-snipe: s/S two-char, f/F/t/T one-char, highlighted
 weft.plugin("offers");      // what a context offers, as a strip, a list or mouse-3's menu
 weft.plugin("panel");       // panel-toggle: the bottom panel (config/panel.js) on and off
 weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
@@ -169,9 +169,16 @@ weft.set("editor", "flash-undo", "on");   // undo/redo flash what they put back,
 // "relative": distance from the caret, with the caret line's own number —
 // vim's `number relativenumber`. Or "absolute".
 weft.set("linenumbers", "style", "relative");
-// Where an operator-pending snipe (`d f`, `c t`, …) hands its range: vim's
-// pending operator.
+// Snipe is evil-snipe, set the way Doom Emacs sets it (modules/editor/evil
+// config.el): smart case, a snipe looks along the rest of the line, and `;`/`,`
+// repeat over what is visible. (Doom's `char-fold` has no weft equivalent.)
+// An operator-pending snipe (`d z a b`, `c t )`) hands its range to vim's
+// pending operator, and `3sab` reads vim's typed count.
 weft.set("snipe", "operator", "vim-operate");
+weft.set("snipe", "count", "vim-count-take");
+weft.set("snipe", "smart-case", "on");
+weft.set("snipe", "scope", "line");
+weft.set("snipe", "repeat-scope", "visible");
 weft.set("editor", "font-size", "16");     // startup text size; C-+/C-- adjust, C-0 resets
 // Each section gives an id, title, candidate-source command, activation
 // command, and maximum count. Source commands return newline-delimited lists.
@@ -301,17 +308,28 @@ weft.bind("normal", ".", "repeat-change");
 // in-buffer jump: type a pattern, Return lands on the match.
 weft.bind("normal", "/", "consult-line");
 
-// `f F t T` — snipe instead of vim's line-bound find: the search covers what
-// the pane SHOWS, one hit jumps, several get labels you pick with one more
-// key. `; ,` repeat it. In operator-pending mode (`d f x`, `c t )`) the chosen
-// hit becomes the operator's range, across lines — see the `snipe` values
-// above. Vim's own `find-*` commands stay registered, just unbound here.
-for (const [key, dir] of [["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
-  weft.bind("normal", key, `snipe-${dir}`);
+// Snipe, bound the way Doom binds evil-snipe (both of its modes on):
+//   s S       — two-character snipe forward/back (vim's substitute `s`/`S` go),
+//               in visual too
+//   z Z / x X — the same after an operator, through / up to the match
+//               (`d z a b` deletes through "ab", `d x a b` up to it)
+//   f F t T   — one-character snipes: vim's find, but highlighted and
+//               repeatable by pressing the key again
+//   ; ,       — repeat the last snipe, same way / reversed
+// Vim's own `find-*` commands stay registered, just unbound here.
+for (const key of ["s", "S", "f", "F", "t", "T"]) {
+  weft.bind("normal", key, `snipe-${key}`);
+}
+weft.bind("visual", "s", "snipe-s");
+weft.bind("visual", "S", "snipe-S");
+for (const [key, dir] of [["z", "s"], ["Z", "S"], ["x", "x"], ["X", "X"],
+                          ["f", "f"], ["F", "F"], ["t", "t"], ["T", "T"]]) {
   weft.bind("op-pending", key, `snipe-op-${dir}`);
 }
 weft.bind("normal", ";", "snipe-repeat");
 weft.bind("normal", ",", "snipe-repeat-rev");
+weft.bind("op-pending", ";", "snipe-op-repeat");
+weft.bind("op-pending", ",", "snipe-op-repeat-rev");
 
 // `C-o` / `C-i` — vim's jumplist. The intention first: a focused view that
 // knows its own history answers it; otherwise the head's jumplist does, which

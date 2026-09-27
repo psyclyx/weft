@@ -162,28 +162,51 @@ predicate leaf. The guest half is the `gutter` plugin library.
    - paste, `J`, `~`, `r`.
    - Undo and redo through 0.4.
    - The e2e test asserts that the flash range is set after each of these.
-3. **Snipe on f/F/t/T** — plugin `snipe`:
-   - Reads the character through a `textInput` capture.
-   - Searches the visible range (0.3), not only the current line.
-   - With one hit it jumps. With several it labels each hit with an overlay (0.3) from a
-     home-row alphabet, then a second capture reads the label.
-   - Keeps its own `;`/`,` state.
-   - Composes with operators: in operator-pending mode (`df<c>`) it returns a range the
-     same way `motions` does, so `d`, `c` and `y` work across lines.
-   - The vim `find-*` bindings stay in vim; config.js rebinds `f F t T ; ,` in `normal`
-     (and the operator-pending mode) to snipe. The e2e tests that pin `f .` then `;` `;`
-     `,` (`authoring_test.zig:372`) move to exercising snipe, with a single-hit case
-     that still lands exactly.
+3. **Snipe** — plugin `snipe`, which is evil-snipe (github.com/hlissner/evil-snipe),
+   not a label picker. (The first build labelled every hit, avy-style, from a wrong
+   brief; it was rebuilt against evil-snipe.el.)
+   - `s`/`S` read two characters through a `textInput` capture (the prompt echoes
+     `2>`, `1>a`) and jump to the next/previous place they occur. Under an operator
+     `z`/`Z` do the same inclusively and `x`/`X` exclusively (`d z a b` deletes through
+     "ab", `d x a b` up to it). `f`/`F`/`t`/`T` are the same machinery with one
+     character (evil-snipe's override mode).
+   - No labels: a count picks the Nth match (`3sab`). Matches are highlighted on an
+     annotation layer — every match in scope as you type, then the one you landed on
+     (role `location`) and the rest (role `emphasis`) until your next key.
+   - Scope (`weft.set("snipe", "scope", …)`): `line` (default), `buffer`, `visible`,
+     `whole-line`, `whole-buffer`, `whole-visible`; `repeat-scope` for `;`/`,`;
+     `spillover-scope` is tried when a snipe finds nothing, and first by a counted one.
+   - `;`/`,` repeat the last snipe (with its count times the one typed now). The very
+     next key after a snipe repeats it if it is the snipe's own: `s` as `;`, `S` as `,`
+     (so after `S`, `S` goes forward — evil-snipe's transient map), `f`/`F`, `t`/`T`
+     likewise. RET at an empty prompt repeats the last snipe.
+   - `smart-case`, `aliases` (a flat list: `["[", "[[{(]"]` makes `[` match any of
+     `[{(`), `skip-leading-whitespace`, `show-prompt`, `highlight`,
+     `incremental-highlight`, `repeat-keys` ("on"/"off").
+   - A snipe is a motion, so it maps like one: every extent snipes from its own caret
+     (`.each`), and under an operator every extent hands its own range on. The commands
+     that only open the prompt are `.whole`.
 
 **Built.** `linenumbers` has two styles: `absolute`, and `relative`, which shows the
 caret line's own number the way vim's `number relativenumber` does (`hybrid` is
 accepted as a synonym). config.js sets `relative`. The vim flashes are in place, `=` has
 no operator to flash yet. Snipe's operator-pending commands are `snipe-op-*`: the range
 goes to the command named by `weft.set("snipe", "operator", …)`, which config.js sets to
-vim's new `vim-operate` (apply the pending operator over a range argument). A motion
+vim's `vim-operate` (apply the pending operator over a range argument). A motion
 that reads keys before it knows its target cannot be a synchronous range command like
-`motions`', so it hands the range back instead. Snipe is not bound in `visual`; there
-`f` falls through to `normal`'s binding and leaves visual, as vim's `find-*` did.
+`motions`', so it hands the range back instead. The count comes the same way, from the
+command `weft.set("snipe", "count", …)` names (vim's `vim-count-take`), so snipe names no
+grammar. config.js takes Doom Emacs's evil-snipe settings (modules/editor/evil
+config.el): smart case, `scope` line, `repeat-scope` visible; Doom's `char-fold` has no
+weft equivalent. It binds `s S` in normal and visual, `z Z x X f F t T ; ,` under an
+operator, and `f F t T ; ,` in normal. In visual a snipe lands where it would in normal
+(weft's visual selection ends at the caret, as vim's own `f` does there) and stays in
+visual.
+
+Two doors made this possible without a keymap or a hook in core: `wl_key_serial` (SDK
+`weft.keySerial`) — how many keys this head has dispatched, so "is this the key right
+after my snipe?" is the plugin's comparison — and `wl_annotate_begin_until_key` (SDK
+`Annotations.beginUntilKey`), a round whose paint dispatch drops at the next key.
 The e2e coverage is `src/e2e/visual_aids_test.zig`.
 
 ## 2. helix.js — a working Helix
@@ -288,8 +311,8 @@ settled:
   pastes it (vim's `/` stays consult-line; vim has no `n`).
 - `gw` labels every word of two or more word characters in view with two letters, nearest
   first, alternating after and before the cursor; the first key narrows the labels to the
-  one still to type. The label machinery is a plugin library, `labels`, which snipe now
-  links too (one-character labels, its behaviour unchanged).
+  one still to type. The label machinery is a plugin library, `labels`; snipe linked it
+  too until it was rebuilt as evil-snipe, which has no labels.
 - The caret door: `cursor-place <mode> head|inside` sits beside `set-cursor`, and the view
   draws every caret through `View.caretDrawOffset`. helix declares `inside` for its normal,
   select, capture, prompt and label modes; insert, vim, emacs and ide keep `head`.

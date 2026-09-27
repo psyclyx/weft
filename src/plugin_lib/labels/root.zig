@@ -1,6 +1,6 @@
 //! labels — jump labels drawn over the text (doc/configs.md §0.3), for
 //! whichever plugin wants "pick one of these places with a key or two":
-//! snipe's labelled f/F/t/T, helix's `gw`.
+//! helix's `gw`.
 //!
 //! A label is drawn as an `overlay` annotation at its target, over the
 //! target's own cells, so no text moves and the caret is untouched. Labels
@@ -66,7 +66,7 @@ pub const Set = struct {
     /// Label `offsets` (nearest first: the easiest labels go to them) on
     /// annotation layer `name` of the focused entry. Offsets past the
     /// capacity are not labelled. False when there is nothing to draw on —
-    /// the caller then falls back (snipe takes the first hit).
+    /// the caller then falls back.
     pub fn show(self: *Set, name: []const u8, offsets: []const usize, alphabet_in: []const u8, width: usize) bool {
         self.clear();
         self.name = name;

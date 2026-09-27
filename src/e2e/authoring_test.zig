@@ -360,28 +360,29 @@ test "authoring: `f` snipes a char, `;` repeats it, `,` repeats reversed" {
     defer app.deinit();
     const ed = &app.ed;
 
-    // config.js binds f/;/, to snipe. Dots at indices 3, 7, 11 and a lone
-    // `q`. We navigate by find/repeat, then `x` deletes the char under the
-    // cursor — the deleted position is how we observe where we landed
-    // without poking cursor internals.
+    // config.js binds f/;/, to snipe (evil-snipe's override mode): `f` is a
+    // one-character snipe along the line, landing on the first match — no
+    // labels. Dots at indices 3, 7, 11 and a lone `q`. We navigate by
+    // find/repeat, then `x` deletes the char under the cursor — the deleted
+    // position is how we observe where we landed without poking cursor
+    // internals.
     authorFile(ed, "f.txt",
         \\foo.bar.baz.qux
         \\
     );
 
-    // One `q` in view: `f q` lands on it exactly, like vim's `f`.
+    // `f q` lands on the `q`, like vim's `f`.
     ed.chord("g g");
     ed.press("f", "");
     ed.typeText("q");
     try t.expectEqualStrings("normal", ed.mode());
     try t.expectEqual(@as(usize, 12), ed.buffers.active().textEditor().?.cursorOffset());
 
-    // Three dots: each gets a label, nearest first (a, s, d).
+    // Three dots: `f .` takes the nearest; `;`/`,` walk on and back.
     ed.chord("g g");
     ed.press("f", ""); // f<char>
-    ed.typeText("."); // three hits → labels
-    try t.expectEqualStrings("snipe-label", ed.mode());
-    ed.typeText("a"); // → the nearest dot (index 3)
+    ed.typeText("."); // → the nearest dot (index 3)
+    try t.expectEqualStrings("normal", ed.mode());
     ed.press("semicolon", ""); // ; → next dot (index 7)
     ed.press("semicolon", ""); // ; → next dot (index 11)
     ed.press("comma", ""); // , → reversed, back to the dot at index 7

@@ -51,7 +51,7 @@ const Guest = struct {
 /// (doc/configs.md §0.2), with the one word-character rule `\b`, the word
 /// motions, text objects and C-d all ask, and `search` the query → matches
 /// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
-/// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
+/// — core never parses a pattern — and `labels` the jump labels helix's `gw`
 /// draw over the visible text.
 const Library = enum {
     prompt,
@@ -492,7 +492,7 @@ const guests = [_]Guest{
     // window of cells per round (absolute or caret-relative). No commands.
     .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
     // Jump labels on f/F/t/T over the visible range; composes with operators.
-    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
+    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
     // The offers projection (doc/model.md §2.4): what a context offers, as a
