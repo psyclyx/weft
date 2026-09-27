@@ -27,8 +27,9 @@
 //! one failure policy — and this module stays pure: it does no I/O. A value
 //! is `stamp (u64 LE) · form (u8) · name length (u16 LE) · name · payload`,
 //! the stamp being what orders records for eviction. A record that does not
-//! decode, or whose history does not restore, is warned about and discarded
-//! when it is read — a corrupt record is lost, never a crash.
+//! decode is dropped when the store is loaded (`settle`); one whose history
+//! does not restore is refused when read and KEPT (`restore` says why) —
+//! never a crash, and never a user's text discarded on a guess.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -88,7 +89,16 @@ pub fn contains(self: *const DocStore, id: Document.Id) bool {
 /// Keep `doc` (displayed as `name`) as the newest record, replacing any
 /// record of the same id, then evict past `doc_cap`. Serializes now: the
 /// caller may destroy `doc` as soon as this returns.
-pub fn put(self: *DocStore, gpa: Allocator, name: []const u8, doc: *const Document) Allocator.Error!void {
+///
+/// A document that is not `storable` — one ever bound to a peer — is not
+/// kept, and any record of its id is dropped: this store is written to the
+/// local disk, and another's text never reaches it through here, whoever
+/// asks. Answers whether it was kept.
+pub fn put(self: *DocStore, gpa: Allocator, name: []const u8, doc: *const Document) Allocator.Error!bool {
+    if (!doc.storable()) {
+        self.forget(gpa, doc.id);
+        return false;
+    }
     const history = try doc.serialize(gpa);
     defer gpa.free(history);
     const content = if (history.len > history_cap) try textOf(gpa, doc) else null;
@@ -109,6 +119,7 @@ pub fn put(self: *DocStore, gpa: Allocator, name: []const u8, doc: *const Docume
     try self.records.put(gpa, namespace, &key, value);
     self.next_stamp += 1;
     self.trim(gpa);
+    return true;
 }
 
 fn textOf(gpa: Allocator, doc: *const Document) Allocator.Error![]u8 {
@@ -135,24 +146,34 @@ pub const Restored = struct {
     name: []u8,
 };
 
-/// Restore document `id` as the user peer `user_agent`'s replica, and forget
-/// its record — from now on something holds it open, and what is kept of it
-/// next is whatever that holder does. Null when no record is `id`'s, or when
-/// its record is corrupt (then warned and discarded). Out of memory leaves
-/// the record where it was.
-pub fn take(self: *DocStore, gpa: Allocator, user_agent: []const u8, id: Document.Id) Allocator.Error!?Restored {
+/// Restore document `id` as the user peer `user_agent`'s replica. The record
+/// STAYS: reading a document back is not yet holding it, and a reopen that
+/// fails after this (the entry cannot be made) must leave the document where
+/// it was. The caller `forget`s the record once something holds the
+/// document — so it lives in exactly one place at a time, and in at least
+/// one at every moment. Null when no record is `id`'s, or when its history
+/// does not restore (warned, and the record kept: whether a restore failed
+/// for the record's sake or for the allocator's is not something a failure
+/// deep in the history decoder reliably says, and discarding a user's text on
+/// a guess is the one outcome this store exists to prevent; the count bound
+/// evicts it in time).
+pub fn restore(self: *const DocStore, gpa: Allocator, user_agent: []const u8, id: Document.Id) Allocator.Error!?Restored {
     const key = id.text();
     const value = self.records.get(namespace, &key) orelse return null;
-    const restored = restoreRecord(gpa, user_agent, id, value) catch |e| switch (e) {
+    return restoreRecord(gpa, user_agent, id, value) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Corrupt => {
-            std.log.warn("documents: the record for {s} is corrupt — discarded", .{&key});
-            _ = self.records.del(gpa, namespace, &key);
+            std.log.warn("documents: the record for {s} does not restore — kept, not opened", .{&key});
             return null;
         },
     };
+}
+
+/// Drop `id`'s record: its document is held open now (`restore`'s caller,
+/// once the entry stands). Frees; cannot fail.
+pub fn forget(self: *DocStore, gpa: Allocator, id: Document.Id) void {
+    const key = id.text();
     _ = self.records.del(gpa, namespace, &key);
-    return restored;
 }
 
 fn restoreRecord(gpa: Allocator, user_agent: []const u8, id: Document.Id, value: []const u8) Document.RestoreError!Restored {
@@ -260,13 +281,15 @@ test "doc store: a kept document comes back with its id, its text and its name, 
     original.moveTo(5);
     try original.insertText(gpa, " world\n");
     const id = original.doc.id;
-    try store.put(gpa, "*notes*", &original.doc);
+    _ = try store.put(gpa, "*notes*", &original.doc);
     original.deinit(gpa); // the store holds bytes, not the document
     try t.expect(store.contains(id));
 
-    var restored = (try store.take(gpa, "user", id)).?;
+    var restored = (try store.restore(gpa, "user", id)).?;
     defer gpa.free(restored.name);
-    // Taken is taken: the record is consumed.
+    // Restoring is not holding: the record stays until it is forgotten.
+    try t.expect(store.contains(id));
+    store.forget(gpa, id);
     try t.expect(!store.contains(id));
     try t.expectEqualStrings("*notes*", restored.name);
     try t.expect(restored.doc.id.eql(id));
@@ -288,8 +311,8 @@ test "doc store: a kept document comes back with its id, its text and its name, 
     try ed.insertText(gpa, "again\n");
 
     // …and it can be kept again, and come back again, edits and all.
-    try store.put(gpa, "*notes*", &ed.doc);
-    var twice = (try store.take(gpa, "user", id)).?;
+    _ = try store.put(gpa, "*notes*", &ed.doc);
+    var twice = (try store.restore(gpa, "user", id)).?;
     defer twice.doc.deinit(gpa);
     defer gpa.free(twice.name);
     const text = try textAlloc(&twice.doc);
@@ -307,14 +330,14 @@ test "doc store: past the bound the record put longest ago goes, and putting aga
         defer doc.deinit(gpa);
         try doc.insert(gpa, 0, "x");
         id.* = doc.id;
-        try store.put(gpa, "d", &doc);
+        _ = try store.put(gpa, "d", &doc);
         // Re-keep the first just before the bound bites: it is now newer
         // than the second, so the second is the one evicted.
         if (i == doc_cap - 1) {
-            var again = (try store.take(gpa, "user", ids[0])).?;
+            var again = (try store.restore(gpa, "user", ids[0])).?;
             defer again.doc.deinit(gpa);
             defer gpa.free(again.name);
-            try store.put(gpa, "d", &again.doc);
+            _ = try store.put(gpa, "d", &again.doc);
         }
     }
     try t.expectEqual(@as(usize, doc_cap), store.count());
@@ -334,12 +357,12 @@ test "doc store: a history past the cap is kept as its text — the id and every
     var doc = try Document.init(gpa, "user");
     try doc.insert(gpa, 0, big);
     const id = doc.id;
-    try store.put(gpa, "big", &doc);
+    _ = try store.put(gpa, "big", &doc);
     doc.deinit(gpa);
 
     const key = id.text();
     try t.expectEqual(Form.content, decode(store.records.get(namespace, &key).?).?.form);
-    var back = (try store.take(gpa, "user", id)).?;
+    var back = (try store.restore(gpa, "user", id)).?;
     defer back.doc.deinit(gpa);
     defer gpa.free(back.name);
     try t.expect(back.doc.id.eql(id));
@@ -351,7 +374,7 @@ test "doc store: a history past the cap is kept as its text — the id and every
     try t.expectEqual(big.len + 4, back.doc.text().byteLen());
 }
 
-test "doc store: a corrupt record is discarded, never restored and never a crash" {
+test "doc store: a record whose history does not restore is refused and kept; garbage is dropped at load" {
     const gpa = t.allocator;
     var store: DocStore = .{};
     defer store.deinit(gpa);
@@ -365,15 +388,17 @@ test "doc store: a corrupt record is discarded, never restored and never a crash
     std.mem.writeInt(u16, value[9..11], 0, .little);
     @memcpy(value[header_len..], "junk!");
     try store.records.put(gpa, namespace, &key, &value);
-    try t.expect((try store.take(gpa, "user", id)) == null);
-    try t.expect(!store.contains(id));
+    try t.expect((try store.restore(gpa, "user", id)) == null);
+    // Kept: a failed restore never costs the record (see `restore`).
+    try t.expect(store.contains(id));
+    store.forget(gpa, id);
 
     // Loaded garbage — a key that is no id, a value with no header — is
     // dropped by `settle`, and what is sound stays.
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "sound");
-    try store.put(gpa, "ok", &doc);
+    _ = try store.put(gpa, "ok", &doc);
     try store.records.put(gpa, namespace, "not-an-id", &value);
     const other = Document.mintId().text();
     try store.records.put(gpa, namespace, &other, "short");

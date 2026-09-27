@@ -598,14 +598,16 @@ fn mintGeneration(self: *Buffers) u64 {
 /// still resolve when it is reopened.
 ///
 /// Past `parked_cap` the oldest parked document moves on to `documents`,
-/// serialized; `head`'s jumps into it settle into offsets first, since the
-/// anchors they hold die with this instance of it.
+/// serialized — unless it was ever bound to a peer, which the store refuses
+/// (`DocStore.put`), and which is then released; `head`'s jumps into it
+/// settle into offsets first, since the anchors they hold die with this
+/// instance of it.
 fn park(self: *Buffers, gpa: Allocator, b: *Buffer, head: *Head) Error!void {
     try self.parked.ensureUnusedCapacity(gpa, 1);
     if (self.parked.items.len >= parked_cap) {
         const oldest = self.parked.items[0];
         const ed = oldest.textEditor().?;
-        try self.documents.put(gpa, oldest.name, &ed.doc);
+        _ = try self.documents.put(gpa, oldest.name, &ed.doc);
         _ = self.parked.orderedRemove(0);
         jumplist.settle(&head.jumps, &ed.doc);
         self.destroyBuffer(gpa, oldest);
@@ -617,8 +619,10 @@ fn park(self: *Buffers, gpa: Allocator, b: *Buffer, head: *Head) Error!void {
 /// identity (a new slot and generation: nothing that held the closed entry
 /// resolves to this one). Does not focus it. Parked first — that is the
 /// document itself, anchors and all — else restored from `documents`
-/// (`DocStore.take`: its record is consumed, so the document lives in
-/// exactly one place at a time), as the user's entry, whoever is acting.
+/// (`DocStore.restore`; its record is forgotten only once the entry stands,
+/// so the document lives in exactly one place at a time and in at least one
+/// at every moment — a failure partway loses nothing), as the user's entry,
+/// whoever is acting.
 /// Null when neither holds it — never kept, or released past both bounds.
 pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
     for (self.parked.items, 0..) |b, i| {
@@ -631,7 +635,7 @@ pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
         self.slots.items[id] = b;
         return id;
     }
-    var restored = (try self.documents.take(gpa, self.user_agent, doc)) orelse return null;
+    var restored = (try self.documents.restore(gpa, self.user_agent, doc)) orelse return null;
     defer gpa.free(restored.name);
     errdefer restored.doc.deinit(gpa);
     var editor = try Editor.around(gpa, self.pool, &restored.doc);
@@ -640,20 +644,26 @@ pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
     // happens to be running the `open` that brings it back.
     const was = self.actAs("");
     defer _ = self.actAs(was);
-    return try self.insert(gpa, restored.name, editor, "");
+    const id = try self.insert(gpa, restored.name, editor, "");
+    // Only now does an entry hold it: until here, a failure left the record
+    // as the one place the document still lives.
+    self.documents.forget(gpa, doc);
+    return id;
 }
 
 /// Keep every document worth keeping (`Buffer.keepsDocument`) in
 /// `documents`: the parked ones oldest first, then every open one, so the
 /// open ones are the newest records and the bound evicts what was closed
 /// longest ago first. Records already there that nothing reopened this run
-/// stay, older than all of these. The shutdown half of `DocumentFile`; the
-/// entries themselves are left as they are.
+/// stay, older than all of these. A document ever bound to a peer is not
+/// kept, whatever entry holds it: the store refuses it (`DocStore.put`). The
+/// shutdown half of `DocumentFile`; the entries themselves are left as they
+/// are.
 pub fn keepDocuments(self: *Buffers, gpa: Allocator) Error!void {
-    for (self.parked.items) |b| try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+    for (self.parked.items) |b| _ = try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
     var it = self.iterator();
     while (it.next()) |b| {
-        if (b.keepsDocument()) try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+        if (b.keepsDocument()) _ = try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
     }
 }
 
@@ -1270,6 +1280,88 @@ test "buffers: keeping this run's documents takes every parked and open scratch 
     try t.expect(bufs.documents.contains(closed_doc));
     try t.expect(!bufs.documents.contains(empty));
     try t.expect(!bufs.documents.contains(tool_doc));
+}
+
+test "buffers: a reopen from the store that fails partway loses nothing — the record stays until the entry stands" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+    const kept = try bufs.create(gpa, "*kept*");
+    const ed = bufs.get(kept).?.textEditor().?;
+    try ed.insertText(gpa, "kept\n");
+    const doc = ed.doc.id;
+    _ = try bufs.documents.put(gpa, "*kept*", &ed.doc);
+    // Emptied and closed, the entry is gone for good: the store is the only
+    // place the document lives.
+    try ed.doc.delete(gpa, .{ .start = 0, .end = ed.text().byteLen() });
+    try bufs.close(gpa, kept, &head, &km);
+    try t.expect(bufs.documentById(doc) == null);
+
+    // Fail every allocation the reopen makes, one at a time: whichever one
+    // fails, the document is still kept.
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_at });
+        const got = bufs.revive(failing.allocator(), doc) catch |e| {
+            try t.expectEqual(error.OutOfMemory, e);
+            try t.expect(bufs.documents.contains(doc));
+            continue;
+        };
+        const id = got orelse return error.NotRevived;
+        // It stands: now, and only now, the record is gone.
+        try t.expect(!bufs.documents.contains(doc));
+        try t.expect(bufs.get(id).?.textEditor().?.doc.id.eql(doc));
+        break;
+    }
+    try t.expect(fail_at > 0);
+}
+
+test "buffers: a document bound to a peer is never written to the local store, whatever buffer holds it" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    // Buffer 0 as `--connect` leaves it: a bare entry whose document is a
+    // replica bound to a peer's share. Its text is not ours to keep.
+    const ed = bufs.get(0).?.textEditor().?;
+    try ed.insertText(gpa, "the peer's words\n");
+    var collab = try @import("session/Collab.zig").init(gpa, undefined, &ed.doc, "me");
+    defer collab.deinit();
+    try t.expect(bufs.get(0).?.isBareDocument());
+    try bufs.keepDocuments(gpa);
+    try t.expect(!bufs.documents.contains(ed.doc.id));
+
+    // Nor does it reach the store by being closed past the parked bound.
+    const shared = try bufs.create(gpa, "*shared*");
+    const shared_ed = bufs.get(shared).?.textEditor().?;
+    try shared_ed.insertText(gpa, "also the peer's\n");
+    const shared_doc = shared_ed.doc.id;
+    var shared_collab = try @import("session/Collab.zig").init(gpa, undefined, &shared_ed.doc, "me");
+    shared_collab.deinit();
+    try bufs.close(gpa, shared, &head, &km);
+    for (0..parked_cap) |_| {
+        const id = try bufs.create(gpa, "*note*");
+        try bufs.get(id).?.textEditor().?.insertText(gpa, "mine\n");
+        try bufs.close(gpa, id, &head, &km);
+    }
+    try t.expect(!bufs.documents.contains(shared_doc));
+    try bufs.keepDocuments(gpa);
+    try t.expect(!bufs.documents.contains(shared_doc));
+    try t.expect(!bufs.documents.contains(ed.doc.id));
 }
 
 test "buffers: the document store outlives the process — kept at close, loaded at open, reopened on demand" {

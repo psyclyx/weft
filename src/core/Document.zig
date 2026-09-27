@@ -123,6 +123,14 @@ id: Id = .{ .bytes = @splat(0) },
 /// would let a handle into a released instance index a restored one's
 /// anchors.
 incarnation: u64 = 0,
+/// Whether this document has EVER been bound to a peer session — shared out,
+/// or a replica of a peer's share (`Collab.init`, the one door every text
+/// binding passes). Sticky: unbinding does not make the text ours alone
+/// again, since a peer may have written into it. What decides whether the
+/// document may be written to this machine's disk (`storable`), by where the
+/// document has BEEN, not by which entry happens to hold it: a `--connect`
+/// launch's first entry looks like any bare scratch and holds a peer's text.
+bound_to_peer: bool = false,
 doc: ObjectDoc = .empty,
 /// `self.doc`'s body text object — resolved once (`resolveBody`) and
 /// cached, not re-resolved on every use. Why that is safe: `ObjId` IS
@@ -329,6 +337,14 @@ pub fn restoreContent(gpa: Allocator, user_agent: []const u8, id: Id, content: [
     try self.adoptContent(gpa, content);
     self.id = id;
     return self;
+}
+
+/// Whether this document may be written to the local document store
+/// (`DocStore`): only one whose text is this machine's alone — never bound
+/// to a peer (`bound_to_peer`). The store's one door (`DocStore.put`) asks
+/// this, so no caller can persist a peer's text by forgetting to.
+pub fn storable(self: *const Document) bool {
+    return !self.bound_to_peer;
 }
 
 var incarnations: std.atomic.Value(u64) = .init(1);
