@@ -769,7 +769,14 @@ fn chooseArm(ctx: *core.command.Context, arms: []const []const u8) ?Arm {
             },
             .unavailable => |u| switch (u) {
                 .no_offer => {}, // nonapplicable — the next arm gets its turn
-                else => {
+                .disabled => |d| {
+                    // A refusal is a reason to SHOW (§9.3): the key said
+                    // something, and the reason it did not act is the answer.
+                    traceUnavailable(plane, name, u);
+                    echoDisabled(ctx, plane, d);
+                    return null;
+                },
+                .checking => {
                     traceUnavailable(plane, name, u);
                     return null;
                 },
@@ -810,6 +817,14 @@ fn traceUnavailable(plane: *const core.intent.Plane, name: []const u8, u: core.c
             plane.catalog.providerName(c.provider),
         }),
     }
+}
+
+fn echoDisabled(ctx: *core.command.Context, plane: *const core.intent.Plane, d: anytype) void {
+    const why = if (d.reason.message.len > 0) d.reason.message else d.reason.reason;
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}: {s}", .{ plane.catalog.intentionName(d.intention), why }) catch why;
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
 }
 
 fn echoAmbiguity(ctx: *core.command.Context, plane: *const core.intent.Plane, a: core.catalog.Ambiguity) void {

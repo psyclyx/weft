@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const Actions = @import("action.zig");
 const catalog_mod = @import("catalog.zig");
 const command = @import("command.zig");
+const selection = @import("selection.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
@@ -312,9 +313,9 @@ pub const Plane = struct {
     /// A signature comparison when nothing moved — the same pushed-offer
     /// discipline every other table here follows, so nothing recomputes
     /// eligibility on the keystroke path.
-    pub fn syncDerived(self: *Plane, gpa: Allocator, f: @import("weft_facts").Facts) !void {
+    pub fn syncDerived(self: *Plane, gpa: Allocator, f: @import("weft_facts").Facts, commands: *const command.Commands) !void {
         if (!self.derived_attached) return;
-        _ = try self.derived.refresh(gpa, &self.catalog, f);
+        _ = try self.derived.refresh(gpa, &self.catalog, f, commands);
     }
 
     /// Republish core's table when the focused entry's shape changes — the
@@ -406,7 +407,7 @@ pub const Plane = struct {
         // must read the same table. Hung off `dispatchSpec` first, and the
         // difference was visible immediately: `s` staged the row while
         // which-key, one call earlier, said nothing was offered.
-        self.syncDerived(ctx.gpa, factsIn(scope)) catch {};
+        self.syncDerived(ctx.gpa, factsIn(scope), ctx.commands) catch {};
         return self.catalog.snapshot(contextIn(ctx, scope)) catch |err| {
             std.log.warn("intent: catalog snapshot failed: {t}", .{err});
             return null;
@@ -726,11 +727,16 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
             0;
         h.update(std.mem.asBytes(&rev));
     }
+    // The selection's shape decides which offers can map over it.
+    const shape = selection.shapeOfEntry(entry, scope.focus);
+    h.update(std.mem.asBytes(&shape.count));
+    h.update(&[_]u8{@intFromBool(shape.mixed)});
     scope.clock.observe(scope.entry_id, h.final());
     return .{
         .key = scope.clock.key,
         .revision = scope.clock.revision,
         .facts = facts,
+        .shape = shape,
     };
 }
 
@@ -772,8 +778,14 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
     for (arms) |name| {
         if (!catalog_mod.isIntentionName(name)) {
             // A flat arm that resolves ends the walk exactly as it would for
-            // dispatch — no later intention is ever reached.
-            if (ctx.commands.resolve(name) != null or ctx.keymap.modeHasTag(name, "menu")) return .none;
+            // dispatch — no later intention is ever reached. It is BLOCKED
+            // when it cannot map over the selection here: dispatch would run
+            // it and be refused, for the reason said here.
+            if (ctx.commands.resolve(name)) |cmd| {
+                const refusal = selection.admits(cmd.arity, selection.shapeOf(ctx)) orelse return .none;
+                return .{ .blocked = .{ .intention = name, .provider = cmd.owner, .reason = selection.reason(refusal).code } };
+            }
+            if (ctx.keymap.modeHasTag(name, "menu")) return .none;
             continue;
         }
         if (first == null) first = name;

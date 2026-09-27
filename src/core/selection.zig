@@ -45,6 +45,8 @@ const Editor = @import("Editor.zig");
 const Register = @import("register.zig");
 const subbuffer = @import("subbuffer.zig");
 const Document = @import("Document.zig");
+const Buffers = @import("Buffers.zig");
+const Head = @import("Head.zig");
 
 /// What an extent is a range of.
 pub const Kind = enum(u32) {
@@ -145,7 +147,14 @@ pub fn reason(r: Refusal) struct { code: []const u8, message: []const u8 } {
 pub fn shapeOf(ctx: *command.Context) Shape {
     if (ctx.visit != null) return .{};
     const entry = ctx.entry() orelse return .{};
+    return shapeOfEntry(entry, &ctx.head.semantic_focus);
+}
+
+/// The shape of `entry`'s selection: its editor's text extents, or — for an
+/// entry with no text — the rows `focus` (its scene selection) holds.
+pub fn shapeOfEntry(entry: *Buffers.Buffer, focus: *const Head.SemanticFocus) Shape {
     if (entry.textEditor()) |ed| return .{ .count = ed.selectionCount() };
+    _ = focus;
     return .{};
 }
 

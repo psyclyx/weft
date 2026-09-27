@@ -288,7 +288,8 @@ pub fn hOffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         results[0] = 0;
         return;
     }
-    pub_.add(gpa, intention, cmd, reason) catch {
+    const arity = if (p.activeCtx().commands.resolve(cmd)) |c| c.arity else null;
+    pub_.add(gpa, intention, cmd, reason, arity) catch {
         results[0] = 0;
         return;
     };

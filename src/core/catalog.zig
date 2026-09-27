@@ -52,6 +52,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts_mod = @import("weft_facts");
 const container = @import("container.zig");
+const selection = @import("selection.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Predicate = facts_mod.Predicate;
@@ -237,6 +238,12 @@ pub const Offer = struct {
     /// How a UI presents this row. Carried through to `Candidate`, never
     /// consulted by the order.
     affordance: Affordance = .{},
+    /// How the command this offer runs maps over a selection of several
+    /// extents (`Command.arity`, read by the publisher). A snapshot for a
+    /// selection it cannot map over reports the offer disabled — the same
+    /// refusal dispatch would give, so a toolbar greys exactly what would
+    /// refuse.
+    arity: ?selection.Arity = .whole,
 
     /// DERIVED, never pushed: conjunct count of the eligibility predicate,
     /// plus one for an endpoint-class constraint. A provider raises its rank
@@ -277,6 +284,10 @@ pub const Context = struct {
     /// Protocol class of the focused endpoint.
     class: ?ClassId = null,
     facts: Facts = .{},
+    /// The shape of the selection here (`selection.Shape`): an offer whose
+    /// command cannot map over it is DISABLED, with the reason dispatch
+    /// would refuse it by. Fold it into `revision` like any fact.
+    shape: selection.Shape = .{},
 };
 
 /// An eligible offer, ranked. Carries every sort key so a trace explains the
@@ -635,6 +646,16 @@ const Recorder = struct {
 /// Why an offer was not a candidate for a context.
 const Fit = enum { ok, class_mismatch, predicate_mismatch };
 
+/// An offer's availability for a selection of `shape`: its own, unless the
+/// command it runs cannot map over that selection (`selection.admits`) —
+/// then disabled, with the reason dispatch would refuse it by.
+fn mapped(offer: Offer, shape: selection.Shape) Availability {
+    if (offer.availability != .enabled) return offer.availability;
+    const refused = selection.admits(offer.arity, shape) orelse return .enabled;
+    const why = selection.reason(refused);
+    return .{ .disabled = .{ .reason = why.code, .message = why.message } };
+}
+
 fn fit(offer: Offer, ctx: Context) Fit {
     if (offer.class) |want| {
         const have = ctx.class orelse return .class_mismatch;
@@ -757,7 +778,7 @@ pub const Catalog = struct {
                     .provider = table.provider,
                     .owner = offer.attribution orelse publisher,
                     .endpoint = offer.endpoint,
-                    .availability = offer.availability,
+                    .availability = mapped(offer, ctx.shape),
                     .tier = table.tier,
                     .priority = offer.priority,
                     .specificity = offer.specificity(),
@@ -845,7 +866,7 @@ pub const Catalog = struct {
                     .provider = table.provider,
                     .owner = offer.attribution orelse self.providerName(table.provider),
                     .endpoint = offer.endpoint,
-                    .availability = offer.availability,
+                    .availability = mapped(offer, ctx.shape),
                     .tier = table.tier,
                     .priority = offer.priority,
                     .specificity = offer.specificity(),
