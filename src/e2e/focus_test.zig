@@ -358,6 +358,50 @@ test "e2e/focus: ide.js — a status listing and the problems list show a focuse
     try t.expect(std.mem.indexOf(u8, focused.content.action.label, "2:7") != null);
 }
 
+/// The line of the active text entry that point is on.
+fn lineAtPoint(ed: *Editor, text: []const u8) []const u8 {
+    const at = @min(ed.buffers.active().textEditor().?.cursorOffset(), text.len);
+    const start = if (std.mem.lastIndexOfScalar(u8, text[0..at], '\n')) |nl| nl + 1 else 0;
+    const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+    return text[start..end];
+}
+
+test "e2e/focus: ide.js — type-ahead reaches a text projection's rows: git status jumps by file name" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > delta.txt && printf 'one\\n' > mango.txt && git add . && git commit -q -m base",
+        "printf 'two\\n' >> delta.txt && printf 'two\\n' >> mango.txt",
+    }) |cmd| {
+        const out = try app.proj.oracle(cmd);
+        gpa.free(out);
+    }
+    try ide.openFile(ed, "q.txt", "one\n");
+    ed.run("git.status");
+    try t.expect(h.drainToolContains(ed, "*git*", "mango.txt"));
+    ed.applyWindow();
+    try frame(ed);
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    const delta = std.mem.indexOf(u8, text, "delta.txt") orelse return error.NoFileRow;
+    ed.click(ed.pointAt(delta) orelse return error.RowNotDrawn);
+    try t.expect(std.mem.indexOf(u8, lineAtPoint(ed, text), "delta.txt") != null);
+
+    // A letter nothing binds jumps to the row whose FILE starts with it —
+    // the row's subject, not its `modified` column — and back.
+    ed.typeText("m");
+    try t.expect(std.mem.indexOf(u8, lineAtPoint(ed, text), "mango.txt") != null);
+    ed.head.type_ahead.at_ns = 0;
+    ed.typeText("de");
+    try t.expect(std.mem.indexOf(u8, lineAtPoint(ed, text), "delta.txt") != null);
+}
+
 /// A weft booted from a shipped config with the sidebar docked, a file open,
 /// and the keys in the sidebar.
 fn configSidebar(app: *h.App, config: []const u8) !void {

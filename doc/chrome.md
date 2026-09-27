@@ -411,8 +411,12 @@ What the build settled:
 - **Type-ahead** (`core/type_ahead.zig`) runs where an unbound printable key
   finds no commit, under `row`, with no edit in progress: a 1 s prefix
   searched from the focused row, one repeated key stepping through the rows
-  it starts, wrapping, case-insensitive. A row's label is its primary
-  field's text, else its focusable node's label.
+  it starts, wrapping, case-insensitive. A scene row's label is its primary
+  field's text, else its focusable node's label. A text projection's rows
+  (git status, grep results) are its visible focusable nodes, and a row's
+  label is its subject (`projection.Node.label`: the last keyed part, else
+  the editable part, else the row) — so git declares each file row's path
+  as its subject part, and type-ahead matches `f.txt`, not `modified`.
 - **Pointer.** The platform marks a press `slow` when it follows the
   previous press of its button after the double-click interval
   (`multi_click_ms`) but within `slow_click_ms` (3×). `pointer-click` under
@@ -429,8 +433,8 @@ What the build settled:
 - **For free:** the problems list, outline, dashboard and places are scenes
   of focusable labels and action rows, so they get the row focus, the
   highlight and type-ahead; the status listing gets the row focus through
-  `row_focus`. Action rows keep acting on a single click (a button is its
-  action), and type-ahead does not reach text projections.
+  `row_focus`, and type-ahead over its rows. Action rows keep acting on a
+  single click (a button is its action).
 - Found on the way: the files apply dialog bound `enter`/`escape`, which no
   key is spelled; they are `Return`/`Escape` now.
 
