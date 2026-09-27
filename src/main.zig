@@ -222,8 +222,16 @@ pub fn main(init: std.process.Init) !void {
     // config with a stale value. Plugin kv is the opposite — runtime state
     // (project-recent, frecency, the kill/mark rings) that nothing else can
     // reproduce, so losing it at exit loses information.
-    var plugin_kv_file = core.kv_file.Binding.open(gpa, &plug.kv);
+    var plugin_kv_file = core.kv_file.Binding.open(gpa, &plug.kv, core.kv_file.plugins_file);
     defer plugin_kv_file.close();
+    // The same for scratch documents (doc/model.md §2.1: a document survives
+    // restart): load the kept ones now — into the store only; each comes back
+    // when its designation is opened, as there is no session restore — and at
+    // shutdown keep every open and parked one, then write. Registered after
+    // `session.deinit`'s defer for the same reason as the line above: the
+    // entries it keeps must still be alive when it runs.
+    var document_file = core.Buffers.DocumentFile.open(gpa, buffers);
+    defer document_file.close();
     // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
     core.wasm_host.setEnviron(init.minimal.environ);
     const plugin_dir = config_load.pluginDir(gpa);

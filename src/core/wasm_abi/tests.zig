@@ -2812,7 +2812,7 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     {
         const dir = @import("../kv_file.zig").stateDir(gpa).?;
         defer gpa.free(dir);
-        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").store_file });
+        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").plugins_file });
         defer gpa.free(blob);
         try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = blob }}));
         try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = blob }}));

@@ -7,14 +7,23 @@
 //! blob, where, and when*. This file is that owner, kept separate so the
 //! store itself remains trivially testable with no filesystem in sight.
 //!
-//! **What is persisted: the PLUGIN kv store only.** `System.Plugins.kv`
-//! (matcher frecency, recent/kill/mark rings, `project-recent`) is state a
-//! plugin authored at runtime and nothing else can reproduce, so losing it
-//! at exit loses information. `System.config_kv` is deliberately NOT
-//! persisted: config values come from the config script on every run and
-//! the config script is the source of truth, so a persisted blob could only
-//! ever shadow an edited config with a stale value. See `Binding.open`'s
-//! call site for the same note where the choice is actually made.
+//! **What is persisted: two stores, each its own file in one directory.**
+//!
+//!   - `plugins_file`: the PLUGIN kv store. `System.Plugins.kv` (matcher
+//!     frecency, recent/kill/mark rings, `project-recent`) is state a plugin
+//!     authored at runtime and nothing else can reproduce, so losing it at
+//!     exit loses information.
+//!   - `documents_file`: the DOCUMENT store (`DocStore`, owned by
+//!     `Buffers`) — scratch documents, which have no file of their own to be
+//!     reopened from. Its records are `kv`-shaped on purpose, so it rides
+//!     exactly this load/save path; what goes INTO it at shutdown is
+//!     `Buffers.DocumentFile`'s business, which wraps a `Binding` here.
+//!
+//! `System.config_kv` is deliberately NOT persisted: config values come from
+//! the config script on every run and the config script is the source of
+//! truth, so a persisted blob could only ever shadow an edited config with a
+//! stale value. See `Binding.open`'s call site for the same note where the
+//! choice is actually made.
 //!
 //! **Where.** Editor machinery, so XDG, resolved host-side (`stateDir`).
 //! **Failure is never fatal.** A missing file is a fresh store, a corrupt
@@ -29,10 +38,11 @@ const Allocator = std.mem.Allocator;
 const kv = @import("kv.zig");
 const file = @import("file.zig");
 
-/// The blob's name inside `stateDir()`. `stateDir` names a DIRECTORY rather
-/// than this file directly so that a second persisted store, should one ever
-/// exist, is one more name here — not a second path-resolution scheme.
-pub const store_file = "plugins.kv";
+/// The blobs' names inside `stateDir()`. `stateDir` names a DIRECTORY rather
+/// than a file so that each persisted store is one more name here — not a
+/// second path-resolution scheme.
+pub const plugins_file = "plugins.kv";
+pub const documents_file = "documents.kv";
 
 /// Where the plugin kv store is persisted. Mirrors `wasm.zig`'s
 /// `Engine.cacheDir` exactly, carve-out included: in a TEST BUILD the path
@@ -64,9 +74,9 @@ pub fn stateDir(gpa: Allocator) ?[]u8 {
 ///   - corrupt/truncated blob → warned, fresh store. `kv.Store.load`
 ///     already leaves the store empty-and-usable on `error.Corrupt`, so
 ///     "recover by starting over" needs no cleanup here.
-pub fn loadFrom(gpa: Allocator, store: *kv.Store, dir: []const u8) void {
+pub fn loadFrom(gpa: Allocator, store: *kv.Store, dir: []const u8, name: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, store_file }) catch return;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return;
     const bytes = file.readAlloc(gpa, path) catch |e| switch (e) {
         error.FileNotFound => return, // first run: nothing to restore
         else => {
@@ -86,11 +96,11 @@ pub fn loadFrom(gpa: Allocator, store: *kv.Store, dir: []const u8) void {
 /// shutdown. The write goes through `writeBytesMakingDirs`, so a reader only
 /// ever sees a whole blob — a half-written file is not a state this can
 /// leave behind.
-pub fn saveTo(gpa: Allocator, store: *const kv.Store, dir: []const u8) void {
+pub fn saveTo(gpa: Allocator, store: *const kv.Store, dir: []const u8, name: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, store_file }) catch return;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return;
     const blob = store.serialize(gpa) catch |e| {
-        std.log.warn("kv: could not serialize the plugin store ({t}) — state not saved", .{e});
+        std.log.warn("kv: could not serialize {s} ({t}) — state not saved", .{ name, e });
         return;
     };
     defer gpa.free(blob);
@@ -118,9 +128,11 @@ pub const Binding = struct {
     /// Resolved once, at `open`. Null = persistence off (no writable base);
     /// both halves then degenerate to no-ops and the editor runs unchanged.
     dir: ?[]u8,
+    /// Which blob in `dir` this store is (`plugins_file`, `documents_file`).
+    name: []const u8,
 
-    pub fn open(gpa: Allocator, store: *kv.Store) Binding {
-        return openIn(gpa, store, stateDir(gpa));
+    pub fn open(gpa: Allocator, store: *kv.Store, name: []const u8) Binding {
+        return openIn(gpa, store, stateDir(gpa), name);
     }
 
     /// `open` with the directory handed in rather than resolved — takes
@@ -129,14 +141,14 @@ pub const Binding = struct {
     /// a test pin a private directory and still exercise every byte of the
     /// production path; `open`'s only extra job, resolving `stateDir`, is
     /// gated separately (see the state-dir test below).
-    pub fn openIn(gpa: Allocator, store: *kv.Store, dir: ?[]u8) Binding {
-        if (dir) |d| loadFrom(gpa, store, d);
-        return .{ .gpa = gpa, .store = store, .dir = dir };
+    pub fn openIn(gpa: Allocator, store: *kv.Store, dir: ?[]u8, name: []const u8) Binding {
+        if (dir) |d| loadFrom(gpa, store, d, name);
+        return .{ .gpa = gpa, .store = store, .dir = dir, .name = name };
     }
 
     pub fn close(self: *Binding) void {
         if (self.dir) |d| {
-            saveTo(self.gpa, self.store, d);
+            saveTo(self.gpa, self.store, d, self.name);
             self.gpa.free(d);
         }
         self.* = undefined;
@@ -152,7 +164,7 @@ const t = std.testing;
 /// test source is linked into more than one test binary — `test_mod` and
 /// `weft_mod` — which the runner may execute concurrently). Pair with
 /// `removeTestDir` so a green run leaves the cache as it found it.
-fn testDir(gpa: Allocator, name: []const u8) ![]u8 {
+pub fn testDir(gpa: Allocator, name: []const u8) ![]u8 {
     const base = stateDir(gpa).?;
     defer gpa.free(base);
     return std.fmt.allocPrint(gpa, "{s}/t-{s}-{d}", .{ base, name, std.os.linux.getpid() });
@@ -160,7 +172,7 @@ fn testDir(gpa: Allocator, name: []const u8) ![]u8 {
 
 /// Drop a `testDir` once its contents are gone. Best-effort: a directory
 /// that never got created, or one a sibling still holds, is not a failure.
-fn removeTestDir(gpa: Allocator, dir: []const u8) void {
+pub fn removeTestDir(gpa: Allocator, dir: []const u8) void {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     std.Io.Dir.cwd().deleteDir(threaded.io(), dir) catch {};
@@ -178,7 +190,7 @@ test "kv_file: save→load through the real file path preserves entries" {
     const dir = try testDir(gpa, "roundtrip");
     defer gpa.free(dir);
     defer removeTestDir(gpa, dir); // LIFO: runs after the file below is gone
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, store_file });
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, plugins_file });
     defer gpa.free(path);
     file.deleteFile(gpa, path);
     defer file.deleteFile(gpa, path);
@@ -189,7 +201,7 @@ test "kv_file: save→load through the real file path preserves entries" {
     try store.put(gpa, "project", "root", "/tmp/proj");
     try store.put(gpa, "matcher", "frecency", "\x00\x01\xff"); // arbitrary bytes
     try store.put(gpa, "ring", "kill", ""); // zero-length value survives
-    saveTo(gpa, &store, dir);
+    saveTo(gpa, &store, dir, plugins_file);
 
     // A real file landed at the real path — this is the disk hop the pure
     // serialize→load unit tests deliberately do not make.
@@ -197,7 +209,7 @@ test "kv_file: save→load through the real file path preserves entries" {
 
     var restored: kv.Store = .empty;
     defer restored.deinit(gpa);
-    loadFrom(gpa, &restored, dir);
+    loadFrom(gpa, &restored, dir, plugins_file);
     try t.expectEqualStrings("a.zig\nb.zig", restored.get("project", "recent").?);
     try t.expectEqualStrings("/tmp/proj", restored.get("project", "root").?);
     try t.expectEqualStrings("\x00\x01\xff", restored.get("matcher", "frecency").?);
@@ -211,7 +223,7 @@ test "kv_file: a corrupt blob yields an empty, usable store and does not error" 
     const dir = try testDir(gpa, "corrupt");
     defer gpa.free(dir);
     defer removeTestDir(gpa, dir); // LIFO: runs after the file below is gone
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, store_file });
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, plugins_file });
     defer gpa.free(path);
     defer file.deleteFile(gpa, path);
 
@@ -221,7 +233,7 @@ test "kv_file: a corrupt blob yields an empty, usable store and does not error" 
 
     var store: kv.Store = .empty;
     defer store.deinit(gpa);
-    loadFrom(gpa, &store, dir); // returns void: there is no error to propagate
+    loadFrom(gpa, &store, dir, plugins_file); // returns void: there is no error to propagate
     try t.expectEqual(@as(usize, 0), store.ns.count());
 
     // Empty is not broken — the store is usable, so the run continues and
@@ -234,13 +246,13 @@ test "kv_file: a missing file is a fresh store, silently" {
     const gpa = t.allocator;
     const dir = try testDir(gpa, "absent");
     defer gpa.free(dir);
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, store_file });
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, plugins_file });
     defer gpa.free(path);
     file.deleteFile(gpa, path);
 
     var store: kv.Store = .empty;
     defer store.deinit(gpa);
-    loadFrom(gpa, &store, dir);
+    loadFrom(gpa, &store, dir, plugins_file);
     try t.expectEqual(@as(usize, 0), store.ns.count());
 }
 
@@ -249,7 +261,7 @@ test "kv_file: a Binding's close is the save its open is the load" {
     const dir = try testDir(gpa, "binding");
     defer gpa.free(dir);
     defer removeTestDir(gpa, dir); // LIFO: runs after the file below is gone
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, store_file });
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, plugins_file });
     defer gpa.free(path);
     file.deleteFile(gpa, path);
     defer file.deleteFile(gpa, path);
@@ -258,7 +270,7 @@ test "kv_file: a Binding's close is the save its open is the load" {
         var store: kv.Store = .empty;
         defer store.deinit(gpa);
         // First "run": nothing to restore, and nothing on disk yet.
-        var binding = Binding.openIn(gpa, &store, try gpa.dupe(u8, dir));
+        var binding = Binding.openIn(gpa, &store, try gpa.dupe(u8, dir), plugins_file);
         defer binding.close();
         try t.expectEqual(@as(usize, 0), store.ns.count());
         try store.put(gpa, "project", "recent", "survivor.zig");
@@ -269,7 +281,7 @@ test "kv_file: a Binding's close is the save its open is the load" {
     // exactly what `project-recent` silently lost on every restart.
     var next: kv.Store = .empty;
     defer next.deinit(gpa);
-    var binding = Binding.openIn(gpa, &next, try gpa.dupe(u8, dir));
+    var binding = Binding.openIn(gpa, &next, try gpa.dupe(u8, dir), plugins_file);
     defer binding.close();
     try t.expectEqualStrings("survivor.zig", next.get("project", "recent").?);
 }
@@ -278,7 +290,7 @@ test "kv_file: persistence off (no writable base) is a working, non-persisting s
     const gpa = t.allocator;
     var store: kv.Store = .empty;
     defer store.deinit(gpa);
-    var binding = Binding.openIn(gpa, &store, null);
+    var binding = Binding.openIn(gpa, &store, null, plugins_file);
     defer binding.close(); // saves nowhere, frees nothing, must not fault
     try store.put(gpa, "project", "recent", "ephemeral.zig");
     try t.expectEqualStrings("ephemeral.zig", store.get("project", "recent").?);

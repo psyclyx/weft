@@ -75,7 +75,9 @@ pub const Location = enum {
     module_cache,
     /// `kv_file.stateDir` — the persisted plugin kv store (matcher frecency,
     /// the recent/kill/mark rings, `project-recent`): one plugin's private
-    /// state, readable by all of them if this were reachable.
+    /// state, readable by all of them if this were reachable. Also where the
+    /// scratch documents kept across restarts live (`DocStore`): the user's
+    /// own unsaved text.
     kv_state,
     /// `identity.configPath` — the machine's SECRET key, mode 0600. Reading
     /// it is impersonating this weft to every peer it has ever met.

@@ -30,6 +30,8 @@ const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const jumplist = @import("jumplist.zig");
 const Document = @import("Document.zig");
+pub const DocStore = @import("DocStore.zig");
+const kv_file = @import("kv_file.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
 
@@ -69,9 +71,16 @@ status: @import("status_feed.zig").Feed = .{},
 /// what it opened: a scratch document — which has no file to be reopened
 /// from — is parked here, whole, so `weft://here/doc/<id>` (a jumplist entry,
 /// an embed, a viewport's subject) can open it again. Bounded: past
-/// `parked_cap` the oldest is released for good, and a designation naming
-/// it is refused as gone rather than answered with something else.
+/// `parked_cap` the oldest moves on to `documents`, serialized.
 parked: std.ArrayList(*Buffer) = .empty,
+/// Where a scratch document goes past the parked bound, and what outlives
+/// the process (`DocStore`). Always present; memory-only unless a
+/// `DocumentFile` binds it to disk. `revive` answers from here when the
+/// document is not parked, so a closed scratch comes back by the same route
+/// whichever tier holds it. Past `DocStore.doc_cap` the oldest record is
+/// released for good, and a designation naming it is refused as gone rather
+/// than answered with something else.
+documents: DocStore = .{},
 /// The plugin whose code is running right now, or empty for the user and
 /// core: what a new entry's `creator` is stamped with. A bracket the plugin
 /// host sets around every call into a guest (`actAs`), so an entry a guest
@@ -347,6 +356,16 @@ pub const Buffer = struct {
         const ed = self.textEditor() orelse return false;
         return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and !self.read_only;
     }
+
+    /// Whether this entry's document is KEPT when nothing holds it open — a
+    /// bare document with text in it. The one answer both keepers read:
+    /// closing parks what this admits (`close`), and shutdown keeps what
+    /// this admits (`keepDocuments`). Text, not commits: a document restored
+    /// from the store starts with an empty commit log and is no less worth
+    /// keeping, and one whose text was all deleted has nothing to keep.
+    pub fn keepsDocument(self: *Buffer) bool {
+        return self.isBareDocument() and self.textEditor().?.text().byteLen() > 0;
+    }
 };
 
 pub const Error = Allocator.Error;
@@ -373,6 +392,7 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.slots.deinit(gpa);
     for (self.parked.items) |b| self.destroyBuffer(gpa, b);
     self.parked.deinit(gpa);
+    self.documents.deinit(gpa);
     self.closed.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
@@ -576,16 +596,30 @@ fn mintGeneration(self: *Buffers) u64 {
 /// slot is free and every `Ref` to it is dead — but the `Buffer` holding the
 /// document is kept whole, so its anchors (a jumplist's remembered spots)
 /// still resolve when it is reopened.
-fn park(self: *Buffers, gpa: Allocator, b: *Buffer) Error!void {
+///
+/// Past `parked_cap` the oldest parked document moves on to `documents`,
+/// serialized; `head`'s jumps into it settle into offsets first, since the
+/// anchors they hold die with this instance of it.
+fn park(self: *Buffers, gpa: Allocator, b: *Buffer, head: *Head) Error!void {
     try self.parked.ensureUnusedCapacity(gpa, 1);
-    if (self.parked.items.len >= parked_cap) self.destroyBuffer(gpa, self.parked.orderedRemove(0));
+    if (self.parked.items.len >= parked_cap) {
+        const oldest = self.parked.items[0];
+        const ed = oldest.textEditor().?;
+        try self.documents.put(gpa, oldest.name, &ed.doc);
+        _ = self.parked.orderedRemove(0);
+        jumplist.settle(&head.jumps, &ed.doc);
+        self.destroyBuffer(gpa, oldest);
+    }
     self.parked.appendAssumeCapacity(b);
 }
 
-/// Open the parked document `doc` again as a live entry, under a fresh
+/// Open the closed document `doc` again as a live entry, under a fresh
 /// identity (a new slot and generation: nothing that held the closed entry
-/// resolves to this one). Does not focus it. Null when no parked document is
-/// that one — never released, or released past the bound.
+/// resolves to this one). Does not focus it. Parked first — that is the
+/// document itself, anchors and all — else restored from `documents`
+/// (`DocStore.take`: its record is consumed, so the document lives in
+/// exactly one place at a time), as the user's entry, whoever is acting.
+/// Null when neither holds it — never kept, or released past both bounds.
 pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
     for (self.parked.items, 0..) |b, i| {
         const ed = b.textEditor() orelse continue;
@@ -597,8 +631,64 @@ pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
         self.slots.items[id] = b;
         return id;
     }
-    return null;
+    var restored = (try self.documents.take(gpa, self.user_agent, doc)) orelse return null;
+    defer gpa.free(restored.name);
+    errdefer restored.doc.deinit(gpa);
+    var editor = try Editor.around(gpa, self.pool, &restored.doc);
+    errdefer editor.deinit(gpa);
+    // A document someone kept is the user's, not whichever plugin's code
+    // happens to be running the `open` that brings it back.
+    const was = self.actAs("");
+    defer _ = self.actAs(was);
+    return try self.insert(gpa, restored.name, editor, "");
 }
+
+/// Keep every document worth keeping (`Buffer.keepsDocument`) in
+/// `documents`: the parked ones oldest first, then every open one, so the
+/// open ones are the newest records and the bound evicts what was closed
+/// longest ago first. Records already there that nothing reopened this run
+/// stay, older than all of these. The shutdown half of `DocumentFile`; the
+/// entries themselves are left as they are.
+pub fn keepDocuments(self: *Buffers, gpa: Allocator) Error!void {
+    for (self.parked.items) |b| try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+    var it = self.iterator();
+    while (it.next()) |b| {
+        if (b.keepsDocument()) try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+    }
+}
+
+/// The document store bound to its file for a run — `kv_file.Binding` over
+/// `documents_file`, with the one step only Buffers can take put in front of
+/// the save. `open` LOADS the records (only: nothing is reopened; weft has no
+/// session restore, so a kept document comes back when its designation is
+/// opened). `close` KEEPS every open and parked document (`keepDocuments`)
+/// and then SAVES — one handle, so an embedder cannot write the store without
+/// first putting this run's documents in it. Must close while `buffers` is
+/// still alive.
+pub const DocumentFile = struct {
+    gpa: Allocator,
+    buffers: *Buffers,
+    file: kv_file.Binding,
+
+    pub fn open(gpa: Allocator, buffers: *Buffers) DocumentFile {
+        return openIn(gpa, buffers, kv_file.stateDir(gpa));
+    }
+
+    /// `open` with the directory handed in (owned; null = persistence off),
+    /// as `kv_file.Binding.openIn`.
+    pub fn openIn(gpa: Allocator, buffers: *Buffers, dir: ?[]u8) DocumentFile {
+        const file = kv_file.Binding.openIn(gpa, &buffers.documents.records, dir, kv_file.documents_file);
+        buffers.documents.settle(gpa);
+        return .{ .gpa = gpa, .buffers = buffers, .file = file };
+    }
+
+    pub fn close(self: *DocumentFile) void {
+        self.buffers.keepDocuments(self.gpa) catch |e|
+            std.log.warn("documents: could not keep this run's documents ({t}) — saving what is held", .{e});
+        self.file.close();
+        self.* = undefined;
+    }
+};
 
 /// Document `doc` wherever it is held — a live entry or the parked store —
 /// or null once it has been released. What an anchor into a document needs:
@@ -889,8 +979,11 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const
     // Best effort: a generation missed here is never read again anyway
     // (generations are not reused); it only lingers until the store goes.
     self.closed.append(gpa, b.generation) catch {};
-    if (b.isBareDocument() and b.textEditor().?.doc.commitCount() > 0) {
-        self.park(gpa, b) catch self.destroyBuffer(gpa, b);
+    if (b.keepsDocument()) {
+        self.park(gpa, b, head) catch {
+            jumplist.settle(&head.jumps, &b.textEditor().?.doc);
+            self.destroyBuffer(gpa, b);
+        };
         return;
     }
     if (b.textEditor()) |ed| jumplist.settle(&head.jumps, &ed.doc);
@@ -1096,4 +1189,127 @@ test "buffers: setPlace re-targets a reused tool entry, and ignores a dead id" {
     // A producer landing after the entry is gone must not resurrect anything.
     const dead: Id = @intCast(bufs.slots.items.len + 5);
     bufs.setPlace(dead, a); // no panic, no effect
+}
+
+test "buffers: a scratch document parked past the bound moves to the document store and revives from there" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    var docs: [parked_cap + 1]Document.Id = undefined;
+    for (&docs, 0..) |*doc, i| {
+        const id = try bufs.create(gpa, "*note*");
+        const ed = bufs.get(id).?.textEditor().?;
+        var line: [16]u8 = undefined;
+        try ed.insertText(gpa, try std.fmt.bufPrint(&line, "note {d}\n", .{i}));
+        doc.* = ed.doc.id;
+        // A jump into it, so the move to the store has anchors to settle.
+        try bufs.switchTo(gpa, id, &head, &km);
+        try bufs.switchTo(gpa, 0, &head, &km);
+        try bufs.close(gpa, id, &head, &km);
+    }
+    // The first one closed is no longer parked: it is serialized, not gone.
+    try t.expectEqual(@as(usize, parked_cap), bufs.parked.items.len);
+    try t.expect(bufs.documentById(docs[0]) == null);
+    try t.expect(bufs.documents.contains(docs[0]));
+
+    // Reviving it restores it as a fresh, live, user-made entry, and takes it
+    // out of the store — it lives in one place at a time.
+    const was = bufs.actAs("some-plugin");
+    const id = (try bufs.revive(gpa, docs[0])).?;
+    _ = bufs.actAs(was);
+    const b = bufs.get(id).?;
+    try t.expect(!bufs.documents.contains(docs[0]));
+    try t.expect(b.textEditor().?.doc.id.eql(docs[0]));
+    try t.expectEqualStrings("*note*", b.name);
+    try t.expectEqualStrings("", b.creator);
+    try t.expectEqual(@as(usize, 7), b.textEditor().?.text().byteLen()); // "note 0\n"
+    try t.expect(b.isBareDocument());
+
+    // Restored with no edits since, it is still kept when closed again.
+    try bufs.close(gpa, id, &head, &km);
+    try t.expect(bufs.documentById(docs[0]) != null);
+
+    // An id nothing ever kept is refused, not answered with something else.
+    try t.expect((try bufs.revive(gpa, Document.mintId())) == null);
+}
+
+test "buffers: keeping this run's documents takes every parked and open scratch with text, and nothing else" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    const open_doc = bufs.get(0).?.textEditor().?;
+    try open_doc.insertText(gpa, "open scratch\n");
+    const closed = try bufs.create(gpa, "*closed*");
+    try bufs.get(closed).?.textEditor().?.insertText(gpa, "closed scratch\n");
+    const closed_doc = bufs.get(closed).?.textEditor().?.doc.id;
+    try bufs.close(gpa, closed, &head, &km);
+    const empty = bufs.get(try bufs.create(gpa, "*empty*")).?.textEditor().?.doc.id;
+    const tool = try bufs.create(gpa, "*run*");
+    try bufs.get(tool).?.textEditor().?.insertText(gpa, "output\n");
+    bufs.get(tool).?.read_only = true;
+    const tool_doc = bufs.get(tool).?.textEditor().?.doc.id;
+
+    try bufs.keepDocuments(gpa);
+    try t.expect(bufs.documents.contains(open_doc.doc.id));
+    try t.expect(bufs.documents.contains(closed_doc));
+    try t.expect(!bufs.documents.contains(empty));
+    try t.expect(!bufs.documents.contains(tool_doc));
+}
+
+test "buffers: the document store outlives the process — kept at close, loaded at open, reopened on demand" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    const dir = try kv_file.testDir(gpa, "documents");
+    defer gpa.free(dir);
+    defer kv_file.removeTestDir(gpa, dir); // LIFO: after the file below is gone
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, kv_file.documents_file });
+    defer gpa.free(path);
+    const file_mod = @import("file.zig");
+    file_mod.deleteFile(gpa, path);
+    defer file_mod.deleteFile(gpa, path);
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+
+    // First run: a scratch with text, open at shutdown.
+    const doc = blk: {
+        var bufs = try init(gpa, pool, "user");
+        defer bufs.deinit(gpa);
+        var binding = DocumentFile.openIn(gpa, &bufs, try gpa.dupe(u8, dir));
+        const ed = bufs.get(0).?.textEditor().?;
+        try ed.insertText(gpa, "survives the restart\n");
+        binding.close();
+        break :blk ed.doc.id;
+    };
+    try t.expectEqual(file_mod.Kind.file, file_mod.statKind(gpa, path));
+
+    // Second run: the record is loaded, nothing is opened for it…
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var binding = DocumentFile.openIn(gpa, &bufs, try gpa.dupe(u8, dir));
+    defer binding.close();
+    try t.expectEqual(@as(usize, 1), bufs.count());
+    try t.expect(bufs.documents.contains(doc));
+    // …until it is asked for.
+    const id = (try bufs.revive(gpa, doc)).?;
+    const ed = bufs.get(id).?.textEditor().?;
+    try t.expect(ed.doc.id.eql(doc));
+    try t.expectEqual(@as(usize, 21), ed.text().byteLen());
+    try ed.insertText(gpa, "edited ");
+    try t.expect(try ed.undo(gpa, .user_driven));
 }
