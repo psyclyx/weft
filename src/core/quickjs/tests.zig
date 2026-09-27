@@ -1291,8 +1291,8 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     // makes both land: config is staged before the plugin instantiates (its
     // init reads `pairs`), and the late-bound key resolves after load.
     const cfg =
-        \\weft.set("autopair", "pairs", ["pair-tick\t`\t`"]);
-        \\weft.bind("insert", "grave", "pair-tick");
+        \\weft.set("autopair", "pairs", ["autopair.open-tick\t`\t`"]);
+        \\weft.bind("insert", "grave", "autopair.open-tick");
         \\weft.plugin("autopair");
     ;
     try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, &config, null, cfg);
@@ -1300,13 +1300,13 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     // The plugin read its config at init: it registered the CONFIG pair command,
     // not the shipped defaults.
     try t.expect(loader.held != null);
-    try t.expect(env.commands.find("pair-tick") != null);
+    try t.expect(env.commands.find("autopair.open-tick") != null);
     try t.expect(env.commands.find("autopair.open-paren") == null);
     try env.head.setModeRaw(gpa, "insert");
-    try t.expectEqualStrings("pair-tick", env.keymap.lookup(env.head.currentMode(), "grave").?);
+    try t.expectEqualStrings("autopair.open-tick", env.keymap.lookup(env.head.currentMode(), "grave").?);
 
     // And it runs through the membrane: inserts the configured backtick pair.
-    _ = try command.run(&env.commands, &env.ctx, "pair-tick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "autopair.open-tick", &.{});
     const s = try env.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("``", s);

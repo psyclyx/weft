@@ -111,6 +111,14 @@ pub const declare_doors = struct {
     pub const wasmDoor = declare.wasmDoorFor;
 };
 
+/// What a name is called and which key runs it (doc/chrome.md §1.2-1.3) —
+/// read doors both planes run, for the same gate.
+const commands_host = @import("wasm_host/commands.zig");
+pub const command_read_doors = struct {
+    pub const doors = commands_host.read_doors;
+    pub const wasmDoor = declare.wasmDoorFor;
+};
+
 /// The plugin-plane READ doors, whose bodies BOTH membranes run. Re-exported
 /// for the same reason `proc_doors` is: the gate in `e2e/demolition_test.zig`
 /// reaches core only through this facade, and proves the two planes bind one

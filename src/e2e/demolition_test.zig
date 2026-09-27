@@ -467,6 +467,29 @@ test "demolition: a command DECLARATION is one thing, not one per plane" {
     }
 }
 
+test "demolition: what a command is called and which key runs it are ONE body reached two ways" {
+    // A palette or a which-key written in JS must read the same label and the
+    // same key a `.wasm` one does (doc/chrome.md §1.2-1.3): one body each,
+    // proven by function pointer against what each membrane binds.
+    const read = h.core.wasm_host.command_read_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    inline for (read.doors) |d| {
+        const HostFn = @TypeOf(d.wl);
+        try t.expectEqual(read.wasmDoor(d.body, null), d.wl);
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ d.name)) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, d.wl), wl_handler);
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ d.name)) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, null)), qjs_handler);
+    }
+}
+
 test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
     const proc_doors = h.core.wasm_host.proc_doors;
     const wl_bound = h.core.membrane.wl_bound;

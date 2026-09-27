@@ -169,3 +169,107 @@ test "e2e/identity: the gate refuses what the old spellings were, and admits the
     try t.expect(command_id.check("buffer.next") == null);
     try t.expect(command_id.check("plugin.code.format") == null);
 }
+
+test "e2e/identity: presentation crosses every plane — a wasm table, a JS plugin's options, the config tier — and reads back through both" {
+    const gpa = t.allocator;
+    var b: Booted = .{};
+    try b.init(gpa, "config.js");
+    defer b.deinit();
+    const ed = &b.ed;
+
+    // A `.wasm` plugin's CommandEntry fields, through `wl_declare_command_meta`.
+    const palette = core.presentations.of(ed.ctx, "palette.open").?;
+    try t.expectEqualStrings("Command Palette", palette.label);
+    try t.expectEqualStrings("View", palette.menu);
+    try t.expectEqualStrings("command", palette.icon);
+    try t.expect(palette.prompts and !palette.internal);
+    var shown: [64]u8 = undefined;
+    try t.expectEqualStrings("Command Palette…", palette.shown(&shown, "palette.open"));
+    // Its summary comes from the command itself.
+    try t.expectEqualStrings("Run a command, or act on what the focused context offers, by name.", palette.summary);
+
+    // A resident JS plugin's `weft.command(name, fn, {…})`, through
+    // `qjs_declare_command_meta` — the same body.
+    const agent = core.presentations.of(ed.ctx, "agent.start").?;
+    try t.expectEqualStrings("Start Agent", agent.label);
+    try t.expectEqualStrings("Run/Agents", agent.menu);
+    try t.expectEqualStrings("bot", agent.icon);
+
+    // The config tier: semantic.js describes an open action name it declares.
+    const create = core.presentations.of(ed.ctx, "fs.create-file").?;
+    try t.expectEqualStrings("New File", create.label);
+    try t.expectEqualStrings("file-plus", create.icon);
+
+    // And a JS plugin READS it back — `weft.commandMeta` and `weft.keysFor`
+    // are `wl_command_meta`/`wl_keys_for`'s bodies on its plane — and
+    // declares its own through the options form.
+    try ed.loadJs("probe",
+        \\weft.command("probe.read", () => {
+        \\  const m = weft.commandMeta("palette.open");
+        \\  const keys = weft.keysFor("palette.open");
+        \\  weft.echo([m.label, m.icon, m.prompts ? "prompts" : "", m.internal ? "internal" : "", keys.join(",")].join("|"));
+        \\}, { summary: "Read how the palette presents itself.", arity: "whole", label: "Probe Palette", menu: "Help", order: 7, icon: "info", internal: false });
+        \\weft.command("probe.plumbing", () => {}, { summary: "Nothing a person runs.", arity: "whole", internal: true });
+    );
+    const probe = core.presentations.of(ed.ctx, "probe.read").?;
+    try t.expectEqualStrings("Probe Palette", probe.label);
+    try t.expectEqualStrings("Help", probe.menu);
+    try t.expectEqual(@as(?i32, 7), probe.order);
+    try t.expectEqualStrings("info", probe.icon);
+    try t.expect(core.presentations.of(ed.ctx, "probe.plumbing").?.internal);
+    ed.run("probe.read");
+    const echoed = ed.echoText();
+    try t.expect(std.mem.startsWith(u8, echoed, "Command Palette|command|prompts||"));
+    // The keys: config.js's `SPC :` and vim's `SPC SPC`, as a person reads them.
+    try t.expect(std.mem.indexOf(u8, echoed, "SPC") != null);
+}
+
+test "e2e/identity: which key runs it depends on where you are — the grammar, and what the context offers" {
+    const gpa = t.allocator;
+    const keys_for = core.keys_for;
+
+    // The same command, two grammars: each reports its OWN keys. (One
+    // project at a time: a project is the process's directory while it lives.)
+    {
+        var vim: Booted = .{};
+        try vim.init(gpa, "config.js");
+        defer vim.deinit();
+        const under_vim = try keys_for.keysFor(vim.ed.ctx, gpa, "files.find", keys_for.personMode(vim.ed.ctx));
+        defer keys_for.free(gpa, under_vim);
+        try t.expect(contains(under_vim, "space space"));
+        try t.expect(!contains(under_vim, "C-p"));
+    }
+    var ide: Booted = .{};
+    try ide.init(gpa, "ide.js");
+    defer ide.deinit();
+    try core.file.writeBytes(gpa, "a.txt", "alpha\n");
+    ide.ed.runStr("file.open", "a.txt");
+    ide.ed.typeText("x"); // an edit, so the history offer is armed
+    const under_ide = try keys_for.keysFor(ide.ed.ctx, gpa, "files.find", keys_for.personMode(ide.ed.ctx));
+    defer keys_for.free(gpa, under_ide);
+    try t.expectEqual(@as(usize, 1), under_ide.len);
+    try t.expectEqualStrings("C-p", under_ide[0]);
+
+    // An intention arm: ide binds C-z to [std.history.undo, edit.undo]. In a
+    // text entry holding an edit the history offer answers with `edit.undo`,
+    // so C-z is its key.
+    const in_text = try keys_for.keysFor(ide.ed.ctx, gpa, "edit.undo", keys_for.personMode(ide.ed.ctx));
+    defer keys_for.free(gpa, in_text);
+    try t.expect(contains(in_text, "C-z"));
+    // In an entry that holds no text the offer is REFUSED (`no-text`): C-z
+    // there means the intention — pressing it says why — and runs no undo, so
+    // it is no longer a key for `edit.undo`, only for the intention.
+    const listing = try ide.ed.buffers.createView(gpa, "files: .", "files");
+    try ide.ed.buffers.switchTo(gpa, listing, ide.ed.head, ide.ed.keymap);
+    const in_listing = try keys_for.keysFor(ide.ed.ctx, gpa, "edit.undo", keys_for.personMode(ide.ed.ctx));
+    defer keys_for.free(gpa, in_listing);
+    try t.expect(!contains(in_listing, "C-z"));
+    const intention = try keys_for.keysFor(ide.ed.ctx, gpa, "std.history.undo", keys_for.personMode(ide.ed.ctx));
+    defer keys_for.free(gpa, intention);
+    try t.expect(contains(intention, "C-z"));
+}
+
+fn contains(keys: []const []u8, want: []const u8) bool {
+    for (keys) |k| if (std.mem.eql(u8, k, want)) return true;
+    return false;
+}

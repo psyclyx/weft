@@ -113,7 +113,7 @@ weft.set("offers", "pinned", [
   "std.persistence.save\tSave",
   "std.history.undo\tUndo",
   "std.history.redo\tRedo",
-  "pick-commands\tPalette",
+  "palette.open\tPalette",
 ]);
 
 // ── Actions: one key, a provider per context ─────────────────────────

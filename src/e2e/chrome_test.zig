@@ -235,6 +235,13 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     try t.expectEqualStrings("std.history.undo", fact(undo, "name").?);
     // The winner rides along — what a tooltip would say.
     try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Build").?, "provider").?);
+    // Every button carries its command's icon (doc/chrome.md §1.2) for the
+    // styles that draw one: an intention's from the command that answers it
+    // here, a pinned command's from itself, an action's from its provider.
+    for ([_][2][]const u8{ .{ "Save", "save" }, .{ "Undo", "undo" }, .{ "Palette", "command" }, .{ "Build", "build" }, .{ "Format", "format" } }) |want| {
+        const b = button(try toolbarView(ed), want[0]) orelse return error.ButtonMissing;
+        try t.expectEqualStrings(want[1], fact(b, "icon") orelse return error.ButtonHasNoIcon);
+    }
     app.proj.shot(ed, "chrome-toolbar-zig");
 }
 
