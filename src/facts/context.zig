@@ -36,7 +36,7 @@ const Allocator = std.mem.Allocator;
 /// The keys core computes. A predicate or a reader may name them like any
 /// other key (`Facts.get` answers them from the typed fields); a plugin can
 /// never publish one — none contains a dot.
-pub const builtin_keys = [_][]const u8{ "entry", "place", "mode", "posture", "locality", "lang", "tool", "role", "offers" };
+pub const builtin_keys = [_][]const u8{ "entry", "place", "mode", "posture", "locality", "lang", "tool", "role", "offers", "places" };
 
 pub const max_key_len = 64;
 /// Long enough for any designation a value is expected to be.

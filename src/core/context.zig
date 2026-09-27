@@ -14,7 +14,8 @@
 //!   - **The primary context**: the context at the head's primary viewport —
 //!     the last pane focused whose viewport is a `focus_source`. Its keys are
 //!     core's builtins (`entry`, `place`, `mode`, `posture`, `locality`,
-//!     `lang`, `tool`, `role`, `offers`) plus every open key resolved there.
+//!     `lang`, `tool`, `role`, `offers`, `places`) plus every open key resolved
+//!     there. `offers` and `places` are revisions, not values.
 //!   - **One event**: `observe` compares the primary context's per-key
 //!     fingerprints with the last delivered ones and reports the keys that
 //!     moved. The app calls it once per frame, after layout, never inside a
@@ -210,7 +211,7 @@ pub const Context = struct {
     pub fn observe(self: *Context, ctx: *command.Context) Allocator.Error!bool {
         var now: Builder = .{ .gpa = self.gpa };
         defer now.list.deinit(self.gpa);
-        if (intent.primaryScopeOf(ctx)) |scope| try now.primary(ctx, scope);
+        if (intent.primaryScopeOf(ctx)) |scope| try now.primary(self, ctx, scope);
         if (now.failed) return error.OutOfMemory;
 
         self.clearMoved();
@@ -271,13 +272,28 @@ const Builder = struct {
         self.add(key, std.hash.Wyhash.hash(0, value));
     }
 
-    fn primary(self: *Builder, ctx: *command.Context, scope: intent.Scope) Allocator.Error!void {
+    fn primary(self: *Builder, context: *const Context, ctx: *command.Context, scope: intent.Scope) Allocator.Error!void {
         const f = intent.factsIn(scope);
 
         for (facts.context.builtin_keys) |key| {
             if (std.mem.eql(u8, key, "offers")) {
                 const plane = ctx.intent orelse continue;
                 self.add(key, plane.offersFingerprint(ctx, .primary));
+                continue;
+            }
+            if (std.mem.eql(u8, key, "places")) {
+                // The workspace's places list, in order: an entry opening in
+                // a new place anywhere, or a peer sharing a tree, moves it
+                // while the primary `place` stays put.
+                var names: std.ArrayList([]const u8) = .empty;
+                defer names.deinit(self.gpa);
+                try context.places(self.gpa, ctx.buffers, &names);
+                var h = std.hash.Wyhash.init(0);
+                for (names.items) |n| {
+                    h.update(n);
+                    h.update("\n");
+                }
+                self.add(key, h.final());
                 continue;
             }
             const v = f.get(key) orelse continue;

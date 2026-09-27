@@ -133,7 +133,9 @@ grants and config values all resolve against it.
 The shift: **context keys are open.**
 
 - Core owns a few keys it alone can compute: `entry`, `place`, `mode`,
-  `posture`, `locality`, `offers` (a revision).
+  `posture`, `locality`, `offers` (a revision), `places` (a revision of
+  the workspace's places: it moves when an entry opens in a new place or a
+  peer shares a tree, though the primary `place` stays put).
 - Any plugin can publish a value at a scope: `weft.contextSet("repl.session",
   "weft://here/proc/7", .place)`. It is retracted when the plugin unloads or
   sets it empty.

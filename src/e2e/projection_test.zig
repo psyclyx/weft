@@ -482,6 +482,75 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     try t.expect(seen_local and seen_other and seen_peer);
 }
 
+/// Whether the places view `view` lists `designation` as a row.
+fn placesList(ed: *Editor, view: semantic_model.view.Ref, designation: []const u8) bool {
+    const instance = ed.session.system.semantic.views.get(view) orelse return false;
+    for (instance.scene.content.container.children) |rownode| {
+        for (rownode.facts) |f| {
+            if (std.mem.eql(u8, f.name, "designation") and std.mem.eql(u8, f.value, designation)) return true;
+        }
+    }
+    return false;
+}
+
+test "e2e/projection: the places list shows a peer's tree the frame it is shared, and a place opened behind it, with the primary place unmoved" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    try makeProjects(gpa);
+    try core.file.writeBytesMakingDirs(gpa, "shared/src", "shared/src/main.zig", "pub fn main() void {}\n");
+    var buf: [4096]u8 = undefined;
+
+    var a: Editor = undefined;
+    try Editor.initNamed(gpa, &a, "alice");
+    defer a.deinit();
+    var b: Editor = undefined;
+    try Editor.initNamed(gpa, &b, "bob");
+    defer b.deinit();
+    var loader: ConfigLoader = .{ .ed = &b };
+    defer loader.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try h.bootConfigNamed(&b, config_dir, "ide.js", &loader);
+    try b.buffers.setDefaultMode(gpa, b.head.currentMode());
+    try b.enableCollabCommands();
+
+    var link: h.Loopback = undefined;
+    try h.Loopback.init(&link, gpa, &a, &b, "alice", "bob");
+    defer link.deinit();
+    const fp = link.peer_sess.peerFingerprint() orelse return error.NoHandshake;
+
+    b.runStr("open", "a.txt");
+    b.applyWindow();
+    try t.expect(openOk(&b, "weft://here/places/all"));
+    const view = b.toolView() orelse return error.NoPlacesView;
+    try t.expect(placesList(&b, view, under(&proj, &buf, "dir", "")));
+    const place_before = b.ctx.context.?.fingerprint("place");
+
+    // A peer shares its tree: nothing the editor looks at moved, and the
+    // list shows it.
+    const shared_root = try std.fmt.allocPrint(gpa, "{s}/shared", .{proj.root});
+    defer gpa.free(shared_root);
+    var tree: PeerTree = undefined;
+    try tree.init(gpa, &b, shared_root, &fp);
+    defer tree.deinit(gpa, &b);
+    b.applyWindow();
+    try t.expectEqual(place_before, b.ctx.context.?.fingerprint("place"));
+    try t.expect(placesList(&b, view, tree.root_designation));
+
+    // An entry opens in another place in a companion viewport: the primary
+    // place stays, and the list gains the row.
+    const viewports = &b.session.system.viewports;
+    try viewports.declare(gpa, "pinned", .{ .dock = .bottom, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 4 });
+    var other_buf: [4096]u8 = undefined;
+    try viewports.present(gpa, "pinned", .{ .subject = .{ .text = under(&proj, &other_buf, "file", "/other/b.txt") } });
+    b.applyWindow();
+    b.applyWindow();
+    try t.expectEqual(place_before, b.ctx.context.?.fingerprint("place"));
+    try t.expect(placesList(&b, view, under(&proj, &buf, "dir", "/other")));
+}
+
 fn openOk(ed: *Editor, spec: []const u8) bool {
     const outcome = core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = spec }}) catch return false;
     ed.applyWindow();

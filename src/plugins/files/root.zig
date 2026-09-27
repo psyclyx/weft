@@ -10,9 +10,10 @@
 //! `weft://here/places/all`, the places the workspace is working in — the
 //! place of every open entry, every tree a peer shares with us — one row
 //! each, a row opening that tree. It answers `view.reveal` for a place's
-//! designation (a sidebar revealing `{context: "place"}` in it) and follows
-//! the primary context's `place` while it is shown, since a new place is
-//! usually a new row.
+//! designation (a sidebar revealing `{context: "place"}` in it) and, while it
+//! is shown, republishes when the `places` key moves: a peer sharing a tree,
+//! or an entry opening in a place the list lacks — neither of which need
+//! move the primary `place`.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -138,7 +139,7 @@ fn placesAction() bool {
 
 fn onContextChanged() callconv(.c) void {
     if (places_view == null) return;
-    if (!weft.contextChanged().any(&.{"place"})) return;
+    if (!weft.contextChanged().any(&.{"places"})) return;
     publishPlaces() catch {};
 }
 

@@ -133,7 +133,10 @@ pub const Facts = struct {
     ///
     /// `offers` answers nothing here: what a context offers is DERIVED from
     /// its facts, so a fact about offers would be circular. It is a key of the
-    /// primary context (`on_context_changed`), not a predicate axis.
+    /// primary context (`on_context_changed`), not a predicate axis. Nor does
+    /// `places`: it is a revision of the workspace's places list
+    /// (`Context.places`), a key so a follower hears a place arrive that the
+    /// primary context is not in.
     pub fn get(self: Facts, key: []const u8) ?[]const u8 {
         const eql = std.mem.eql;
         const v: []const u8 = if (eql(u8, key, "mode"))
@@ -156,7 +159,7 @@ pub const Facts = struct {
             // The place's container, by its designation — the same string a
             // place-scoped publication is keyed on.
             self.context.at.place
-        else if (eql(u8, key, "offers"))
+        else if (eql(u8, key, "offers") or eql(u8, key, "places"))
             ""
         else
             self.context.get(key) orelse "";
