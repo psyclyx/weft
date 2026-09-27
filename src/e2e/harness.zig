@@ -2369,12 +2369,14 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
 /// Like `bootConfig`, but the config FILE within `config_dir` is named
 /// explicitly — config.js, helix.js and ide.js share one directory, so each
 /// resolves `weft.use("defaults")` identically.
+/// The shipped binary's own door (`app.config_load.ConfigSession`), not a
+/// second one beside it, so a test boots a config exactly as `main` does.
 pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {
     const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/{s}", .{ config_dir, filename });
     defer ed.gpa.free(cfg_path);
-    const src = try core.file.readAlloc(ed.gpa, cfg_path);
-    defer ed.gpa.free(src);
-    try core.quickjs.evalConfig(&ed.engine, ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
+    var cs = try app.config_load.ConfigSession.init(ed.gpa, ed.ctx, cfg_path, loader_state.loader(), &ed.config_kv);
+    defer cs.deinit();
+    try cs.reload();
 }
 
 /// A stable, sorted text snapshot of the RESOLVED keymap: every (mode, key)

@@ -7,18 +7,18 @@
 const std = @import("std");
 const core = @import("weft_core");
 
-/// Load and run the user's `config.js` in the quickjs.wasm sandbox (plan
-/// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config
-/// wires the editor only through the `weft.*` grants. The engine is scoped to
-/// the eval: config is a startup declaration, not a resident runtime.
-pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !void {
-    const src = try core.file.readAlloc(gpa, path);
-    defer gpa.free(src);
-    var engine = try core.wasm.Engine.init(gpa);
-    defer engine.deinit();
-    // `weft.use(name)` resolves against the config's own directory.
-    const dir = std.fs.path.dirname(path);
-    try core.quickjs.evalConfig(&engine, ctx, loader, config, dir, src);
+/// The directory a config's `weft.use(name)` resolves against: the config
+/// file's own. A bare file name (`weft -c ide.js`) has no `dirname`, and
+/// passing that null on would evaluate the config with nowhere to find its
+/// fragments — every import lost, every value they set gone with it. Its
+/// directory is the working one.
+pub fn configDir(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse ".";
+}
+
+test "config_load: a bare config name resolves its fragments beside it" {
+    try std.testing.expectEqualStrings(".", configDir("ide.js"));
+    try std.testing.expectEqualStrings("config", configDir("config/ide.js"));
 }
 
 /// A LIVE config binding (doc/configuration.md §5): remembers the manifest
@@ -59,14 +59,13 @@ pub const ConfigSession = struct {
     /// (Re)load the config file: evaluate it fresh into a NEW manifest, then
     /// reconcile against whatever was applied last (null on the first call —
     /// `reconcile` degenerates to a full apply). Absent/broken config is a
-    /// logged warning, never fatal — matching `loadJsConfig`'s degrade.
+    /// logged warning, never fatal.
     pub fn reload(self: *ConfigSession) !void {
         const src = try core.file.readAlloc(self.gpa, self.path);
         defer self.gpa.free(src);
         var engine = try core.wasm.Engine.init(self.gpa);
         defer engine.deinit();
-        const dir = std.fs.path.dirname(self.path);
-        const new = try core.quickjs.evalToManifest(&engine, self.ctx, self.loader, self.config, dir, src, .config, "config");
+        const new = try core.quickjs.evalToManifest(&engine, self.ctx, self.loader, self.config, configDir(self.path), src, .config, "config");
         errdefer new.destroy();
         std.log.info("config: manifest hash = 0x{x}", .{new.hash()});
         var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = self.ctx, .loader = self.loader, .config = self.config, .ui_bind = self.ui_bind };

@@ -1634,6 +1634,53 @@ test "e2e/config: the showcased weft.set values land under their owners" {
     try t.expect(!app_collab.presenceDefault(null, "off"));
 }
 
+// Every shipped config, through every door a config enters by, keeps every
+// value its fragments set. `config/panel.js` names the viewport three plugins
+// take, and the plugins are loaded by the INCLUDING config — after the
+// `weft.use`, in ide.js. The doors: the app's by an absolute path, the app's
+// by a bare name from the config's own directory (`weft -c ide.js`, where
+// `dirname` is null), and the harness's. A dropped or lost value fails the
+// test twice: by the count below and by the error it logs.
+test "e2e/config: every shipped config keeps its fragments' values through every boot path" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+
+    const Door = enum { absolute, bare, harness };
+    for ([_][]const u8{ "config.js", "helix.js", "ide.js" }) |name| {
+        for ([_]Door{ .absolute, .bare, .harness }) |door| {
+            var ed: Editor = undefined;
+            try Editor.init(gpa, &ed);
+            defer ed.deinit();
+            var loader: ConfigLoader = .{ .ed = &ed };
+            defer loader.deinit();
+            switch (door) {
+                .harness => try bootConfigNamed(&ed, config_dir, name, &loader),
+                .absolute, .bare => {
+                    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ config_dir, name });
+                    defer gpa.free(path);
+                    if (door == .bare) try h.chdirTo(config_dir);
+                    defer if (door == .bare) h.chdirTo(proj.root) catch {};
+                    var cs = try h.app.config_load.ConfigSession.init(gpa, ed.ctx, if (door == .bare) name else path, loader.loader(), &ed.config_kv);
+                    defer cs.deinit();
+                    try cs.reload();
+                    try t.expectEqual(@as(usize, 0), try cs.last.?.unownedValues(gpa));
+                },
+            }
+            for ([_][]const u8{ "panel", "problems", "terminal" }) |owner| {
+                const blob = ed.config_kv.get(owner, "viewport") orelse {
+                    std.debug.print("[e2e/config] {s} via {t}: {s}/viewport lost\n", .{ name, door, owner });
+                    return error.ConfigValueDropped;
+                };
+                try t.expect(std.mem.indexOf(u8, blob, "panel") != null);
+            }
+        }
+    }
+}
+
 test "e2e/config: the shipped config annotates palette rows — the whole chain, in the real editor" {
     // Everything doc/marginalia.md builds, exercised the way a user meets it:
     // boot the REAL config/config.js, open the palette the way `SPC :` does,

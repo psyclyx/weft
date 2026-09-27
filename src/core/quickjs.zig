@@ -1628,17 +1628,25 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
 /// manifests land one tier below the importer"). A no-op (no result to
 /// report — `weft.use` has always been fire-and-forget from JS) when: this
 /// isn't config-eval mode (a resident JS plugin's `weft.use` — no config_dir
-/// is ever wired for one, matching the old `cReadConfig`'s degrade), the
-/// file can't be read, or the nested eval throws — each logged, none fatal
-/// to the OUTER eval (a broken include shouldn't brick the whole config).
+/// is ever wired for one, matching the old `cReadConfig`'s degrade). An
+/// import that cannot land — no directory, an unreadable file, a nested eval
+/// that throws — is logged at error level, none fatal to the OUTER eval (a
+/// broken include shouldn't brick the whole config).
 fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.activeCtx().gpa;
     const m = br.manifest orelse return;
-    const dir = br.config_dir orelse return;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
+    // A config evaluated with no directory cannot resolve an import, and an
+    // import lost here loses every value and plugin the fragment declares —
+    // the includer then reads as if the fragment were never written. Loud
+    // (error level, which fails any test that does it), never a quiet skip.
+    const dir = br.config_dir orelse {
+        std.log.err("config: weft.use(\"{s}\") — this config was evaluated with no directory to resolve it against; the import is lost", .{name});
+        return;
+    };
     // Nested weft.use (an imported file itself calling weft.use) flat-tiers
     // — the sub-sub-manifest still lands at plain `.imported`, one rung, not
     // a deeper one (manifest.zig's module doc: "a deliberate simplification
@@ -1655,14 +1663,14 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
     const src = @import("file.zig").readAlloc(gpa, path) catch |e| {
-        std.log.warn("config: weft.use(\"{s}\") failed to read {s}: {t}", .{ name, path, e });
+        std.log.err("config: weft.use(\"{s}\") failed to read {s}: {t}", .{ name, path, e });
         return;
     };
     defer gpa.free(src);
     const owner = std.fmt.allocPrint(gpa, "import:{s}", .{name}) catch return;
     defer gpa.free(owner);
     const sub = evalToManifest(br.engine, br.activeCtx(), br.loader, br.config, dir, src, .imported, owner) catch |e| {
-        std.log.warn("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
+        std.log.err("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
         return;
     };
     m.addImport(sub) catch sub.destroy();

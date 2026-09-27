@@ -880,6 +880,28 @@ pub const Manifest = struct {
         }
     }
 
+    /// How many `weft.set`s in this manifest AND its imports name an owner
+    /// that is neither a plugin the whole tree loads nor a core namespace —
+    /// exactly the ones `applyDecls` refuses. The owner check is against the
+    /// TREE's plugin set, so a fragment's value for a plugin its includer
+    /// loads is owned wherever the two sit in the text. A config gate asks
+    /// this of an evaluated manifest without applying it.
+    pub fn unownedValues(self: *const Manifest, gpa: Allocator) !usize {
+        var known: std.StringHashMapUnmanaged(void) = .empty;
+        defer known.deinit(gpa);
+        try self.populateKnownPlugins(gpa, &known);
+        return self.countUnowned(&known);
+    }
+
+    fn countUnowned(self: *const Manifest, known: *const std.StringHashMapUnmanaged(void)) usize {
+        var n: usize = 0;
+        for (self.imports.items) |imp| n += imp.countUnowned(known);
+        for (self.values.items) |d| {
+            if (!ownerIsKnown(d.owner, known)) n += 1;
+        }
+        return n;
+    }
+
     fn collectPluginNames(self: *const Manifest, gpa: Allocator, out: *std.ArrayList([]const u8)) !void {
         for (self.imports.items) |imp| try imp.collectPluginNames(gpa, out);
         for (self.plugins.items) |d| try out.append(gpa, d.name);
@@ -961,8 +983,11 @@ pub const Manifest = struct {
             if (!ownerIsKnown(d.owner, known)) {
                 // No silent third result (design rule): stderr AND the
                 // user-visible echo line, same channel `echoProvideRefused`
-                // uses — a GUI user never sees a terminal (nit a).
-                std.log.warn("config: weft.set(\"{s}\", \"{s}\", ...) — '{s}' is not a loaded plugin or a declared value namespace; dropped", .{ d.owner, d.key, d.owner });
+                // uses — a GUI user never sees a terminal (nit a). At ERROR
+                // level: a value nobody owns is a broken config, and the test
+                // runner fails any test that logs one, so no gate can boot a
+                // config that drops a value and still pass.
+                std.log.err("config: weft.set(\"{s}\", \"{s}\", ...) — '{s}' is not a loaded plugin or a declared value namespace; dropped", .{ d.owner, d.key, d.owner });
                 echoValueDropped(actx.ctx, gpa, d.owner, d.key);
                 continue;
             }

@@ -1413,26 +1413,52 @@ test "quickjs: every shipped example config evals without a JS error" {
     // no-op here (no loader), so this checks syntax + the bind/menu/set calls —
     // a typo or a bad API use surfaces as ConfigException. Read from the repo's
     // config/ (the test runs with cwd at the project root).
+    //
+    // A fragment is evaluated the way it is used: INSIDE the config that
+    // includes it, with the directory its `weft.use` resolves against. Alone,
+    // a fragment is not a config — panel.js sets values for plugins its
+    // includer loads, so standalone they read as unowned. Only an opt-in
+    // fragment no shipped config includes is evaluated on its own, and it
+    // must stand on its own. Nothing either way may leave a value unowned.
     const file = @import("../file.zig");
-    const paths = [_][]const u8{
-        "config/config.js",   "config/helix.js",   "config/ide.js",
-        "config/defaults.js", "config/sidebar.js", "config/semantic.js",
-        "config/panel.js",    "config/toolbar.js", "config/statusbar.js",
-    };
+    const roots = [_][]const u8{ "config.js", "helix.js", "ide.js" };
+    const included = [_][]const u8{ "defaults", "sidebar", "semantic", "panel", "toolbar", "statusbar", "menubar" };
+    const opt_in = [_][]const u8{"outline.js"};
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    for (paths) |path| {
-        const src = file.readAlloc(gpa, path) catch continue; // skip if run outside the repo
+    var reached: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = reached.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        reached.deinit(gpa);
+    }
+    for (roots ++ opt_in) |name| {
+        const path = try std.fmt.allocPrint(gpa, "config/{s}", .{name});
+        defer gpa.free(path);
+        const src = file.readAlloc(gpa, path) catch return error.SkipZigTest; // run outside the repo
         defer gpa.free(src);
         var env: Env = undefined;
         try Env.init(gpa, &env);
         defer env.deinit(gpa);
         var cfgstore: kv.Store = .empty;
         defer cfgstore.deinit(gpa);
-        evalConfig(&engine, &env.ctx, null, &cfgstore, null, src) catch |e| {
+        const m = evalToManifest(&engine, &env.ctx, null, &cfgstore, "config", src, .config, "config") catch |e| {
             std.debug.print("config {s} failed: {t}\n", .{ path, e });
             return e;
         };
+        defer m.destroy();
+        try t.expectEqual(@as(usize, 0), try m.unownedValues(gpa));
+        for (m.imports.items) |imp| {
+            if (!reached.contains(imp.owner)) try reached.put(gpa, try gpa.dupe(u8, imp.owner), {});
+        }
+    }
+    for (included) |name| {
+        var buf: [64]u8 = undefined;
+        const owner = try std.fmt.bufPrint(&buf, "import:{s}", .{name});
+        if (!reached.contains(owner)) {
+            std.debug.print("config fragment {s}.js is included by no shipped config\n", .{name});
+            return error.FragmentUnreached;
+        }
     }
 }
 
