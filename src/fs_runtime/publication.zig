@@ -120,10 +120,12 @@ pub fn publish(
     const encoded_directory = try fs.target.encode(gpa, definition.directory);
     defer gpa.free(encoded_directory);
 
-    const facts = try gpa.alloc(semantic.target.Fact, definition.facts.len + 1);
+    const named: usize = @intFromBool(definition.designation.len != 0);
+    const facts = try gpa.alloc(semantic.target.Fact, definition.facts.len + 1 + named);
     defer gpa.free(facts);
     facts[0] = .{ .name = fs.target.fact_name, .value = encoded_directory };
-    @memcpy(facts[1..], definition.facts);
+    if (named != 0) facts[1] = .{ .name = fs.target.designation_fact_name, .value = definition.designation };
+    @memcpy(facts[1 + named ..], definition.facts);
 
     const ref = try targets.publish(gpa, owner, .{
         .kind = .directory,

@@ -43,6 +43,9 @@ const action_request_kind: u8 = 5;
 // distinct protocol tags so adding relation transport cannot alias them.
 const transfer_kind_v2: u8 = 11;
 const action_request_kind_v2: u8 = 12;
+/// v2 plus the request's `argument` designation. Written only when there is
+/// one, so every request without one keeps its v2 bytes.
+const action_request_kind_v3: u8 = 13;
 const target_descriptor_kind: u8 = 6;
 const located_target_kind: u8 = 7;
 const target_relation_kind: u8 = 9;
@@ -1257,15 +1260,17 @@ pub fn encodeActionRequest(gpa: std.mem.Allocator, request: semantic.action.Requ
     if (request.view.generation == 0 or @intFromEnum(request.subject) == 0) return error.InvalidData;
     try validateSelection(request.selection);
     if (request.transfer) |item| try validateTransfer(gpa, item);
+    if (request.argument.len > Limits.max_string_bytes) return error.LimitExceeded;
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
-    try header(&writer, action_request_kind_v2);
+    try header(&writer, if (request.argument.len != 0) action_request_kind_v3 else action_request_kind_v2);
     try writer.string(request.action);
     try writeHandle(&writer, request.view);
     try writer.writeU64(@intFromEnum(request.subject));
     try writeSelection(&writer, request.selection);
     try writer.byte(@intFromBool(request.transfer != null));
     if (request.transfer) |item| try writeTransferBody(&writer, item, true);
+    if (request.argument.len != 0) try writer.string(request.argument);
     return writer.finish();
 }
 
@@ -1284,7 +1289,7 @@ pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
     if (!std.mem.eql(u8, try reader.take(magic.len), magic)) return error.Corrupt;
     if (try reader.byte() != protocol_version) return error.Corrupt;
     const kind = try reader.byte();
-    if (kind != action_request_kind and kind != action_request_kind_v2) return error.Corrupt;
+    if (kind != action_request_kind and kind != action_request_kind_v2 and kind != action_request_kind_v3) return error.Corrupt;
     var owned: OwnedActionRequest = .{ .arena = .init(gpa), .value = undefined };
     errdefer owned.arena.deinit();
     const arena = owned.arena.allocator();
@@ -1294,10 +1299,29 @@ pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
     const subject_raw = try reader.readU64();
     if (subject_raw == 0) return error.InvalidData;
     const selection = try readSelection(&reader, arena);
-    const transfer: ?semantic.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena, kind == action_request_kind_v2) else null;
+    const transfer: ?semantic.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena, kind != action_request_kind) else null;
+    const argument: []const u8 = if (kind == action_request_kind_v3) try reader.string(arena) else "";
+    if (kind == action_request_kind_v3 and argument.len == 0) return error.InvalidData;
     try reader.done();
-    owned.value = .{ .action = action, .view = view, .subject = @enumFromInt(subject_raw), .selection = selection, .transfer = transfer };
+    owned.value = .{ .action = action, .view = view, .subject = @enumFromInt(subject_raw), .selection = selection, .transfer = transfer, .argument = argument };
     return owned;
+}
+
+test "action request codec: an argument rides in v3, and a request without one keeps v2's bytes" {
+    const view_ref: semantic.view.Ref = .{ .authority = .here, .slot = 3, .generation = 1 };
+    const plain = try encodeActionRequest(t.allocator, .{ .action = "view.refresh", .view = view_ref, .subject = @enumFromInt(1) });
+    defer t.allocator.free(plain);
+    try t.expectEqual(action_request_kind_v2, plain[magic.len + 1]);
+    const bytes = try encodeActionRequest(t.allocator, .{ .action = semantic.action.standard.reveal, .view = view_ref, .subject = @enumFromInt(1), .argument = "weft://here/file/srv/a.zig" });
+    defer t.allocator.free(bytes);
+    try t.expectEqual(action_request_kind_v3, bytes[magic.len + 1]);
+    var decoded = try decodeActionRequest(t.allocator, bytes);
+    defer decoded.deinit();
+    try t.expectEqualStrings("weft://here/file/srv/a.zig", decoded.value.argument);
+    try t.expectEqualStrings(semantic.action.standard.reveal, decoded.value.action);
+    var old = try decodeActionRequest(t.allocator, plain);
+    defer old.deinit();
+    try t.expectEqualStrings("", old.value.argument);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

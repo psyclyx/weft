@@ -239,11 +239,18 @@ pub const Application = struct {
     /// a change a listener makes is the NEXT frame's event. The comparison is
     /// per key, over content (`context.Context.observe`), so a frame where
     /// nothing moved fires nothing and a caret move in text fires nothing.
+    ///
+    /// The workspace hears the same list: a viewport whose subject or reveal
+    /// is bound to a moved key (`weft.present(v, {subject: {context: k}})`)
+    /// presents or reveals again, in a second layout pass right here — so a
+    /// sidebar following `place` is on the new place in the frame the place
+    /// changed, through this one comparison rather than a watcher of its own.
     fn notifyContextChanged(self: *Application) bool {
         const ctx = &self.session.cmd_ctx;
         const context = ctx.context orelse return false;
         const plugins = self.driver.ctx.plugins.items;
-        const hears = context.listeners.items.len > 0 or for (plugins) |pl| {
+        const viewports = self.driver.ctx.viewports;
+        const hears = context.listeners.items.len > 0 or viewports.followsAny() or for (plugins) |pl| {
             if (core.wasm_host.hearsContext(pl)) break true;
         } else false;
         if (!hears) return false;
@@ -255,6 +262,9 @@ pub const Application = struct {
         var ran = context.notify();
         for (plugins) |pl| {
             if (core.wasm_host.notifyContextChanged(pl)) ran = true;
+        }
+        if (viewports.follow(context.movedKeys())) {
+            if (self.driver.applyWindowIntents(ctx)) ran = true;
         }
         return ran;
     }

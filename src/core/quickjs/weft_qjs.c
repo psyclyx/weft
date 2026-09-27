@@ -215,10 +215,13 @@ extern void host_viewport(const char *name, int name_len,
                           const char *edge, int edge_len,
                           int flags, int extent_permille);
 // weft.present(viewport, opts): stage "show this subject in that viewport".
+// `flags` bit 0: the subject is a context key; bit 1: so is the reveal.
 __attribute__((import_module("weft"), import_name("qjs_present")))
 extern void host_present(const char *viewport, int viewport_len,
                          const char *subject, int subject_len,
-                         const char *command, int command_len);
+                         const char *as, int as_len,
+                         const char *reveal, int reveal_len,
+                         int flags);
 
 #define WEFT_VP_CYCLES (1 << 0)
 #define WEFT_VP_PERSISTENT (1 << 1)
@@ -696,40 +699,68 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// One of `present`'s two bindable options: a designation string, or
+// `{context: "<key>"}` — the current value of ONE context key. No function,
+// no composition: anything else is refused. Sets *key when it is a key; the
+// string (owned by the caller) is NULL when the option is absent.
+static int present_binding(JSContext *ctx, JSValueConst opts, const char *prop,
+                           const char **out, size_t *len, int *key) {
+    JSValue v = JS_GetPropertyStr(ctx, opts, prop);
+    *out = NULL;
+    *len = 0;
+    *key = 0;
+    int ok = 1;
+    if (JS_IsString(v)) {
+        *out = JS_ToCStringLen(ctx, len, v);
+    } else if (JS_IsObject(v)) {
+        JSValue k = JS_GetPropertyStr(ctx, v, "context");
+        if (JS_IsString(k)) {
+            *out = JS_ToCStringLen(ctx, len, k);
+            *key = 1;
+        } else {
+            ok = 0;
+        }
+        JS_FreeValue(ctx, k);
+    } else if (!JS_IsUndefined(v)) {
+        ok = 0;
+    }
+    JS_FreeValue(ctx, v);
+    return ok;
+}
+
 // weft.present(viewport, opts) — "present resource R in viewport V" (§7) as
 // a declaration. Separate from `viewport` because presenting is an ordinary
 // operation on a live viewport, not part of what the viewport is.
-// `opts.subject` is opened with `open`; `opts.command` names another command
-// that presents (with `subject` as its argument when there is one) — how a
-// plugin's own entry, which has no path to open, reaches a viewport.
+// `opts.subject` is a designation or `{context: key}` (followed: presented
+// again when the key moves), `opts.as` the projection to show it as, and
+// `opts.reveal` a designation or `{context: key}` to highlight inside it.
 static JSValue js_present(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject | command})");
-    size_t vl, sl = 0, cl = 0;
+    if (argc < 2 || !JS_IsObject(argv[1]))
+        return JS_ThrowTypeError(ctx, "present(viewport, {subject, as, reveal})");
+    size_t vl, sl, al = 0, rl;
     const char *vp = JS_ToCStringLen(ctx, &vl, argv[0]);
     if (!vp) return JS_EXCEPTION;
-    const char *subject = NULL, *command = NULL;
-    JSValue jsubject = JS_UNDEFINED, jcommand = JS_UNDEFINED;
-    if (JS_IsObject(argv[1])) {
-        jsubject = JS_GetPropertyStr(ctx, argv[1], "subject");
-        if (JS_IsString(jsubject)) subject = JS_ToCStringLen(ctx, &sl, jsubject);
-        jcommand = JS_GetPropertyStr(ctx, argv[1], "command");
-        if (JS_IsString(jcommand)) command = JS_ToCStringLen(ctx, &cl, jcommand);
+    const char *subject, *reveal, *as = NULL;
+    int subject_key, reveal_key;
+    int ok = present_binding(ctx, argv[1], "subject", &subject, &sl, &subject_key);
+    ok = present_binding(ctx, argv[1], "reveal", &reveal, &rl, &reveal_key) && ok;
+    JSValue jas = JS_GetPropertyStr(ctx, argv[1], "as");
+    if (JS_IsString(jas)) as = JS_ToCStringLen(ctx, &al, jas);
+    else if (!JS_IsUndefined(jas)) ok = 0;
+    JSValue result = JS_UNDEFINED;
+    if (!ok || !subject) {
+        result = JS_ThrowTypeError(ctx, "present(viewport, {subject, as, reveal}): subject and reveal are a designation or {context: \"<key>\"}, and as a name");
+    } else {
+        host_present(vp, (int)vl, subject, (int)sl, as ? as : "", (int)al,
+                     reveal ? reveal : "", (int)rl, subject_key | (reveal_key << 1));
     }
-    if (!subject && !command) {
-        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject | command}): name what to show, or the command that shows it");
-        JS_FreeCString(ctx, vp);
-        JS_FreeValue(ctx, jsubject);
-        JS_FreeValue(ctx, jcommand);
-        return exc;
-    }
-    host_present(vp, (int)vl, subject ? subject : "", (int)sl, command ? command : "", (int)cl);
     JS_FreeCString(ctx, vp);
     if (subject) JS_FreeCString(ctx, subject);
-    if (command) JS_FreeCString(ctx, command);
-    JS_FreeValue(ctx, jsubject);
-    JS_FreeValue(ctx, jcommand);
-    return JS_UNDEFINED;
+    if (reveal) JS_FreeCString(ctx, reveal);
+    if (as) JS_FreeCString(ctx, as);
+    JS_FreeValue(ctx, jas);
+    return result;
 }
 
 // Install the `weft` global: the config surface config.js calls.

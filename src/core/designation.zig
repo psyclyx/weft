@@ -175,6 +175,12 @@ pub const refuse_unreachable = "open: that designation's authority is not reacha
 pub const refuse_doc_gone = "open: that document is gone — closed, and no longer kept";
 pub const refuse_proc_gone = "open: that process is gone — a live resource lasts only as long as it runs";
 pub const refuse_no_producer = "open: nothing here produces that kind";
+pub const refuse_produced_nothing = "open: that projection produced nothing to show";
+
+/// The view parameter that picks a projection (doc/model.md §2.4): a layout
+/// the subject's own producer reads (`offers/primary?as=strip`), or another
+/// producer's projection OF the subject (`…/main.zig?as=symbols`).
+pub const as_param = "as";
 
 /// Open what `d` designates, for the kinds core itself can answer: a live
 /// entry already showing it (any kind), a document (live, or reopened from
@@ -184,10 +190,11 @@ pub const refuse_no_producer = "open: nothing here produces that kind";
 /// connections — so for those this answers only the live-entry case and
 /// null otherwise. Focuses what it opens.
 pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outcome {
-    if (find(ctx.buffers, d)) |b| {
+    if (d.param(as_param)) |as| if (try openAs(ctx, d, text, as)) |outcome| return outcome;
+    if (find(ctx.buffers, d)) |b| if (sameProjection(b, d)) {
         try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
         return .{ .opened = b.id };
-    }
+    };
     if (d.kind.isPath()) return null;
     if (d.authority != .here) return if (d.kind == .doc) null else .{ .refused = refuse_unreachable };
     switch (d.kind) {
@@ -230,6 +237,46 @@ pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outco
         },
         .file, .directory => unreachable,
     }
+}
+
+/// Whether live entry `b` shows `d` as the projection `d` asks for: the
+/// same `as`, or neither names one. View parameters are otherwise advisory
+/// (`Designation.designates`), but a strip of offers is not the menu of the
+/// same offers, and opening one must not focus the other.
+fn sameProjection(b: *Buffers.Buffer, d: Designation) bool {
+    const wanted = d.param(as_param) orelse return true;
+    var buf: [max_len]u8 = undefined;
+    const have = parsed(b, &buf) orelse return false;
+    const shown = have.param(as_param) orelse return false;
+    return std.mem.eql(u8, shown, wanted);
+}
+
+/// `d?as=<kind>` where a producer claims `<kind>` and `d` is not already of
+/// it: that producer's projection OF `d` — the symbols of an entry, the
+/// diagnostics of a place. The producer is run with the whole designation,
+/// and with `d`'s live entry active while it runs, so the document doors it
+/// reads are the subject's; the entry it leaves active is the projection.
+/// Null when `as` is no producer's kind: a layout `d`'s own producer reads
+/// from the parameter, routed the ordinary way.
+fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u8) !?Outcome {
+    const openers = ctx.designations orelse return null;
+    const opener = openers.find(as) orelse return null;
+    switch (d.kind) {
+        .projection => |kind| if (std.mem.eql(u8, kind, as)) return null,
+        else => {},
+    }
+    const subject = find(ctx.buffers, d);
+    if (subject) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
+    const before = ctx.buffers.active_id;
+    var name_buf: [256]u8 = undefined;
+    if (opener.command.len > name_buf.len) return .{ .refused = refuse_no_producer };
+    @memcpy(name_buf[0..opener.command.len], opener.command);
+    const result = try command.run(ctx.commands, ctx, name_buf[0..opener.command.len], &.{.{ .string = text }});
+    if (result == .string) return .{ .refused = result.string };
+    // Still on the subject: the producer made nothing, and the viewport must
+    // not be handed the subject itself instead of its projection.
+    if (subject != null and ctx.buffers.active_id == before) return .{ .refused = refuse_produced_nothing };
+    return .{ .opened = ctx.buffers.active_id };
 }
 
 /// The opener kind that answers a process `ref` — `proc.<namespace>`, the

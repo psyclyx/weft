@@ -215,7 +215,7 @@ test "e2e/designation: a relative path names nothing, and a malformed designatio
     try t.expect(openRaw(ed, "weft://here/doc/not-an-id") != null);
     try t.expectEqual(before, ed.buffers.count());
     // A viewport subject is refused where it is written, too.
-    try t.expectError(error.RelativeSubject, ed.session.system.viewports.present(t.allocator, "nowhere", ".", ""));
+    try t.expectError(error.RelativeSubject, ed.session.system.viewports.present(t.allocator, "nowhere", .{ .subject = .{ .text = "." } }));
 }
 
 test "e2e/designation: the jumplist reopens a closed file and a closed scratch document by name" {

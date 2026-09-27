@@ -17,6 +17,10 @@ pub const Request = struct {
     /// Paste-like actions receive the current system transfer here. Other
     /// actions ignore it; absence is explicit rather than an empty sentinel.
     transfer: ?transfer.Item = null,
+    /// A designation the action is about, for actions that name something
+    /// beyond the subject node — `standard.reveal` names what to expand to.
+    /// Empty for every action that does not.
+    argument: []const u8 = "",
 };
 
 /// Provider-neutral request to follow a named edge from an exact source
@@ -87,6 +91,13 @@ pub const standard = struct {
     /// protocol names: a provider advertises only the ones it supports, while
     /// generic input configurations can expose them without knowing the
     /// provider (directory editor, picker, or another tool).
+    /// Expand to and highlight the designation in the request's `argument`
+    /// inside this view — what a viewport's `reveal` asks of whatever it
+    /// presents (doc/model.md §2.5). The provider answers `.focus` with the
+    /// node that shows it (opening what encloses it first), or declines when
+    /// the view does not contain it. Core moves the ENTRY's highlight to that
+    /// node and never the head's focus: revealing is not navigating.
+    pub const reveal = "view.reveal";
     pub const refresh = "view.refresh";
     pub const revert = "view.revert";
     pub const apply = "view.apply";

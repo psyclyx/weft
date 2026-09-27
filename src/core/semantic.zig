@@ -550,6 +550,40 @@ pub const Services = struct {
         return selected;
     }
 
+    /// Ask view `ref`'s provider to expand to and highlight `designation`
+    /// (`standard.reveal`), and move `focus` — an ENTRY's retained highlight,
+    /// not a head's — to the node it answers with. No head moves: revealing
+    /// what the editor is on inside a companion must not take the keys away
+    /// from the editor. False when the provider declined (the view does not
+    /// contain it) or answered anything but a node of this view.
+    pub fn reveal(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        focus: *Head.SemanticFocus,
+        ref: semantic.view.Ref,
+        designation: []const u8,
+    ) !bool {
+        const root = (self.views.get(ref) orelse return false).descriptor.root;
+        const effect = self.invokeAction(stack, gpa, .{
+            .action = semantic.action.standard.reveal,
+            .view = ref,
+            .subject = root,
+            .argument = designation,
+        }) catch return false;
+        const wanted = switch (effect) {
+            .focus_requested => |f| f,
+            else => return false,
+        };
+        // The provider may have republished while answering (a folder
+        // opened): read the view as it is now.
+        const instance = self.views.get(wanted.view) orelse return false;
+        var storage: [1026]semantic.scene.NodeId = undefined;
+        const path = (try instance.focusPath(wanted.node, &storage)) orelse return false;
+        try focus.set(gpa, path);
+        return true;
+    }
+
     /// Return the closest target link on one head's retained focus path. The
     /// value is borrowed only for synchronous dispatch; the view registry owns
     /// any location payload. A target replacement is an explicit stale result,

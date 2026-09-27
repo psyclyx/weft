@@ -360,6 +360,10 @@ pub const Session = struct {
             try self.toggleExpanded(row);
             return .handled;
         }
+        if (std.mem.eql(u8, request.action, semantic.action.standard.reveal)) {
+            const node = (try self.reveal(request.argument)) orelse return .declined;
+            return .{ .focus = node };
+        }
         if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
             if (request.subject == files.rootNodeId()) return .{ .set_working_target = .{
                 .target = self.target,
@@ -473,6 +477,59 @@ pub const Session = struct {
         else
             try self.readChildren(&staged, row);
         try self.publishDraft(&staged);
+    }
+
+    /// `view.reveal`: the row showing `argument`, a designation somewhere
+    /// below this listing's directory, with every directory between opened
+    /// in place so the row is on screen. Null when it is not below this
+    /// listing (another authority, another tree), or a name on the way is
+    /// not here. The listing's own designation is the one its publisher
+    /// bound it under, stated on its descriptor; the rest of the way is by
+    /// the names this draft already holds, reading a folder only when it has
+    /// to be opened.
+    fn reveal(self: *Session, argument: []const u8) !?semantic.scene.NodeId {
+        const durable = semantic.durable;
+        const want = durable.parse(argument) orelse return null;
+        if (!want.kind.isPath()) return null;
+        var descriptor = try weft.semanticTargetDescribe(self.target, self.plugin.gpa);
+        defer descriptor.deinit();
+        const own_text = for (descriptor.value.facts) |fact| {
+            if (std.mem.eql(u8, fact.name, fs.target.designation_fact_name)) break fact.value;
+        } else return null;
+        const own = durable.parse(own_text) orelse return null;
+        if (!own.authority.eql(want.authority)) return null;
+        const base = std.mem.trimEnd(u8, own.ref, "/");
+        if (want.ref.len <= base.len or !std.mem.startsWith(u8, want.ref, base) or want.ref[base.len] != '/') return null;
+
+        var staged = try self.stage();
+        defer staged.deinit();
+        var opened = false;
+        var parent: ?files.NodeId = null;
+        var found: ?files.NodeId = null;
+        var names = std.mem.tokenizeScalar(u8, want.ref[base.len..], '/');
+        while (names.next()) |name| {
+            const row = childNamed(&staged, parent, name) orelse return null;
+            found = row.id;
+            if (names.peek() == null) break;
+            if (row.draft.kind != .directory) return null;
+            if (!row.expanded) {
+                try self.readChildren(&staged, row.id);
+                opened = true;
+            }
+            parent = row.id;
+        }
+        if (opened) try self.publishDraft(&staged);
+        return try files.rowNodeId(found orelse return null);
+    }
+
+    /// The row named `name` directly under `parent` (null: the listing's own
+    /// directory).
+    fn childNamed(draft: *const files.Model, parent: ?files.NodeId, name: []const u8) ?*const files.Row {
+        for (draft.rows.items) |*row| {
+            if (row.parent != parent) continue;
+            if (std.mem.eql(u8, row.draft.name, name)) return row;
+        }
+        return null;
     }
 
     /// Read one expanded row's directory through its own exact child target

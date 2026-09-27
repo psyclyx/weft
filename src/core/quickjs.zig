@@ -1840,8 +1840,11 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
 }
 
-/// `weft.present(viewport, {subject, command})` — stage what a declared
-/// viewport shows (§7), and optionally the command that presents it.
+/// `weft.present(viewport, {subject, as, reveal})` — stage what a declared
+/// viewport shows (§7): a designation, or ONE context key whose value is one
+/// (`{context: "place"}`, doc/model.md §2.5); the projection to show it as;
+/// and what to highlight inside it. `flags` says which of subject and reveal
+/// are keys (bit 0, bit 1), because the import ABI carries i32s only.
 fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1850,19 +1853,29 @@ fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(name);
     const subject = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(subject);
-    const presenter = readStr(br, caller, args[4], args[5]) orelse return;
-    defer gpa.free(presenter);
-    // A subject names what the viewport shows wherever it is read, so it is
-    // a designation or an absolute path — refused here, where it is written,
-    // rather than resolved later against the directory the process was
-    // launched in (doc/model.md §2.1).
-    if (subject.len != 0) switch (@import("weft_semantic").durable.Spec.of(subject)) {
-        .designation, .path => {},
-        .relative => return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\"}}): a relative path names nothing — give a weft:// designation, an absolute path, or a presenting command", .{ name, subject }),
-        .malformed => return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\"}}): not a designation (weft://<authority>/<kind>/<ref>)", .{ name, subject }),
+    const as = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(as);
+    const reveal = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(reveal);
+    const p: viewport_mod.Presentation = .{
+        .subject = .{ .text = subject, .key = args[8] & 1 != 0 },
+        .as = as,
+        .reveal = .{ .text = reveal, .key = args[8] & 2 != 0 },
     };
+    // A subject names what the viewport shows wherever it is read, so it is
+    // a designation, an absolute path, or a key — refused here, where it is
+    // written, rather than resolved later against the directory the process
+    // was launched in (doc/model.md §2.1).
+    viewport_mod.validate(p) catch |err| return std.log.warn("weft.present(\"{s}\", {{subject: \"{s}\", as: \"{s}\", reveal: \"{s}\"}}): {s}", .{ name, subject, as, reveal, switch (err) {
+        error.RelativeSubject => "a relative path names nothing — give a weft:// designation, an absolute path, or {context: key}",
+        error.MalformedSubject => "not a designation (weft://<authority>/<kind>/<ref>)",
+        error.MalformedKey => "a context key is one word (\"place\", \"repl.session\")",
+        error.MalformedProjection => "`as` is a lowercase projection name (\"strip\", \"symbols\")",
+        error.PathWithProjection => "a bare path has no kind to project — give its weft:// designation",
+        else => "refused",
+    } });
     if (br.manifest) |m| {
-        m.addPresent(name, subject, presenter) catch {};
+        m.addPresent(name, p) catch {};
         return;
     }
     std.log.warn("weft.present: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});

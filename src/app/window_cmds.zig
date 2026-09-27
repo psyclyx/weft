@@ -7,6 +7,7 @@ const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
 const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
+const semantic_model = @import("weft_semantic");
 const ok_echo = @import("handler.zig").ok_echo;
 
 /// Window-layout intents; applied in the frame loop (which owns the pane
@@ -271,7 +272,9 @@ fn applyPlacement(
 /// sealed and must not touch a workspace. Each declaration is materialized
 /// once — the registry remembers the pane — so this is a cheap scan on every
 /// later frame, and a config reload re-presenting a new subject picks it up
-/// without re-docking anything.
+/// without re-docking anything. A subject bound to a context key is presented
+/// again when the frame boundary reports that key moved
+/// (`Registry.follow`), which runs this again; a reveal likewise.
 ///
 /// Only docked viewports are realized today: a tiled declaration has no
 /// stated position to place it at, which is the `ui/layout` slot's business,
@@ -344,19 +347,182 @@ pub fn materializeViewports(
             core.viewport.Registry.hold(gpa, &decl.entry, null) catch {};
             decl.presented = false;
         };
-        if (decl.presented or !decl.hasPresentation()) {
-            // What it holds follows what it shows: navigating inside a
-            // listing moves the listing's designation, and that is what
-            // showing it again must bring back.
-            hold(gpa, buffers, decl, node.pane().buffer_id);
-            continue;
+        // Shown again after a hide: a subject bound to a key that moved
+        // while the viewport was away presents afresh; one that did not keeps
+        // what it showed.
+        if (docked and decl.presented and decl.subject.key) {
+            var probe: [core.designation.max_len + 64]u8 = undefined;
+            const now = subjectNow(ctx, decl, &probe) orelse "";
+            if (decl.resolved) |was| if (!std.mem.eql(u8, was, now)) {
+                decl.presented = false;
+            };
         }
-        decl.presented = true;
-        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, if (decl.command.len > 0) decl.command else "open", decl.subject);
+        if (!decl.presented and decl.hasPresentation()) {
+            decl.presented = true;
+            if (presentDeclared(ctx, win_layout, buffers, gpa, head, keymap, registry, decl, node)) dirty = true;
+        }
+        if (decl.reveal_due) {
+            decl.reveal_due = false;
+            if (revealIn(ctx, buffers, gpa, head, decl, node)) dirty = true;
+        }
+        // What it holds follows what it shows: navigating inside a listing
+        // moves the listing's designation, and that is what showing it again
+        // must bring back.
         hold(gpa, buffers, decl, node.pane().buffer_id);
-        dirty = true;
     }
     return dirty;
+}
+
+/// Room for a subject's designation with its projection parameter added.
+const subject_cap = core.designation.max_len + 64;
+
+/// What `decl`'s subject names right now, `as` included, into `out`: the
+/// literal designation, or the current value of its key in the PRIMARY
+/// context (`intent.primaryScopeOf` — the one context everything that
+/// follows the editor reads). Null when the key has no value there, or the
+/// value cannot carry the projection asked for.
+fn subjectNow(ctx: *core.command.Context, decl: *const core.viewport.Declaration, out: []u8) ?[]const u8 {
+    const value: []const u8 = if (!decl.subject.key) decl.subject.text else blk: {
+        const scope = core.intent.primaryScopeOf(ctx) orelse return null;
+        break :blk core.intent.factsIn(scope).get(decl.subject.text) orelse return null;
+    };
+    return withProjection(out, value, decl.as);
+}
+
+/// `value` with the projection `as` added as its `as` view parameter
+/// (`designation.as_param`), which is where `open`'s routing reads it. A
+/// bare path has no kind to project, so it carries no `as`.
+fn withProjection(out: []u8, value: []const u8, as: []const u8) ?[]const u8 {
+    if (as.len == 0) return std.fmt.bufPrint(out, "{s}", .{value}) catch null;
+    const d = core.designation.durable.parse(value) orelse return null;
+    if (d.param(core.designation.as_param) != null) return null;
+    return std.fmt.bufPrint(out, "{s}{s}{s}={s}", .{ value, if (d.params.len == 0) "?" else "&", core.designation.as_param, as }) catch null;
+}
+
+/// Present what `decl` declares into `node`. A keyed subject whose key reads
+/// the same as when it was last presented keeps what the pane shows — the
+/// key changing is what re-presents, not the frame boundary having asked —
+/// so a persistent viewport keeps whatever the user navigated to inside it.
+/// A key with no value presents the explicit empty state, never the stale
+/// subject. The entry the previous presentation MADE (it did not exist
+/// before) is closed when nothing shows it any more, so following a key
+/// does not leave a trail of listings behind as tabs. True when the pane
+/// changed.
+fn presentDeclared(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+    node: *window_layout.Node,
+) bool {
+    var buf: [subject_cap]u8 = undefined;
+    const target = subjectNow(ctx, decl, &buf);
+    const now = target orelse "";
+    if (decl.subject.key) if (decl.resolved) |was| {
+        if (std.mem.eql(u8, was, now) and buffers.get(node.pane().buffer_id) != null) return false;
+    };
+    core.viewport.Registry.hold(gpa, &decl.resolved, now) catch {};
+    decl.reveal_due = decl.reveal.isSet();
+    const before = if (buffers.get(node.pane().buffer_id)) |b| b.ref() else null;
+    const born = buffers.next_generation;
+    if (target) |t| {
+        const owned = gpa.dupe(u8, t) catch return false;
+        defer gpa.free(owned);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, "open", owned);
+    } else presentEmpty(ctx, buffers, gpa, registry, decl, node);
+    const shown = buffers.get(node.pane().buffer_id);
+    // What the previous presentation made, and nothing shows any more.
+    if (decl.made) |made| if (buffers.resolve(made)) |old| {
+        if (shown != old and old.id != buffers.active_id and !paneShows(win_layout, old.id))
+            core.Buffers.quietly(head, core.Buffers.close, .{ buffers, gpa, old.id, head, keymap }) catch {};
+    };
+    decl.made = if (shown) |b| (if (b.generation >= born) b.ref() else null) else null;
+    const after = if (shown) |b| b.ref() else null;
+    return !std.meta.eql(before, after);
+}
+
+fn paneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
+    const Probe = struct { id: core.Buffers.Id, found: bool = false };
+    var probe: Probe = .{ .id = id };
+    win_layout.eachPane(&probe, struct {
+        fn visit(p: *Probe, pane: *window_layout.Pane) void {
+            if (pane.buffer_id == p.id) p.found = true;
+        }
+    }.visit);
+    return probe.found;
+}
+
+/// The explicit empty state: `decl`'s subject key has no value in the
+/// primary context, so the viewport says so rather than showing whatever it
+/// showed before. One entry per viewport, made on first need and reused: a
+/// view (core's own) with one line naming the key.
+fn presentEmpty(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    registry: *core.viewport.Registry,
+    decl: *core.viewport.Declaration,
+    node: *window_layout.Node,
+) void {
+    const services = ctx.semantic orelse return;
+    if (decl.empty) |empty| {
+        var it = buffers.iterator();
+        while (it.next()) |b| if (b.generation == empty.entry_generation) {
+            node.pane().buffer_id = b.id;
+            node.pane().top_row = 0;
+            return;
+        };
+        _ = services.closeView(gpa, registry.owner orelse return, empty.view);
+        decl.empty = null;
+    }
+    const owner = registry.owner orelse (services.acquireOwner() catch return);
+    registry.owner = owner;
+    var line: [256]u8 = undefined;
+    const label = std.fmt.bufPrint(&line, "Nothing to show: no {s} here", .{decl.subject.text}) catch "Nothing to show";
+    const children = [_]semantic_model.scene.Node{.{ .id = @enumFromInt(2), .role = "muted", .content = .{ .label = label } }};
+    const root: semantic_model.scene.Node = .{ .id = @enumFromInt(1), .role = "viewport.empty", .content = .{ .container = .{ .children = &children } } };
+    const view_ref = services.publishView(gpa, owner, null, 1, root) catch return;
+    const id = buffers.createView(gpa, decl.name, "viewport.empty") catch {
+        _ = services.closeView(gpa, owner, view_ref);
+        return;
+    };
+    const entry = buffers.get(id).?;
+    entry.tool_view = view_ref;
+    const instance = services.views.get(view_ref) orelse return;
+    var storage: [4]semantic_model.scene.NodeId = undefined;
+    if (instance.focusPath(root.id, &storage) catch null) |path| entry.semantic_focus.set(gpa, path) catch {};
+    decl.empty = .{ .entry_generation = entry.generation, .view = view_ref };
+    node.pane().buffer_id = id;
+    node.pane().top_row = 0;
+}
+
+/// Highlight `decl`'s reveal inside what `node` shows, without taking focus
+/// (`Services.reveal`): the provider expands to it and names the node, and
+/// the ENTRY's highlight moves there — the head's too only when the head is
+/// in that entry. True when a highlight moved.
+fn revealIn(
+    ctx: *core.command.Context,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    decl: *const core.viewport.Declaration,
+    node: *window_layout.Node,
+) bool {
+    const services = ctx.semantic orelse return false;
+    const entry = buffers.get(node.pane().buffer_id) orelse return false;
+    var buf: [subject_cap]u8 = undefined;
+    const wanted: []const u8 = if (!decl.reveal.key) decl.reveal.text else blk: {
+        const scope = core.intent.primaryScopeOf(ctx) orelse return false;
+        const value = core.intent.factsIn(scope).get(decl.reveal.text) orelse return false;
+        break :blk std.fmt.bufPrint(&buf, "{s}", .{value}) catch return false;
+    };
+    const focus = if (entry.id == buffers.active_id) &head.semantic_focus else &entry.semantic_focus;
+    const view_ref = focus.view orelse entry.tool_view orelse return false;
+    return services.reveal(&head.interactions, gpa, focus, view_ref, wanted) catch false;
 }
 
 /// Open `designation` again and show it in `node` — a viewport's closed

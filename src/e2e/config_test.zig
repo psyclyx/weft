@@ -1378,10 +1378,14 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     try t.expect(!decl.attrs.cycles); // out of focus-other's rotation
     try t.expect(decl.attrs.persistent); // owns its entry
     try t.expect(!decl.attrs.focus_source); // a companion cannot chase itself
-    // It presents the PLACE's directory, through the files producer — never
-    // "." (a relative path names nothing, doc/model.md §2.1).
-    try t.expectEqualStrings("", decl.subject);
-    try t.expectEqualStrings("files", decl.command);
+    // It presents the PLACE — the value of the `place` context key, a
+    // designation — and reveals the editor's entry inside it: two keys read,
+    // no expression (doc/model.md §2.5). Never "." (a relative path names
+    // nothing, §2.1).
+    try t.expect(decl.subject.key);
+    try t.expectEqualStrings("place", decl.subject.text);
+    try t.expect(decl.reveal.key);
+    try t.expectEqualStrings("entry", decl.reveal.text);
     try t.expect(decl.pane == null); // nothing realized during eval
 
     // The layout phase realizes it — an ordinary application wake, with no

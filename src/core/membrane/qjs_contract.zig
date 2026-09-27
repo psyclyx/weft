@@ -125,7 +125,7 @@ pub const imports = [_]Entry{
     e("qjs_status_segment", 7, 0, .config, "weft.statusSegment(text, role, priority, command): stage a static ui/statusline-seg segment onto the manifest; a click on it runs `command` (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
     e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent | {rows}, cycles, persistent, followFocus, takesFocus, statusLine, shown}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),
-    e("qjs_present", 6, 0, .config, "weft.present(viewport, {subject, command}): stage \"show this subject in that viewport\", opened by `open` or by the named command (doc/contextual-workspace-architecture.md §7)"),
+    e("qjs_present", 9, 0, .config, "weft.present(viewport, {subject, as, reveal}): stage \"show this subject in that viewport\" — a designation or ONE context key (flags bit 0), as a projection, revealing a designation or key (bit 1) inside it (doc/model.md §2.5)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
