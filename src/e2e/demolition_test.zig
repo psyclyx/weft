@@ -634,6 +634,9 @@ test "demolition: the context doors are ONE body reached two ways" {
     const cases = .{
         .{ "context_set", ctx.hContextSet, quickjs.jsDoor(ctx.setBody, null) },
         .{ "context_get", ctx.hContextGet, quickjs.jsDoor(ctx.getBody, null) },
+        .{ "context_changed", ctx.hContextChanged, quickjs.jsDoor(ctx.changedBody, null) },
+        .{ "places", ctx.hPlaces, quickjs.jsDoor(ctx.placesBody, null) },
+        .{ "subject_watch", ctx.hSubjectWatch, quickjs.jsDoor(ctx.watchBody, null) },
     };
     inline for (cases) |c| {
         var wl_handler: ?HostFn = null;
@@ -646,5 +649,35 @@ test "demolition: the context doors are ONE body reached two ways" {
             if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ c[0])) qjs_handler = entry.handler;
         }
         try t.expectEqual(@as(?HostFn, c[2]), qjs_handler);
+    }
+}
+
+// The tool doors: marking an entry, naming it, and claiming a projection kind
+// run one body each on both planes. The creator rule (only the entry's maker
+// says what it is) and the namespace rule (a kind is the plugin's own name,
+// or under it, or declared) live in those bodies, so a `.js` producer cannot
+// be held to a looser rule than a `.wasm` one — the pointers would differ.
+test "demolition: the tool doors are ONE body reached two ways" {
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+    const tool = h.core.wasm_host.tool_doors;
+    const HostFn = @TypeOf(tool.hToolBacking);
+    const cases = .{
+        .{ "wl_tool_backing", "qjs_tool_backing", tool.hToolBacking, quickjs.jsDoor(tool.toolBackingBody, null) },
+        .{ "wl_entry_designation", "qjs_designation", tool.hEntryDesignation, quickjs.jsDoor(tool.designationBody, null) },
+        .{ "wl_entry_designate", "qjs_designate", tool.hEntryDesignate, quickjs.jsDoor(tool.designateBody, null) },
+        .{ "wl_designation_opener", "qjs_designation_opener", tool.hDesignationOpener, quickjs.jsDoor(tool.openerBody, null) },
+    };
+    inline for (cases) |c| {
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, c[0])) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[2]), wl_handler);
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, c[1])) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, c[3]), qjs_handler);
     }
 }

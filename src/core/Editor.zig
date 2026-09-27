@@ -123,10 +123,23 @@ pub const Ends = struct { anchor: usize, head: usize };
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.Error!Editor {
     var doc = try Document.init(gpa, user_agent);
     errdefer doc.deinit(gpa);
+    return around(gpa, pool, &doc);
+}
+
+/// An editor around a document that already exists — one restored from the
+/// document store (`Document.restore`). MOVES `doc` in on success (leaving
+/// it empty, so the caller's cleanup of it is a no-op); on failure the
+/// caller still owns it, unchanged. The caret starts at the top, and there
+/// is no backing and nothing saved: the editor is new even though the
+/// document is not.
+pub fn around(gpa: Allocator, pool: *task.Pool, doc: *Document) Allocator.Error!Editor {
     const cursor = try doc.addAnchor(gpa, 0, .right);
+    errdefer doc.removeAnchor(cursor);
     var selections: std.ArrayList(Selection) = .empty;
     try selections.append(gpa, .{ .head = cursor });
-    return .{ .doc = doc, .selections = selections, .pool = pool };
+    const moved = doc.*;
+    doc.* = .{};
+    return .{ .doc = moved, .selections = selections, .pool = pool };
 }
 
 pub fn deinit(self: *Editor, gpa: Allocator) void {

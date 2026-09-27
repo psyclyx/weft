@@ -91,6 +91,16 @@ pub fn resolveSyntax(buf: *core.Buffers.Buffer) ?*core.syntax.Syntax {
     return at.syntax;
 }
 
+/// How far `buf`'s grammar tree has moved (`Syntax.generation`, 0 with no
+/// grammar): the context's `Derived`, so a watched subject and a chrome
+/// answer see a parse that lands after the edit it reads. A read: a landed
+/// initial parse is adopted by the frame loop (`frame.tickAsync`), earlier
+/// in the same wake than the boundary that reads this.
+pub fn treeRevision(buf: *core.Buffers.Buffer) u64 {
+    const syn = resolveSyntax(buf) orelse return 0;
+    return syn.generation;
+}
+
 pub const AttachDeps = struct {
     gpa: std.mem.Allocator,
     grammars: *core.syntax.Runtime,

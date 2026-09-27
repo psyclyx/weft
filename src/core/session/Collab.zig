@@ -200,6 +200,9 @@ pub const ResolvedPresence = struct {
 };
 
 pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8) !Collab {
+    // From here on a peer may write into it: its text is no longer this
+    // machine's alone to keep on disk (`Document.storable`).
+    doc.bound_to_peer = true;
     return .{
         .gpa = gpa,
         .session = session,

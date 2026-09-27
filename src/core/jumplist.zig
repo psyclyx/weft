@@ -51,6 +51,11 @@ pub const Jump = struct {
     /// was taken. An anchor is meaningless in any other document, so it is
     /// read only while a document with this id is held.
     doc: ?Document.Id = null,
+    /// Which in-memory instance of `doc` the anchor was taken in
+    /// (`Document.incarnation`). A document kept in the store and restored
+    /// comes back with the same id and a fresh anchor set, so the id alone
+    /// cannot say whether `anchor` still indexes anything.
+    incarnation: u64 = 0,
     anchor: ?Document.AnchorHandle = null,
     /// The position as last known: where the jump was taken, or where its
     /// anchor had moved to when its document died. What a freshly opened
@@ -114,7 +119,7 @@ fn resolve(buffers: *Buffers, jump: Jump) Resolved {
 /// document the anchor is in, else the offset it last knew, clamped.
 fn offsetIn(b: *Buffers.Buffer, jump: Jump) ?usize {
     const ed = b.textEditor() orelse return null;
-    if (jump.anchor) |a| if (jump.doc) |doc| if (ed.doc.id.eql(doc)) return ed.doc.anchorOffset(a);
+    if (jump.anchor) |a| if (jump.doc) |doc| if (ed.doc.id.eql(doc) and ed.doc.incarnation == jump.incarnation) return ed.doc.anchorOffset(a);
     const off = jump.offset orelse return null;
     return @min(off, ed.text().byteLen());
 }
@@ -123,6 +128,7 @@ fn release(buffers: *Buffers, gpa: Allocator, jump: Jump) void {
     gpa.free(jump.designation);
     const a = jump.anchor orelse return;
     const doc = buffers.documentById(jump.doc orelse return) orelse return;
+    if (doc.incarnation != jump.incarnation) return; // restored since: not its anchor set
     doc.removeAnchor(a);
 }
 
@@ -141,7 +147,7 @@ fn same(buffers: *Buffers, jump: Jump, at: Here) bool {
 pub fn settle(list: *JumpList, doc: *Document) void {
     for (list.items.items) |*j| {
         const in = j.doc orelse continue;
-        if (!in.eql(doc.id)) continue;
+        if (!in.eql(doc.id) or j.incarnation != doc.incarnation) continue;
         if (j.anchor) |a| j.offset = doc.anchorOffset(a);
         j.anchor = null;
         j.doc = null;
@@ -179,6 +185,7 @@ fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocato
     if (at.offset) |off| if (at.doc) |doc_id| if (buffers.documentById(doc_id)) |doc| {
         jump.anchor = try doc.addAnchor(gpa, @min(off, doc.text().byteLen()), .left);
         jump.doc = doc_id;
+        jump.incarnation = doc.incarnation;
     };
     errdefer if (jump.anchor) |a| buffers.documentById(jump.doc.?).?.removeAnchor(a);
     try list.items.append(gpa, jump);
@@ -191,7 +198,7 @@ fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocato
 /// Opens a designation whose entry is no longer live — the `open` command,
 /// for a caller that has a `Context`. A jump to a closed entry is refused
 /// (and stepped over) when there is no opener, or when opening fails: a
-/// process that has exited, a document released past the parked bound.
+/// process that has exited, a document released past the kept bounds (`Buffers.documents`).
 pub const Reopen = struct {
     context: ?*anyopaque = null,
     open: ?*const fn (context: ?*anyopaque, designation: []const u8) bool = null,

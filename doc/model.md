@@ -319,14 +319,18 @@ shared tree.
   is wrong until the registry is wired.
 - **Peer files open read-only.** Editing one still means sharing it as a
   document; a remote-file backing (substrate §2) is the general answer.
-- **Projections can't see documents change.** The outline re-reads on
-  presentation; there is no "document changed" event, so a later parse shows
-  only on the next presentation. This belongs to the context/signal layer.
-- **Scratch documents don't persist across restarts**, and an answer's
-  QUESTION key still holds the local buffer ref and the local log length (a
-  peer-rendered view needs an opaque remote version). What an answer is
+- **An answer's QUESTION key** still holds the local buffer ref and a local
+  revision (`Context.revisionOf`: the log length and the tree generation), so
+  a peer-rendered view needs an opaque remote version. What an answer is
   about — the key a pane's lookup names — is the designation.
-- **JS plugins** lack the designation doors and `on_context_changed`.
+- **The problems list** hears its source's signal, not its documents: a
+  diagnostic is an occurrence the source reports, not a function of the
+  text, so it does not watch subjects; `problems-refresh` stays for a source
+  that raises no signal.
+- **A JS plugin** declares no capabilities (no `describe()`), so it claims
+  projection kinds only in its own namespace; it registers its
+  `onContextChanged`/`onSubjectChanged` handlers from JS, which the host
+  cannot see, so every loaded JS plugin is delivered the context event.
 
 ## 4. What retires
 
@@ -595,6 +599,30 @@ kept alive past its phase.
    version (its subject is already the designation); the `Hud`'s strings, surfaces and semantic scenes
    are borrowed for the frame (safe: nothing mutates them between capture
    and draw) but a view sent to a peer would need them owned.
+
+*Gaps closed (2026-09-27, branch `arc/model-gaps`).* A projection hears its
+subject change: a producer watches a designation (`wl_subject_watch`, 64 per
+plugin), and at the frame boundary, beside `on_context_changed`, core compares
+each watched subject's revision (`Context.revisionOf`: the opening, the text,
+and the grammar tree via the app's `Context.derived`) and fires
+`on_subject_changed` once per moved subject, bound to the subject's entry. The
+outline watches what it presents (`symbols-refresh` is deleted); the chrome
+answer cache keys on the same revision, so the breadcrumbs are asked again
+when a parse lands (their private cache is deleted). Scratch documents
+outlive the process: past the parked bound, and at shutdown for every open or
+parked scratch with text, a document goes to `Buffers.documents` (`DocStore`:
+32 records, histories up to 1 MiB else the text alone, `documents.kv` beside
+`plugins.kv`), and `open weft://here/doc/<id>` or a jump restores it on
+demand — no session restore, since weft has none; a record is forgotten only
+once its entry stands, and a document ever bound to a peer
+(`Document.bound_to_peer`) is never stored. JS plugins reach the tool and
+context groups whole through the same bodies (`qjs_designation`,
+`qjs_designate`, `qjs_designation_opener`, `qjs_tool_backing`,
+`qjs_context_changed`, `qjs_places`, `qjs_subject_watch`;
+`weft.onContextChanged`, `weft.onSubjectChanged`), and a JS call is an acting
+bracket, so the creator rule holds for JS-made entries. vim's visual `y`/`d`/`p`
+over `V`'s rows are one row transfer, as `yy`/`dd`/`p` are, and visual
+linewise holds for every caret.
 
 Phases 1-2 are foundations and touch every plugin lightly. Phase 3 is most of
 the visible payoff. Phase 4 is the largest and riskiest; it is where the

@@ -218,6 +218,9 @@ pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scop
 pub extern "weft:abi/1" fn wl_context_get(k: u32, kl: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_context_changed(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_places(out_ptr: u32, out_cap: u32) i32;
+// Watch a subject designation (1) or stop (0): `on_subject_changed` fires,
+// bound to its entry, when that entry reads differently.
+pub extern "weft:abi/1" fn wl_subject_watch(ptr: u32, len: u32, watching: u32) i32;
 pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;

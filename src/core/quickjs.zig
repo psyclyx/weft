@@ -44,6 +44,7 @@ const edit_doors = @import("wasm_host/edit.zig");
 const pointer_doors = @import("wasm_host/pointer.zig");
 const clipboard_doors = @import("wasm_host/clipboard.zig");
 const context_doors = @import("wasm_host/context.zig");
+const tool_doors = @import("wasm_host/tool.zig");
 const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
@@ -264,6 +265,13 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
     .{ .name = "qjs_context_set", .handler = cContextSet },
     .{ .name = "qjs_context_get", .handler = cContextGet },
+    .{ .name = "qjs_context_changed", .handler = cContextChanged },
+    .{ .name = "qjs_places", .handler = cPlaces },
+    .{ .name = "qjs_subject_watch", .handler = cSubjectWatch },
+    .{ .name = "qjs_tool_backing", .handler = cToolBacking },
+    .{ .name = "qjs_designation", .handler = cDesignation },
+    .{ .name = "qjs_designate", .handler = cDesignate },
+    .{ .name = "qjs_designation_opener", .handler = cDesignationOpener },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -555,11 +563,68 @@ pub const JsPlugin = struct {
         // rewrite what one of its commands claims to be after the palette has
         // read it.
         self.resources.accepting_declarations = true;
-        const rc = try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        const rc = blk: {
+            const entries = ctx.buffers;
+            const was = entries.actAs(self.name);
+            defer _ = entries.actAs(was);
+            break :blk try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        };
         self.resources.accepting_declarations = false;
         self.bridge.loading = false;
-        if (rc != 0) return error.ConfigException;
+        // A body that threw, or a projection kind it may not claim (the same
+        // rule, and the same refusal, as a `.wasm` plugin's load): what it
+        // published or claimed before failing goes with it.
+        const failed: ?anyerror = if (rc != 0) error.ConfigException else self.resources.load_refusal;
+        if (failed) |e| {
+            self.retract();
+            return e;
+        }
         return self;
+    }
+
+    /// Every guest call enters here: for its duration this plugin is the
+    /// ACTING one (`Buffers.actAs`), so an entry it creates — however it
+    /// comes to — is its own (`Buffer.creator`), and only it may say what
+    /// that entry is (`wasm_host/tool.zig`). The wasm plane's `contract.enter`
+    /// twin.
+    fn enter(self: *JsPlugin, symbol: []const u8, args: []const i32) wasm.Error!void {
+        const entries = self.activeCtx().buffers;
+        const was = entries.actAs(self.name);
+        defer _ = entries.actAs(was);
+        return self.instance.callVoid(symbol, args);
+    }
+
+    /// The context event (`on_context_changed`'s JS twin): keys of the
+    /// head's primary context moved; `weft.onContextChanged`'s handler hears
+    /// them (read through `qjs_context_changed`). The app's frame boundary
+    /// decides WHEN, exactly as for a wasm plugin. Returns whether it ran.
+    pub fn notifyContextChanged(self: *JsPlugin) bool {
+        self.enter("weft_on_context_changed", &.{}) catch return false;
+        return true;
+    }
+
+    /// The subject event (`on_subject_changed`'s JS twin), bound to the
+    /// subject's entry for the call, so `weft.designation()`, `weft.slice`
+    /// and the other reads answer for the subject.
+    pub fn notifySubjectChanged(self: *JsPlugin, entry: Buffers.Ref) bool {
+        const ctx = self.activeCtx();
+        const was = ctx.bindEntry(entry);
+        defer _ = ctx.bindEntry(was);
+        self.enter("weft_on_subject_changed", &.{}) catch return false;
+        return true;
+    }
+
+    /// Take back what this plugin said to the workspace: its published
+    /// context values, its subject watches, its projection kinds — as a
+    /// `.wasm` plugin's unload does. Before `name`, which they are keyed by,
+    /// is freed.
+    fn retract(self: *JsPlugin) void {
+        const ctx = self.activeCtx();
+        if (ctx.context) |context| {
+            _ = context.store.retractOwner(self.resources.name);
+            context.unwatchOwner(self.resources.name);
+        }
+        if (ctx.designations) |openers| openers.release(self.gpa, self.name);
     }
 
     /// Dispatch command `id` into the JS handler registered for it. DISPATCHING
@@ -583,7 +648,7 @@ pub const JsPlugin = struct {
             self.bridge.active_ctx = saved_ctx;
             self.bridge.in_dispatch = saved_dispatch;
         }
-        self.instance.callVoid("weft_on_command", &.{id}) catch {};
+        self.enter("weft_on_command", &.{id}) catch {};
     }
 
     /// Frame boundary: fire the JS output handler for every stream with new
@@ -596,7 +661,7 @@ pub const JsPlugin = struct {
         while (h < self.resources.streams.len()) : (h += 1) {
             if (self.resources.streams.slice()[h]) |s| {
                 if (s.pending() > 0) {
-                    self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
+                    self.enter("weft_on_output", &.{@intCast(h)}) catch {};
                     fired = true;
                 }
             }
@@ -618,7 +683,7 @@ pub const JsPlugin = struct {
             }
             if (h >= self.exits_reported.items.len or self.exits_reported.items[h]) continue;
             self.exits_reported.items[h] = true;
-            self.instance.callVoid("weft_on_exit", &.{@intCast(h)}) catch {};
+            self.enter("weft_on_exit", &.{@intCast(h)}) catch {};
             fired = true;
         }
         return fired;
@@ -693,9 +758,9 @@ pub const JsPlugin = struct {
 
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
-        // What it published leaves with it, exactly as for a `.wasm` plugin —
-        // and before `name`, which the owner key borrows, is freed.
-        if (self.activeCtx().context) |context| _ = context.store.retractOwner(self.resources.name);
+        // What it published and claimed leaves with it, exactly as for a
+        // `.wasm` plugin — and before `name`, which the owner key borrows.
+        self.retract();
         gpa.free(self.name);
         self.resources.deinit(); // kill + join every live child
         self.exits_reported.deinit(gpa);
@@ -785,6 +850,15 @@ pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
 /// at a scope as this plugin, read the primary context.
 pub const cContextSet = jsDoor(context_doors.setBody, null);
 pub const cContextGet = jsDoor(context_doors.getBody, null);
+pub const cContextChanged = jsDoor(context_doors.changedBody, null);
+pub const cPlaces = jsDoor(context_doors.placesBody, null);
+pub const cSubjectWatch = jsDoor(context_doors.watchBody, null);
+/// The tool doors — `wasm_host/tool.zig`'s bodies: mark an entry this plugin
+/// made, name it, claim a projection kind in its own namespace.
+pub const cToolBacking = jsDoor(tool_doors.toolBackingBody, null);
+pub const cDesignation = jsDoor(tool_doors.designationBody, null);
+pub const cDesignate = jsDoor(tool_doors.designateBody, null);
+pub const cDesignationOpener = jsDoor(tool_doors.openerBody, null);
 /// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
 pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
 pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
@@ -1239,7 +1313,7 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
         bp.plugin.bridge.active_ctx = saved_ctx;
         bp.plugin.bridge.in_dispatch = saved_dispatch;
     }
-    bp.plugin.instance.callVoid("weft_on_pick", &.{
+    bp.plugin.enter("weft_on_pick", &.{
         kind,
         idx,
         text_ptr,

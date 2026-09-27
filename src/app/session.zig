@@ -163,6 +163,10 @@ pub const Session = struct {
         // This session opened the roots, so it is the only party entitled to
         // say what they are called (`doc/place.md` §2.3).
         self.cmd_ctx.realizer = self.realizer();
+        // This session attaches the grammars, so it alone can say when an
+        // entry's tree moved — what a projection of the entry reads besides
+        // its text (`core.context.Derived`).
+        self.system.context.derived = providers.treeRevision;
         try ui_mesh.declareSlots(&self.system.container);
         try ui_mesh.bindDefaultStatusline(&self.system.container);
         // Capability consumers — written against capability names only.

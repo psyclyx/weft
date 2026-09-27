@@ -135,7 +135,7 @@ pub fn hDeclareCapability(data: ?*anyopaque, caller: *wasm.Caller, args: []const
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (p.phase != .describing) return;
     const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    p.declared_caps.append(p.gpa, name) catch {
+    p.resources.declared_capabilities.append(p.gpa, name) catch {
         p.gpa.free(name);
         return;
     };
