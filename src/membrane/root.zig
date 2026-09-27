@@ -285,10 +285,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
 
     // ── intent.zig — the focused context's live offers ──────────────────
-    .{ .name = "wl_offer_count", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "the number of intentions offered in the focused context" },
-    .{ .name = "wl_offer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offered intention's name, into guest memory" },
-    .{ .name = "wl_offer_provider", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offer's winning provider name, into guest memory" },
-    .{ .name = "wl_offer_reason", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "why the `i`-th offer cannot run (0 = it can), into guest memory" },
     .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
     .{ .name = "wl_offers_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "start this plugin's offer table for a tool identity, stamped with its model ordinal" },
     .{ .name = "wl_offer", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "stage one offer row: an intention, one of this plugin's own commands, and the reason it cannot run (empty = enabled)" },
@@ -606,9 +602,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 262;
+const max_import_count: usize = 258;
 const max_export_count: usize = 20;
-const max_semantic_operation_count: usize = 282;
+const max_semantic_operation_count: usize = 278;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -763,7 +759,7 @@ test "membrane contract data: ABI v1 owns eighteen full callbacks and one mini c
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 262), census.imports);
+    try t.expectEqual(@as(usize, 258), census.imports);
     try t.expectEqual(@as(usize, 20), census.exports);
-    try t.expectEqual(@as(usize, 282), census.semantic_operations);
+    try t.expectEqual(@as(usize, 278), census.semantic_operations);
 }

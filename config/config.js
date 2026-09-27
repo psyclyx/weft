@@ -84,7 +84,7 @@ weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's f
 weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the key that runs it)
 weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
 weft.plugin("snipe");       // f/F/t/T over the visible range, with jump labels
-weft.plugin("contextmenu"); // mouse-3: what the thing under the pointer offers
+weft.plugin("offers");      // what a context offers, as a strip, a list or mouse-3's menu
 weft.plugin("panel");       // panel-toggle: the bottom panel (config/panel.js) on and off
 weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
 weft.plugin("terminal");    // a LINE-MODE shell in the panel (SPC o t) — no terminal emulation
@@ -222,10 +222,11 @@ weft.set("palette", "signature", "on");     // show each row's <parameters>
 // persistence, and going back.
 
 weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
-// The pointer's secondary button opens a menu of what the thing under it
-// offers — a row, the text, a git hunk — in any mode, vim's included: the
-// menu's own keys (Up/Down/Return/Escape) are its interaction's, not a mode.
-weft.bind("global", "mouse-3", "contextmenu");
+// The pointer's secondary button presents what the thing under it offers
+// (`weft://here/offers/at-pointer`) as a menu — a row, the text, a git hunk —
+// in any mode, vim's included: the menu's own keys (Up/Down/Return/Escape)
+// are its interaction's, not a mode.
+weft.bind("global", "mouse-3", "offers-menu");
 
 // The keymap derives groups from longer chords. Give those prefixes names for
 // which-key; an unnamed prefix intentionally falls back to "+prefix".

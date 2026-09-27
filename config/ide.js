@@ -64,7 +64,7 @@ weft.plugin("lsp");         // language server client (F2, F12, S-F12, C-.)
 weft.plugin("debug");       // breakpoints (F9)
 weft.plugin("marginalia");  // pick-row annotations
 weft.plugin("linenumbers"); // a line-number gutter on text entries
-weft.plugin("contextmenu"); // mouse-3: what the context under the pointer offers
+weft.plugin("offers");      // what a context offers: the toolbar's strip, mouse-3's menu
 
 // The same breadth config.js writes down, for the same reasons: the browser
 // goes where you point it, and the two `.js` plugins hold exactly what these
@@ -89,10 +89,11 @@ weft.use("defaults"); // picker and which-key keys
 // an IDE looks like, and it is the second context every key below must make
 // sense in. C-b hides and shows it.
 weft.use("sidebar");
-// The adaptive toolbar: one row along the top of the primary context's
-// offers — a source file's build and format, a files listing's "New file",
-// git's stage and commit — plus the pinned entries below. It takes no
-// focus, so clicking it acts on the editor and leaves the keys there.
+// The adaptive toolbar: one row along the top presenting what the primary
+// context offers (`weft://here/offers/primary` as a strip) — a source file's
+// build and format, a files listing's "New file", git's stage and commit —
+// plus the pinned entries below. It takes no focus, so clicking it acts on
+// the editor and leaves the keys there.
 weft.use("toolbar");
 
 // ── Values ───────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ weft.set("palette", "arguments", "ask");
 weft.set("ide", "sidebar", "sidebar");
 // Always on the toolbar, first: an intention shows its live availability
 // (greyed, with the reason, when it cannot run); a command is `name\tLabel`.
-weft.set("toolbar", "pinned", [
+weft.set("offers", "pinned", [
   "std.persistence.save\tSave",
   "std.history.undo\tUndo",
   "std.history.redo\tRedo",
@@ -185,12 +186,13 @@ bindWorkspace("C-w", "close");
 bindWorkspace("C-Tab", "buffer-next");
 bindWorkspace("C-b", "ide-toggle-sidebar");
 
-// The pointer. mouse-3 opens the context menu for whatever is under it — a
-// row of the sidebar, the text, a git row — and S-F10 / Menu open it at the
-// caret. (The grammar binds what double, triple and C-clicks mean.)
-bindWorkspace("mouse-3", "contextmenu");
-bindWorkspace("S-F10", "contextmenu-at-caret");
-bindWorkspace("Menu", "contextmenu-at-caret");
+// The pointer. mouse-3 presents what the context under it offers
+// (`weft://here/offers/at-pointer`) as a menu there — a row of the sidebar,
+// the text, a git row — and S-F10 / Menu the focused context's at the caret.
+// (The grammar binds what double, triple and C-clicks mean.)
+bindWorkspace("mouse-3", "offers-menu");
+bindWorkspace("S-F10", "offers-menu-at-caret");
+bindWorkspace("Menu", "offers-menu-at-caret");
 
 // Back and forward along the jumplist: M-Left / M-Right, and VS Code's
 // C-M-minus / C-S-minus. A view with its own history (a listing) answers

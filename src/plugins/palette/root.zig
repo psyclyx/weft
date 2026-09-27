@@ -23,6 +23,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const invoke = @import("weft_invoke");
+const offers_lib = @import("weft_offers");
 
 var id_palette: u32 = 0;
 var id_help: u32 = 0;
@@ -282,20 +283,23 @@ fn rowDoc(i: usize) []const u8 {
 }
 
 /// The focused context's live offers, listed ahead of the raw commands and
-/// told apart by their dotted intention names. A disabled offer is listed
-/// WITH its reason rather than hidden: absence already means nonapplicable,
-/// so hiding one would say something false about it.
+/// told apart by their dotted intention names — read through `weft_offers`,
+/// the same reading the offers projection's strip, list and menu are, so the
+/// palette, the toolbar and the context menu cannot disagree about what a
+/// context offers or in what order. Every word is listed (the grammar's own
+/// included: a palette is where you look one up), and a disabled offer WITH
+/// its reason rather than hidden: absence already means nonapplicable, so
+/// hiding one would say something false about it.
 fn offers() void {
-    const n = weft.offerCount();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const provider = weft.offerProvider(i) orelse continue;
-        const doc = if (weft.offerReason(i)) |why|
-            std.fmt.bufPrint(&label_buf, "offer · {s} · {s}", .{ provider, why }) catch continue
+    var arena = std.heap.ArenaAllocator.init(weft.allocator);
+    defer arena.deinit();
+    const items = offers_lib.collect(arena.allocator(), .{ .where = .active, .grammar_words = true }) catch return;
+    for (items) |item| {
+        const doc = if (!item.enabled())
+            std.fmt.bufPrint(&label_buf, "offer · {s} · {s}", .{ item.provider, item.reason }) catch continue
         else
-            std.fmt.bufPrint(&label_buf, "offer · {s}", .{provider}) catch continue;
-        const name = weft.offerName(i) orelse continue;
-        weft.pickAdd(name, doc);
+            std.fmt.bufPrint(&label_buf, "offer · {s}", .{item.provider}) catch continue;
+        weft.pickAdd(item.name, doc);
     }
 }
 

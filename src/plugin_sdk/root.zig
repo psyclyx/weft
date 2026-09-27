@@ -1022,33 +1022,6 @@ pub fn commandArg(i: usize, k: usize) ?[]const u8 {
     if (n < 0) return null;
     return param_scratch[0..@intCast(n)];
 }
-// ── Live offers (what the FOCUSED context can do right now) ──────────
-/// How many intentions the focused context offers. An intention nobody
-/// offers is absent — absence is nonapplicable, not refused.
-pub fn offerCount() usize {
-    return e.wl_offer_count();
-}
-/// The `i`-th offered intention's name (into `scratch`).
-pub fn offerName(i: usize) ?[]const u8 {
-    const n = e.wl_offer_name(@intCast(i), p(&scratch), scratch.len);
-    if (n < 0) return null;
-    return scratch[0..@intCast(n)];
-}
-/// Who wins that offer (into `arg_scratch`, so it survives a paired
-/// `offerName` read).
-pub fn offerProvider(i: usize) ?[]const u8 {
-    const n = e.wl_offer_provider(@intCast(i), p(&arg_scratch), arg_scratch.len);
-    if (n < 0) return null;
-    return arg_scratch[0..@intCast(n)];
-}
-/// Why the `i`-th offer cannot run right now (into `intent_scratch`), or
-/// null when it can. Relevant but impossible — worth SHOWING, not hiding.
-pub fn offerReason(i: usize) ?[]const u8 {
-    const n = e.wl_offer_reason(@intCast(i), p(&intent_scratch), intent_scratch.len);
-    if (n <= 0) return null;
-    return intent_scratch[0..@intCast(n)];
-}
-
 /// What `invokeIntention` did. `unknown` is not a refusal: the name is no
 /// intention, so the caller's other vocabulary (commands) still owns it.
 pub const Invocation = union(enum) {

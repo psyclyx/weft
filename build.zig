@@ -69,6 +69,7 @@ const Library = enum {
     search,
     labels,
     affordances,
+    offers,
     statusline,
     put,
 
@@ -90,6 +91,7 @@ const Library = enum {
             .search => "weft_search",
             .labels => "weft_labels",
             .affordances => "weft_affordances",
+            .offers => "weft_offers",
             .statusline => "weft_statusline",
             .put => "weft_put",
         };
@@ -106,7 +108,10 @@ const Library = enum {
             .rowkey, .jsonrpc, .sessions, .regex, .affordances => .protocol_data,
             // `search` is pure data too, but it sits on `regex`, so it
             // takes the tier above.
-            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels => .service_presentation,
+            // `offers` is the one READING of a context's offers (pinned
+            // first, then arranged by `affordances`) that the offers
+            // projection and the palette share.
+            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
             .invoke => .interaction_orchestration,
             // `put` edits a document on a grammar's behalf, as `ex` runs
             // its commands: the top of the stack, depending on nothing.
@@ -124,6 +129,7 @@ const Library = enum {
             .invoke => &.{.prompt},
             .ex => &.{ .prompt, .invoke },
             .search => &.{.regex},
+            .offers => &.{.affordances},
             else => &.{},
         };
     }
@@ -443,7 +449,7 @@ const guests = [_]Guest{
     .{ .name = "edit", .import = "guest_edit_wasm", .install = true },
     .{ .name = "complete", .import = "guest_complete_wasm", .install = true },
     .{ .name = "project", .import = "guest_project_wasm", .install = true },
-    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{.invoke} },
+    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{ .invoke, .offers } },
     .{ .name = "structural", .import = "guest_structural_wasm", .install = true },
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
@@ -494,11 +500,9 @@ const guests = [_]Guest{
     .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
-    // The adaptive toolbar and the context menu (doc/configs.md §3.6): the
-    // primary context's offers as a docked strip of action nodes, and the
-    // offers under the pointer as a menu — both arranged by one library.
-    .{ .name = "toolbar", .import = "guest_toolbar_wasm", .install = true, .libraries = &.{.affordances} },
-    .{ .name = "contextmenu", .import = "guest_contextmenu_wasm", .install = true, .libraries = &.{.affordances} },
+    // The offers projection (doc/model.md §2.4): what a context offers, as a
+    // strip a toolbar viewport presents, a list, or a menu at the pointer.
+    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{.offers} },
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },

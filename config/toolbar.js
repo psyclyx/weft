@@ -1,10 +1,15 @@
 // A toolbar docked along the top — a config FRAGMENT (`weft.use("toolbar")`).
 //
 // Like sidebar.js, "toolbar" is a named bundle of viewport attributes, not a
-// kind the workspace knows. The strip itself is the `toolbar` plugin: the
-// primary context's offers, plus whatever `weft.set("toolbar", "pinned",
-// [...])` pins, as a row of buttons that redraws when those offers change.
-weft.plugin("toolbar");
+// kind the workspace knows, and no plugin owns it. It is a composition:
+// viewport + subject + projection (doc/model.md §2.4). The subject is what the
+// PRIMARY context offers, `weft://here/offers/primary`; the `offers` provider
+// presents it as a strip of buttons — the pinned entries first
+// (`weft.set("offers", "pinned", [...])`), then the context's offers grouped
+// and ordered by their own presentation — and redraws it when those offers
+// move. Presenting the same designation `as: "list"` in a docked column is a
+// different line here, not a different plugin.
+weft.plugin("offers");
 
 weft.viewport("toolbar", {
   edge: "top",
@@ -23,5 +28,4 @@ weft.viewport("toolbar", {
   statusLine: false,
 });
 
-// Its entry has no path to `open`; the plugin's own command presents it.
-weft.present("toolbar", { command: "toolbar-open" });
+weft.present("toolbar", { subject: "weft://here/offers/primary", as: "strip" });

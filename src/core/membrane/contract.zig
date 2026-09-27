@@ -199,10 +199,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
 
     // ── intent.zig — the focused context's live offers ──────────────────
-    .{ .name = "wl_offer_count", .handler = intent.hOfferCount },
-    .{ .name = "wl_offer_name", .handler = intent.hOfferName },
-    .{ .name = "wl_offer_provider", .handler = intent.hOfferProvider },
-    .{ .name = "wl_offer_reason", .handler = intent.hOfferReason },
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
     .{ .name = "wl_offers_begin", .handler = intent.hOffersBegin },
     .{ .name = "wl_offer", .handler = intent.hOffer },
