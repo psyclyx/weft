@@ -617,9 +617,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 262;
+const max_import_count: usize = 263;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 284;
+const max_semantic_operation_count: usize = 285;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -779,7 +779,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 262), census.imports);
+    try t.expectEqual(@as(usize, 263), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 284), census.semantic_operations);
+    try t.expectEqual(@as(usize, 285), census.semantic_operations);
 }
