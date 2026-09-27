@@ -338,7 +338,7 @@ pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn
 
 /// The membrane's SECOND deny path (task #19 item 4, alongside `requirePerm`
 /// above): every import that MUTATES per-head interaction state (mode/
-/// pending/pick/echo — `Head.zig`'s module doc; NOT mode/menu/action TABLE
+/// pending/pick — `Head.zig`'s module doc; NOT mode/menu/action TABLE
 /// declarations, which are system-scoped, and NOT the buffer/editor-owned
 /// cursor/selection — see `membrane/root.zig`'s `.head_gated` doc for the
 /// full boundary) calls this before touching `activeCtx().head`. TWO entry
@@ -357,8 +357,8 @@ pub fn wasmDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn
 /// gate — same shape, same trap-message discipline, same "no site can hand
 /// back a success-shaped value on denial" property `requirePerm`'s doc
 /// states. A background entry that legitimately needs to reach the head
-/// AFTER load (an async LSP response landing off `on_poll` that wants to
-/// echo a result, say) has ONE sanctioned door: dispatch itself back in
+/// AFTER load (an async LSP response landing off `on_poll` that opens a
+/// pick of its results, say) has ONE sanctioned door: dispatch itself back in
 /// through `wl_run` — a real command name, cross-checked at registration
 /// like any other — which re-enters `wpCmdTrampoline` and is a DISPATCHING
 /// entry by definition, promoting `in_dispatch` to true for the nested
@@ -536,6 +536,15 @@ pub fn noteSpawnRefusal(ctx: *@import("../command.zig").Context, plugin: []const
     std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
     var buf: [128]u8 = undefined;
     ctx.buffers.status.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
+}
+
+/// What a plugin says from a BACKGROUND entry — no head asked, so it is the
+/// system's to hear: the status feed, which every status line draws. The wasm
+/// and JS planes both land here, so the two cannot disagree about where a
+/// background message goes.
+pub fn noteBackground(ctx: *@import("../command.zig").Context, plugin: []const u8, msg: []const u8) void {
+    std.log.info("plugin '{s}' (background): {s}", .{ plugin, msg });
+    ctx.buffers.status.set(msg);
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

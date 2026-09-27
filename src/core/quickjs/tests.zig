@@ -513,7 +513,8 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     // line, and its onOutput handler reads the echoed reply — the whole
     // agent-transport shape (spawn + stdin + streamed stdout) in JS.
     // `weft.onOutput` is BACKGROUND (`weft_on_output`, fired by `tick`);
-    // `weft.echo` is head-gated (task #19 item 4), so the reply defers
+    // an echo there has no head that asked and goes to the status feed, so a
+    // reply meant for the head's echo line defers
     // through a self-registered command — a nested `weft.run` from a
     // background entry IS a dispatching entry for its duration (same door
     // `config/plugins/acp.js`'s real onOutput→weft.pick path uses).
@@ -538,6 +539,32 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
         std.Thread.yield() catch {};
     }
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "ping") != null);
+}
+
+test "quickjs: an echo from a background entry reaches the status feed, never a head" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const src =
+        \\weft.onOutput((h) => { weft.echo("bg:" + weft.procRead(h).trim()); });
+        \\weft.command("go", () => { weft.procSpawn("printf 'pong\\n'"); });
+    ;
+    try env.grant("test", "proc");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    env.head.echo.clearRetainingCapacity();
+    const deadline = task.nowNs() + 2 * std.time.ns_per_s;
+    while (env.buffers.status.get() == null and task.nowNs() < deadline) {
+        _ = plugin.tick();
+        std.Thread.yield() catch {};
+    }
+    try t.expectEqualStrings("bg:pong", env.buffers.status.get() orelse "");
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
 }
 
 // SCOPE NOTE (added alongside the incremental-append/decoration-path

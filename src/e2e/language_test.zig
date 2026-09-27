@@ -418,3 +418,40 @@ fn nextQuoted(rest: *[]const u8) ?[]const u8 {
     rest.* = after[close + 1 ..];
     return after[0..close];
 }
+
+// A language server that cannot start says so where the person looks. The
+// start is attempted from `on_activate` — a BACKGROUND entry, with no head
+// that asked — and the plugin's `weft.echo` there used to trap: the message
+// was lost and the rest of the activation (decorations, diagnostics) aborted
+// with it. A background echo is a notice to the whole system: it lands on the
+// status feed every status line draws.
+test "e2e/languages: a language server that cannot start says so from a background entry" {
+    const gpa = t.allocator;
+    var proj: h.Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    try h.core.file.writeBytesMakingDirs(gpa, "box/src", "box/src/main.zig", "pub fn main() void {}\n");
+    var ed: h.Editor = undefined;
+    try h.Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: h.ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try h.bootConfigNamed(&ed, config_dir, "ide.js", &loader);
+    const local_sh = [_][]const u8{"/bin/sh"};
+    ed.prov.attach_deps.spawner = .{ .command = &local_sh };
+
+    // A zig file over a shell: a configured language in a place with no local
+    // directory, so no server can start there, and lsp says so as it activates.
+    var buf: [4096]u8 = undefined;
+    const file = try std.fmt.bufPrint(&buf, "weft://shell:box/file{s}/box/src/main.zig", .{proj.root});
+    ed.runStr("file.open", file);
+    ed.applyWindow();
+    ed.settle(2);
+    const said = ed.buffers.status.get() orelse "";
+    if (std.mem.indexOf(u8, said, "lsp: this place has no local directory") == null) {
+        std.debug.print("[e2e/languages] status feed: '{s}', echo: '{s}'\n", .{ said, ed.echoText() });
+        return error.TestExpectedEqual;
+    }
+}

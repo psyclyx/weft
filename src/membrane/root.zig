@@ -253,7 +253,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_config_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .config_kv, .doc = "read this plugin's staged config value (the distinct weft.set store)" },
 
     // ── dispatch.zig — echo + command args in/result out ───────────────
-    .{ .name = "wl_echo", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .dispatch, .head_gated = true, .doc = "print a message to the echo area" },
+    .{ .name = "wl_echo", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .dispatch, .doc = "print a message to the asking head's echo area; from a background entry, to the system's status feed" },
     .{ .name = "wl_arg_count", .params = &.{}, .results = &.{.u32}, .group = .dispatch, .doc = "the current command dispatch's argument count" },
     .{ .name = "wl_arg_int", .params = &.{.u32}, .results = &.{.i32}, .group = .dispatch, .doc = "the `i`-th dispatch arg as an int" },
     .{ .name = "wl_arg_str", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .dispatch, .doc = "the `i`-th dispatch arg as a string, into guest memory" },

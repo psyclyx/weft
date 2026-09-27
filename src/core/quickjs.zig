@@ -133,7 +133,7 @@ const Bridge = struct {
 
     /// task #19 item 4 (mirrors `wasm_host/plugin.zig`'s `requireDispatch`
     /// exactly, one layer down under the JS engine): every LIVE `weft.*`
-    /// handler that MUTATES head state (`weft.echo`, `weft.pick` — see
+    /// handler that MUTATES head state (`weft.pick` — see
     /// `membrane/root.zig`'s `.head_gated` doc for the exact boundary this
     /// mirrors) calls this before touching `activeCtx().head`. In dispatch
     /// (`in_dispatch`, set by `JsPlugin.onCommand`/`jsPickAccept`) or loading
@@ -2078,10 +2078,11 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         m.addEcho(msg) catch {};
         return;
     }
-    // HEAD-GATED (task #19 item 4): reached only in LIVE mode (config-eval
-    // already returned above) — a resident plugin's BACKGROUND
-    // `weft_on_output` must not write the head's echo line directly.
-    if (!br.requireDispatch(caller, "weft.echo")) return;
+    // Reached only in LIVE mode (config-eval already returned above). A
+    // resident plugin's BACKGROUND `weft_on_output` has no head that asked:
+    // what it says goes to the system's status feed, exactly as the wasm
+    // plane's `hEcho` routes it — never the head's echo line, never a trap.
+    if (!(br.in_dispatch or br.loading)) return perm_gate.noteBackground(br.activeCtx(), br.owner, msg);
     br.activeCtx().head.echo.clearRetainingCapacity();
     br.activeCtx().head.echo.appendSlice(br.activeCtx().gpa, msg) catch {};
 }

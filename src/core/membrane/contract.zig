@@ -679,7 +679,6 @@ const head_gated_list = [_][]const u8{
     "wl_set_mode", // keymap.zig hSetMode
     "wl_exit_to_resting", // keymap.zig hExitToResting
     "wl_declare_posture", // keymap.zig hDeclarePosture
-    "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
