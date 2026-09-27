@@ -1014,13 +1014,31 @@ fn insertLine() void {
 /// visual mode, so there is nothing a stale value could reach.
 var visual_linewise: bool = false;
 
-/// The effective operated range for the current selection: verbatim charwise,
-/// or expanded to whole lines (incl. the trailing newline) when linewise.
-fn visualSpan(s: weft.Range) weft.Range {
-    if (!visual_linewise) return s;
-    const first = weft.lineAt(s.start);
-    const last = weft.lineAt(s.end);
-    return .{ .start = first.start, .end = @min(last.end + 1, weft.byteLen()) };
+/// The range a visual verb operates on: the selection verbatim when
+/// charwise; when linewise, every line from the selection's anchor to its
+/// head, the trailing newline included. Linewise reads the ENDS, never the
+/// selected text: `V` covers its line before anything moves, when anchor and
+/// head still sit on one offset and `weft.selection()` (text, or nothing) has
+/// nothing to say — so `V d` deleted nothing.
+fn visualRange() ?weft.Range {
+    if (!visual_linewise) return weft.selection();
+    const sel = weft.selections();
+    if (sel.items.len == 0) return null;
+    const x = sel.items[sel.primary];
+    if (x.kind != .text) return null;
+    const first = weft.lineAt(@min(x.anchor, x.head));
+    const last = weft.lineAt(@max(x.anchor, x.head));
+    const r: weft.Range = .{ .start = first.start, .end = @min(last.end + 1, weft.byteLen()) };
+    return if (r.end > r.start) r else null;
+}
+
+/// Yank a visual range. A linewise register holds its lines without the
+/// last line break — `yy`'s form, which `put` completes with one of its own —
+/// so `V y p` lands the line once, not followed by an empty one.
+fn yankVisual(s: weft.Range) void {
+    var end = s.end;
+    if (visual_linewise and end > s.start and weft.slice(end - 1, end)[0] == '\n') end -= 1;
+    yankCurrent(s.start, end, visual_linewise);
 }
 
 fn visual() void { // v — charwise
@@ -1073,9 +1091,8 @@ fn visualDeleteText() void {
         }
         selected_register = slot;
     }
-    if (weft.selection()) |s0| {
-        const s = visualSpan(s0);
-        yankCurrent(s.start, s.end, visual_linewise);
+    if (visualRange()) |s| {
+        yankVisual(s);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(s.start);
     }
@@ -1092,9 +1109,8 @@ fn visualYankText() void {
         }
         selected_register = slot;
     }
-    if (weft.selection()) |s0| {
-        const s = visualSpan(s0);
-        yankCurrent(s.start, s.end, visual_linewise);
+    if (visualRange()) |s| {
+        yankVisual(s);
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("selection.clear");
@@ -1114,9 +1130,8 @@ fn visualChange() void {
         }
         selected_register = slot;
     }
-    if (weft.selection()) |s0| {
-        const s = visualSpan(s0);
-        yankCurrent(s.start, s.end, visual_linewise);
+    if (visualRange()) |s| {
+        yankVisual(s);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
         weft.jump(s.start);
     }
@@ -1129,8 +1144,7 @@ fn visualChange() void {
 fn visualOp(comptime cmd: []const u8) fn () void {
     return struct {
         fn h() void {
-            if (weft.selection()) |s0| {
-                const s = visualSpan(s0);
+            if (visualRange()) |s| {
                 if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| {
                     weft.runRangeArg(cmd, hnd);
                     flashAfter(hnd);

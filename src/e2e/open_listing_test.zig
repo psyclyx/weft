@@ -434,14 +434,16 @@ test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lin
     try t.expectEqualStrings("normal", ed.mode());
     ed.press("G", "");
     ed.press("p", "");
-    try expectPrimaryText(ed, "one\ntwo\nthree\none\ntwo\n");
+    // The lines land once, each on its own: the register holds them as `yy`
+    // does, without the last line break, which the put supplies.
+    try expectPrimaryText(ed, "one\ntwo\nthree\none\ntwo");
 
     ed.chord("g g");
     ed.press("V", "");
     ed.press("j", "");
     ed.press("d", "");
     try t.expectEqualStrings("normal", ed.mode());
-    try expectPrimaryText(ed, "three\none\ntwo\n");
+    try expectPrimaryText(ed, "three\none\ntwo");
 
     // Visual `P` is normal `P`'s put, as it was when visual fell through to it.
     ed.press("v", "");
@@ -450,7 +452,7 @@ test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lin
     defer gpa.free(visual_put);
     ed.press("Escape", "");
     ed.press("u", "");
-    try expectPrimaryText(ed, "three\none\ntwo\n");
+    try expectPrimaryText(ed, "three\none\ntwo");
     ed.press("P", "");
     try expectPrimaryText(ed, visual_put);
 }
@@ -474,6 +476,73 @@ test "e2e/files: config.js — `V` then `d` over two carets deletes both lines: 
     ed.press("d", "");
     try t.expectEqualStrings("normal", ed.mode());
     try expectPrimaryText(ed, "c1\nc2\n");
+}
+
+test "e2e/files: config.js — `V` with no motion covers the current line: `d`, `y`, `>`, `<` and `c` act on it" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "one-line.txt", "one\ntwo\nthree\n");
+    ed.runStr("file.open", "one-line.txt");
+    ed.applyWindow();
+
+    // `V d` on `two`, from mid-line: the line goes, as vim's does.
+    ed.chord("g g");
+    ed.press("j", "");
+    ed.press("l", "");
+    ed.press("V", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "one\nthree\n");
+
+    // `V y` yanks the line linewise: `p` puts it on a line of its own.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("y", "");
+    ed.press("p", "");
+    try expectPrimaryText(ed, "one\none\nthree\n");
+
+    // `V >` and `V <` shift the line.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("greater", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.applyWindow();
+    const shifted = try primaryText(ed);
+    defer gpa.free(shifted);
+    try t.expect(!std.mem.startsWith(u8, shifted, "one\n"));
+    try t.expect(std.mem.endsWith(u8, shifted, "one\none\nthree\n"[3..]));
+    ed.press("V", "");
+    ed.press("less", "");
+    try expectPrimaryText(ed, "one\none\nthree\n");
+
+    // `V c` replaces the line with what is typed.
+    ed.press("V", "");
+    ed.press("c", "");
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("ONE\n");
+    ed.press("Escape", "");
+    try expectPrimaryText(ed, "ONE\none\nthree\n");
+}
+
+test "e2e/files: config.js — `V d` over rows with no motion flags the focused row" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    ed.run("files.browse");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    ed.press("V", "");
+    try t.expect(ed.head.scene_selection.primaryRows() != null);
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 1), rowsFlaggedDeleted(ed));
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
 }
 
 fn primaryText(ed: *Editor) ![]u8 {
