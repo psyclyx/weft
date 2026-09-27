@@ -44,6 +44,10 @@ pub const MdInline = struct {
 /// What the frame shows besides the buffer: mode, dirtiness, the composed
 /// `ui/statusline-seg`/`ui/gutter-segment` mesh output, and the picker when
 /// one is open. Plain data — the caller assembles it, the view renders it.
+///
+/// Every layer here is a `layers.Snapshot` taken when the frame's input was
+/// (doc/model.md §2.7), never a live `Layer`: a span's offsets are the ones
+/// that matched the snapshot's text, whatever the document did since.
 pub const Hud = struct {
     mode: []const u8,
     /// Draw the pane's status line (the viewport's `status_line` attribute).
@@ -78,28 +82,28 @@ pub const Hud = struct {
     /// a pick.
     pick: ?*const core.Pick = null,
     /// The highlight feed layer (stamped bulk paint).
-    highlight_layer: ?*const core.layers.Layer = null,
+    highlight_layer: ?*const core.layers.Snapshot = null,
     /// The styles feed layer (plugin-published bulk paint over a tool buffer:
     /// class-per-byte StyleClass). Read the same way as `highlight_layer`;
     /// highlight wins where both exist (tool buffers have no grammar, so in
     /// practice they never collide).
-    styles_layer: ?*const core.layers.Layer = null,
+    styles_layer: ?*const core.layers.Snapshot = null,
     /// The diagnostics feed layer (anchored spans, kind = severity).
-    diag_layer: ?*const core.layers.Layer = null,
+    diag_layer: ?*const core.layers.Snapshot = null,
     /// Placed decorations (virtual_before text drawn beside the line, never in
     /// the document): files's metadata/arrow/mark, inlay hints, blame. Rendered
     /// as leading dimmed cells by the mono line layout.
-    decorations_layer: ?*const core.layers.Layer = null,
+    decorations_layer: ?*const core.layers.Snapshot = null,
     /// Third-party annotation feeds over this entry
     /// (doc/contextual-workspace-architecture.md §11.7), composited on top of
     /// the entry's own paint: `range` spans tint their bytes by role, placed
     /// spans draw beside the line. The presentation knows only the feed
     /// shape — never which plugin published one, or what it means.
-    annotations: []const *const core.layers.Layer = &.{},
+    annotations: []const core.layers.Snapshot = &.{},
     /// Message of a diagnostic at the cursor, for the status line.
     cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).
-    presence_layer: ?*const core.layers.Layer = null,
+    presence_layer: ?*const core.layers.Snapshot = null,
     /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
     /// connected out to; see known_peers / the SAS).
     trust: ?[]const u8 = null,

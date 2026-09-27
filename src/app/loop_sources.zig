@@ -176,6 +176,18 @@ pub fn presentRetryDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return now;
 }
 
+// ── 8b. Provider answers landed — new (no old site): a frame draws what
+// plugins last said and asks, after it is built, for what it lacked
+// (doc/model.md §2.7). When those answers land, the frame that shows them is
+// due NOW, with no input and no fd to wake the loop. Immediate while set;
+// dormant otherwise. Cannot spin: the frame it wakes for reads the answers
+// from the cache and asks nothing new. ──
+
+pub fn redrawDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    const due: *const bool = @ptrCast(@alignCast(ctx.?));
+    return if (due.*) now else null;
+}
+
 // ── 9. plugin_loop's own timers — old site: none (this loop's timers were
 // ALREADY explicit deadlines, `core/async.zig`'s `Timer.due_ns` — but
 // nothing told the frame loop about them; `tick()` only ran because vsync

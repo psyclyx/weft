@@ -298,4 +298,10 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
     }
     std.debug.print("scenarios (real app wake; input -> first highlighted frame | input -> first frame):\n", .{});
     inline for (@typeInfo(Scenario).@"enum".fields) |f| report(f.name, results[f.value][0..iters]);
+    // What every frame above paid to be a function of a version: the text
+    // and layer snapshots its panes drew from (doc/model.md §2.7).
+    const snaps = &ed.render.fb.stats.snapshot;
+    std.debug.print("frame input snapshot (every pane, text + layers): p50 {d:.4} ms p99 {d:.4} ms over {d} frames\n", .{
+        ms(snaps.percentileNs(50)), ms(snaps.percentileNs(99)), snaps.len,
+    });
 }

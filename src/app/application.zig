@@ -274,6 +274,13 @@ pub const Application = struct {
         return damaged;
     }
 
+    /// After the frame: ask the plugins what it had no answer to
+    /// (doc/model.md §2.7). Never during the build, so an answering provider
+    /// can neither tear the frame nor be refused for acting.
+    pub fn answerRequests(self: *Application, renderer: anytype) !bool {
+        return renderer.answerRequests(&self.driver.ctx);
+    }
+
     pub fn buildPrepared(self: *Application, renderer: anytype, active: frame.Driver.Prepared, opts: anytype) !void {
         try self.driver.buildPrepared(renderer, active, .{
             .frame_start = opts.frame_start,

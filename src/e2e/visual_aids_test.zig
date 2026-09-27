@@ -17,8 +17,9 @@ const ui_mesh = h.view.ui_mesh;
 
 /// The gutter cells the active entry's pane shows for `line`, joined — read
 /// through the SAME resolution a frame uses (`frame_builder.gutterFrame`:
-/// the eligible providers for this entry's facts, and a plugin's window
-/// round), not a reimplementation of it. "" when no provider answers.
+/// the eligible providers for this entry's facts, and the plugin answers the
+/// pane has, which the wake that drew the last frame asked for), not a
+/// reimplementation of it. "" when no provider answers.
 fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(ed.gpa);
     defer arena.deinit();
@@ -26,7 +27,8 @@ fn gutterText(ed: *Editor, line: usize, out: []u8) ![]const u8 {
     const buf = ed.buffers.active();
     const text_ed = buf.textEditor();
     const fx = &ed.application.driver.ctx;
-    const gf = try h.app.frame_builder.gutterFrame(a, fx, h.app.frame_builder.paneFacts(fx, buf, ed.head.focused_pane), text_ed, null, "");
+    const pane = ed.head.focused_pane;
+    const gf = try h.app.frame_builder.gutterFrame(a, fx, &ed.render.fb.answers, pane, buf, h.app.frame_builder.paneFacts(fx, buf, pane), null, "");
     var args: ui_mesh.GutterLineArgs = .{
         .line = line,
         .row = if (text_ed) |e| e.text().lineRange(line) else .{ .start = 0, .end = 0 },

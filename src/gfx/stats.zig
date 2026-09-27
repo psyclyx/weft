@@ -33,6 +33,9 @@ pub const Ring = struct {
 pub const Stats = struct {
     frame: Ring = .{},
     input: Ring = .{},
+    /// Per-frame cost of taking the frame's input snapshots (text + layers,
+    /// every pane) — doc/model.md §2.7.
+    snapshot: Ring = .{},
     frames_since_log: usize = 0,
 
     pub fn recordFrame(self: *Stats, ns: u64) void {

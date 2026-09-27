@@ -29,7 +29,10 @@ pub const ChromeSink = struct {
             .rect = v.cellsRect(y, from, to - from),
             .kind = .status,
             .index = index,
-            .command = command,
+            // Copied into the frame arena with the hit: the segment's command
+            // is borrowed from a plugin answer the loop may replace before a
+            // click reads this.
+            .command = if (command.len == 0) "" else try self.gpa.dupe(u8, command),
         });
     }
 };

@@ -40,7 +40,7 @@ pub const StyleInputs = struct {
     /// Placed decorations (virtual text) for the visible range — drawn beside
     /// the text, never in the document. files's metadata/arrow/mark ride this,
     /// so the buffer text is only the editable name (yy yanks the name alone).
-    deco: ?*const core.layers.Layer = null,
+    deco: ?*const core.layers.Snapshot = null,
     /// Third-party annotation roles over the visible range: `anno[i]` is the
     /// StyleClass painted at byte `anno_base + i`, plus one (0 = unpainted, so
     /// an unannotated byte costs nothing to check). Composited from every
@@ -50,7 +50,7 @@ pub const StyleInputs = struct {
     anno_base: usize = 0,
     /// The annotation feeds' placed decorations, drawn beside the line by the
     /// same prefix path the `decorations` layer uses.
-    anno_layers: []const *const core.layers.Layer = &.{},
+    anno_layers: []const core.layers.Snapshot = &.{},
     /// The `ui/gutter-segment` mesh's per-frame resolution
     /// (doc/contextual-workspace-architecture.md §11), passed through
     /// from `Hud.gutter` unchanged — null (today's default) means no
@@ -70,7 +70,7 @@ fn cellWidth(text: []const u8) usize {
 
 /// The sign column's width over every `gutter`-placed span the entry's feeds
 /// hold: the widest mark plus a separating blank, or 0 when there is none.
-fn markCols(deco: ?*const core.layers.Layer, anno: []const *const core.layers.Layer) usize {
+fn markCols(deco: ?*const core.layers.Snapshot, anno: []const core.layers.Snapshot) usize {
     var widest: usize = 0;
     if (deco) |dl| {
         for (0..dl.spanCount()) |i| {
@@ -103,10 +103,10 @@ const InlineStyle = struct {
 
 /// Resolve the highlight + diagnostic bulk feeds for the visible range.
 pub fn resolveStyleInputs(
-    v: *View,
     scratch: Allocator,
     hud: Hud,
     rope: *const stemma.Rope,
+    top_row: usize,
     rows_visible: usize,
     total_rows: usize,
 ) !StyleInputs {
@@ -124,10 +124,10 @@ pub fn resolveStyleInputs(
         }
     }
     const diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
-    if (diag_count > 0 and rows_visible > 0 and v.top_row < total_rows) {
+    if (diag_count > 0 and rows_visible > 0 and top_row < total_rows) {
         const dl = hud.diag_layer.?;
-        const last = @min(total_rows, v.top_row + rows_visible);
-        const vis_start = rope.lineRange(v.top_row).start;
+        const last = @min(total_rows, top_row + rows_visible);
+        const vis_start = rope.lineRange(top_row).start;
         const vis_end = rope.lineRange(last - 1).end;
         const tint = try scratch.alloc(u8, vis_end - vis_start);
         @memset(tint, 0);
@@ -145,9 +145,9 @@ pub fn resolveStyleInputs(
     }
     s.deco = hud.decorations_layer;
     s.anno_layers = hud.annotations;
-    if (hud.annotations.len > 0 and rows_visible > 0 and v.top_row < total_rows) {
-        const last = @min(total_rows, v.top_row + rows_visible);
-        const vis_start = rope.lineRange(v.top_row).start;
+    if (hud.annotations.len > 0 and rows_visible > 0 and top_row < total_rows) {
+        const last = @min(total_rows, top_row + rows_visible);
+        const vis_start = rope.lineRange(top_row).start;
         const vis_end = rope.lineRange(last - 1).end;
         const roles = try scratch.alloc(u8, vis_end - vis_start);
         @memset(roles, 0);
@@ -244,7 +244,7 @@ fn layoutMonoLine(
     if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells, col);
     // Third-party feeds compose onto the same prefix, after the entry's own
     // decorations: one more producer of leading cells, not a new mechanism.
-    for (styles.anno_layers) |al| col = try layoutRowPrefix(v, scratch, al, line, cols_visible, &pfx_bytes, &cells, col);
+    for (styles.anno_layers) |*al| col = try layoutRowPrefix(v, scratch, al, line, cols_visible, &pfx_bytes, &cells, col);
 
     // Overlays draw OVER real cells: a covered cell sources its glyph from
     // the overlay's text instead of the document's. The text, its stops, and
@@ -331,7 +331,7 @@ fn layoutMonoLine(
 fn layoutRowPrefix(
     v: *View,
     scratch: Allocator,
-    dl: *const core.layers.Layer,
+    dl: *const core.layers.Snapshot,
     line: stemma.Range,
     cols_visible: usize,
     pfx_bytes: *std.ArrayList(u8),
@@ -450,7 +450,7 @@ fn layoutMarkColumn(
     const width = @min(styles.mark_cols, cols_visible);
     var col: usize = 0;
     const Walk = struct {
-        fn layer(vv: *View, sc: Allocator, dl: *const core.layers.Layer, ln: stemma.Range, w: usize, c: *usize, pb: *std.ArrayList(u8), cs: *std.ArrayList(text_engine.Cell)) !void {
+        fn layer(vv: *View, sc: Allocator, dl: *const core.layers.Snapshot, ln: stemma.Range, w: usize, c: *usize, pb: *std.ArrayList(u8), cs: *std.ArrayList(text_engine.Cell)) !void {
             for (0..dl.spanCount()) |i| {
                 const s = dl.resolvedSpan(i);
                 if (s.placement != .gutter) continue;
@@ -474,7 +474,7 @@ fn layoutMarkColumn(
         }
     };
     if (styles.deco) |dl| try Walk.layer(v, scratch, dl, line, width, &col, pfx_bytes, cells);
-    for (styles.anno_layers) |al| try Walk.layer(v, scratch, al, line, width, &col, pfx_bytes, cells);
+    for (styles.anno_layers) |*al| try Walk.layer(v, scratch, al, line, width, &col, pfx_bytes, cells);
     return width;
 }
 
@@ -509,7 +509,7 @@ const Overlays = struct {
 
     fn collect(self: *Overlays, styles: StyleInputs, line: stemma.Range) void {
         if (styles.deco) |dl| self.add(dl, line);
-        for (styles.anno_layers) |al| self.add(al, line);
+        for (styles.anno_layers) |*al| self.add(al, line);
         std.mem.sort(Item, self.items[0..self.n], {}, struct {
             fn lt(_: void, a: Item, b: Item) bool {
                 return a.start < b.start;
@@ -517,7 +517,7 @@ const Overlays = struct {
         }.lt);
     }
 
-    fn add(self: *Overlays, dl: *const core.layers.Layer, line: stemma.Range) void {
+    fn add(self: *Overlays, dl: *const core.layers.Snapshot, line: stemma.Range) void {
         for (0..dl.spanCount()) |i| {
             const s = dl.resolvedSpan(i);
             if (s.placement != .overlay or s.message.len == 0) continue;
@@ -731,6 +731,18 @@ fn nextScalar(text: []const u8, base: usize, off: usize) usize {
 
 const testing = std.testing;
 
+/// The whole of `doc`, as a snapshot window.
+fn wholeOf(doc: *const core.Document) stemma.Range {
+    return .{ .start = 0, .end = doc.text().byteLen() };
+}
+
+/// Every feed in `feeds` as the frame would take it now.
+fn snapshotsOf(a: Allocator, doc: *const core.Document, feeds: []const *const core.layers.Layer) ![]const core.layers.Snapshot {
+    const out = try a.alloc(core.layers.Snapshot, feeds.len);
+    for (feeds, out) |f, *s| s.* = try f.snapshot(a, wholeOf(doc));
+    return out;
+}
+
 test "styles: a published styles bulk resolves to StyleClass colors; highlight wins" {
     const gpa = testing.allocator;
     var v = try View.init(gpa, font_provider.defaultMono(), 16);
@@ -781,8 +793,9 @@ test "styles: Hud.styles_layer flows through resolveStyleInputs (the render seam
     // lifts its bulk into StyleInputs.st, and the per-cell path resolves colors.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const hud: Hud = .{ .mode = "normal", .styles_layer = layer };
-    const si = try resolveStyleInputs(&v, arena.allocator(), hud, doc.text(), 2, 2);
+    const snap = try layer.snapshot(arena.allocator(), wholeOf(&doc));
+    const hud: Hud = .{ .mode = "normal", .styles_layer = &snap };
+    const si = try resolveStyleInputs(arena.allocator(), hud, doc.text(), 0, 2, 2);
     try testing.expect(si.st != null);
     try testing.expectEqual(v.theme.styleColor(.added), hlColor(&v, si, 0));
     try testing.expectEqual(v.theme.styleColor(.removed), hlColor(&v, si, 5));
@@ -808,9 +821,10 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const hud: Hud = .{ .mode = "normal", .decorations_layer = layer };
-    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
-    try testing.expect(si.deco == layer);
+    const snap = try layer.snapshot(a, wholeOf(&doc));
+    const hud: Hud = .{ .mode = "normal", .decorations_layer = &snap };
+    const si = try resolveStyleInputs(a, hud, doc.text(), 0, 1, 1);
+    try testing.expect(si.deco == &snap);
 
     var runs: std.ArrayList(Run) = .empty;
     const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
@@ -890,8 +904,9 @@ test "gutter placement: a breakpoint mark draws in a sign column every row share
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const hud: Hud = .{ .mode = "normal", .decorations_layer = layer };
-    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 3);
+    const snap = try layer.snapshot(a, wholeOf(&doc));
+    const hud: Hud = .{ .mode = "normal", .decorations_layer = &snap };
+    const si = try resolveStyleInputs(a, hud, doc.text(), 0, 2, 3);
     try testing.expectEqual(@as(usize, 2), si.mark_cols); // the dot + a blank
 
     // The marked row draws the dot at column 0; BOTH rows start their text at
@@ -929,8 +944,8 @@ test "overlay placement: a label covers its cell without moving any text" {
     defer arena.deinit();
     const a = arena.allocator();
     const feeds = try store.annotations(a, &doc);
-    const hud: Hud = .{ .mode = "normal", .annotations = feeds };
-    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
+    const hud: Hud = .{ .mode = "normal", .annotations = try snapshotsOf(a, &doc, feeds) };
+    const si = try resolveStyleInputs(a, hud, doc.text(), 0, 1, 1);
     var runs: std.ArrayList(Run) = .empty;
     const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, &.{});
 
@@ -985,8 +1000,8 @@ test "annotations: the presentation composites third-party feeds it was never to
     defer arena.deinit();
     const a = arena.allocator();
     const feeds = try store.annotations(a, &doc);
-    const hud: Hud = .{ .mode = "normal", .annotations = feeds };
-    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
+    const hud: Hud = .{ .mode = "normal", .annotations = try snapshotsOf(a, &doc, feeds) };
+    const si = try resolveStyleInputs(a, hud, doc.text(), 0, 1, 1);
 
     // The range feed colors its bytes by role; everything else is untouched.
     try testing.expectEqual(v.theme.styleColor(.emphasis), hlColor(&v, si, 3));
@@ -999,10 +1014,12 @@ test "annotations: the presentation composites third-party feeds it was never to
     try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
     try testing.expectApproxEqAbs(v.origin_x + 7 * v.cell_w, vl.stops[0].x, 0.01);
 
-    // An edit moves the entry past both stamps: the paint drops until the
-    // decorators republish — a stale span is never guessed onto new text.
+    // An edit moves the entry past both stamps: the next frame's snapshot of
+    // them is empty until the decorators republish — a stale span is never
+    // guessed onto new text.
     try doc.insert(gpa, 0, "\n");
-    const stale = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 2);
+    const next: Hud = .{ .mode = "normal", .annotations = try snapshotsOf(a, &doc, feeds) };
+    const stale = try resolveStyleInputs(a, next, doc.text(), 0, 2, 2);
     try testing.expect(stale.anno == null);
     var stale_runs: std.ArrayList(Run) = .empty;
     const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, &.{});

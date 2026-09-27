@@ -481,7 +481,7 @@ fn hasGutter(ed: *Editor, node: *window_layout.Node) !bool {
     var arena = std.heap.ArenaAllocator.init(ed.gpa);
     defer arena.deinit();
     const entry = ed.buffers.get(node.pane().buffer_id) orelse return error.NoEntry;
-    const gf = try h.app.frame_builder.gutterFrame(arena.allocator(), &ed.application.driver.ctx, try chromeFacts(ed, node), entry.textEditor(), null, "");
+    const gf = try h.app.frame_builder.gutterFrame(arena.allocator(), &ed.application.driver.ctx, &ed.render.fb.answers, node.pane().id, entry, try chromeFacts(ed, node), null, "");
     return gf.bindings.len > 0;
 }
 

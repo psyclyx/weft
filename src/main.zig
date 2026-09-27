@@ -655,6 +655,10 @@ pub fn main(init: std.process.Init) !void {
     var present_pending = false;
     var present_retry_ctx: loop_sources.PresentRetryCtx = .{ .pending = &present_pending, .swapchain_stale = &whead.ctx.swapchain_stale };
     _ = try sched.addTimer(&present_retry_ctx, loop_sources.presentRetryDue, "present_retry");
+    // Provider answers a frame asked for landed after it (doc/model.md §2.7):
+    // the frame that draws them is due without further input.
+    var redraw_due = false;
+    _ = try sched.addTimer(&redraw_due, loop_sources.redrawDue, "answers_landed");
 
     // The outbound session's wake-fd (§6 W2a-3 item 3) exists for the whole
     // run regardless of whether a session is bound to it yet (`Collab`
@@ -735,6 +739,7 @@ pub fn main(init: std.process.Init) !void {
             .frame_start = frame_start,
             .fb = fb,
         });
+        redraw_due = advanced.redraw;
         // The hub's wake-fd source tracks the Hub struct's own lifetime
         // (listen/stop-listen, connect/disconnect are all funneled through
         // `applyIntents`/`tickCollab` above) — reconcile once per wake.

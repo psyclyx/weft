@@ -14,6 +14,24 @@ const region = @import("region.zig");
 const window_layout = @import("window_layout.zig");
 const skia_mod = @import("weft_skia");
 
+/// `view.build` over `editor` as it is now: the snapshot a frame takes
+/// (`core.TextSnapshot`), released once the pane is built.
+fn buildOf(
+    gpa: std.mem.Allocator,
+    view: *view_mod.View,
+    arena: std.mem.Allocator,
+    editor: *const core.Editor,
+    hud: view_mod.Hud,
+    top_row: *usize,
+    frame: region.Rect,
+    dock: region.Rect,
+    w2p: scene.Transform2D,
+) !view_mod.Built {
+    var snap = try core.TextSnapshot.of(editor, arena);
+    defer snap.release(gpa);
+    return view.build(arena, &snap, hud, top_row, frame, dock, w2p);
+}
+
 fn fullFrame(w: u32, h: u32) region.Rect {
     return .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
 }
@@ -39,7 +57,7 @@ pub fn renderView(
     defer arena.deinit();
     view.resetFrame();
     var top_row: usize = 0;
-    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), .{}, w2p);
+    var built = try buildOf(gpa, view, arena.allocator(), editor, hud, &top_row, fullFrame(w, h), .{}, w2p);
     defer built.deinit(gpa);
 
     return try rasterize(gpa, view, &.{built.items}, w, h);
@@ -250,7 +268,7 @@ test "harness: the picker docks below the panes — cannot overlap body or statu
     defer arena.deinit();
     view.resetFrame();
     var tr: usize = 0;
-    var built = try view.build(arena.allocator(), &ed, .{ .mode = "normal", .pick = &pick }, &tr, panes, dock, w2p);
+    var built = try buildOf(gpa, &view, arena.allocator(), &ed, .{ .mode = "normal", .pick = &pick }, &tr, panes, dock, w2p);
     defer built.deinit(gpa);
     const pixels = try rasterize(gpa, &view, &.{built.items}, w, h);
     defer gpa.free(pixels);
@@ -290,9 +308,9 @@ test "harness: a vertical split renders a buffer in each column" {
     var rt: usize = 0;
     const lrect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(half), .h = @floatFromInt(h) };
     const rrect: region.Rect = .{ .x = @floatFromInt(half), .y = 0, .w = @floatFromInt(w - half), .h = @floatFromInt(h) };
-    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, .{}, w2p);
+    const lb = try buildOf(gpa, &view, arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, .{}, w2p);
     const left_layout = view.frame_layout; // capture before the next build overwrites it
-    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, .{}, w2p);
+    const rb = try buildOf(gpa, &view, arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, .{}, w2p);
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
@@ -343,12 +361,12 @@ test "harness: renderBuilt composites panes laid out by the real window layout" 
     view.resetFrame();
 
     // Build each pane into its layout slot rect (identity transform), exactly
-    // as renderPanes does — then composite through renderBuilt (headless present).
+    // as FrameBuilder.draw does — then composite through renderBuilt (headless present).
     var built: [2]view_mod.Built = undefined;
     const editors = [_]*core.Editor{ &left, &right };
     var trs = [_]usize{ 0, 0 };
     for (slots[0..n], 0..) |slot, i| {
-        built[i] = try view.build(arena.allocator(), editors[i], .{ .mode = "normal", .pane_border = slot.border }, &trs[i], slot.rect, .{}, w2p);
+        built[i] = try buildOf(gpa, &view, arena.allocator(), editors[i], .{ .mode = "normal", .pane_border = slot.border }, &trs[i], slot.rect, .{}, w2p);
     }
     defer for (&built) |*b| b.deinit(gpa);
 
@@ -388,9 +406,9 @@ test "harness: a horizontal split stacks a buffer in each row" {
     var bt: usize = 0;
     const trect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(half) };
     const brect: region.Rect = .{ .x = 0, .y = @floatFromInt(half), .w = @floatFromInt(w), .h = @floatFromInt(h - half) };
-    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, .{}, w2p);
+    const tb = try buildOf(gpa, &view, arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, .{}, w2p);
     const tl = view.frame_layout;
-    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, .{}, w2p);
+    const bb = try buildOf(gpa, &view, arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, .{}, w2p);
     const bl = view.frame_layout;
     try t.expect(tl.lines.len > 0 and bl.lines.len > 0);
     defer {
