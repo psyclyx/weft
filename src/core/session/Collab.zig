@@ -121,7 +121,9 @@ remote_file: ?*RemoteFile = null,
 partial: ?*PartialDoc = null,
 /// Host side: forward this layer's spans over the wire (feed ch 2).
 export_diag_layer: ?*layers_mod.Layer = null,
-export_diag_gen: usize = 0,
+/// What the last forwarded diagnostics were (a cheap signature), or null
+/// when they must go out again whatever they are — a peer just joined.
+export_diag_gen: ?usize = 0,
 /// Client side: imported host-scoped diagnostics land here.
 import_diag_layer: ?*layers_mod.Layer = null,
 
@@ -338,8 +340,18 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     if (merged) try self.republishPresence();
                 },
                 .frontier => {
+                    // The peer's FIRST frontier on this quad is the peer
+                    // joining it: until now it had no replica bound, so every
+                    // feed of our STATE — our cursor, our host diagnostics —
+                    // that went out before reached nothing, and both are
+                    // sent only when they change. Send them again.
+                    const joined = self.core.their_frontier == null;
                     try self.core.setTheirFrontier(gpa, frame.payload);
                     try self.sendBatch();
+                    if (joined) {
+                        self.clearLastPresence();
+                        self.export_diag_gen = null;
+                    }
                 },
                 // Connection-level; Conn consumes these on channel 0.
                 .share, .publish, .unpublish => {},
@@ -621,7 +633,7 @@ pub fn push(self: *Collab) !bool {
             for (0..layer.spanCount()) |i| acc +%= layer.resolvedSpan(i).start;
             break :blk acc;
         };
-        if (gen != self.export_diag_gen) {
+        if (self.export_diag_gen == null or gen != self.export_diag_gen.?) {
             self.export_diag_gen = gen;
             var payload: std.ArrayList(u8) = .empty;
             defer payload.deinit(gpa);

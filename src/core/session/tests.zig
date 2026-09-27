@@ -4223,6 +4223,81 @@ test "publication: a surface the descriptor does not export is dropped, while th
     try t.expectEqual(@as(usize, 0), bcol.presence.items.len);
 }
 
+test "collab: a peer that binds after the sharer's cursor went out is sent it again — state feeds reach a joiner" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "notes\n");
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    const acol = try ca.shareExports(&a_notes, "notes", 1, .legacy);
+    var emitted: QuadEmissions = .{ .base = acol.base };
+    sa.tap = emitted.tap();
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 1), cb.offers.items.len);
+    try t.expectEqual(@as(usize, 0), emitted.presence);
+    acol.publish_presence = true;
+    acol.cursor_offset = 3;
+    acol.selection_anchor = 3;
+    // Alice's cursor goes out while bob has an offer and no replica, and
+    // reaches bob's side before he binds: a feed for a quad nobody there has
+    // bound reaches nothing (drained here exactly as `Conn.tick` would drop
+    // it, so the order is the test's, not the scheduler's).
+    var dropped = false;
+    const drop_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (!dropped and task.nowNs() < drop_deadline) {
+        _ = try ca.tick();
+        var frames: std.ArrayList(wire.Decoder.Decoded) = .empty;
+        defer frames.deinit(gpa);
+        try sb.drain(gpa, &frames);
+        for (frames.items) |frame| {
+            defer gpa.free(frame.payload);
+            if (frame.class == .feed and frame.channel == acol.base + 1) dropped = true;
+        }
+        if (!dropped) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(dropped);
+    try t.expectEqual(@as(usize, 1), emitted.presence);
+
+    // Bob joins. Alice has not moved — and still her cursor reaches him,
+    // because his joining is when her state is sent again.
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const bcol = try cb.openOffer(0, &b_notes, 2);
+    bcol.presence_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var landed = false;
+    while (!landed and task.nowNs() < deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        landed = bcol.presence_layer.?.spanCount() > 0;
+        if (!landed) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(emitted.presence >= 2);
+    try t.expect(landed);
+    try t.expectEqualStrings("alice", bcol.presence_layer.?.resolvedSpan(0).message);
+}
+
 test "publication: unpublish advances the epoch, marks the quad stale, and invalidates translated references" {
     const gpa = t.allocator;
     const fds = try socketPair();
