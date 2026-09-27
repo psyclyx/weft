@@ -322,9 +322,10 @@ shared tree.
 - **Projections can't see documents change.** The outline re-reads on
   presentation; there is no "document changed" event, so a later parse shows
   only on the next presentation. This belongs to the context/signal layer.
-- **Scratch documents don't persist across restarts**, and the answer cache is
-  keyed by the local buffer ref rather than the designation (a prerequisite
-  for peer-rendered views).
+- **Scratch documents don't persist across restarts**, and an answer's
+  QUESTION key still holds the local buffer ref and the local log length (a
+  peer-rendered view needs an opaque remote version). What an answer is
+  about — the key a pane's lookup names — is the designation.
 - **JS plugins** lack the designation doors and `on_context_changed`.
 
 ## 4. What retires
@@ -408,7 +409,7 @@ kept alive past its phase.
    in a path is not formed; JS plugins have no designation doors (the
    `.tool` group is wasm-only); projection producers can re-run only in the
    place they ran in (a spawn runs where the dispatch is), and say so; the
-   answer cache still keys by `Buffers.Ref` (phase 5's note).
+   answer cache's question key still holds `Buffers.Ref` (phase 5's note).
 2. **Open context.** Keyed values with scopes, `weft.contextSet`, predicate
    leaves, `on_context_changed(keys)`. Migrate the toolbar and delete
    `on_offers_changed` and `Companion`. The repl plugin publishes
@@ -558,7 +559,9 @@ kept alive past its phase.
    live `Editor` or `Layer`. No guest runs in either half: gutter cells and
    status segments come from `app/answers.zig`, a cache keyed by
    (pane, entry, revision, `Facts.digest`, ask), drawn even when one version
-   behind; the questions a frame lacked are asked by a new lifecycle phase
+   behind — but only for the same SUBJECT: a pane looks answers up by the
+   digest of its entry's designation (`answers.Subject`), so a pane moved to
+   another entry draws none of the last one's cells; the questions a frame lacked are asked by a new lifecycle phase
    after the build (`answerRequests`, `piawpobr`), and answers that land
    damage the view and wake the loop (`AdvanceResult.redraw`,
    `loop_sources.redrawDue`). `contract.render_safe`, `answerGate` and
@@ -572,9 +575,9 @@ kept alive past its phase.
    to 0.09 ms.
    Still open: the initial parse is all-or-nothing (tree-sitter yields no
    partial tree), so a large file still paints once the whole parse lands;
-   the answer cache keys entries by local `Buffers.Ref` and revisions are the
-   local log length, so a peer-rendered view needs designation keys and an
-   opaque remote version; the `Hud`'s strings, surfaces and semantic scenes
+   an answer's question key holds the local `Buffers.Ref` and revisions are
+   the local log length, so a peer-rendered view needs an opaque remote
+   version (its subject is already the designation); the `Hud`'s strings, surfaces and semantic scenes
    are borrowed for the frame (safe: nothing mutates them between capture
    and draw) but a view sent to a peer would need them owned.
 

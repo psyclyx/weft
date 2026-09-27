@@ -4,8 +4,10 @@
 //! cells, its status segments — is ASKED for a version and CACHED here, keyed
 //! by what the question was: the pane, the entry, the document revision, and
 //! the facts and positions the ask carries. A frame draws the newest answer it
-//! has for its pane, whether or not it was the answer to this frame's
-//! question, and notes the question it had no answer to (`want`). After the
+//! has for its pane ABOUT ITS SUBJECT, whether or not it was the answer to
+//! this frame's question, and notes the question it had no answer to
+//! (`want`). A lookup names the subject, so a pane that moved to another
+//! entry cannot reach the cells of the one it showed before. After the
 //! frame, the loop asks (`FrameBuilder.answerRequests`); an answer that lands
 //! damages the view, so the next frame draws it.
 //!
@@ -28,6 +30,27 @@ const ui_mesh = @import("weft_gfx").view.ui_mesh;
 /// an answer is in the key, so an unequal key is a question not yet answered.
 pub const Key = u64;
 
+/// What an answer is ABOUT: the digest of the entry's designation
+/// (doc/model.md §2.1), so it names the content rather than the local slot —
+/// the key a peer-rendered view can share. An entry with no designation is
+/// named by its slot and generation, which a reused slot cannot inherit.
+pub const Subject = u64;
+
+/// The subject `entry` is: its designation's digest, else its slot's.
+pub fn subjectOf(entry: *core.Buffers.Buffer) Subject {
+    var buf: [core.designation.max_len]u8 = undefined;
+    var h = std.hash.Wyhash.init(0);
+    if (core.designation.of(entry, &buf)) |d| {
+        h.update("designation");
+        h.update(d);
+    } else {
+        h.update("slot");
+        h.update(std.mem.asBytes(&entry.id));
+        h.update(std.mem.asBytes(&entry.generation));
+    }
+    return h.final();
+}
+
 /// Which exchange a request or an answer belongs to.
 pub const Slot = enum { gutter, status };
 
@@ -35,6 +58,8 @@ pub const Slot = enum { gutter, status };
 pub const Request = struct {
     pane: u32,
     entry: core.Buffers.Ref,
+    /// `entry`'s subject, as the frame that asked named it.
+    subject: Subject,
     key: Key,
     ask: Ask,
 
@@ -55,6 +80,8 @@ pub const Request = struct {
 /// One stored answer: what the pane's providers said to one question.
 pub const Entry = struct {
     pane: u32,
+    /// What the answer is about: only a lookup for the same subject finds it.
+    subject: Subject,
     key: Key,
     /// Store order: the newest answer wins a lookup.
     stamp: u64,
@@ -106,22 +133,23 @@ pub const Answers = struct {
         return self.pending.toOwnedSlice(self.gpa);
     }
 
-    /// The newest status answer `pane` has, whatever it answered.
-    pub fn status(self: *const Answers, pane: u32) ?*const Entry {
+    /// The newest status answer `pane` has about `subject`, whatever
+    /// question it answered.
+    pub fn status(self: *const Answers, pane: u32, subject: Subject) ?*const Entry {
         var best: ?*const Entry = null;
         for (self.entries.items) |e| {
-            if (e.pane != pane or e.answer != .status) continue;
+            if (e.pane != pane or e.subject != subject or e.answer != .status) continue;
             if (best == null or e.stamp > best.?.stamp) best = e;
         }
         return best;
     }
 
-    /// Every gutter window `pane` has, newest first, into `arena` (frame
-    /// scratch). The windows borrow this cache's bytes, which live until the
-    /// next `store` — after the frame that reads them.
-    pub fn gutterWindows(self: *const Answers, arena: std.mem.Allocator, pane: u32) ![]const ui_mesh.GutterBatch.Window {
+    /// Every gutter window `pane` has about `subject`, newest first, into
+    /// `arena` (frame scratch). The windows borrow this cache's bytes, which
+    /// live until the next `store` — after the frame that reads them.
+    pub fn gutterWindows(self: *const Answers, arena: std.mem.Allocator, pane: u32, subject: Subject) ![]const ui_mesh.GutterBatch.Window {
         var mine: std.ArrayList(*const Entry) = .empty;
-        for (self.entries.items) |e| if (e.pane == pane and e.answer == .gutter) try mine.append(arena, e);
+        for (self.entries.items) |e| if (e.pane == pane and e.subject == subject and e.answer == .gutter) try mine.append(arena, e);
         std.mem.sort(*const Entry, mine.items, {}, struct {
             fn newer(_: void, a: *const Entry, b: *const Entry) bool {
                 return a.stamp > b.stamp;
@@ -138,6 +166,7 @@ pub const Answers = struct {
         const e = try self.gpa.create(Entry);
         e.* = .{
             .pane = req.pane,
+            .subject = req.subject,
             .key = req.key,
             .stamp = 0,
             .arena = .init(self.gpa),
@@ -208,7 +237,7 @@ pub const Answers = struct {
 const t = std.testing;
 
 fn gutterReq(pane: u32, key: Key, first: u32) Request {
-    return .{ .pane = pane, .entry = undefined, .key = key, .ask = .{ .gutter = .{ .first = first, .count = core.gutter.window, .lines = 1 } } };
+    return .{ .pane = pane, .entry = undefined, .subject = 5, .key = key, .ask = .{ .gutter = .{ .first = first, .count = core.gutter.window, .lines = 1 } } };
 }
 
 test "answers: a question asked twice before the loop answers is asked once" {
@@ -227,22 +256,40 @@ test "answers: a question asked twice before the loop answers is asked once" {
 test "answers: the newest answer wins, a status answer replaces the last, windows are bounded" {
     var a: Answers = .init(t.allocator);
     defer a.deinit();
-    const status_req: Request = .{ .pane = 1, .entry = undefined, .key = 1, .ask = .{ .status = .{ .caret = 0, .focused = true } } };
+    const status_req: Request = .{ .pane = 1, .entry = undefined, .subject = 5, .key = 1, .ask = .{ .status = .{ .caret = 0, .focused = true } } };
     try a.store(try a.begin(status_req));
     var newer = status_req;
     newer.key = 2;
     try a.store(try a.begin(newer));
-    try t.expectEqual(@as(Key, 2), a.status(1).?.key);
-    try t.expect(a.status(2) == null);
+    try t.expectEqual(@as(Key, 2), a.status(1, 5).?.key);
+    try t.expect(a.status(2, 5) == null);
 
     for (0..gutter_windows_per_pane + 2) |i| try a.store(try a.begin(gutterReq(1, 9, @intCast(i * core.gutter.window))));
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const windows = try a.gutterWindows(arena.allocator(), 1);
+    const windows = try a.gutterWindows(arena.allocator(), 1, 5);
     try t.expectEqual(@as(usize, gutter_windows_per_pane), windows.len);
     try t.expectEqual(@as(usize, (gutter_windows_per_pane + 1) * core.gutter.window), windows[0].first);
 
     a.retainPanes(&.{2});
-    try t.expect(a.status(1) == null);
-    try t.expectEqual(@as(usize, 0), (try a.gutterWindows(arena.allocator(), 1)).len);
+    try t.expect(a.status(1, 5) == null);
+    try t.expectEqual(@as(usize, 0), (try a.gutterWindows(arena.allocator(), 1, 5)).len);
+}
+
+test "answers: a pane's answers about one subject are never found for another" {
+    var a: Answers = .init(t.allocator);
+    defer a.deinit();
+    var status_req: Request = .{ .pane = 1, .entry = undefined, .subject = 5, .key = 1, .ask = .{ .status = .{ .caret = 0, .focused = true } } };
+    try a.store(try a.begin(status_req));
+    try a.store(try a.begin(gutterReq(1, 9, 0)));
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    // The pane now shows subject 6: nothing it has is about it.
+    try t.expect(a.status(1, 6) == null);
+    try t.expectEqual(@as(usize, 0), (try a.gutterWindows(arena.allocator(), 1, 6)).len);
+    // Its own answer replaces the other subject's in the pane.
+    status_req.subject = 6;
+    try a.store(try a.begin(status_req));
+    try t.expect(a.status(1, 6) != null);
+    try t.expect(a.status(1, 5) == null);
 }

@@ -286,7 +286,7 @@ pub fn gutterFrame(
         if (b.provider != .schema_provider) continue;
         const batch = try arena.create(view_mod.ui_mesh.GutterBatch);
         batch.* = .{
-            .windows = try answers.gutterWindows(arena, pane),
+            .windows = try answers.gutterWindows(arena, pane, answers_mod.subjectOf(buffer)),
             .key = gutterKey(buffer, facts, gf.line_count),
             .caret_line = gf.caret_line,
         };
@@ -298,11 +298,11 @@ pub fn gutterFrame(
 
 /// Ask for this frame's status question after the frame, unless the answer
 /// `pane` has is already to it.
-fn wantStatus(answers: *answers_mod.Answers, pane: u32, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) void {
+fn wantStatus(answers: *answers_mod.Answers, pane: u32, subject: answers_mod.Subject, buffer: *core.Buffers.Buffer, facts: core.facts.Facts, focused: bool) void {
     const q = statusQuestion(buffer, facts, focused);
-    if (answers.status(pane)) |e| if (e.key == q.key) return;
+    if (answers.status(pane, subject)) |e| if (e.key == q.key) return;
     const ask = q.ask orelse return;
-    answers.want(.{ .pane = pane, .entry = buffer.ref(), .key = q.key, .ask = .{ .status = ask } });
+    answers.want(.{ .pane = pane, .entry = buffer.ref(), .subject = subject, .key = q.key, .ask = .{ .status = ask } });
 }
 
 /// Ask every question the last frame had no answer to, and cache what the
@@ -462,6 +462,8 @@ fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
 pub const PaneInput = struct {
     pane: u32,
     entry: core.Buffers.Ref,
+    /// What the pane's answers are about (`answers.subjectOf(entry)`).
+    subject: answers_mod.Subject,
     rect: region.Rect,
     /// The window-bottom dock (only the focused pane carries it).
     dock: region.Rect = .{},
@@ -657,6 +659,9 @@ pub const FrameBuilder = struct {
         input.snapshot_ns += stats_mod.nowNs() - t0;
         layers.apply(&hud);
 
+        // Every answer this pane draws or asks for is about its subject: a
+        // pane that just moved to another entry draws none of the last one's.
+        const subject = answers_mod.subjectOf(spec.buffer);
         var status_args: view_mod.ui_mesh.StatuslineArgs = .{
             .facts = spec.facts,
             .file = if (ed) |e| (if (e.backingPath()) |p| core.designation.placeRelative(spec.buffer, fx.cmd_ctx.realizer, p, try arena.alloc(u8, core.designation.max_len)) else name) else name,
@@ -664,15 +669,16 @@ pub const FrameBuilder = struct {
             .diag_layer = live.diagnostics,
             .link = spec.link,
             .theme = &self.view.theme,
-            .plugin_answers = if (self.answers.status(spec.pane)) |e| e.answer.status else &.{},
+            .plugin_answers = if (self.answers.status(spec.pane, subject)) |e| e.answer.status else &.{},
         };
         hud.statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena, &status_args);
-        if (status_args.plugin_reached) wantStatus(&self.answers, spec.pane, spec.buffer, spec.facts, spec.focused);
+        if (status_args.plugin_reached) wantStatus(&self.answers, spec.pane, subject, spec.buffer, spec.facts, spec.focused);
         hud.gutter = try gutterFrame(arena, fx, &self.answers, spec.pane, spec.buffer, spec.facts, layers.diagnostics, bpLines(arena, fx.caps, ed));
 
         try input.panes.append(arena, .{
             .pane = spec.pane,
             .entry = spec.buffer.ref(),
+            .subject = subject,
             .rect = spec.rect,
             .dock = spec.dock,
             .top_row = spec.top_row.*,
@@ -712,7 +718,7 @@ pub const FrameBuilder = struct {
             const gf = p.hud.gutter orelse continue;
             const batch = gf.batch orelse continue;
             const first = batch.wanted orelse continue;
-            self.answers.want(.{ .pane = p.pane, .entry = p.entry, .key = batch.key, .ask = .{ .gutter = .{
+            self.answers.want(.{ .pane = p.pane, .entry = p.entry, .subject = p.subject, .key = batch.key, .ask = .{ .gutter = .{
                 .first = std.math.cast(u32, first) orelse continue,
                 .count = core.gutter.window,
                 .lines = std.math.cast(u32, gf.line_count) orelse continue,

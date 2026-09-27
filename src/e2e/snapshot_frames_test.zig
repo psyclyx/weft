@@ -205,3 +205,57 @@ test "e2e/snapshot-frames: an unchanged frame repaints no highlight; an edit rep
     try t.expectEqual(after_edit, syn.paints);
     try t.expect(lang.shownHighlighted(ed));
 }
+
+/// A status provider that names the ENTRY it was asked about (`entry <id>`),
+/// so a frame showing it says whose answer it drew.
+const Namer = struct {
+    ed: *Editor,
+
+    fn register(self: *Namer) !void {
+        try self.ed.ctx.slot_host.?.register(.{ .slot = core.status_segment.slot_name, .owner = "namer", .data = self, .handler = answer });
+    }
+
+    fn answer(data: ?*anyopaque, host: *core.slot.SlotHost, req: *const core.slot.Request) anyerror!void {
+        const self: *Namer = @ptrCast(@alignCast(data.?));
+        var buf: [32]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&buf, "entry {d}", .{self.ed.buffers.active().id});
+        const tell = try core.status_segment.encodeTell(self.ed.gpa, &.{.{ .text = "namer", .command = cmd }});
+        defer self.ed.gpa.free(tell);
+        try host.push(req.session, .{ .owner = "namer" }, tell);
+    }
+};
+
+fn showsEntry(ed: *Editor, id: u32) bool {
+    var buf: [32]u8 = undefined;
+    return ed.pointAtStatusCommand(std.fmt.bufPrint(&buf, "entry {d}", .{id}) catch return false) != null;
+}
+
+test "e2e/snapshot-frames: a pane that changed entry never draws the last entry's answer" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    var namer: Namer = .{ .ed = ed };
+    try namer.register();
+
+    ed.runStr("open", "a.txt");
+    const a = ed.buffers.active().id;
+    ed.application.damage();
+    _ = try wake(ed);
+    _ = try wake(ed);
+    try t.expect(showsEntry(ed, a));
+
+    // The same pane now shows b.txt. Its first frame has no answer for b —
+    // and draws none, rather than a.txt's.
+    // (Opened without the harness's own wake, so the frame below is b's first.)
+    var typed: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = Editor.asTyped("b.txt", &typed) }});
+    const b = ed.buffers.active().id;
+    try t.expect(a != b);
+    ed.application.noteInput();
+    _ = try wake(ed);
+    try t.expect(!showsEntry(ed, a));
+    _ = try wake(ed);
+    try t.expect(showsEntry(ed, b));
+}
