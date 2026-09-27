@@ -15,23 +15,29 @@ const Run = view.Run;
 const Rect = view.Rect;
 const Built = view.Built;
 
-/// Where the floating layer starts in each list: everything a build appended
-/// from these indices on (a popup, a menu) paints after the whole base layer,
-/// so a popup's fill covers the text beneath it instead of the text showing
-/// through (rects all paint before glyphs within one layer).
+/// Where a layer starts in each list: everything a build appended from these
+/// indices on (a popup, a menu; above those, a tooltip) paints after the
+/// whole layer below, so a popup's fill covers the text beneath it instead of
+/// the text showing through (rects all paint before glyphs within one layer).
 pub const Layers = struct { rects: usize, runs: usize };
 
-pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect, float: Layers) !Built {
+/// `starts` are the layers above the base one, bottom up, in increasing
+/// order.
+pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect, starts: []const Layers) !Built {
     // At most: every rect, every glyph, a clip before each run and one lift
     // after each layer.
-    var count = rects.len + runs.len + 2;
+    var count = rects.len + runs.len + starts.len + 1;
     for (runs) |run| count += run.shaped.glyphs.len;
     var items = try v.gpa.alloc(scene.DrawItem, count);
     errdefer v.gpa.free(items);
 
     var at: usize = 0;
-    at += try place(v, world_to_pixel, items[at..], runs[0..float.runs], rects[0..float.rects]);
-    at += try place(v, world_to_pixel, items[at..], runs[float.runs..], rects[float.rects..]);
+    var from: Layers = .{ .rects = 0, .runs = 0 };
+    for (starts) |to| {
+        at += try place(v, world_to_pixel, items[at..], runs[from.runs..to.runs], rects[from.rects..to.rects]);
+        from = to;
+    }
+    at += try place(v, world_to_pixel, items[at..], runs[from.runs..], rects[from.rects..]);
     std.debug.assert(at <= items.len);
     if (at < items.len) items = try v.gpa.realloc(items, at);
     return .{ .items = items };

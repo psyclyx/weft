@@ -13,6 +13,7 @@ const region = @import("../region.zig");
 const view = @import("../view.zig");
 const data = @import("semantic_data.zig");
 const popup = @import("popup.zig");
+const chrome_mod = @import("chrome.zig");
 
 const View = view.View;
 const Run = view.Run;
@@ -38,6 +39,34 @@ pub const Span = struct {
     compact_below: u16 = 0,
     hide_below: u16 = 0,
     selection: ?struct { anchor: usize, caret: usize } = null,
+    /// The chrome role this span is drawn as: an action node is a button
+    /// (a menu item, in a menu), a node whose role is `separator` a divider.
+    /// Null: plain text, as every label and field is.
+    chrome: ?chrome_mod.Role = null,
+    /// The node's `icon` fact — an icon name in the theme's set.
+    icon: ?[]const u8 = null,
+    /// Why the action cannot run (its `reason` fact): the button reads
+    /// disabled and its tooltip says why.
+    reason: []const u8 = "",
+    /// The action's `name` fact, which a key hint is looked up by.
+    name: []const u8 = "",
+
+    /// Cells the span occupies on the row before its style is known — a
+    /// button's label and a cell of padding either side. A style that draws
+    /// an icon widens it at draw time (`chrome.buttonCols`).
+    fn cells(self: Span) usize {
+        return visualWidth(self.text) + @as(usize, if (self.chrome == .button) 2 else 0);
+    }
+
+    /// Cells under `v`'s chrome style.
+    fn cellsIn(self: Span, v: *const View) usize {
+        if (self.chrome == .button) return chrome_mod.buttonCols(v, self.content());
+        return visualWidth(self.text);
+    }
+
+    fn content(self: Span) chrome_mod.Content {
+        return .{ .label = self.text, .icon = self.icon };
+    }
 };
 
 pub const Row = struct {
@@ -119,11 +148,9 @@ const Builder = struct {
         var selection: ?struct { anchor: usize, caret: usize } = null;
         const text = switch (node.content) {
             .label => |label| try displayBytes(self.arena, label),
-            .action => |action| blk: {
-                const label = if (action.label.len != 0) action.label else action.action;
-                const decorated = try std.fmt.allocPrint(self.arena, "[{s}]", .{label});
-                break :blk try displayBytes(self.arena, decorated);
-            },
+            // The label alone: that it is a button is the chrome style's to
+            // show, not brackets in its text.
+            .action => |action| try displayBytes(self.arena, if (action.label.len != 0) action.label else action.action),
             .field => |field| blk: {
                 const provider = self.document.fields.get(field.ref) orelse
                     break :blk try displayBytes(self.arena, field.placeholder);
@@ -151,9 +178,18 @@ const Builder = struct {
             depth * 2
         else blk: {
             const prior = preceding[preceding.len - 1];
-            break :blk @as(usize, prior.column) + visualWidth(prior.text) + 2;
+            break :blk @as(usize, prior.column) + prior.cells() + 2;
+        };
+        const role: ?chrome_mod.Role = switch (node.content) {
+            .action => .button,
+            .label => if (std.mem.eql(u8, leafOf(node.role), "separator")) .separator else null,
+            else => null,
         };
         return .{
+            .chrome = role,
+            .icon = factValue(node, "icon"),
+            .reason = factValue(node, "reason") orelse "",
+            .name = factValue(node, "name") orelse "",
             .node = node.id,
             .text = text,
             .column = node.layout.column orelse @intCast(@min(natural_column, std.math.maxInt(u16))),
@@ -195,7 +231,7 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
         if (index >= top_row.* + visible) top_row.* = index + 1 - visible;
         break;
     };
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true, false);
     return hits.toOwnedSlice(hit_arena);
 }
 
@@ -212,21 +248,26 @@ pub const Drawn = struct { hits: []const Hit, box: ?region.Rect = null };
 pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, bounds: region.Rect, caret_at: ?[2]f32) !Drawn {
     const rows = try rowsFor(scratch, overlay.document);
     if (rows.len == 0) return .{ .hits = &.{} };
-    var widest: usize = 1;
-    for (rows) |row| {
-        var occupied: usize = 0;
-        for (row.spans, 0..) |span, index| {
-            const column = @max(occupied, @as(usize, span.column));
-            occupied = column + visualWidth(span.text) + @as(usize, @intFromBool(index + 1 < row.spans.len));
-        }
-        widest = @max(widest, occupied);
-    }
     const anchor: ?[2]f32 = if (std.mem.eql(u8, overlay.presentation, "pointer"))
         overlay.pointer orelse caret_at
     else if (std.mem.eql(u8, overlay.presentation, "caret"))
         caret_at orelse overlay.pointer
     else
         null;
+    // Hung at a point, the overlay is a menu: its actions are menu items,
+    // with an icon column when the style draws icons.
+    const menu = anchor != null;
+    const icon_column: usize = if (menu and v.chrome.showsIcons()) 2 else 0;
+    var widest: usize = 1;
+    for (rows) |row| {
+        var occupied: usize = 0;
+        for (row.spans, 0..) |span, index| {
+            const column = @max(occupied, @as(usize, span.column));
+            const width = if (menu and span.chrome == .button) visualWidth(span.text) + icon_column else span.cellsIn(v);
+            occupied = column + width + @as(usize, @intFromBool(index + 1 < row.spans.len));
+        }
+        widest = @max(widest, occupied);
+    }
     const area = if (anchor != null) bounds else body;
     const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1));
     const pad_x = v.cell_w;
@@ -247,14 +288,17 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     else
         area.y + (area.h - box_h) / 2;
     const y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));
-    try popup.outlinedBox(scratch, rects, x, y, box_w, box_h, v.theme.background, v.theme.accent);
+    const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+    try chrome_mod.paintPanel(sink, .{ .x = x, .y = y, .w = box_w, .h = box_h }, v.theme.background, v.theme.accent, if (menu) .menu else .popup);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true, menu);
     return .{ .hits = try hits.toOwnedSlice(hit_arena), .box = .{ .x = x, .y = y, .w = box_w, .h = box_h } };
 }
 
-fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool) !void {
+/// `menu`: the rows are a menu's, so an action is a `menu_item` across the
+/// row rather than a `button` in its cells.
+fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool, menu: bool) !void {
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
@@ -288,6 +332,43 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 const end = @min(@max(sel.anchor, sel.caret), available_cells);
                 if (end > start) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(start)) * v.cell_w, .y = y, .w = @as(f32, @floatFromInt(end - start)) * v.cell_w, .h = v.line_h, .color = v.theme.selection });
                 if (hud.cursor_on and sel.caret < available_cells) try rects.append(scratch, fieldCaretRect(x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y, v.cell_w, v.line_h, hud.cursor_style, v.theme.cursor));
+            }
+            if (span.chrome) |role| {
+                // A chrome node: its style draws it, in the cells (or, in a
+                // menu, the row) it is given, and that box is what a click
+                // reaches.
+                const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+                const hovered = hud.pointer.onNode(view_ref, span.node);
+                const state: chrome_mod.State = .{
+                    .hover = hovered,
+                    .pressed = hovered and hud.pointer.pressed,
+                    .disabled = span.reason.len != 0,
+                    .focused = row.focused,
+                };
+                const content: chrome_mod.Content = .{ .label = span.text, .icon = span.icon, .fg = colorFor(v, span.tone) };
+                var box: region.Rect = .{ .x = x, .y = y, .w = @min(@as(f32, @floatFromInt(span.cellsIn(v))) * v.cell_w, @max(0, body.x + body.w - x)), .h = v.line_h };
+                switch (role) {
+                    .separator => {
+                        if (row.spans.len == 1)
+                            try chrome_mod.paintSeparator(sink, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h }, .horizontal)
+                        else
+                            try chrome_mod.paintSeparator(sink, .{ .x = x, .y = y + 3, .w = v.cell_w, .h = @max(0, v.line_h - 6) }, .vertical);
+                        occupied = column + visualWidth(span.text) + 1;
+                        continue;
+                    },
+                    .button => if (menu) {
+                        box = .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h };
+                        var item = content;
+                        item.key_hint = chrome_mod.KeyHints.of(hud.key_hints, scratch, span.name);
+                        try chrome_mod.paint(sink, .menu_item, state, item, box);
+                    } else try chrome_mod.paint(sink, .button, state, content, box),
+                    else => try chrome_mod.paint(sink, role, state, content, box),
+                }
+                if (hovered and hud.pointer.tooltip) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
+                occupied = column + span.cellsIn(v) + 1;
+                if (!span.focusable and !span.activatable) continue;
+                try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });
+                continue;
             }
             const text = if (clip_width) firstCells(span.text, available_cells) else span.text;
             try popup.propLine(v, scratch, runs, text, x, y + v.ascent, colorFor(v, span.tone));
@@ -352,6 +433,16 @@ fn toneFor(node: *const semantic.scene.Node) Tone {
         if (std.mem.eql(u8, fact.value, "symlink")) return .warning;
     };
     return .normal;
+}
+
+fn factValue(node: *const semantic.scene.Node, name: []const u8) ?[]const u8 {
+    for (node.facts) |fact| if (std.mem.eql(u8, fact.name, name)) return fact.value;
+    return null;
+}
+
+/// A role's last dotted segment: `offers.separator` and `separator` alike.
+fn leafOf(role: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, role, '.')) |dot| role[dot + 1 ..] else role;
 }
 
 fn numberFact(node: *const semantic.scene.Node, name: []const u8) ?u16 {

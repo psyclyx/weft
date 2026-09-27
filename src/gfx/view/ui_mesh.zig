@@ -98,6 +98,11 @@ pub const Seg = struct {
     /// BORROWED — a manifest decl's, or a plugin answer's in the frame
     /// arena — so `freeSegs` leaves it alone.
     command: []const u8 = "",
+    /// An icon name (the theme's set) drawn in place of the segment's first
+    /// glyph by a chrome style that shows icons. BORROWED, like `command`.
+    icon: []const u8 = "",
+    /// What the segment's tooltip says; its command when empty. BORROWED.
+    tooltip: []const u8 = "",
 };
 
 pub fn freeSegs(gpa: Allocator, segs: []const Seg) void {

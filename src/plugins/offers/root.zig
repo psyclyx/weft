@@ -190,8 +190,10 @@ fn publishBoard(board: *Board) !void {
     const a = board.arena.allocator();
     var nodes: std.ArrayList(Node) = .empty;
     for (board.items, 0..) |item, i| {
+        // A separator says what it is; the chrome style decides how it looks
+        // (the label is only its text fallback).
         if (offers.separatorBefore(board.items, i))
-            try nodes.append(a, .{ .id = @enumFromInt(sep_base + i), .facts = &.{.{ .name = "tone", .value = "muted" }}, .content = .{ .label = if (board.layout == .strip) "│" else "──" } });
+            try nodes.append(a, .{ .id = @enumFromInt(sep_base + i), .role = "separator", .facts = &.{.{ .name = "tone", .value = "muted" }}, .content = .{ .label = if (board.layout == .strip) "│" else "──" } });
         var facts: std.ArrayList(Fact) = .empty;
         try facts.append(a, .{ .name = "name", .value = item.name });
         if (item.provider.len > 0) try facts.append(a, .{ .name = "provider", .value = item.provider });
@@ -333,7 +335,7 @@ fn publishMenu(m: *Menu) !void {
     var rows: std.ArrayList(Node) = .empty;
     for (m.items, 0..) |item, i| {
         if (m.rules[i])
-            try rows.append(a, .{ .id = @enumFromInt(sep_base + i), .facts = &.{.{ .name = "tone", .value = "muted" }}, .layout = .{ .column = 0 }, .content = .{ .label = "──" } });
+            try rows.append(a, .{ .id = @enumFromInt(sep_base + i), .role = "separator", .facts = &.{.{ .name = "tone", .value = "muted" }}, .layout = .{ .column = 0 }, .content = .{ .label = "──" } });
         const cells = try a.alloc(Node, 1);
         cells[0] = .{
             .id = @enumFromInt(item_base + i),

@@ -25,6 +25,10 @@ pub const CaretPlace = hud_mod.CaretPlace;
 pub const MdInline = hud_mod.MdInline;
 pub const Tab = hud_mod.Tab;
 pub const ChromeHit = hud_mod.ChromeHit;
+pub const Hover = hud_mod.Hover;
+
+/// How chrome looks: roles, states and the three styles (doc/chrome.md §3).
+pub const chrome = @import("view/chrome.zig");
 
 /// The view's color palette (data + role→color lookups), from `view/Theme.zig`.
 pub const Theme = @import("view/Theme.zig");
@@ -52,6 +56,7 @@ test {
     _ = View;
     _ = @import("view/Theme.zig");
     _ = @import("view/hud.zig");
+    _ = chrome;
     _ = @import("view/statusline.zig");
     _ = @import("view/popup.zig");
     _ = @import("view/decoration.zig");
