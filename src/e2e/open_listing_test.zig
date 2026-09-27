@@ -527,6 +527,90 @@ test "e2e/files: config.js — `V` with no motion covers the current line: `d`, 
     try expectPrimaryText(ed, "ONE\none\nthree\n");
 }
 
+/// The mode chip the status line draws for the mode the editor is in.
+fn chip(ed: *Editor) []const u8 {
+    return if (ed.keymap.modeDisplay(ed.mode())) |d| d.name else "";
+}
+
+test "e2e/files: config.js — the visual chip names the kind the operators act on, however visual is entered or switched" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "kinds.txt", "one\ntwo\nthree\nfour\n");
+    ed.runStr("file.open", "kinds.txt");
+    ed.applyWindow();
+
+    // `V`: linewise, and says so.
+    ed.chord("g g");
+    ed.press("V", "");
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    // `V` again leaves visual, as vim's does.
+    ed.press("V", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // `v` then `V`: the selection turns linewise where it stands — the chip
+    // says V-LINE and `d` takes both lines the charwise selection touched.
+    ed.chord("g g");
+    ed.press("l", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("j", "");
+    ed.press("V", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "three\nfour\n");
+
+    // `V` then `v`: charwise again, the anchor kept — `v` again leaves.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("v", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // `o` swaps the ends and stays linewise: still V-LINE, still both lines.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("o", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    try expectPrimaryText(ed, "three\nfour\n"); // `o` opened no line
+    ed.press("k", ""); // the head is on the first line now: nothing above it
+    ed.press("y", "");
+    ed.press("j", ""); // onto `four`, the last line
+    ed.press("p", "");
+    try expectPrimaryText(ed, "three\nfour\nthree\nfour\n");
+
+    // `gv` brings the last visual selection back with its kind: after a `V`
+    // selection, V-LINE; after a `v` one, VISUAL.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("Escape", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "three\nfour\n");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("l", "");
+    ed.press("Escape", "");
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("d", ""); // charwise: the line survives what it lost
+    const left = try primaryText(ed);
+    defer gpa.free(left);
+    try t.expect(std.mem.endsWith(u8, left, "ee\nfour\n") and left.len < "three\nfour\n".len);
+}
+
 test "e2e/files: config.js — `V d` over rows with no motion flags the focused row" {
     const gpa = t.allocator;
     var app: ConfigApp = undefined;

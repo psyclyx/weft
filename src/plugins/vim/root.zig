@@ -393,6 +393,11 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim.indent", .call = enterOpIndent, .arity = .whole, .summary = "Indent the lines the next motion or text object covers.", .label = "Indent", .icon = "indent-increase" },
     .{ .name = "vim.dedent", .call = enterOpDedent, .arity = .whole, .summary = "Dedent the lines the next motion or text object covers.", .label = "Dedent", .icon = "indent-decrease" },
     .{ .name = "vim.visual-line", .call = visualLine, .arity = each, .summary = "Start a linewise visual selection at the cursor's line.", .label = "Visual Line Mode" },
+    .{ .name = "vim.visual-as-char", .call = visualSwitch(.char), .arity = .whole, .summary = "In visual mode: make the selection charwise where it stands, or leave visual mode when it already is.", .label = "Charwise Selection" },
+    .{ .name = "vim.visual-as-line", .call = visualSwitch(.line), .arity = .whole, .summary = "In visual mode: make the selection linewise where it stands, or leave visual mode when it already is.", .label = "Linewise Selection" },
+    .{ .name = "vim.visual-swap-ends", .call = visualSwapEnds, .arity = .whole, .summary = "Move to the other end of the visual selection.", .label = "Other End of Selection" },
+    .{ .name = "vim.visual-reselect", .call = visualReselect, .arity = .whole, .summary = "Select the last visual selection again, charwise or linewise as it was.", .label = "Reselect Last Visual" },
+    .{ .name = "vim.visual-leave", .call = leaveVisual, .arity = .whole, .summary = "Leave visual mode, remembering the selection for gv.", .label = "Leave Visual Mode" },
     .{ .name = "vim.normal", .call = normal, .arity = .whole, .summary = "Return to normal mode, clearing the selection and sealing the undo step.", .label = "Normal Mode" },
     .{ .name = "vim.append-line-end", .call = appendLine, .arity = each, .summary = "Start inserting at the end of the cursor's line.", .label = "Append at Line End" },
     .{ .name = "vim.insert-line-start", .call = insertLine, .arity = each, .summary = "Start inserting at the start of the cursor's line.", .label = "Insert at Line Start" },
@@ -902,7 +907,15 @@ fn initExtra() void {
     weft.bindKey("visual", "P", "vim.visual-paste-before");
     weft.bindKey("visual", "c", "vim.visual-change");
     weft.bindKey("visual", "s", "vim.visual-change"); // `s` in visual = change too
-    weft.bindKey("visual", "Escape", "vim.normal");
+    weft.bindKey("visual", "Escape", "vim.visual-leave");
+    // Inside visual, v and V switch kind where the selection stands (the
+    // same kind leaves); o moves to its other end. gv selects the last one
+    // again, of its kind.
+    weft.bindKey("visual", "v", "vim.visual-as-char");
+    weft.bindKey("visual", "V", "vim.visual-as-line");
+    weft.bindKey("visual", "o", "vim.visual-swap-ends");
+    weft.bindKey("visual", "O", "vim.visual-swap-ends");
+    weft.bindKey("normal", "g v", "vim.visual-reselect");
     weft.bindKey("insert", "Escape", "vim.normal");
 
     // No leader/window/goto/zed MODES: those trees are key sequences now (below).
@@ -1087,6 +1100,7 @@ var visual_linewise: bool = false;
 /// head still sit on one offset and `weft.selection()` (text, or nothing) has
 /// nothing to say — so `V d` deleted nothing.
 fn visualRange() ?weft.Range {
+    rememberVisual();
     if (!visual_linewise) return weft.selection();
     const sel = weft.selections();
     if (sel.items.len == 0) return null;
@@ -1107,22 +1121,87 @@ fn yankVisual(s: weft.Range) void {
     yankCurrent(s.start, end, visual_linewise);
 }
 
+const VisualKind = enum { char, line };
+
+/// THE one writer of visual's kind. One `visual` mode, linewise by this
+/// plugin's own flag, and its name on the status line follows the flag as
+/// vim's `-- VISUAL LINE --` does — so both are written here, together, from
+/// one value. Written apart (`v`'s and `V`'s own lines), a way in that set
+/// one and not the other showed a chip naming the kind the operators were
+/// not acting on.
+fn setVisualKind(kind: VisualKind) void {
+    visual_linewise = kind == .line;
+    weft.modeDisplay("visual", switch (kind) {
+        .char => "VISUAL",
+        .line => "V-LINE",
+    }, .select);
+}
+
 fn visual() void { // v — charwise
-    visual_linewise = false;
-    weft.modeDisplay("visual", "VISUAL", .select);
+    setVisualKind(.char);
     weft.run("selection.start");
     weft.setMode("visual");
 }
 fn visualLine() void { // V — linewise
-    visual_linewise = true;
-    // One `visual` mode, linewise by this plugin's own flag: its name on the
-    // status line follows the flag, as vim's `-- VISUAL LINE --` does.
-    weft.modeDisplay("visual", "V-LINE", .select);
+    setVisualKind(.line);
     // Over a listing's rows a line IS a row: the range is rows, whatever
     // part of the row is focused.
     weft.run(if (weft.posture() == .text) "selection.start" else "selection.start-rows");
     weft.setMode("visual");
 }
+
+/// `v` / `V` inside visual, as vim has them: the other kind switches where
+/// the selection stands; the same kind leaves. Over a listing's rows the
+/// selection is rows or a field's text, not both, so switching starts it
+/// again from the focus.
+fn visualSwitch(comptime kind: VisualKind) fn () void {
+    return struct {
+        fn h() void {
+            const now: VisualKind = if (visual_linewise) .line else .char;
+            if (now == kind) return leaveVisual();
+            if (weft.posture() != .text) return if (kind == .line) visualLine() else visual();
+            setVisualKind(kind);
+        }
+    }.h;
+}
+
+/// `o` in visual: the selection's other end becomes the one that moves.
+fn visualSwapEnds() void {
+    const set = weft.selections();
+    for (set.items) |*s| std.mem.swap(usize, &s.anchor, &s.head);
+    _ = weft.setSelections(set.items, set.primary);
+}
+
+/// The last visual selection, as it stood when visual was left, and its kind:
+/// what `gv` brings back.
+var last_visual: ?struct { anchor: usize, head: usize, kind: VisualKind } = null;
+
+/// Remember the visual selection as it stands, for `gv`: read by every
+/// visual verb before it acts (`visualRange`) and by Escape.
+fn rememberVisual() void {
+    const set = weft.selections();
+    if (set.items.len == 0 or set.items[set.primary].kind != .text) return;
+    const s = set.items[set.primary];
+    last_visual = .{ .anchor = s.anchor, .head = s.head, .kind = if (visual_linewise) .line else .char };
+}
+
+/// `gv`: the last visual selection again, of its kind — V-LINE after a `V`.
+/// Its ends are where they were, cut to the text there is now.
+fn visualReselect() void {
+    const last = last_visual orelse return;
+    const len = weft.byteLen();
+    setVisualKind(last.kind);
+    const again = [_]weft.Selection{.{ .anchor = @min(last.anchor, len), .head = @min(last.head, len) }};
+    if (!weft.setSelections(&again, 0)) return;
+    weft.setMode("visual");
+}
+
+/// Escape in visual.
+fn leaveVisual() void {
+    rememberVisual();
+    normal();
+}
+
 /// Leave visual mode: the selection is spent.
 fn endVisual() void {
     weft.run("selection.clear");
