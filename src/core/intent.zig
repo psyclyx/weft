@@ -701,23 +701,15 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
 fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
     const entry = scope.entry;
     const facts = factsIn(scope);
-    const locality = facts.locality;
-    const path = facts.path;
     var h = std.hash.Wyhash.init(0);
-    h.update(scope.mode);
-    h.update(entry.tool);
-    // Fold the locality too. The `.facts` literal below and this signature
-    // must always name the same fields: a fact the hash omits changes
-    // resolution without bumping the revision, so `cached()` keeps handing
-    // back a snapshot built for a different world. That is the one edit here
-    // with neither a compiler nor a test to catch it -- hence this comment
-    // sitting on the line it applies to.
-    h.update(&[_]u8{@intFromEnum(locality)});
-    h.update(&[_]u8{@intFromBool(path != null)});
-    // …and the open keys, through the store's revision and coordinates: a
-    // plugin publishing `repl.session` changes which providers are eligible.
-    const open = facts.context.digest();
-    h.update(std.mem.asBytes(&open));
+    // EVERY fact the snapshot is resolved against, through the one reflective
+    // signature (`Facts.digest`, walked at comptime — the open keys through
+    // their reader): a fact this signature omitted would change resolution
+    // without moving the revision, and `cached()` would hand back a snapshot
+    // built for a different world. No list here to keep in step.
+    const digest = facts.digest();
+    h.update(std.mem.asBytes(&digest));
+    // What is not a fact but decides the offers: the semantic view focused…
     if (scope.focus.view) |view| {
         h.update(std.mem.asBytes(&view.slot));
         h.update(std.mem.asBytes(&view.generation));
@@ -727,10 +719,10 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
             0;
         h.update(std.mem.asBytes(&rev));
     }
-    // The selection's shape decides which offers can map over it.
+    // …and the selection's shape, which decides the offers that can map over
+    // it — every field of it.
     const shape = selection.shapeOfEntry(entry, scope.focus);
-    h.update(std.mem.asBytes(&shape.count));
-    h.update(&[_]u8{@intFromBool(shape.mixed)});
+    std.hash.autoHash(&h, shape);
     scope.clock.observe(scope.entry_id, h.final());
     return .{
         .key = scope.clock.key,
@@ -824,6 +816,33 @@ pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "intent: a context's catalog revision moves with every fact — the focused row's role included" {
+    const gpa = t.allocator;
+    var env: @import("TestHost.zig") = undefined;
+    try @import("TestHost.zig").init(gpa, &env);
+    defer env.deinit(gpa);
+
+    // A projection with two rows of two roles; a provider gated on one of
+    // them would be offered on the first row and not on the second.
+    const b = env.buffers.active();
+    const view = try gpa.create(@import("projection.zig").View);
+    view.* = .init(gpa);
+    b.projection = view;
+    view.begin();
+    _ = try view.add(.{ .key = "a", .role = "git.file", .text = "a.zig", .parent = null, .foldable = false, .focusable = true });
+    _ = try view.add(.{ .key = "a#0", .role = "git.hunk", .text = "@@ -1 +1 @@", .parent = null, .foldable = false, .focusable = true });
+    const text = try view.commit();
+    const ed = b.textEditor().?;
+    try ed.insertText(gpa, text);
+
+    ed.placeCursor(1);
+    try t.expectEqualStrings("git.file", b.focusedRole());
+    const on_file = catalogContext(&env.ctx).revision;
+    ed.placeCursor(text.len - 2);
+    try t.expectEqualStrings("git.hunk", b.focusedRole());
+    try t.expect(catalogContext(&env.ctx).revision != on_file);
+}
 
 test "intent: an endpoint token refused once its invoker is retired" {
     const gpa = t.allocator;
