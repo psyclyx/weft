@@ -69,6 +69,8 @@ const WasmPlugin = shared.WasmPlugin;
 const Door = @import("../plugin_resources.zig").Door;
 const presentations = @import("../presentations.zig");
 const keys_for = @import("../keys_for.zig");
+const standing = @import("../standing.zig");
+const intent_mod = @import("../intent.zig");
 const presentation_codec = @import("weft_membrane").presentation;
 
 // ── What a name is called, and which key runs it (doc/chrome.md §1.2-1.3) ──
@@ -116,8 +118,31 @@ pub fn keysForBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []
     results[0] = @intCast(out.items.len);
 }
 
+/// `command_at(where, name, out, cap) -> len`: how `name` stands in a chosen
+/// context (0 active, 1 primary) — whether it would run there and why not,
+/// and the keys that run it there (`standing.encode`'s text form). What a
+/// menu row shows; a reading, so the head never moves. Answers the whole
+/// length and writes only when it fits; -1 when nothing by that name answers
+/// (or `where` is unknown).
+pub fn commandAtBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const ctx = d.ctx;
+    const gpa = d.resources.gpa;
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse return;
+    const name = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer gpa.free(name);
+    var s = (standing.of(ctx, gpa, name, where) catch return) orelse return;
+    defer s.deinit(gpa);
+    const text = standing.encode(ctx, gpa, s) catch return;
+    defer gpa.free(text);
+    const cap: usize = @intCast(args[4]);
+    if (text.len <= cap) _ = caller.writeMemory(@intCast(args[3]), cap, text) catch return;
+    results[0] = @intCast(text.len);
+}
+
 pub const hCommandMeta = shared.wasmDoor(commandMetaBody, null);
 pub const hKeysFor = shared.wasmDoor(keysForBody, null);
+pub const hCommandAt = shared.wasmDoor(commandAtBody, null);
 
 /// The two doors both planes run, for the anti-drift gate.
 pub const read_doors = .{

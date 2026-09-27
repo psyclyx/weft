@@ -109,6 +109,9 @@ pub const intent = @import("intent.zig");
 pub const presentations = @import("presentations.zig");
 /// "Which key runs this, here" (doc/chrome.md §1.3).
 pub const keys_for = @import("keys_for.zig");
+/// Whether a name would run in a chosen context, why not, and by which keys
+/// (doc/chrome.md §2.1) — what a menu row shows.
+pub const standing = @import("standing.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");
 pub const System = @import("System.zig");

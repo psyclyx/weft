@@ -382,6 +382,8 @@ const contract_data = @import("weft_membrane");
 /// `wl_intent_invoke` is deliberately absent: it resolves a dotted
 /// INTENTION name through the catalog and calls a registered endpoint, so
 /// it can neither name a bare command nor forward guest arguments to one.
+/// Its chosen-context twin `wl_intent_invoke_at` does run a bare command (a
+/// menubar item) — with none — so it is listed.
 const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     // The runners.
     .{ .name = "wl_run", .args = 0 },
@@ -408,6 +410,8 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_command_arg", .args = 0 },
     .{ .name = "wl_command_meta", .args = 0 },
     .{ .name = "wl_keys_for", .args = 0 },
+    .{ .name = "wl_command_at", .args = 0 },
+    .{ .name = "wl_intent_invoke_at", .args = 0 },
 };
 
 /// Entries the census must account for, so a new runner cannot slip past

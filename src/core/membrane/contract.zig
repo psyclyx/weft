@@ -201,6 +201,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
     .{ .name = "wl_command_meta", .handler = commands.hCommandMeta },
     .{ .name = "wl_keys_for", .handler = commands.hKeysFor },
+    .{ .name = "wl_command_at", .handler = commands.hCommandAt },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },

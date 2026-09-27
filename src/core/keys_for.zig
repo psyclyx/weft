@@ -34,10 +34,32 @@ pub fn personMode(ctx: *command.Context) []const u8 {
     return ctx.bindingMode();
 }
 
+/// The binding mode keys resolve through in a chosen context: where the
+/// person is (`personMode`) for the context the head is on, or — for a
+/// primary it is not on (a companion holds the keyboard) — the mode that
+/// entry rests in, its structural variant when its saved focus is on a scene
+/// row, as `Context.bindingModeFor` decides live.
+pub fn modeAt(ctx: *command.Context, where: intent.Where) []const u8 {
+    const scope = intent.scopeOf(ctx, where);
+    if (scope.live) return personMode(ctx);
+    if (scope.focus.path() != null) {
+        if (ctx.keymap.variantFor(scope.mode, .structural)) |variant| return variant;
+    }
+    return scope.entry.bindingMode(ctx.keymap, scope.mode);
+}
+
 /// Every key sequence that runs `target` in `mode` here, shortest first
 /// (fewest keys, then fewest bytes). Owned by the caller: free each and the
 /// slice.
 pub fn keysFor(ctx: *command.Context, gpa: Allocator, target: []const u8, mode: []const u8) Allocator.Error![][]u8 {
+    return keysForAt(ctx, gpa, target, mode, .active);
+}
+
+/// `keysFor` with every intention arm asked of a CHOSEN context rather than
+/// the focused one: the keys a menubar shows beside an item that runs in the
+/// primary context while a companion holds the keyboard. `mode` is that
+/// context's binding mode (`modeAt`).
+pub fn keysForAt(ctx: *command.Context, gpa: Allocator, target: []const u8, mode: []const u8, where: intent.Where) Allocator.Error![][]u8 {
     var bindings: std.ArrayList(Keymap.Binding) = .empty;
     defer bindings.deinit(gpa);
     var groups: std.ArrayList(bool) = .empty;
@@ -51,7 +73,7 @@ pub fn keysFor(ctx: *command.Context, gpa: Allocator, target: []const u8, mode: 
     }
     for (bindings.items, groups.items) |b, is_group| {
         if (is_group) continue;
-        if (!runs(ctx, b.arms, target)) continue;
+        if (!runs(ctx, b.arms, target, where)) continue;
         try out.append(gpa, try gpa.dupe(u8, b.key));
     }
     std.mem.sort([]u8, out.items, {}, shorter);
@@ -64,7 +86,7 @@ pub fn free(gpa: Allocator, keys: [][]u8) void {
 }
 
 /// Whether the arm dispatch would take from `arms` here is `target`.
-fn runs(ctx: *command.Context, arms: []const []const u8, target: []const u8) bool {
+fn runs(ctx: *command.Context, arms: []const []const u8, target: []const u8, where: intent.Where) bool {
     for (arms) |arm| {
         if (!catalog.isIntentionName(arm)) {
             // A flat arm that names something ends the walk, as it does for
@@ -73,7 +95,7 @@ fn runs(ctx: *command.Context, arms: []const []const u8, target: []const u8) boo
             if (ctx.keymap.modeHasTag(arm, "menu")) return false;
             continue;
         }
-        switch (armVerdict(ctx, arm)) {
+        switch (armVerdict(ctx, arm, where)) {
             .skip => continue,
             .runs => |cmd| return std.mem.eql(u8, arm, target) or
                 (if (cmd) |c| std.mem.eql(u8, c, target) else false),
@@ -94,10 +116,10 @@ const Verdict = union(enum) {
     refused,
 };
 
-fn armVerdict(ctx: *command.Context, intention: []const u8) Verdict {
+fn armVerdict(ctx: *command.Context, intention: []const u8, where: intent.Where) Verdict {
     const plane = ctx.intent orelse return .skip;
     const id = plane.catalog.findIntention(intention) orelse return .skip;
-    const snap = plane.snapshotFor(ctx) orelse return .skip;
+    const snap = plane.snapshotAt(ctx, where) orelse return .skip;
     return switch (snap.resolveOne(id)) {
         .decision => |d| .{ .runs = plane.invokers.commandOf(ctx, d.endpoint) },
         .unavailable => |u| switch (u) {

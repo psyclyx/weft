@@ -195,6 +195,12 @@ pub fn gestureName(buf: []u8, kind: Kind, button: u8, clicks: u8) []const u8 {
     } catch "";
 }
 
+/// Hover has no keyspec: the keymap never sees it. The one place it is an
+/// input is an active interaction that binds it by this name (a menu whose
+/// highlight follows the pointer), handed it when the pointer comes to rest
+/// on a new target (`app/pointer.zig`).
+pub const hover_input = @import("weft_view_runtime").interaction.hover_input;
+
 pub const WheelDir = enum { up, down, left, right };
 
 pub fn wheelName(dir: WheelDir) []const u8 {

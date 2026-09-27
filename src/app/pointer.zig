@@ -105,7 +105,8 @@ pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.Po
     const hit = hitAt(driver, ctx.head, @floatCast(ev.x), @floatCast(ev.y));
     // Hover is frame input, kept for every event kind: a press or a release
     // moves it too (a click is where the pointer is).
-    if (driver.ctx.hover.move(hit, core.task.nowNs())) driver.ctx.view_dirty.* = true;
+    const moved = driver.ctx.hover.move(hit, core.task.nowNs());
+    if (moved) driver.ctx.view_dirty.* = true;
     const mods: Pointer.Mods = .{ .ctrl = ev.mods.ctrl, .alt = ev.mods.alt, .shift = ev.mods.shift, .logo = ev.mods.logo };
     var name_buf: [32]u8 = undefined;
     switch (ev.kind) {
@@ -135,9 +136,11 @@ pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.Po
         .motion => {
             g.hit = hit;
             if (ev.held == 0) {
-                // Hover: the facts move, nothing is dispatched.
+                // Hover: the facts move, nothing is dispatched — except to an
+                // open interaction that asked to hear it (a menu's highlight
+                // follows the pointer), once per new target.
                 g.kind = .hover;
-                return false;
+                return moved and hoverInteraction(ctx);
             }
             const button: u8 = @intCast(@ctz(ev.held) + 1);
             g.kind = .drag;
@@ -165,6 +168,22 @@ pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.Po
             return any;
         },
     }
+}
+
+/// Hand the active interaction its `hover` input, when it binds one by name.
+/// Not a keystroke: no macro, dot-repeat or key serial sees it — only the
+/// interaction's own binding table (`Services.invokeInteractionInput`).
+fn hoverInteraction(ctx: *core.command.Context) bool {
+    const services = ctx.semantic orelse return false;
+    const active = ctx.head.interactions.active() orelse return false;
+    if (!active.binds(Pointer.hover_input)) return false;
+    ctx.user_initiated = true;
+    defer ctx.user_initiated = false;
+    _ = services.invokeInteractionInput(&ctx.head.interactions, ctx.head, ctx.gpa, Pointer.hover_input) catch |err| {
+        std.log.warn("interaction hover failed: {t}", .{err});
+        return false;
+    };
+    return true;
 }
 
 fn dispatchGesture(ctx: *core.command.Context, mods: Pointer.Mods, name: []const u8) !bool {

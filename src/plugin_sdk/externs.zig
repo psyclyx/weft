@@ -134,6 +134,7 @@ pub extern "weft:abi/1" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_meta(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_keys_for(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_command_at(where: u32, name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 // The focused context's live offers, and the door one is accepted through.
 pub extern "weft:abi/1" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;

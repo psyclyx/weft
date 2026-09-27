@@ -146,10 +146,12 @@ fn putU32(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) std.mem.Alloc
 }
 
 /// `wl_intent_invoke_at(where, name, out, cap)`: `wl_intent_invoke` for a
-/// chosen context — resolved and run THERE (`Plane.invokeNamedAt`), so a
-/// toolbar's Undo undoes the editor it describes, not the toolbar. Same
-/// result convention: 0 invoked, -1 not an intention (or unknown `where`),
-/// else the refusal's length.
+/// chosen context — resolved and run THERE (`Plane.invokeAt`), so a
+/// toolbar's Undo undoes the editor it describes, not the toolbar. A name
+/// that is no intention but a command runs as that command there, with no
+/// arguments: a menubar's File › Save saves the editor while the sidebar
+/// holds the keys. Same result convention: 0 invoked, -1 neither an
+/// intention nor a command (or unknown `where`), else the refusal's length.
 ///
 /// HEAD-GATED, unlike `wl_intent_invoke`: running in the primary context
 /// moves which entry the head is on for the call (`Plane.invokeNamedAt`),
@@ -175,7 +177,7 @@ pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     };
     defer p.gpa.free(name);
     var buf: [reason_max]u8 = undefined;
-    results[0] = switch (plane.invokeNamedAt(ctx, where, name, &buf)) {
+    results[0] = switch (plane.invokeAt(ctx, where, name, &buf)) {
         .invoked => 0,
         .unknown => -1,
         .refused => |why| @intCast(caller.writeMemory(@intCast(args[3]), @intCast(args[4]), why) catch 0),

@@ -295,6 +295,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_arg", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's `k`-th argument NAME, into guest memory, or -1" },
     .{ .name = "wl_command_meta", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "how the command, action or intention `name` is presented here, in the `presentation` text form; returns its length (written only if it fits), -1 when nothing by that name answers" },
     .{ .name = "wl_keys_for", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the keys that run `name` in the context a person is in (a pick's origin while one is open), shortest first, one displayed sequence per line; returns the length (written only if it fits)" },
+    .{ .name = "wl_command_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "how `name` stands in a chosen context (0 active, 1 primary focus): a `state` line (ready or disabled), a `reason` line when disabled, and one `key` line per key that runs it there, shortest first; returns the length (written only if it fits), -1 when nothing by that name answers" },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
@@ -305,7 +306,7 @@ pub const imports = [_]Entry{
     // A CHOSEN context (doc/configs.md §3.5): 0 = the active pane, 1 = the
     // head's primary focus, which a toolbar describes while it holds focus.
     .{ .name = "wl_offers_list", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "every offer in a chosen context (0 active, 1 primary focus) as one record: availability, order, intention, provider, reason, label, group; returns the record length (written only if it fits), -1 if unknown" },
-    .{ .name = "wl_intent_invoke_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .head_gated = true, .doc = "resolve an intention in a chosen context and invoke it THERE through the effect door; 0 = invoked, -1 = not an intention, else a refusal written to guest memory" },
+    .{ .name = "wl_intent_invoke_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .head_gated = true, .doc = "resolve an intention in a chosen context and invoke it THERE through the effect door — or, for a name that is no intention but a command, run that command there with no arguments; 0 = invoked, -1 = neither, else a refusal written to guest memory" },
     .{ .name = "wl_provide_affordance", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{.u32}, .group = .intent, .doc = "how this plugin's providers of an action present their offer (label, group, order; minInt = no order); presentation only, returns how many providers took it" },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────

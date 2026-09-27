@@ -1096,6 +1096,46 @@ pub fn firstKey(listing: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, listing, '\n') orelse listing.len;
     return listing[0..end];
 }
+
+var standing_scratch: [1 << 11]u8 = undefined;
+
+/// How a name stands in a chosen context (`commandAt`): whether it would run
+/// there, why not, and the keys that run it there. Strings borrow one shared
+/// scratch, overwritten by the next `commandAt`.
+pub const Standing = struct {
+    /// Why it would not run there, in words a person reads; "" when it would.
+    reason: []const u8 = "",
+    /// The whole answer (`key` lines, shortest first, as the keymap
+    /// displays them).
+    text: []const u8 = "",
+
+    pub fn ready(self: Standing) bool {
+        return self.reason.len == 0;
+    }
+
+    /// The shortest key, or "".
+    pub fn firstKey(self: Standing) []const u8 {
+        var lines = std.mem.splitScalar(u8, self.text, '\n');
+        while (lines.next()) |line| if (std.mem.startsWith(u8, line, "key\t")) return line[4..];
+        return "";
+    }
+};
+
+/// How `name` — a command, an action or an intention — stands in `where`:
+/// the menu row's question (doc/chrome.md §2.1). A reading; the head never
+/// moves. Null when nothing by that name answers.
+pub fn commandAt(where: OfferContext, name: []const u8) ?Standing {
+    const n = e.wl_command_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&standing_scratch), standing_scratch.len);
+    if (n < 0 or n > standing_scratch.len) return null;
+    const text = standing_scratch[0..@intCast(n)];
+    var out: Standing = .{ .text = text };
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "reason\t")) out.reason = line["reason\t".len..];
+    }
+    if (std.mem.indexOf(u8, text, "state\tdisabled") != null and out.reason.len == 0) out.reason = "unavailable";
+    return out;
+}
 /// The `i`-th command's `k`-th argument NAME (into `param_scratch`, so it
 /// survives a paired `commandName`/`commandSummary` read), or null when there
 /// is no such argument. Successive calls reuse it — copy each name out before

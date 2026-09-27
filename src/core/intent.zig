@@ -539,6 +539,33 @@ pub const Plane = struct {
         return ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, invokeNamed, .{ self, ctx, name, buf }) catch |err|
             refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
     }
+
+    /// `invokeNamedAt`, where a name that is no intention but a registered
+    /// COMMAND (an action's trampoline included) runs as that command, with
+    /// no arguments, in the chosen context — what a menubar item does to the
+    /// editor it describes. The command reports its own refusal (`command.
+    /// invoke`), so a refused one is still `invoked`: it was asked.
+    pub fn invokeAt(
+        self: *Plane,
+        ctx: *command.Context,
+        where: Where,
+        name: []const u8,
+        buf: []u8,
+    ) Invocation {
+        switch (self.invokeNamedAt(ctx, where, name, buf)) {
+            .unknown => {},
+            else => |done| return done,
+        }
+        if (ctx.commands.resolve(name) == null) return .unknown;
+        const scope = scopeOf(ctx, where);
+        if (scope.live) {
+            command.invoke(ctx.commands, ctx, name, &.{});
+            return .invoked;
+        }
+        ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, command.invoke, .{ ctx.commands, ctx, name, @as([]const command.Value, &.{}) }) catch |err|
+            return refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
+        return .invoked;
+    }
 };
 
 /// What `invokeNamed` did. `unknown` is not a refusal: the name is no
