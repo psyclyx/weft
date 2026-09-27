@@ -125,7 +125,7 @@ fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
-const Scenario = enum { open, page_down, jump_bottom, jump_top, type_bottom };
+const Scenario = enum { open, page_down, jump_bottom, jump_top, type_bottom, redraw };
 
 fn report(name: []const u8, samples: []Sample) void {
     var ns_buf: [64]u64 = undefined;
@@ -239,7 +239,7 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
     }
 
     // ── Scenarios, through the real app ──
-    var results: [5][64]Sample = undefined;
+    var results: [@typeInfo(Scenario).@"enum".fields.len][64]Sample = undefined;
     // How long to keep waking before calling a frame "never highlighted". The
     // initial parse is the slowest honest wait (tens of ms); this is well past it.
     // WEFT_BENCH_BUDGET_MS shortens it, so a profile of the bench is a profile
@@ -284,6 +284,13 @@ test "e2e/bench-syntax: time to a highlighted frame on a large javascript buffer
         t0 = nowNs();
         try te.insertText(gpa, "x");
         results[@intFromEnum(Scenario.type_bottom)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
+
+        // A frame that changes nothing the text shows (a caret blink, a chip):
+        // the tree, the scroll and the window are as the last frame left them,
+        // so whatever it recomputes is pure overhead.
+        ed.applyWindow();
+        t0 = nowNs();
+        results[@intFromEnum(Scenario.redraw)][i] = wakeUntilHighlighted(ed, t0, budget_ns);
 
         command(ed, "buffer-close-force", &.{});
         ed.application.noteInput();
