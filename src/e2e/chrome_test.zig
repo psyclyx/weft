@@ -1,10 +1,13 @@
 //! e2e test file — the adaptive toolbar and the context menu under
 //! config/ide.js (doc/configs.md §3.6.2-3).
 //!
-//! Both are plugins over doors the action system already had: the toolbar is
-//! the PRIMARY context's offers as a docked strip of action nodes, the menu
-//! the offers of the context under the pointer as a head-local interaction.
-//! These gates hold what that has to mean to a person clicking:
+//! Both are presentations of ONE projection (doc/model.md §2.4), and neither
+//! is a plugin that owns a viewport: the toolbar is a config viewport
+//! presenting `weft://here/offers/primary` as a strip of action nodes, the
+//! menu is mouse-3 presenting `offers/at-pointer` as a head-local
+//! interaction. These gates were the toolbar and contextmenu plugins'; they
+//! hold unchanged for the projection that replaced them — what it has to mean
+//! to a person clicking:
 //!
 //!   • the strip is one text row along the top from the first frame, and its
 //!     buttons are exactly the pinned entries plus what the editor offers,
