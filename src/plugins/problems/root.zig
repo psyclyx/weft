@@ -225,13 +225,13 @@ fn jumpTo(row: Row) void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "problems", .call = open, .summary = "list this place's diagnostics in the panel" },
-    .{ .name = "problems-present", .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
-    .{ .name = "problems-refresh", .call = refresh, .summary = "re-read the problems list's source now" },
+    .{ .name = "problems", .arity = .whole, .call = open, .summary = "list this place's diagnostics in the panel" },
+    .{ .name = "problems-present", .arity = .whole, .call = present, .params = "designation", .summary = "present a place's diagnostics (weft://here/diagnostics/<place>)" },
+    .{ .name = "problems-refresh", .arity = .whole, .call = refresh, .summary = "re-read the problems list's source now" },
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
     weft.exportCallback("on_signal", &onSignal);
 }

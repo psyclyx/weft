@@ -47,13 +47,13 @@ var view_ref: ?weft.semantic.view.Ref = null;
 var revision: u32 = 0;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "symbols-present", .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
-    .{ .name = "symbols-refresh", .call = refresh, .summary = "read the presented entry's symbols again" },
-    .{ .name = "symbols-jump", .call = jump, .params = "offset" },
+    .{ .name = "symbols-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
+    .{ .name = "symbols-refresh", .arity = .whole, .call = refresh, .summary = "read the presented entry's symbols again" },
+    .{ .name = "symbols-jump", .arity = .one, .call = jump, .params = "offset" },
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
 }
 

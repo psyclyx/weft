@@ -11,27 +11,27 @@ const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "ts-node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
-    .{ .name = "ts-select-node", .call = selectNode, .summary = "select the syntax node under the cursor" },
-    .{ .name = "ts-expand-selection", .call = expandSelection, .summary = "grow the selection to the enclosing node" },
-    .{ .name = "ts-goto-parent", .call = gotoParent, .summary = "move to the enclosing node" },
-    .{ .name = "ts-select-function", .call = selectFunction, .summary = "select the enclosing function" },
-    .{ .name = "ts-select-class", .call = selectClass, .summary = "select the enclosing class" },
-    .{ .name = "ts-select-call", .call = selectCall, .summary = "select the enclosing call" },
-    .{ .name = "ts-select-block", .call = selectBlock, .summary = "select the enclosing block" },
-    .{ .name = "ts-select-comment", .call = selectComment, .summary = "select the enclosing comment" },
-    .{ .name = "ts-goto-first-child", .call = gotoFirstChild, .summary = "move to the first child node" },
-    .{ .name = "ts-select-child", .call = selectChild, .summary = "select the first child node" },
-    .{ .name = "ts-raise", .call = raise, .summary = "replace the enclosing node with this one" },
+    .{ .name = "ts-select-node", .arity = weft.Arity.each_extent, .call = selectNode, .summary = "select the syntax node under the cursor" },
+    .{ .name = "ts-expand-selection", .arity = weft.Arity.each_extent, .call = expandSelection, .summary = "grow the selection to the enclosing node" },
+    .{ .name = "ts-goto-parent", .arity = weft.Arity.each_extent, .call = gotoParent, .summary = "move to the enclosing node" },
+    .{ .name = "ts-select-function", .arity = weft.Arity.each_extent, .call = selectFunction, .summary = "select the enclosing function" },
+    .{ .name = "ts-select-class", .arity = weft.Arity.each_extent, .call = selectClass, .summary = "select the enclosing class" },
+    .{ .name = "ts-select-call", .arity = weft.Arity.each_extent, .call = selectCall, .summary = "select the enclosing call" },
+    .{ .name = "ts-select-block", .arity = weft.Arity.each_extent, .call = selectBlock, .summary = "select the enclosing block" },
+    .{ .name = "ts-select-comment", .arity = weft.Arity.each_extent, .call = selectComment, .summary = "select the enclosing comment" },
+    .{ .name = "ts-goto-first-child", .arity = weft.Arity.each_extent, .call = gotoFirstChild, .summary = "move to the first child node" },
+    .{ .name = "ts-select-child", .arity = weft.Arity.each_extent, .call = selectChild, .summary = "select the first child node" },
+    .{ .name = "ts-raise", .arity = weft.Arity.each_extent, .call = raise, .summary = "replace the enclosing node with this one" },
     .{ .name = "ts-query", .call = queryCount, .arity = .whole, .summary = "count what a tree-sitter query matches here" },
     // Range-returning forms (like `textobjects`: an absolute span, not a
     // move). Each answers for THE selection, so dispatch maps them over
     // every selection a grammar has; none touches the selection itself.
-    .{ .name = "ts.expand", .call = rangeExpand, .summary = "the node enclosing the selection" },
-    .{ .name = "ts.shrink", .call = rangeShrink, .summary = "the first child node inside the selection" },
-    .{ .name = "ts.sibling-next", .call = rangeSiblingNext, .summary = "the node after the selection's node" },
-    .{ .name = "ts.sibling-prev", .call = rangeSiblingPrev, .summary = "the node before the selection's node" },
-    .{ .name = "ts.function-next", .call = rangeFunctionNext, .summary = "the next function after the cursor's line" },
-    .{ .name = "ts.function-prev", .call = rangeFunctionPrev, .summary = "the previous function before the cursor's line" },
+    .{ .name = "ts.expand", .arity = weft.Arity.each_extent, .call = rangeExpand, .summary = "the node enclosing the selection" },
+    .{ .name = "ts.shrink", .arity = weft.Arity.each_extent, .call = rangeShrink, .summary = "the first child node inside the selection" },
+    .{ .name = "ts.sibling-next", .arity = weft.Arity.each_extent, .call = rangeSiblingNext, .summary = "the node after the selection's node" },
+    .{ .name = "ts.sibling-prev", .arity = weft.Arity.each_extent, .call = rangeSiblingPrev, .summary = "the node before the selection's node" },
+    .{ .name = "ts.function-next", .arity = weft.Arity.each_extent, .call = rangeFunctionNext, .summary = "the next function after the cursor's line" },
+    .{ .name = "ts.function-prev", .arity = weft.Arity.each_extent, .call = rangeFunctionPrev, .summary = "the previous function before the cursor's line" },
 };
 
 var raise_buf: [1 << 15]u8 = undefined;
@@ -286,5 +286,5 @@ fn rangeFunctionPrev() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
+    weft.plugin(&cmds, .{}).exportAll();
 }

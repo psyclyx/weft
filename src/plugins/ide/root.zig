@@ -679,8 +679,8 @@ fn onPickAccept(pick_id: u32) void {
 // ── Command table (registration order == on_command id) ──
 // Every command says how it maps over several selections: a move or an edit
 // runs once per selection (`each`), a line edit once per line block
-// (`eachOver`), and what shapes or ignores the set runs once (`.whole`, the
-// table's default).
+// (`eachOver`), what shapes or ignores the set runs once (`.whole`), and a
+// goto from the primary's word is refused on several (`.one`).
 const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-left", .call = left.plain, .arity = each, .summary = "move left, or collapse the selection to its start" },
     .{ .name = "ide-right", .call = right.plain, .arity = each, .summary = "move right, or collapse the selection to its end" },
@@ -690,8 +690,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-word-right", .call = word_right.plain, .arity = each, .summary = "move to the next word" },
     .{ .name = "ide-home", .call = home.plain, .arity = each, .summary = "move to the first non-blank, then to column 0" },
     .{ .name = "ide-end", .call = end_of_line.plain, .arity = each, .summary = "move to the end of the line" },
-    .{ .name = "ide-doc-start", .call = docStartJump, .summary = "move to the start of the buffer (a jump)" },
-    .{ .name = "ide-doc-end", .call = docEndJump, .summary = "move to the end of the buffer (a jump)" },
+    .{ .name = "ide-doc-start", .call = docStartJump, .arity = .whole, .summary = "move to the start of the buffer (a jump)" },
+    .{ .name = "ide-doc-end", .call = docEndJump, .arity = .whole, .summary = "move to the end of the buffer (a jump)" },
     .{ .name = "ide-select-left", .call = left.extend, .arity = each, .summary = "extend the selection left" },
     .{ .name = "ide-select-right", .call = right.extend, .arity = each, .summary = "extend the selection right" },
     .{ .name = "ide-select-up", .call = up.extend, .arity = each, .summary = "extend the selection up" },
@@ -702,18 +702,18 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-select-end", .call = end_of_line.extend, .arity = each, .summary = "extend the selection to the line end" },
     .{ .name = "ide-select-doc-start", .call = doc_start.extend, .arity = each, .summary = "extend the selection to the buffer start" },
     .{ .name = "ide-select-doc-end", .call = doc_end.extend, .arity = each, .summary = "extend the selection to the buffer end" },
-    .{ .name = "ide-select-all", .call = selectAll, .summary = "select the whole buffer" },
-    .{ .name = "ide-escape", .call = escape, .summary = "drop the selection, or break out of a capture" },
+    .{ .name = "ide-select-all", .call = selectAll, .arity = .whole, .summary = "select the whole buffer" },
+    .{ .name = "ide-escape", .call = escape, .arity = .whole, .summary = "drop the selection, or break out of a capture" },
     .{ .name = "ide-indent", .call = indent, .arity = eachOver("ide-tab-target"), .summary = "indent the selected lines, or insert a tab" },
     .{ .name = "ide-dedent", .call = dedent, .arity = eachOver("ide-lines"), .summary = "dedent the selected lines" },
-    .{ .name = "ide-move-line-up", .call = moveLineUp, .summary = "move the line (or selected lines) up" },
-    .{ .name = "ide-move-line-down", .call = moveLineDown, .summary = "move the line (or selected lines) down" },
+    .{ .name = "ide-move-line-up", .call = moveLineUp, .arity = .whole, .summary = "move the line (or selected lines) up" },
+    .{ .name = "ide-move-line-down", .call = moveLineDown, .arity = .whole, .summary = "move the line (or selected lines) down" },
     .{ .name = "ide-delete-line", .call = deleteLine, .arity = eachOver("ide-line-span"), .summary = "delete the line (or selected lines)" },
     .{ .name = "ide-open-below", .call = openBelow, .arity = eachOver("ide-line-end"), .summary = "start a new line below this one" },
     .{ .name = "ide-open-above", .call = openAbove, .arity = eachOver("ide-line-start"), .summary = "start a new line above this one" },
-    .{ .name = "ide-copy", .call = copy, .summary = "copy the selection (or the line)" },
-    .{ .name = "ide-cut", .call = cut, .summary = "cut the selection (or the line)" },
-    .{ .name = "ide-paste", .call = paste, .summary = "paste over the selection, or at the cursor" },
+    .{ .name = "ide-copy", .call = copy, .arity = .whole, .summary = "copy the selection (or the line)" },
+    .{ .name = "ide-cut", .call = cut, .arity = .whole, .summary = "cut the selection (or the line)" },
+    .{ .name = "ide-paste", .call = paste, .arity = .whole, .summary = "paste over the selection, or at the cursor" },
     .{ .name = "ide-copy-each", .call = copyEach, .arity = eachOver("ide-transfer-target") },
     .{ .name = "ide-cut-each", .call = cutEach, .arity = eachOver("ide-transfer-target") },
     .{ .name = "ide-paste-each", .call = weft.thunk(pasteEach), .arity = each, .params = "how [text]" },
@@ -725,15 +725,15 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ide-line-end", .call = targetLineEnd, .arity = each },
     .{ .name = "ide-line-start", .call = targetLineStart, .arity = each },
     .{ .name = "ide-transfer-target", .call = targetTransfer, .arity = each },
-    .{ .name = "quick-open", .call = quickOpen, .summary = "fuzzy-open a project file" },
-    .{ .name = "open-path", .call = openPath, .summary = "open a file by typed path" },
-    .{ .name = "goto-line", .call = gotoLine, .summary = "go to a line by number" },
-    .{ .name = "ide-toggle-sidebar", .call = toggleSidebar, .summary = "show or hide the docked sidebar" },
-    .{ .name = "ide-add-next-match", .call = addNextMatch, .summary = "select the word, then add the next occurrence of the selection" },
-    .{ .name = "ide-select-all-matches", .call = selectAllMatches, .summary = "select every occurrence of the selection" },
-    .{ .name = "ide-select-word-at-pointer", .call = selectWordAtPointer, .summary = "select the word under the pointer (a scene row: open it)" },
-    .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .summary = "select the line under the pointer" },
-    .{ .name = "ide-goto-definition", .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
+    .{ .name = "quick-open", .call = quickOpen, .arity = .whole, .summary = "fuzzy-open a project file" },
+    .{ .name = "open-path", .call = openPath, .arity = .whole, .summary = "open a file by typed path" },
+    .{ .name = "goto-line", .call = gotoLine, .arity = .whole, .summary = "go to a line by number" },
+    .{ .name = "ide-toggle-sidebar", .call = toggleSidebar, .arity = .whole, .summary = "show or hide the docked sidebar" },
+    .{ .name = "ide-add-next-match", .call = addNextMatch, .arity = .whole, .summary = "select the word, then add the next occurrence of the selection" },
+    .{ .name = "ide-select-all-matches", .call = selectAllMatches, .arity = .whole, .summary = "select every occurrence of the selection" },
+    .{ .name = "ide-select-word-at-pointer", .call = selectWordAtPointer, .arity = .whole, .summary = "select the word under the pointer (a scene row: open it)" },
+    .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .arity = .whole, .summary = "select the line under the pointer" },
+    .{ .name = "ide-goto-definition", .arity = .one, .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
 };
 
 fn initExtra() void {
@@ -822,5 +822,5 @@ fn initExtra() void {
 comptime {
     // `.clipboard` is declared for the approval surface; only the config's
     // `weft.grant("ide", "clipboard")` confers it.
-    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .perms = &.{.clipboard}, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
 }

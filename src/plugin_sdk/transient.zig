@@ -39,6 +39,7 @@
 const std = @import("std");
 const weft = @import("root.zig");
 const Entry = @import("plugin.zig").Entry;
+const Arity = @import("plugin.zig").Arity;
 
 /// One toggleable flag. `extra` is spliced in after `flag` when armed, for the
 /// flags that take an operand (`--set-upstream origin HEAD`).
@@ -71,6 +72,10 @@ pub const Action = struct {
     keys: []const []const u8,
     label: []const u8,
     run: ?*const fn () void = null,
+    /// How `run` maps over several selections — required with `run`, since
+    /// a body is code nobody else has looked at. A `command` action maps by
+    /// that command's own declaration.
+    arity: ?Arity = null,
     command: []const u8 = "",
 };
 
@@ -101,6 +106,8 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
             if ((a.run == null) == (a.command.len == 0))
                 @compileError("transient '" ++ name ++ "' action '" ++ a.label ++
                     "' needs exactly one of `run` or `command`");
+            if (a.run != null and a.arity == null)
+                @compileError("transient '" ++ name ++ "' action '" ++ a.label ++ "' runs a body: declare its `arity`");
             for (a.keys) |k| assertFreshKey(name, k, &seen);
         }
         for (spec.cancel_keys) |k| assertFreshKey(name, k, &seen);
@@ -187,14 +194,17 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
         /// `cmds ++ push.commands`.
         pub const commands: []const Entry = blk: {
             var out: []const Entry = &.{
-                .{ .name = open_command, .call = openFn, .summary = spec.title },
-                .{ .name = cancel_command, .call = cancelFn },
+                // Opening, leaving and toggling touch the menu, never the
+                // selection.
+                .{ .name = open_command, .call = openFn, .summary = spec.title, .arity = .whole },
+                .{ .name = cancel_command, .call = cancelFn, .arity = .whole },
             };
             for (spec.switches, 0..) |s, i| {
                 out = out ++ [_]Entry{.{
                     .name = toggleName(s),
                     .call = toggleFn(i),
                     .summary = "toggle " ++ s.flag ++ " for " ++ spec.title,
+                    .arity = .whole,
                 }};
             }
             for (spec.actions, 0..) |a, i| {
@@ -208,6 +218,8 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
                     .name = actionName(a),
                     .call = actionFn(i),
                     .summary = a.label,
+                    // A wrapper around a command only runs it: that one maps.
+                    .arity = a.arity orelse .whole,
                 }};
             }
             break :blk out;

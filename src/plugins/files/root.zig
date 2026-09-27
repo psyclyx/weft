@@ -21,19 +21,18 @@ const files_guest = @import("weft_files_adapter");
 var plugin: files_guest.Plugin = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "files", .call = browse, .summary = "browse a directory" },
-    .{ .name = "files-enter", .call = enterRow, .summary = "open the focused entry" },
-    .{ .name = "files-up", .call = stepOut, .summary = "browse the containing directory" },
-    .{ .name = "files-apply", .call = applyFocused, .summary = "apply this directory's draft" },
-    .{ .name = "files-places", .call = presentPlaces, .params = "designation", .summary = "list the places you are working in (weft://here/places/all)" },
-    .{ .name = "files-place-open", .call = openPlace, .params = "row" },
+    .{ .name = "files", .arity = .whole, .call = browse, .summary = "browse a directory" },
+    .{ .name = "files-enter", .arity = .whole, .call = enterRow, .summary = "open the focused entry" },
+    .{ .name = "files-up", .arity = .whole, .call = stepOut, .summary = "browse the containing directory" },
+    .{ .name = "files-apply", .arity = .whole, .call = applyFocused, .summary = "apply this directory's draft" },
+    .{ .name = "files-places", .arity = .whole, .call = presentPlaces, .params = "designation", .summary = "list the places you are working in (weft://here/places/all)" },
+    .{ .name = "files-place-open", .arity = .whole, .call = openPlace, .params = "row" },
 };
 
 comptime {
     weft.plugin(&cmds, .{
         .perms = &.{ .fs_read, .fs_write },
         .init = start,
-        .arity = .whole,
     }).exportAll();
 }
 

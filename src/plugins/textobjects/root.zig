@@ -30,9 +30,9 @@ const cmds = blk: {
     var arr: [object_names.len * 2]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (object_names) |obj| {
-        arr[i] = .{ .name = "textobj.inner-" ++ obj, .call = objHandler(obj, false) };
+        arr[i] = .{ .name = "textobj.inner-" ++ obj, .call = objHandler(obj, false), .arity = weft.Arity.each_extent };
         i += 1;
-        arr[i] = .{ .name = "textobj.a-" ++ obj, .call = objHandler(obj, true) };
+        arr[i] = .{ .name = "textobj.a-" ++ obj, .call = objHandler(obj, true), .arity = weft.Arity.each_extent };
         i += 1;
     }
     break :blk arr;
@@ -263,5 +263,5 @@ fn paraObj(around: bool) ?Obj {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
+    weft.plugin(&cmds, .{}).exportAll();
 }

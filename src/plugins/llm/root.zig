@@ -29,7 +29,7 @@ const Cmd = struct {
 };
 const cmds = [_]weft.CommandEntry{
     .{ .name = "llm-ask", .call = ask, .arity = .whole, .params = "prompt", .summary = "ask the configured LLM CLI; the reply lands in its own buffer" },
-    .{ .name = "llm-ask-line", .call = askLine, .summary = "ask using the current line as the prompt" },
+    .{ .name = "llm-ask-line", .arity = .one, .call = askLine, .summary = "ask using the current line as the prompt" },
 };
 
 fn describeExtra() void {

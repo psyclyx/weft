@@ -35,7 +35,10 @@
 //!
 //! A dispatch handed an explicit range or anchor runs once whatever its arity:
 //! its subject is the argument, not the selection (an operator a grammar hands
-//! a motion's range).
+//! a motion's range). On several extents that holds only where a run CHOSE the
+//! range — inside a visit, or under a command that took the set on (`.whole`,
+//! `.homogeneous`); elsewhere it is one extent's range picked by nobody, and
+//! refused as undeclared.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -291,7 +294,15 @@ pub const Stage = struct {
 /// once, or once per extent/target, or not at all (a refusal). The body of
 /// `command.run` past name resolution.
 pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value) anyerror!command.Value {
-    if (explicitSubject(args)) return cmd.handler(ctx, cmd.data, args);
+    if (explicitSubject(args)) {
+        // A range names its subject — but on several extents, only a run
+        // that owns one (a visit) or a command that took the set on may name
+        // it. Anywhere else (an undeclared caller's callback, a bare
+        // dispatch) the range is one extent's among several, chosen by no
+        // declaration: the silent act-on-the-primary bug, refused.
+        if (ctx.visit == null and !ctx.reading_set and shapeOf(ctx).count > 1) return error.UndeclaredMapping;
+        return cmd.handler(ctx, cmd.data, args);
+    }
     const over = if (cmd.arity) |a| switch (a) {
         .each => |e| e.over,
         .whole, .homogeneous => null,
@@ -304,12 +315,17 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
     }
     const shape = shapeOf(ctx);
     if (admits(cmd.arity, shape)) |refused| return refused;
-    if (shape.count <= 1 and over == null) return cmd.handler(ctx, cmd.data, args);
-    const arity = cmd.arity.?; // admitted with several extents: declared
-    const each = switch (arity) {
-        .whole, .homogeneous => return cmd.handler(ctx, cmd.data, args),
+    const each = if (cmd.arity) |a| switch (a) {
+        .whole, .homogeneous => {
+            // It reads the set — however many extents it grows or finds.
+            const was = ctx.reading_set;
+            ctx.reading_set = true;
+            defer ctx.reading_set = was;
+            return cmd.handler(ctx, cmd.data, args);
+        },
         .each => |e| e,
-    };
+    } else return cmd.handler(ctx, cmd.data, args); // undeclared, admitted: one extent
+    if (shape.count <= 1 and over == null) return cmd.handler(ctx, cmd.data, args);
     const entry = ctx.entry() orelse return cmd.handler(ctx, cmd.data, args);
     const ed = entry.textEditor() orelse return mapRows(ctx, cmd, args, each);
     return mapText(ctx, cmd, args, entry.ref(), ed, each);
@@ -786,4 +802,49 @@ test "mapping: targets found per selection; identical ones run once, as one undo
 
     // An undeclared command never runs on several selections.
     try testing.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "t-undeclared", &.{}));
+}
+
+/// A `.whole` command that hands `t-mark-at` the range of the set's FIRST
+/// extent — a command that read the set and chose among it.
+fn testWholeFirst(ctx: *command.Context, args: struct {}) anyerror!command.Value {
+    _ = args;
+    const ed = try ctx.textEditor();
+    const first = ed.selectionEnds(0);
+    const rv = try live(ctx, ed, first.head, first.head);
+    return command.run(ctx.commands, ctx, "t-mark-at", &.{rv});
+}
+
+test "an explicit range on several extents runs only where a visit or a set-reading command chose it" {
+    const gpa = testing.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+    _ = try env.commands.bind(gpa, "t-mark-at", command.define("t-mark-at", "", testMark).maps(null));
+    _ = try env.commands.bind(gpa, "t-whole-first", command.define("t-whole-first", "", testWholeFirst).maps(.whole));
+
+    const ed = env.editor();
+    try ed.insertText(gpa, "ab\ncd\n");
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 } }, 1);
+
+    // Handed a range by nobody that took the set on: which of the two it is
+    // was chosen by no declaration, so it is refused, not run on one.
+    const rv = try live(&env.ctx, ed, 3, 3);
+    try testing.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "t-mark-at", &.{rv}));
+    const untouched = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(untouched);
+    try testing.expectEqualStrings("ab\ncd\n", untouched);
+
+    // A `.whole` command read the set and chose: its range runs.
+    _ = try command.run(&env.commands, &env.ctx, "t-whole-first", &.{});
+    const chosen = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(chosen);
+    try testing.expectEqualStrings("#ab\ncd\n", chosen);
+
+    // One extent is the degenerate case: a range runs.
+    try ed.setSelections(gpa, &.{.{ .anchor = 0, .head = 0 }}, 0);
+    _ = try command.run(&env.commands, &env.ctx, "t-mark-at", &.{rv});
+    const one = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(one);
+    try testing.expectEqualStrings("#ab\n#cd\n", one);
 }

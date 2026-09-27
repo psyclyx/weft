@@ -34,7 +34,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "ms-upcase-each", .call = opUpcase, .arity = .{ .each = .{ .over = "ms-motion" } } },
     .{ .name = "ms-yank", .call = yank, .arity = each },
     .{ .name = "ms-paste", .call = paste, .arity = each },
-    .{ .name = "ms-undeclared", .call = undeclared },
+    .{ .name = "ms-undeclared", .arity = .one, .call = undeclared },
     .{ .name = "ms-unit-leak", .call = unitLeak, .arity = .whole },
     .{ .name = "ms-unit-close", .call = unitClose, .arity = .whole },
 };

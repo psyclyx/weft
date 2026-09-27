@@ -113,15 +113,15 @@ const Menu = struct {
 var menu: ?Menu = null;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "offers-present", .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
-    .{ .name = "offers-menu", .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
-    .{ .name = "offers-menu-at-caret", .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
-    .{ .name = "offers-press", .call = press, .params = "button" },
-    .{ .name = "offers-menu-key", .call = menuKey, .params = "input" },
+    .{ .name = "offers-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
+    .{ .name = "offers-menu", .arity = .whole, .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
+    .{ .name = "offers-menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
+    .{ .name = "offers-press", .arity = .whole, .call = press, .params = "button" },
+    .{ .name = "offers-menu-key", .arity = .whole, .call = menuKey, .params = "input" },
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
     weft.exportCallback("on_context_changed", &onContextChanged);
 }

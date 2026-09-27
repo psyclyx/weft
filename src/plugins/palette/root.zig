@@ -80,16 +80,17 @@ const pick_buffers = 1;
 const asker = invoke.Invoker(.{ .name = "palette-arg" });
 
 const own_cmds = [_]weft.CommandEntry{
-    .{ .name = "pick-commands", .call = palette, .summary = "run a command by name" },
-    .{ .name = "help", .call = palette, .summary = "browse every command with its summary" },
-    .{ .name = "buffers", .call = buffers, .summary = "switch to another open buffer" },
-    .{ .name = "status", .call = status, .summary = "say what the status line is showing" },
+    .{ .name = "pick-commands", .arity = .whole, .call = palette, .summary = "run a command by name" },
+    .{ .name = "help", .arity = .whole, .call = palette, .summary = "browse every command with its summary" },
+    .{ .name = "buffers", .arity = .whole, .call = buffers, .summary = "switch to another open buffer" },
+    .{ .name = "status", .arity = .whole, .call = status, .summary = "say what the status line is showing" },
 };
 /// The argument prompt's five editing commands, spliced into this plugin's
 /// one flat table so `on_command`'s id indexing stays a single array.
 const arg_cmds: [asker.commands.len]weft.CommandEntry = blk: {
     var arr: [asker.commands.len]weft.CommandEntry = undefined;
-    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    // Editing the prompt's own line: never the selection.
+    for (asker.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
     break :blk arr;
 };
 const cmds = own_cmds ++ arg_cmds;
@@ -367,7 +368,7 @@ fn onPickAccept(pick_id: u32) void {
     }
 }
 
-const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept, .arity = .whole });
+const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept });
 comptime {
     manifest.exportAll();
 }

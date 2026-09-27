@@ -362,44 +362,46 @@ fn chooseRegister(comptime index: u8) fn () void {
 }
 
 // ── The static command table (registration order == on_command id) ────
+/// A vim verb is a one-cursor program: dispatch runs it once per selection.
+const each = weft.Arity.each_extent;
 const static_cmds = [_]weft.CommandEntry{
-    .{ .name = "vim-insert", .call = insert },
-    .{ .name = "vim-append", .call = append },
-    .{ .name = "vim-open-below", .call = openBelow },
-    .{ .name = "vim-open-above", .call = openAbove },
-    .{ .name = "vim-visual", .call = visual },
-    .{ .name = "vim-visual-delete", .call = visualDelete },
-    .{ .name = "vim-visual-yank", .call = visualYank },
-    .{ .name = "vim-visual-change", .call = visualChange },
-    .{ .name = "vim-visual-comment", .call = visualOp("op.comment") },
-    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase") },
-    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase") },
-    .{ .name = "vim-visual-indent", .call = visualOp("op.indent") },
-    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent") },
+    .{ .name = "vim-insert", .call = insert, .arity = each },
+    .{ .name = "vim-append", .call = append, .arity = each },
+    .{ .name = "vim-open-below", .call = openBelow, .arity = each },
+    .{ .name = "vim-open-above", .call = openAbove, .arity = each },
+    .{ .name = "vim-visual", .call = visual, .arity = each },
+    .{ .name = "vim-visual-delete", .call = visualDelete, .arity = each },
+    .{ .name = "vim-visual-yank", .call = visualYank, .arity = each },
+    .{ .name = "vim-visual-change", .call = visualChange, .arity = each },
+    .{ .name = "vim-visual-comment", .call = visualOp("op.comment"), .arity = each },
+    .{ .name = "vim-visual-upcase", .call = visualOp("op.upcase"), .arity = each },
+    .{ .name = "vim-visual-lowercase", .call = visualOp("op.lowercase"), .arity = each },
+    .{ .name = "vim-visual-indent", .call = visualOp("op.indent"), .arity = each },
+    .{ .name = "vim-visual-dedent", .call = visualOp("op.dedent"), .arity = each },
     .{ .name = "enter-op-upcase", .call = enterOpUpcase, .arity = .whole },
     .{ .name = "enter-op-lowercase", .call = enterOpLowercase, .arity = .whole },
     .{ .name = "enter-op-indent", .call = enterOpIndent, .arity = .whole },
     .{ .name = "enter-op-dedent", .call = enterOpDedent, .arity = .whole },
-    .{ .name = "vim-visual-line", .call = visualLine },
+    .{ .name = "vim-visual-line", .call = visualLine, .arity = each },
     .{ .name = "vim-normal", .call = normal, .arity = .whole },
-    .{ .name = "vim-append-line", .call = appendLine },
-    .{ .name = "vim-insert-line", .call = insertLine },
-    .{ .name = "vim-delete-eol", .call = deleteEol },
-    .{ .name = "vim-change-eol", .call = changeEol },
-    .{ .name = "vim-change-line", .call = changeLine },
-    .{ .name = "yank-line", .call = yankLine },
-    .{ .name = "paste", .call = paste },
-    .{ .name = "paste-before", .call = pasteBefore },
+    .{ .name = "vim-append-line", .call = appendLine, .arity = each },
+    .{ .name = "vim-insert-line", .call = insertLine, .arity = each },
+    .{ .name = "vim-delete-eol", .call = deleteEol, .arity = each },
+    .{ .name = "vim-change-eol", .call = changeEol, .arity = each },
+    .{ .name = "vim-change-line", .call = changeLine, .arity = each },
+    .{ .name = "yank-line", .call = yankLine, .arity = each },
+    .{ .name = "paste", .call = paste, .arity = each },
+    .{ .name = "paste-before", .call = pasteBefore, .arity = each },
     .{ .name = "vim-open-focused", .call = openFocused, .arity = .whole },
     .{ .name = "vim-open-container", .call = openContainer, .arity = .whole },
-    .{ .name = "join-lines", .call = joinLines },
+    .{ .name = "join-lines", .call = joinLines, .arity = each },
     .{ .name = "enter-op-delete", .call = enterOpDelete, .arity = .whole },
     .{ .name = "enter-op-change", .call = enterOpChange, .arity = .whole },
     .{ .name = "enter-op-yank", .call = enterOpYank, .arity = .whole },
     .{ .name = "enter-op-comment", .call = enterOpComment, .arity = .whole },
     .{ .name = "op-cancel", .call = opCancel, .arity = .whole },
-    .{ .name = "vim-operate", .call = operate },
-    .{ .name = "op-line", .call = opLine },
+    .{ .name = "vim-operate", .call = operate, .arity = each },
+    .{ .name = "op-line", .call = opLine, .arity = each },
     .{ .name = "enter-op-inner", .call = enterOpInner, .arity = .whole },
     .{ .name = "enter-op-around", .call = enterOpAround, .arity = .whole },
     .{ .name = "enter-register", .call = enterRegister, .arity = .whole },
@@ -430,24 +432,24 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim-win-move-right", .call = vimWinMoveRight, .arity = .whole },
     .{ .name = "vim-win-move-up", .call = vimWinMoveUp, .arity = .whole },
     .{ .name = "vim-win-move-down", .call = vimWinMoveDown, .arity = .whole },
-    .{ .name = "vim-goto-top", .call = vimGotoTop },
+    .{ .name = "vim-goto-top", .call = vimGotoTop, .arity = each },
     .{ .name = "vim-center", .call = vimCenter, .arity = .whole },
     .{ .name = "find-f", .call = enterFindF, .arity = .whole },
     .{ .name = "find-F", .call = enterFindBigF, .arity = .whole },
     .{ .name = "find-t", .call = enterFindT, .arity = .whole },
     .{ .name = "find-T", .call = enterFindBigT, .arity = .whole },
-    .{ .name = "vim-repeat-find", .call = repeatFind },
-    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev },
+    .{ .name = "vim-repeat-find", .call = repeatFind, .arity = each },
+    .{ .name = "vim-repeat-find-rev", .call = repeatFindRev, .arity = each },
     .{ .name = "vim-replace-char", .call = enterReplaceChar, .arity = .whole },
-    .{ .name = "do-replace-char", .call = doReplaceChar },
-    .{ .name = "vim-tilde", .call = tildeCase },
-    .{ .name = "do-find-f", .call = doFindF },
-    .{ .name = "do-find-F", .call = doFindBigF },
-    .{ .name = "do-find-t", .call = doFindT },
-    .{ .name = "do-find-T", .call = doFindBigT },
+    .{ .name = "do-replace-char", .call = doReplaceChar, .arity = each },
+    .{ .name = "vim-tilde", .call = tildeCase, .arity = each },
+    .{ .name = "do-find-f", .call = doFindF, .arity = each },
+    .{ .name = "do-find-F", .call = doFindBigF, .arity = each },
+    .{ .name = "do-find-t", .call = doFindT, .arity = each },
+    .{ .name = "do-find-T", .call = doFindBigT, .arity = each },
     // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
-    .{ .name = "vim-zero", .call = zeroKey },
-    .{ .name = "vim-delete-char", .call = deleteCharFwd },
+    .{ .name = "vim-zero", .call = zeroKey, .arity = each },
+    .{ .name = "vim-delete-char", .call = deleteCharFwd, .arity = each },
     // The `:` ex command line — the key that OPENS it. Its five editing
     // commands come from the shared prompt, spliced in as `ex_cmds` below.
     .{ .name = "vim-ex", .call = ex.enter, .arity = .whole },
@@ -476,15 +478,15 @@ const gen_cmds: [n_gen]weft.CommandEntry = blk: {
     var arr: [n_gen]weft.CommandEntry = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump) };
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .call = moveByMotion(m.motion, m.jump), .arity = each };
         i += 1;
         if (m.in_op) {
-            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion) };
+            arr[i] = .{ .name = "vim/o/" ++ m.motion, .call = opByMotion(m.motion), .arity = each };
             i += 1;
         }
     }
     for (to_objs) |obj| {
-        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj) };
+        arr[i] = .{ .name = "vim/to/" ++ obj, .call = objWrap(obj), .arity = each };
         i += 1;
     }
     break :blk arr;
@@ -551,10 +553,9 @@ const preserve_register = blk: {
 comptime {
     // `.clipboard` is declared for the approval surface to show; it confers
     // nothing — only the config's `weft.grant("vim", "clipboard")` does.
-    // A vim verb is a one-cursor program: dispatch runs it once per
-    // selection. What only enters a mode, picks a register or opens a window
-    // says `.whole`.
-    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard}, .arity = weft.Arity.each_extent }).exportAll();
+    // Every entry says its arity: a verb is `each`; what only enters a mode,
+    // picks a register or opens a window says `.whole`.
+    weft.plugin(&cmds, .{ .init = initExtra, .after = settle, .pick = onPickAccept, .perms = &.{.clipboard} }).exportAll();
 }
 
 /// The dispatch epilogue: a stray count or a named slot must not leak into an

@@ -271,3 +271,29 @@ test "e2e/visual-aids: snipe — one hit jumps, several are labelled, and d comp
     defer gpa.free(after);
     try t.expectEqualStrings("psilon\n", after);
 }
+
+test "e2e/visual-aids: `d f` over two carets is refused, never a delete at the primary alone" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "twice.txt", "ab x\ncd x\n");
+    ed.chord("g g");
+    const text_ed = ed.buffers.active().textEditor().?;
+    try text_ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 5, .head = 5 } }, 1);
+
+    // The labelled search is ONE interaction from one caret — "the label
+    // you pick" has no per-caret reading — so snipe's operator says nothing
+    // about several selections and is refused.
+    ed.press("d", "");
+    ed.press("f", "");
+    try t.expectEqualStrings("snipe-op-f: acts on one selection; several are selected", ed.echoText());
+    try t.expect(!std.mem.eql(u8, "snipe-char", ed.mode()));
+    ed.press("Escape", "");
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("ab x\ncd x\n", text);
+    try t.expectEqual(@as(usize, 2), text_ed.selectionCount());
+}

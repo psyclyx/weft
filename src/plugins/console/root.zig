@@ -29,7 +29,7 @@ const Cmd = struct {
 };
 const cmds = [_]weft.CommandEntry{
     .{ .name = "console-open", .call = open, .arity = .whole, .summary = "open a command console of its own" },
-    .{ .name = "console-send", .call = send, .summary = "run the current line in this console" },
+    .{ .name = "console-send", .arity = .one, .call = send, .summary = "run the current line in this console" },
 };
 
 fn describeExtra() void {

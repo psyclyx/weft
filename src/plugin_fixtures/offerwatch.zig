@@ -142,18 +142,18 @@ fn provideProbe() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ow-fired", .call = firedCount },
-    .{ .name = "ow-keys", .call = lastKeys },
-    .{ .name = "ow-context-set", .call = contextSet },
-    .{ .name = "ow-context-get", .call = contextGet },
-    .{ .name = "ow-context-set-at", .call = contextSetAt },
-    .{ .name = "ow-designation", .call = designation },
-    .{ .name = "ow-designate", .call = designate },
-    .{ .name = "ow-claim", .call = claim },
-    .{ .name = "ow-list", .call = list },
-    .{ .name = "ow-invoke", .call = invoke },
-    .{ .name = "ow-probe", .call = probe },
-    .{ .name = "ow-provide", .call = provideProbe },
+    .{ .name = "ow-fired", .arity = .one, .call = firedCount },
+    .{ .name = "ow-keys", .arity = .one, .call = lastKeys },
+    .{ .name = "ow-context-set", .arity = .one, .call = contextSet },
+    .{ .name = "ow-context-get", .arity = .one, .call = contextGet },
+    .{ .name = "ow-context-set-at", .arity = .one, .call = contextSetAt },
+    .{ .name = "ow-designation", .arity = .one, .call = designation },
+    .{ .name = "ow-designate", .arity = .one, .call = designate },
+    .{ .name = "ow-claim", .arity = .one, .call = claim },
+    .{ .name = "ow-list", .arity = .one, .call = list },
+    .{ .name = "ow-invoke", .arity = .one, .call = invoke },
+    .{ .name = "ow-probe", .arity = .one, .call = probe },
+    .{ .name = "ow-provide", .arity = .one, .call = provideProbe },
 };
 
 comptime {

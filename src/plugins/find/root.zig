@@ -126,31 +126,33 @@ var history_at: ?usize = null;
 var draft: Field = .{};
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "find", .call = openFind, .summary = "search this buffer as you type" },
-    .{ .name = "find-replace", .call = openReplace, .summary = "search and replace in this buffer" },
-    .{ .name = "find-next", .call = findNext, .summary = "go to the next match of the last search" },
-    .{ .name = "find-prev", .call = findPrev, .summary = "go to the previous match of the last search" },
-    .{ .name = "find-select-all", .call = selectAll, .summary = "select every match of the last search" },
-    .{ .name = "find-replace-all", .call = replaceAll, .summary = "replace every match, as one undo step" },
-    .{ .name = "find-replace-one", .call = replaceOne },
-    .{ .name = "find-accept", .call = accept },
-    .{ .name = "find-close", .call = close },
-    .{ .name = "find-type", .call = typeText },
-    .{ .name = "find-backspace", .call = backspace },
-    .{ .name = "find-clear", .call = clearField },
-    .{ .name = "find-paste", .call = paste },
-    .{ .name = "find-switch-field", .call = switchField },
-    .{ .name = "find-history-prev", .call = historyOlder },
-    .{ .name = "find-history-next", .call = historyNewer },
-    .{ .name = "find-toggle-regex", .call = toggleRegex },
-    .{ .name = "find-toggle-case", .call = toggleCase },
-    .{ .name = "find-toggle-word", .call = toggleWord },
+    .{ .name = "find", .arity = .whole, .call = openFind, .summary = "search this buffer as you type" },
+    .{ .name = "find-replace", .arity = .whole, .call = openReplace, .summary = "search and replace in this buffer" },
+    .{ .name = "find-next", .arity = .whole, .call = findNext, .summary = "go to the next match of the last search" },
+    .{ .name = "find-prev", .arity = .whole, .call = findPrev, .summary = "go to the previous match of the last search" },
+    .{ .name = "find-select-all", .arity = .whole, .call = selectAll, .summary = "select every match of the last search" },
+    .{ .name = "find-replace-all", .arity = .whole, .call = replaceAll, .summary = "replace every match, as one undo step" },
+    .{ .name = "find-replace-one", .arity = .whole, .call = replaceOne },
+    .{ .name = "find-accept", .arity = .whole, .call = accept },
+    .{ .name = "find-close", .arity = .whole, .call = close },
+    .{ .name = "find-type", .arity = .whole, .call = typeText },
+    .{ .name = "find-backspace", .arity = .whole, .call = backspace },
+    .{ .name = "find-clear", .arity = .whole, .call = clearField },
+    .{ .name = "find-paste", .arity = .whole, .call = paste },
+    .{ .name = "find-switch-field", .arity = .whole, .call = switchField },
+    .{ .name = "find-history-prev", .arity = .whole, .call = historyOlder },
+    .{ .name = "find-history-next", .arity = .whole, .call = historyNewer },
+    .{ .name = "find-toggle-regex", .arity = .whole, .call = toggleRegex },
+    .{ .name = "find-toggle-case", .arity = .whole, .call = toggleCase },
+    .{ .name = "find-toggle-word", .arity = .whole, .call = toggleWord },
 };
 
 comptime {
-    // Nothing here maps over selections: the bar searches the document, and
-    // a replace-all or select-all-matches answers for the whole of it.
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    // Every verb is `.whole`: the bar edits its own fields, searches the
+    // document, answers replace-all and select-all-matches for all of it,
+    // and a step REPLACES the set with the match (`setSelection` collapses
+    // the others) — nothing reads one extent among several.
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
 }
 
 /// The bar's keys. Bound here rather than by a config because they are the

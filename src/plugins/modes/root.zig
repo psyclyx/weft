@@ -38,7 +38,7 @@ fn langFor(path: []const u8) ?Lang {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "lang-run", .call = langRun },
+    .{ .name = "lang-run", .arity = .whole, .call = langRun },
 };
 
 fn describeExtra() void {
@@ -94,7 +94,7 @@ fn runSubst(template: []const u8, path: []const u8) void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
 }
 
 comptime {

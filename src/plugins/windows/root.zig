@@ -8,11 +8,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "win-split", .call = split, .summary = "split the window horizontally" },
-    .{ .name = "win-vsplit", .call = vsplit, .summary = "split the window vertically" },
-    .{ .name = "win-focus", .call = focus, .summary = "move focus to the next window" },
-    .{ .name = "win-close", .call = close, .summary = "close this window" },
-    .{ .name = "win-center", .call = center, .summary = "centre the cursor line in the window" },
+    .{ .name = "win-split", .arity = .whole, .call = split, .summary = "split the window horizontally" },
+    .{ .name = "win-vsplit", .arity = .whole, .call = vsplit, .summary = "split the window vertically" },
+    .{ .name = "win-focus", .arity = .whole, .call = focus, .summary = "move focus to the next window" },
+    .{ .name = "win-close", .arity = .whole, .call = close, .summary = "close this window" },
+    .{ .name = "win-center", .arity = .whole, .call = center, .summary = "centre the cursor line in the window" },
 };
 
 fn split() void {
@@ -32,5 +32,5 @@ fn center() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{}).exportAll();
 }

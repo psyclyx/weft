@@ -55,25 +55,34 @@ pub const Entry = struct {
     /// `describeCommand`, so the palette can ask for the arguments.
     params: []const u8 = "",
     summary: []const u8 = "",
-    /// How it maps over several selections; null takes the table's
-    /// `Hooks.arity`, and null there is undeclared.
-    arity: ?Arity = null,
+    /// How it maps over several selections — REQUIRED, so no command reaches
+    /// the host without its author having looked at it. There is no
+    /// table-wide default: a default is a guess about commands nobody looked
+    /// at, and every plugin that had one ran some of them on the primary
+    /// alone.
+    arity: Arity,
 };
 
 /// How a command maps over a selection of several extents (doc/model.md
 /// §2.6; core's `selection.Arity`, which dispatch maps by):
 ///
+///   - `.one` — acts on one selection: refused on several, which is how the
+///     host reads a command that declares nothing. A command that reads THE
+///     caret or row once and has no per-extent reading — an interactive
+///     search, a row's own action, a jump to a picked place — says this.
 ///   - `.each` — once per extent, last first, one undo unit; each run sees
 ///     its extent as THE selection, so the handler is a one-selection program.
 ///     `.over` names a range command that maps each extent to its target
 ///     first (identical targets run once); the handler then gets the target
 ///     as its range argument (`argRange(0)`). `.merge` unions overlapping
 ///     targets (lines) instead of refusing them.
-///   - `.whole` — once; the handler reads (or ignores) the whole set.
+///   - `.whole` — once; the handler reads the whole set, or its subject is
+///     not the selection at all (a picker, a window, a process, its own
+///     argument). A command that only runs another says `.whole`: the one it
+///     runs maps, or refuses, by its own declaration.
 ///   - `.homogeneous` — once, refused when the extents differ in kind.
-///
-/// A command that declares none is refused on several extents.
 pub const Arity = union(enum) {
+    one,
     each: Each,
     whole,
     homogeneous,
@@ -82,8 +91,11 @@ pub const Arity = union(enum) {
     /// The plain per-extent mapping.
     pub const each_extent: Arity = .{ .each = .{} };
 
-    pub fn code(self: Arity) u32 {
+    /// The wire code `declare_arity` carries; null for `.one`, which is
+    /// declared by declaring nothing.
+    pub fn code(self: Arity) ?u32 {
         return switch (self) {
+            .one => null,
             .each => |e| if (e.over == null) 0 else if (e.merge) 4 else 3,
             .whole => 1,
             .homogeneous => 2,
@@ -93,7 +105,7 @@ pub const Arity = union(enum) {
     pub fn over(self: Arity) []const u8 {
         return switch (self) {
             .each => |e| e.over orelse "",
-            .whole, .homogeneous => "",
+            .one, .whole, .homogeneous => "",
         };
     }
 };
@@ -103,10 +115,6 @@ pub const Arity = union(enum) {
 pub const Hooks = struct {
     /// Requested at describe time, before any authority exists.
     perms: []const weft.Perm = &.{},
-    /// The arity of every command in the table that declares none of its
-    /// own. A plugin none of whose commands reads the selection says `.whole`
-    /// here once; null leaves such commands undeclared.
-    arity: ?Arity = null,
     /// Capabilities this plugin provides, cross-checked host-side at init.
     capabilities: []const []const u8 = &.{},
     /// Extra describe-phase work (declarations only — no authority yet).
@@ -164,8 +172,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                     weft.describeCommand(c.name, c.params, c.summary)
                 else
                     weft.declareCommand(c.name);
-                const arity: ?Arity = if (c.arity) |own| own else hooks.arity;
-                if (arity) |a| weft.declareArity(c.name, a);
+                weft.declareArity(c.name, c.arity);
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);

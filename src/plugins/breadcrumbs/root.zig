@@ -115,10 +115,10 @@ fn jump() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "breadcrumbs-jump", .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
+    .{ .name = "breadcrumbs-jump", .arity = .one, .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

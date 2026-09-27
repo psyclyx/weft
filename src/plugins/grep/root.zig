@@ -28,8 +28,8 @@ const Cmd = struct {
 };
 const cmds = [_]weft.CommandEntry{
     .{ .name = "grep", .call = grep, .arity = .whole, .params = "pattern", .summary = "search the project for a pattern, into *grep*" },
-    .{ .name = "grep-word", .call = grepWord, .summary = "search the project for the word under the cursor" },
-    .{ .name = "grep-visit", .call = output.visit, .arity = .whole, .summary = "open the location the focused result row names" },
+    .{ .name = "grep-word", .arity = .one, .call = grepWord, .summary = "search the project for the word under the cursor" },
+    .{ .name = "grep-visit", .call = output.visit, .arity = .one, .summary = "open the location the focused result row names" },
     .{ .name = "grep-open", .call = reopen, .arity = .whole, .params = "designation", .summary = "run the search a `weft://here/grep/…` designation names" },
 };
 

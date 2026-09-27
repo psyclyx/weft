@@ -67,7 +67,7 @@ const Cmd = struct {
 const cmds = [_]weft.CommandEntry{
     .{ .name = "repl-start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
     .{ .name = "repl-send", .call = send, .arity = .whole, .params = "text", .summary = "send a line to this buffer's REPL" },
-    .{ .name = "repl-send-line", .call = sendLine, .summary = "send the current line to this buffer's REPL" },
+    .{ .name = "repl-send-line", .arity = .one, .call = sendLine, .summary = "send the current line to this buffer's REPL" },
     .{ .name = "repl-quit", .call = quit, .arity = .whole, .summary = "stop this buffer's REPL; others stay live" },
     .{ .name = "repl-reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "show the live REPL a `weft://here/proc/repl…` designation names" },
 };

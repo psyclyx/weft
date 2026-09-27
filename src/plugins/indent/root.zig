@@ -13,8 +13,8 @@ const weft = @import("weft");
 const unit = "  ";
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "op.indent", .call = opIndent },
-    .{ .name = "op.dedent", .call = opDedent },
+    .{ .name = "op.indent", .arity = weft.Arity.each_extent, .call = opIndent },
+    .{ .name = "op.dedent", .arity = weft.Arity.each_extent, .call = opDedent },
 };
 
 /// Whether the line has no non-whitespace content (indent skips blank lines, as
@@ -80,5 +80,5 @@ fn opDedent() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .arity = weft.Arity.each_extent }).exportAll();
+    weft.plugin(&cmds, .{}).exportAll();
 }

@@ -74,10 +74,10 @@ const Cmd = struct {
 const cmds = [_]weft.CommandEntry{
     .{ .name = "notes-capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "append a line to the notes file" },
     .{ .name = "notes-open", .call = open, .arity = .whole, .params = "[file]", .summary = "open the notes file itself" },
-    .{ .name = "notes-capture-here", .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
+    .{ .name = "notes-capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
     .{ .name = "notes-embeds", .call = embedsRefresh, .arity = .whole, .summary = "render this note's embeds live beside their own bytes" },
     .{ .name = "notes-embeds-off", .call = embedsOff, .arity = .whole, .summary = "stop rendering this note's embeds" },
-    .{ .name = "notes-embed-activate", .call = embedActivate, .summary = "open what the embed on this line designates" },
+    .{ .name = "notes-embed-activate", .arity = .one, .call = embedActivate, .summary = "open what the embed on this line designates" },
 };
 
 fn describeExtra() void {

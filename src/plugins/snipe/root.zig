@@ -81,24 +81,27 @@ var last_dir: ?Dir = null;
 var last_char: [8]u8 = undefined;
 var last_len: usize = 0;
 
+/// A labelled search is ONE interaction from one caret — the label you pick
+/// has no per-caret reading — so it is `.one`, refused on several; a repeat
+/// has no labels and is a plain motion, run from each caret.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "snipe-f", .call = start(.f, false), .summary = "jump to a visible character (labelled when ambiguous)" },
-    .{ .name = "snipe-F", .call = start(.F, false), .summary = "jump back to a visible character" },
-    .{ .name = "snipe-t", .call = start(.t, false), .summary = "jump to just before a visible character" },
-    .{ .name = "snipe-T", .call = start(.T, false), .summary = "jump back to just after a visible character" },
-    .{ .name = "snipe-op-f", .call = start(.f, true), .summary = "operate through a visible character" },
-    .{ .name = "snipe-op-F", .call = start(.F, true), .summary = "operate back to a visible character" },
-    .{ .name = "snipe-op-t", .call = start(.t, true), .summary = "operate up to a visible character" },
-    .{ .name = "snipe-op-T", .call = start(.T, true), .summary = "operate back to just after a visible character" },
-    .{ .name = "snipe-read-char", .call = readChar },
-    .{ .name = "snipe-read-label", .call = readLabel },
-    .{ .name = "snipe-cancel", .call = cancel },
-    .{ .name = "snipe-repeat", .call = repeatSame, .summary = "repeat the last snipe to the nearest hit" },
-    .{ .name = "snipe-repeat-rev", .call = repeatReversed, .summary = "repeat the last snipe in the other direction" },
+    .{ .name = "snipe-f", .arity = .one, .call = start(.f, false), .summary = "jump to a visible character (labelled when ambiguous)" },
+    .{ .name = "snipe-F", .arity = .one, .call = start(.F, false), .summary = "jump back to a visible character" },
+    .{ .name = "snipe-t", .arity = .one, .call = start(.t, false), .summary = "jump to just before a visible character" },
+    .{ .name = "snipe-T", .arity = .one, .call = start(.T, false), .summary = "jump back to just after a visible character" },
+    .{ .name = "snipe-op-f", .arity = .one, .call = start(.f, true), .summary = "operate through a visible character" },
+    .{ .name = "snipe-op-F", .arity = .one, .call = start(.F, true), .summary = "operate back to a visible character" },
+    .{ .name = "snipe-op-t", .arity = .one, .call = start(.t, true), .summary = "operate up to a visible character" },
+    .{ .name = "snipe-op-T", .arity = .one, .call = start(.T, true), .summary = "operate back to just after a visible character" },
+    .{ .name = "snipe-read-char", .arity = .one, .call = readChar },
+    .{ .name = "snipe-read-label", .arity = .one, .call = readLabel },
+    .{ .name = "snipe-cancel", .arity = .whole, .call = cancel },
+    .{ .name = "snipe-repeat", .arity = weft.Arity.each_extent, .call = repeatSame, .summary = "repeat the last snipe to the nearest hit" },
+    .{ .name = "snipe-repeat-rev", .arity = weft.Arity.each_extent, .call = repeatReversed, .summary = "repeat the last snipe in the other direction" },
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .init = init, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .init = init }).exportAll();
 }
 
 fn init() void {

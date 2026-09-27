@@ -133,10 +133,12 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
     );
 }
 /// Say how a declared command maps over a selection of several extents
-/// (`Arity`). The manifest calls this for every entry that declares one.
+/// (`Arity`). The manifest calls this for every entry; `.one` sends
+/// nothing, since an undeclared command is the one the host refuses.
 pub fn declareArity(name: []const u8, arity: Arity) void {
+    const code = arity.code() orelse return;
     const over = arity.over();
-    e.wl_declare_arity(p(name.ptr), @intCast(name.len), arity.code(), p(over.ptr), @intCast(over.len));
+    e.wl_declare_arity(p(name.ptr), @intCast(name.len), code, p(over.ptr), @intCast(over.len));
 }
 /// Whether this dispatch is one run of a selection mapping, and how many runs
 /// come after it — null outside one.

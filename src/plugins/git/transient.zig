@@ -28,14 +28,14 @@ pub const push = weft.transient("git-push", .{
         .{ .key = "f", .flag = "--force-with-lease" },
         .{ .key = "u", .flag = "--set-upstream", .extra = &.{ "origin", "HEAD" } },
     },
-    .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "push", .run = doPush }},
+    .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "push", .run = doPush, .arity = .whole }},
     .cancel_keys = leave_keys,
 });
 
 pub const pull = weft.transient("git-pull", .{
     .title = "Pull",
     .switches = &.{.{ .key = "r", .flag = "--rebase" }},
-    .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "pull", .run = doPull }},
+    .actions = &.{.{ .keys = &.{ "p", "Return" }, .label = "pull", .run = doPull, .arity = .whole }},
     .cancel_keys = leave_keys,
 });
 
@@ -45,7 +45,7 @@ pub const fetch = weft.transient("git-fetch", .{
         .{ .key = "a", .flag = "--all" },
         .{ .key = "p", .flag = "--prune" },
     },
-    .actions = &.{.{ .keys = &.{ "f", "Return" }, .label = "fetch", .run = doFetch }},
+    .actions = &.{.{ .keys = &.{ "f", "Return" }, .label = "fetch", .run = doFetch, .arity = .whole }},
     .cancel_keys = leave_keys,
 });
 

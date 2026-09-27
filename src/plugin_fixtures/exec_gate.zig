@@ -24,11 +24,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "exec-ok", .call = execOk },
-    .{ .name = "exec-fail", .call = execFail },
-    .{ .name = "exec-argv", .call = execArgv },
-    .{ .name = "exec-spool", .call = execSpool },
-    .{ .name = "exec-ctx", .call = execCtx },
+    .{ .name = "exec-ok", .arity = .one, .call = execOk },
+    .{ .name = "exec-fail", .arity = .one, .call = execFail },
+    .{ .name = "exec-argv", .arity = .one, .call = execArgv },
+    .{ .name = "exec-spool", .arity = .one, .call = execSpool },
+    .{ .name = "exec-ctx", .arity = .one, .call = execCtx },
 };
 comptime {
     weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();

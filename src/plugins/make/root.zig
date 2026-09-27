@@ -13,11 +13,11 @@ const weft = @import("weft");
 const output = @import("weft_output");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "make-build", .call = makeBuild, .summary = "build this project" },
-    .{ .name = "make-test", .call = makeTest, .summary = "run this project's tests" },
-    .{ .name = "make-run", .call = makeRun, .summary = "run this project" },
-    .{ .name = "make-visit", .call = output.visit, .summary = "open the location the focused build row names" },
-    .{ .name = "make-open", .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
+    .{ .name = "make-build", .arity = .whole, .call = makeBuild, .summary = "build this project" },
+    .{ .name = "make-test", .arity = .whole, .call = makeTest, .summary = "run this project's tests" },
+    .{ .name = "make-run", .arity = .whole, .call = makeRun, .summary = "run this project" },
+    .{ .name = "make-visit", .arity = .one, .call = output.visit, .summary = "open the location the focused build row names" },
+    .{ .name = "make-open", .arity = .whole, .call = reopen, .params = "designation", .summary = "run the build a `weft://here/make/…` designation names" },
 };
 
 fn describeExtra() void {
@@ -62,5 +62,5 @@ fn reopen() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .arity = .whole }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

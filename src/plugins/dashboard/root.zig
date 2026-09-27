@@ -41,14 +41,14 @@ var revision: u32 = 0;
 var activations: std.ArrayList(Activation) = .empty;
 
 const commands = [_]weft.CommandEntry{
-    .{ .name = "dashboard", .call = openDashboard, .summary = "open the welcome dashboard" },
-    .{ .name = "dashboard-activate", .call = activate, .summary = "activate the selected dashboard item" },
-    .{ .name = "dashboard-open-file", .call = openFile, .summary = "find a file to edit" },
-    .{ .name = "dashboard-new", .call = newBuffer, .summary = "create a new buffer" },
+    .{ .name = "dashboard", .arity = .whole, .call = openDashboard, .summary = "open the welcome dashboard" },
+    .{ .name = "dashboard-activate", .arity = .one, .call = activate, .summary = "activate the selected dashboard item" },
+    .{ .name = "dashboard-open-file", .arity = .whole, .call = openFile, .summary = "find a file to edit" },
+    .{ .name = "dashboard-new", .arity = .whole, .call = newBuffer, .summary = "create a new buffer" },
 };
 
 comptime {
-    weft.plugin(&commands, .{ .init = init, .pick = onPick, .arity = .whole }).exportAll();
+    weft.plugin(&commands, .{ .init = init, .pick = onPick }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
 }
 

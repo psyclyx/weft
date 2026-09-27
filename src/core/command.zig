@@ -196,6 +196,10 @@ pub const Context = struct {
     /// file under the visited extent, and nothing edits while targets are
     /// found. A bracket like `principal`, never set by a caller.
     visit: ?*selection.Visit = null,
+    /// A `.whole` or `.homogeneous` command admitted on several extents is
+    /// running: it declared that it reads the set, so a range it hands a
+    /// nested dispatch is its own choice among them. Set by `run` alone.
+    reading_set: bool = false,
 
     /// Bind (or clear, with `null`) the async-delivery entry, returning the
     /// previous binding for the caller to restore.

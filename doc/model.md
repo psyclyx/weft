@@ -211,8 +211,11 @@ As built (phase 4, `core/selection.zig`):
   (`wl_selections_get/set`: `[primary, kind, anchor, head, …]`; rows by their
   place in the view's focus order) and the same SDK `Selection`.
 - **Arity**, declared per command (`Command.arity`; guests through
-  `wl_declare_arity`, the SDK's `CommandEntry.arity` or `Hooks.arity`, JS's
-  fifth `weft.command` argument):
+  `wl_declare_arity`, the SDK's `CommandEntry.arity`, JS's fifth
+  `weft.command` argument). The SDK field is required and there is no
+  table-wide default: a plugin-wide `.whole` was a guess about commands its
+  author never looked at, and ran snipe's `d f` on the primary alone. The
+  SDK spells refusal `.one` (declared by declaring nothing):
   - `.each` — dispatch (`command.run` → `selection.run`) visits every extent,
     last first, inside one undo unit; in a run the single-selection API and
     the selection doors address the visited extent alone. Register yanks are
@@ -227,10 +230,19 @@ As built (phase 4, `core/selection.zig`):
     the untouched text and a whole-set dedupe, which is exactly target
     finding plus settling, so no command needs both views itself.
   - `.whole` — once; the command reads the set (split, add-next-match,
-    align) or never looks at it (save, a picker).
+    align) or never looks at it (save, a picker whose accept does not move
+    the caret, a command that only runs another — which then maps by its
+    own declaration).
   - `.homogeneous` — once, refused when the extents differ in kind.
+  - `.one` — refused on several: it reads THE caret or row and has no
+    per-extent reading (a labelled search, a goto from the word at point, a
+    row's own action, a picker that jumps).
   - A dispatch handed an explicit range runs once: its subject is the
-    argument.
+    argument — but on several extents only where a run chose it: inside a
+    visit, or under a `.whole`/`.homogeneous` command that took the set on
+    (`Context.reading_set`). Anywhere else (a callback, a bare dispatch)
+    the range is one extent's among several, picked by no declaration, and
+    is refused like an undeclared command.
 - **The default is refusal.** An undeclared command on several extents is
   not run; it says `<name>: acts on one selection; several are selected`.
   Running it once on the primary is precisely the bug every review finding

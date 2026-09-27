@@ -1011,3 +1011,37 @@ test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.head.scene_selection.extentCount());
 }
+
+/// Whether a buffer holds the project file `name`.
+fn fileOpen(ed: *Editor, name: []const u8) bool {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = core.file.processDirectory(&cwd_buf) orelse return false;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cwd, name }) catch return false;
+    return ed.buffers.findByPath(path) != null;
+}
+
+test "e2e/ide: files-enter over two marked rows opens both — a plugin's command maps as IT declares, never as its table's default" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try core.file.writeBytes(gpa, name, "x\n");
+    try openFile(ed, "b.txt", "x\n");
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    ed.click(ed.pointAtNode(try filesNameNode(ed, "a.txt")) orelse return error.RowNotDrawn);
+    ed.applyWindow();
+    ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+    try t.expect(!fileOpen(ed, "a.txt") and !fileOpen(ed, "c.txt"));
+
+    // `files-enter` is `target-open-focused` by name, and maps as it does:
+    // each marked row opens. A table-wide `.whole` ran it once, on the
+    // primary, and the other row was silently not opened.
+    ed.run("files-enter");
+    try t.expect(fileOpen(ed, "a.txt"));
+    try t.expect(fileOpen(ed, "c.txt"));
+}

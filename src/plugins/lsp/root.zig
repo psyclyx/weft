@@ -73,21 +73,21 @@ const posRequest = request.posRequest;
 
 // ── Plugin surface ───────────────────────────────────────────────────
 const base_cmds = [_]weft.CommandEntry{
-    .{ .name = "hover", .call = cmdHover, .summary = "describe the symbol under the cursor" },
-    .{ .name = "goto-definition", .call = cmdDefinition, .summary = "jump to the definition" },
-    .{ .name = "goto-type-definition", .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
-    .{ .name = "goto-implementation", .call = cmdImplementation, .summary = "jump to the implementation" },
-    .{ .name = "references", .call = cmdReferences, .summary = "list references to the symbol" },
+    .{ .name = "hover", .arity = .one, .call = cmdHover, .summary = "describe the symbol under the cursor" },
+    .{ .name = "goto-definition", .arity = .one, .call = cmdDefinition, .summary = "jump to the definition" },
+    .{ .name = "goto-type-definition", .arity = .one, .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
+    .{ .name = "goto-implementation", .arity = .one, .call = cmdImplementation, .summary = "jump to the implementation" },
+    .{ .name = "references", .arity = .one, .call = cmdReferences, .summary = "list references to the symbol" },
     .{ .name = "symbols", .call = cmdSymbols, .arity = .whole, .summary = "pick a symbol in this file" },
     .{ .name = "next-diagnostic", .call = cmdNextDiag, .arity = .whole, .summary = "go to the next diagnostic" },
     .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .arity = .whole, .summary = "go to the previous diagnostic" },
     .{ .name = "diagnostics", .call = cmdDiagnostics, .arity = .whole, .summary = "pick a diagnostic in this file" },
     .{ .name = "diagnostics-list", .call = cmdDiagnosticsList, .arity = .whole, .summary = "every stored diagnostic, one `path\tline\tcol\tseverity\tmessage` row each (a string result)" },
     .{ .name = "lsp-format", .call = cmdFormat, .arity = .whole, .summary = "format the buffer through the language server" },
-    .{ .name = "rename", .call = cmdRename, .summary = "rename the symbol everywhere" },
-    .{ .name = "signature-help", .call = cmdSignature, .summary = "show the call signature here" },
+    .{ .name = "rename", .arity = .one, .call = cmdRename, .summary = "rename the symbol everywhere" },
+    .{ .name = "signature-help", .arity = .one, .call = cmdSignature, .summary = "show the call signature here" },
     .{ .name = "inlay-hints", .call = cmdInlay, .arity = .whole, .summary = "toggle inlay hints" },
-    .{ .name = "code-actions", .call = cmdCodeActions, .summary = "offer the code actions available here" },
+    .{ .name = "code-actions", .arity = .one, .call = cmdCodeActions, .summary = "offer the code actions available here" },
     // Internal: the deferred half of `on_poll`'s message dispatch (task #19
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.
@@ -98,7 +98,8 @@ const base_cmds = [_]weft.CommandEntry{
 /// mapped into lsp's `weft.CommandEntry` so `on_command`'s id indexing stays one table.
 const prompt_cmds: [rename_prompt.commands.len]weft.CommandEntry = blk: {
     var arr: [rename_prompt.commands.len]weft.CommandEntry = undefined;
-    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler };
+    // Editing the prompt's own line: never the selection.
+    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
     break :blk arr;
 };
 
