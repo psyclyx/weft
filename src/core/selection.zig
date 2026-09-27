@@ -113,6 +113,9 @@ pub const Arity = union(enum) {
 pub const Shape = struct {
     count: usize = 1,
     mixed: bool = false,
+    /// Whether the extents are text. A target is found by a range command
+    /// over text, so `.each` with `over` finds none among rows.
+    text: bool = true,
 };
 
 pub const Refusal = error{
@@ -122,7 +125,20 @@ pub const Refusal = error{
     MixedExtents,
     /// An `.each` command's targets partially overlap.
     OverlappingTargets,
+    /// An `.each` command that maps over TARGETS met several extents that are
+    /// not text: a target is a range of text, and rows have none.
+    UntargetableExtents,
 };
+
+/// `err` as a mapping refusal, or null for any other failure: the one test
+/// every place that SHOWS a refusal asks, so a refusal added to the set is
+/// shown everywhere at once.
+pub fn asRefusal(err: anyerror) ?Refusal {
+    inline for (@typeInfo(Refusal).error_set.?) |e| {
+        if (err == @field(anyerror, e.name)) return @field(Refusal, e.name);
+    }
+    return null;
+}
 
 /// Whether a command of `arity` can run on `shape`, else why not. The ONE
 /// reading dispatch refuses by and availability disables by, so an offer the
@@ -132,7 +148,8 @@ pub fn admits(arity: ?Arity, shape: Shape) ?Refusal {
     const a = arity orelse return error.UndeclaredMapping;
     return switch (a) {
         .homogeneous => if (shape.mixed) error.MixedExtents else null,
-        .each, .whole => null,
+        .each => |e| if (e.over != null and !shape.text) error.UntargetableExtents else null,
+        .whole => null,
     };
 }
 
@@ -143,6 +160,7 @@ pub fn reason(r: Refusal) struct { code: []const u8, message: []const u8 } {
         error.UndeclaredMapping => .{ .code = "one-selection", .message = "acts on one selection; several are selected" },
         error.MixedExtents => .{ .code = "mixed-selection", .message = "needs selections of one kind" },
         error.OverlappingTargets => .{ .code = "overlapping-targets", .message = "the selections' targets overlap" },
+        error.UntargetableExtents => .{ .code = "text-selection", .message = "acts on text selections; these are rows" },
     };
 }
 
@@ -158,7 +176,7 @@ pub fn shapeOf(ctx: *command.Context) Shape {
 /// entry with no text — the rows `focus` (its scene selection) holds.
 pub fn shapeOfEntry(entry: *Buffers.Buffer, focus: *const Head.SceneSelection) Shape {
     if (entry.textEditor()) |ed| return .{ .count = ed.selectionCount() };
-    return .{ .count = @max(1, focus.extentCount()) };
+    return .{ .count = @max(1, focus.extentCount()), .text = false };
 }
 
 // ── The visit ────────────────────────────────────────────────────────
@@ -325,7 +343,9 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
         },
         .each => |e| e,
     } else return cmd.handler(ctx, cmd.data, args); // undeclared, admitted: one extent
-    if (shape.count <= 1 and over == null) return cmd.handler(ctx, cmd.data, args);
+    // One extent is the degenerate case; one ROW with a target to find is
+    // too — there is no text to find it in, and nothing to map.
+    if (shape.count <= 1 and (over == null or !shape.text)) return cmd.handler(ctx, cmd.data, args);
     const entry = ctx.entry() orelse return cmd.handler(ctx, cmd.data, args);
     const ed = entry.textEditor() orelse return mapRows(ctx, cmd, args, each);
     return mapText(ctx, cmd, args, entry.ref(), ed, each);
@@ -341,7 +361,8 @@ fn runOnTarget(ctx: *command.Context, cmd: *const command.Command, args: []const
         return e;
     };
     v.targeting = was;
-    if (rv != .range) return .nil;
+    const doc = ctx.document() orelse return .nil;
+    _ = try targetOf(rv, doc) orelse return .nil;
     const full = try ctx.gpa.alloc(command.Value, args.len + 1);
     defer ctx.gpa.free(full);
     full[0] = rv;
@@ -446,6 +467,59 @@ const Target = struct {
     anchors: ?Document.RangeAnchors = null,
 };
 
+/// What a target command answered, as a range of `doc`: null for `.nil` (this
+/// extent has no target), an error for anything else. A finder answering a
+/// non-range, or a range of another document, is a broken declaration, and
+/// running the command on fewer targets would hide it.
+fn targetOf(rv: command.Value, doc: *Document) error{TargetNotARange}!?Document.Range {
+    return switch (rv) {
+        .nil => null,
+        .range => |r| r.resolve(doc) orelse error.TargetNotARange,
+        else => error.TargetNotARange,
+    };
+}
+
+/// Settle `targets` in place and answer how many are kept, in document order
+/// (the longer first at one start): identical ones once, nested ones each, a
+/// partial overlap refused — or, with `merge`, unioned, touching ones too. A
+/// target is checked against EVERY kept one still open at its start (a
+/// stack: kept targets nest by construction), not only the last kept, so
+/// `[0,10] [2,3] [5,12]` refuses: `[5,12]` clears `[2,3]` but not `[0,10]`.
+fn settle(gpa: Allocator, targets: []Target, merge: bool) (Allocator.Error || Refusal)!usize {
+    std.mem.sort(Target, targets, {}, struct {
+        fn lt(_: void, a: Target, b: Target) bool {
+            return a.start < b.start or (a.start == b.start and a.end > b.end);
+        }
+    }.lt);
+    var m: usize = 0;
+    if (merge) {
+        // Unions stay disjoint, so the last kept is the only one to meet.
+        for (targets) |t| {
+            if (m > 0 and t.start <= targets[m - 1].end) {
+                targets[m - 1].end = @max(targets[m - 1].end, t.end);
+                continue;
+            }
+            targets[m] = t;
+            m += 1;
+        }
+        return m;
+    }
+    // Indices of the kept targets open at the current start, outermost first.
+    const open = try gpa.alloc(usize, targets.len);
+    defer gpa.free(open);
+    var depth: usize = 0;
+    for (targets) |t| {
+        if (m > 0 and t.start == targets[m - 1].start and t.end == targets[m - 1].end) continue;
+        while (depth > 0 and targets[open[depth - 1]].end <= t.start) depth -= 1;
+        if (depth > 0 and t.end > targets[open[depth - 1]].end) return error.OverlappingTargets;
+        targets[m] = t;
+        open[depth] = m;
+        depth += 1;
+        m += 1;
+    }
+    return m;
+}
+
 /// `.each` over targets: find every extent's target on the untouched text,
 /// settle overlaps, then run once per target, last first.
 fn mapTargets(
@@ -469,43 +543,23 @@ fn mapTargets(
         };
         targets.deinit(gpa);
     }
-    // Phase one: every extent's target, nothing edited.
+    // Phase one: every extent's target, nothing edited. A target command's
+    // failure is the mapping's: a misspelled `over`, or a finder that errors,
+    // refuses the command rather than quietly shrinking the set it runs on.
+    // Only an extent with NO target (`.nil`) is skipped.
     for (heads, 0..) |h, i| {
         if (!stillOn(ctx, at, ed)) return .nil;
         const idx = indexOf(ed, h) orelse continue;
         ed.visit(idx);
         var v: Visit = .{ .index = i, .count = heads.len, .remaining = heads.len, .targeting = true, .stage = stage };
         ctx.visit = &v;
-        const rv = command.run(ctx.commands, ctx, over, &.{}) catch continue;
+        const rv = try command.run(ctx.commands, ctx, over, &.{});
         ctx.visit = null;
-        if (rv != .range) continue;
-        const r = rv.range.resolve(doc) orelse continue;
+        const r = try targetOf(rv, doc) orelse continue;
         try targets.append(gpa, .{ .producer = i, .start = r.start, .end = r.end });
     }
     ctx.visit = null;
-    std.mem.sort(Target, targets.items, {}, struct {
-        fn lt(_: void, a: Target, b: Target) bool {
-            return a.start < b.start or (a.start == b.start and a.end > b.end);
-        }
-    }.lt);
-    // Settle: identical once; nested each; partial overlap merged or refused.
-    var m: usize = 0;
-    for (targets.items) |t| {
-        if (m > 0) {
-            const prev = &targets.items[m - 1];
-            if (t.start == prev.start and t.end == prev.end) continue;
-            const overlaps = t.start < prev.end or (merge and t.start == prev.end);
-            const nested = t.end <= prev.end;
-            if (overlaps and (merge or !nested)) {
-                if (!merge) return error.OverlappingTargets;
-                prev.end = @max(prev.end, t.end);
-                continue;
-            }
-        }
-        targets.items[m] = t;
-        m += 1;
-    }
-    targets.shrinkRetainingCapacity(m);
+    targets.shrinkRetainingCapacity(try settle(gpa, targets.items, merge));
     for (targets.items) |*t| t.anchors = try doc.addRangeAnchors(gpa, .{ .start = t.start, .end = t.end });
 
     // Phase two: the command per target, last first.
@@ -559,8 +613,9 @@ fn focusRows(ctx: *command.Context, instance: anytype, r: Rows) bool {
 /// extent as the scene's one selection. The set is put back afterwards —
 /// every extent whose rows are still there, the primary focused.
 fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value, each: Arity.Each) anyerror!command.Value {
-    // A target is found by a range command over text; a scene has none.
-    if (each.over != null) return cmd.handler(ctx, cmd.data, args);
+    // A target is found by a range command over text; a scene has none, and
+    // `admits` refused the command before any mapping began.
+    std.debug.assert(each.over == null);
     const gpa = ctx.gpa;
     const focus = &ctx.head.scene_selection;
     const services = ctx.semantic orelse return cmd.handler(ctx, cmd.data, args);
@@ -847,4 +902,83 @@ test "an explicit range on several extents runs only where a visit or a set-read
     const one = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(one);
     try testing.expectEqualStrings("#ab\n#cd\n", one);
+}
+
+/// A target per caret, from a table: caret 0 → [0,10], caret 2 → [2,3],
+/// caret 5 → [5,12]. Any other caret has none.
+fn testTable(ctx: *command.Context, args: struct {}) anyerror!command.Value {
+    _ = args;
+    const ed = try ctx.textEditor();
+    return switch (ed.cursorOffset()) {
+        0 => live(ctx, ed, 0, 10),
+        2 => live(ctx, ed, 2, 3),
+        5 => live(ctx, ed, 5, 12),
+        else => .nil,
+    };
+}
+
+fn testFails(ctx: *command.Context, args: struct {}) anyerror!command.Value {
+    _ = ctx;
+    _ = args;
+    return error.FinderBroke;
+}
+
+test "mapping: a target overlapping an earlier one refuses, though it clears the last kept" {
+    const gpa = testing.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+    _ = try env.commands.bind(gpa, "t-table", command.define("t-table", "", testTable).maps(Arity.each_extent));
+    _ = try env.commands.bind(gpa, "t-mark-table", command.define("t-mark-table", "", testMark).maps(.{ .each = .{ .over = "t-table" } }));
+    const ed = env.editor();
+    try ed.insertText(gpa, "0123456789abcdef\n");
+    // [0,10] holds [2,3]; [5,12] overlaps [0,10] partially: refused, whole.
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 2, .head = 2 }, .{ .anchor = 5, .head = 5 } }, 0);
+    try testing.expectError(error.OverlappingTargets, command.run(&env.commands, &env.ctx, "t-mark-table", &.{}));
+    const text = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("0123456789abcdef\n", text);
+}
+
+test "mapping: a target finder's failure refuses the command, and a misspelled over is no silent no-op" {
+    const gpa = testing.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    env.ctx.user_initiated = true;
+    _ = try env.commands.bind(gpa, "t-fails", command.define("t-fails", "", testFails).maps(Arity.each_extent));
+    _ = try env.commands.bind(gpa, "t-mark-fails", command.define("t-mark-fails", "", testMark).maps(.{ .each = .{ .over = "t-fails" } }));
+    _ = try env.commands.bind(gpa, "t-mark-typo", command.define("t-mark-typo", "", testMark).maps(.{ .each = .{ .over = "t-lnie" } }));
+    const ed = env.editor();
+    try ed.insertText(gpa, "ab\ncd\n");
+    try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 3, .head = 3 } }, 0);
+    try testing.expectError(error.FinderBroke, command.run(&env.commands, &env.ctx, "t-mark-fails", &.{}));
+    try testing.expectError(error.UnknownCommand, command.run(&env.commands, &env.ctx, "t-mark-typo", &.{}));
+}
+
+test "admits: each-over-targets refuses several rows, with its own reason" {
+    const over: Arity = .{ .each = .{ .over = "lines" } };
+    try testing.expectEqual(@as(?Refusal, error.UntargetableExtents), admits(over, .{ .count = 2, .text = false }));
+    try testing.expectEqual(@as(?Refusal, null), admits(over, .{ .count = 2 }));
+    try testing.expectEqual(@as(?Refusal, null), admits(Arity.each_extent, .{ .count = 2, .text = false }));
+    try testing.expectEqualStrings("text-selection", reason(asRefusal(error.UntargetableExtents).?).code);
+    try testing.expect(asRefusal(error.OutOfMemory) == null);
+}
+
+test "settle: every target meets every one open at its start; merging unions" {
+    const gpa = testing.allocator;
+    var three = [_]Target{ .{ .producer = 0, .start = 0, .end = 10 }, .{ .producer = 1, .start = 2, .end = 3 }, .{ .producer = 2, .start = 5, .end = 12 } };
+    try testing.expectError(error.OverlappingTargets, settle(gpa, &three, false));
+    // Nested each run, identical once, touching is not overlapping.
+    var nested = [_]Target{ .{ .producer = 0, .start = 2, .end = 3 }, .{ .producer = 1, .start = 0, .end = 10 }, .{ .producer = 2, .start = 5, .end = 9 }, .{ .producer = 3, .start = 0, .end = 10 }, .{ .producer = 4, .start = 10, .end = 12 } };
+    try testing.expectEqual(@as(usize, 4), try settle(gpa, &nested, false));
+    try testing.expectEqual(@as(usize, 0), nested[0].start);
+    try testing.expectEqual(@as(usize, 10), nested[3].start);
+    // A nested one partially overlapping its sibling still refuses.
+    var siblings = [_]Target{ .{ .producer = 0, .start = 0, .end = 10 }, .{ .producer = 1, .start = 2, .end = 5 }, .{ .producer = 2, .start = 4, .end = 7 } };
+    try testing.expectError(error.OverlappingTargets, settle(gpa, &siblings, false));
+    var lines = [_]Target{ .{ .producer = 0, .start = 0, .end = 10 }, .{ .producer = 1, .start = 2, .end = 3 }, .{ .producer = 2, .start = 5, .end = 12 }, .{ .producer = 3, .start = 12, .end = 14 }, .{ .producer = 4, .start = 20, .end = 22 } };
+    try testing.expectEqual(@as(usize, 2), try settle(gpa, &lines, true));
+    try testing.expectEqual(@as(usize, 14), lines[0].end);
 }

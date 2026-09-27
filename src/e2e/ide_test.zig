@@ -1019,6 +1019,19 @@ test "e2e/ide: C-click marks rows in the files sidebar, Delete removes every one
     };
     try t.expect(disabled_one);
 
+    // A command that maps over TEXT targets has none to find among rows: it
+    // is refused on both, never run once on the primary.
+    const counted = struct {
+        var runs: usize = 0;
+        fn run(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+            runs += 1;
+            return .nil;
+        }
+    };
+    _ = try ed.ctx.commands.bind(gpa, "t-over-lines", core.command.define("t-over-lines", "", counted.run).maps(.{ .each = .{ .over = "line-range" } }));
+    try t.expectError(error.UntargetableExtents, core.command.run(ed.ctx.commands, ed.ctx, "t-over-lines", &.{}));
+    try t.expectEqual(@as(usize, 0), counted.runs);
+
     // Delete maps over the rows: both are flagged, b.txt between them is not.
     ed.press("Delete", "");
     try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));

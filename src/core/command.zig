@@ -925,8 +925,8 @@ fn refusal(buf: []u8, commands: *const Commands, name: []const u8, args: []const
         }
         return std.fmt.bufPrint(buf, "{s} takes no arguments, given {d}", .{ name, args.len }) catch name;
     }
-    if (err == error.UndeclaredMapping or err == error.MixedExtents or err == error.OverlappingTargets) {
-        const why = selection.reason(@errorCast(err));
+    if (selection.asRefusal(err)) |r| {
+        const why = selection.reason(r);
         return std.fmt.bufPrint(buf, "{s}: {s}", .{ name, why.message }) catch name;
     }
     return std.fmt.bufPrint(buf, "{s} failed: {t}", .{ name, err }) catch name;
