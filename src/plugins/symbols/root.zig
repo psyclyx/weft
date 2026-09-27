@@ -225,7 +225,10 @@ fn publish(tree: *Tree) !void {
             .focusable = true,
             .content = .{ .action = .{ .action = jump_action, .label = s.name } },
         };
-        try rows.append(a, .{ .id = @enumFromInt(line_base + i), .content = .{ .container = .{ .axis = .horizontal, .children = cells } } });
+        // The row says how much of its column is depth, so a narrow outline
+        // gives the depth back before it cuts a name.
+        const indent = try a.dupe(weft.semantic.scene.Fact, &.{.{ .name = "indent", .value = try std.fmt.allocPrint(a, "{d}", .{depth * 2}) }});
+        try rows.append(a, .{ .id = @enumFromInt(line_base + i), .facts = indent, .content = .{ .container = .{ .axis = .horizontal, .children = cells } } });
     }
     if (tree.symbols.items.len == 0)
         try rows.append(a, .{ .id = @enumFromInt(row_base), .role = "muted", .content = .{ .label = "No symbols" } });
