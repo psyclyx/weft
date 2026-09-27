@@ -205,13 +205,26 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
 }
 
 pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    if (args.len != 0) return error.ArityMismatch;
+    if (ctx.buffers.active().hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
+    return closeActive(ctx, data);
+}
+
+/// `buffer-close-force`: the same close, minus the dirty check. It has to be
+/// shadowed here like `buffer-close`: core's version knows nothing of
+/// providers, so closing through it leaked the buffer's syntax instance (tree,
+/// parser, mirror rope) and its feed layers.
+pub fn closeBufferForceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    if (args.len != 0) return error.ArityMismatch;
+    return closeActive(ctx, data);
+}
+
+fn closeActive(ctx: *core.command.Context, data: ?*anyopaque) anyerror!core.command.Value {
     const command_context: *Context = @ptrCast(@alignCast(data.?));
     const deps = command_context.attachments;
-    if (args.len != 0) return error.ArityMismatch;
     // The ACTIVE entry, like core's: closing is focus-scoped, and a background
     // delivery's bound entry is where it writes, not what it may retire.
     const b = ctx.buffers.active();
-    if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {
         if (sc.conn.*) |*c| c.unbindTag(b.id);
@@ -246,6 +259,13 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .summary = "Close the active buffer (refuses when dirty), detaching providers.",
         .args = &.{},
         .handler = closeBufferHandler,
+        .data = context,
+    });
+    _ = try commands.bind(gpa, "buffer-close-force", .{
+        .name = "buffer-close-force",
+        .summary = "Close the active buffer, discarding unsaved edits, detaching providers.",
+        .args = &.{},
+        .handler = closeBufferForceHandler,
         .data = context,
     });
     _ = try commands.bind(gpa, "browse-remote", .{

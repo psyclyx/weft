@@ -19,6 +19,24 @@ pub fn attachedSyntax(ed: *h.Editor) ?*h.core.syntax.Syntax {
     return at.syntax;
 }
 
+/// Whether the frame on screen is highlighted: the rows the last build laid
+/// out lie inside the published highlight window, and it carries classes
+/// there. Judged on what the app SHOWS — a window painted around some other
+/// scroll position does not count, however recently it was published.
+pub fn shownHighlighted(ed: *h.Editor) bool {
+    const view = ed.ensureView() catch return false;
+    const lines = view.frame_layout.lines;
+    if (lines.len == 0) return false;
+    const s = lines[0].src.start;
+    const e = lines[lines.len - 1].src.end;
+    const doc = &(ed.buffers.active().textEditor() orelse return false).doc;
+    const hl = ed.caps.layers.find(doc, "highlight") orelse return false;
+    const b = hl.bulk orelse return false;
+    if (b.start > s or b.start + b.classes.len < e) return false;
+    for (b.classes[s - b.start .. e - b.start]) |cls| if (cls != 0) return true;
+    return false;
+}
+
 pub fn waitForTree(ed: *h.Editor, syn: *h.core.syntax.Syntax) bool {
     const deadline = h.core.task.nowNs() + 5 * std.time.ns_per_s;
     while (h.core.task.nowNs() < deadline) {

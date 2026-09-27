@@ -392,6 +392,63 @@ fn scrollToCursor(editor: *const core.Editor, top_row: *usize, body_rows: usize)
     if (cur >= top_row.* + body_rows) top_row.* = cur + 1 - body_rows;
 }
 
+/// The scroll a text body settles on: the caret kept in view, the top row
+/// clamped to the document. The one place `build` moves `top_row`.
+fn settleRows(editor: *const core.Editor, top_row: *usize, body_rows: usize) void {
+    scrollToCursor(editor, top_row, body_rows);
+    const total_rows = editor.text().lineCount();
+    if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
+}
+
+/// A pane's frame carved into regions (no element computes an offset against
+/// another): content is the frame inset by `margin`; a top tab strip and a
+/// bottom HUD (status line + optional panel) are cut off it, and the body is
+/// what remains.
+const Regions = struct {
+    content: region.Rect,
+    tab: ?region.Rect,
+    status: region.Rect,
+    panel: region.Rect,
+    body: region.Rect,
+};
+
+fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
+    const content: region.Rect = .{
+        .x = frame.x + margin,
+        .y = frame.y + margin,
+        .w = frame.w - 2 * margin,
+        .h = frame.h - 2 * margin,
+    };
+    var stack = content;
+    var tab: ?region.Rect = null;
+    if (hud.tabs != null) {
+        const c = stack.cutTop(self.line_h);
+        tab = c.strip;
+        stack = c.rest;
+    }
+    // A pane that declares no status line (a one-row strip) gives the row
+    // to its body.
+    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
+    const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
+    return .{ .content = content, .tab = tab, .status = status_cut.strip, .panel = panel_cut.strip, .body = panel_cut.rest };
+}
+
+fn bodyRowsOf(self: *const View, body: region.Rect) usize {
+    return @intFromFloat(@max(1, @floor(body.h / self.line_h)));
+}
+
+/// Move `top_row` to where `build` will put it for `editor` in `frame` under
+/// `hud` — before any row is laid out. `build` runs exactly this itself, so
+/// calling it first changes nothing about the frame; what it buys a caller is
+/// knowing the scroll BEFORE the build, which is when per-row inputs (the
+/// highlight paint window, markdown attributes) have to be prepared. Preparing
+/// them around the pre-scroll `top_row` instead is how a jump used to draw
+/// its first frame at the destination with no highlighting at all.
+pub fn settleScroll(self: *const View, editor: *const core.Editor, hud: Hud, top_row: *usize, frame: region.Rect) void {
+    if (hud.semantic_view != null) return;
+    settleRows(editor, top_row, self.bodyRowsOf(self.carve(frame, hud).body));
+}
+
 // ── Frame assembly ───────────────────────────────────────────────
 
 /// Build the visible picture: lay out each body row into runs + the
@@ -411,39 +468,19 @@ pub fn build(
 ) !Built {
     self.build_hits = &.{};
     self.build_chrome = &.{};
-    // Carve the pane's frame into regions (no element computes an offset
-    // against another): content is the frame inset by `margin`; a top
-    // tab strip and a bottom HUD (status line + optional panel) are cut
-    // off it, and the body is what remains. Everything below renders
-    // into its own rect.
-    const content: region.Rect = .{
-        .x = frame.x + margin,
-        .y = frame.y + margin,
-        .w = frame.w - 2 * margin,
-        .h = frame.h - 2 * margin,
-    };
+    const regions = self.carve(frame, hud);
+    const content = regions.content;
     self.origin_x = content.x;
     self.origin_y = content.y;
     const cols_visible: usize = @intFromFloat(@max(1, @floor(content.w / self.cell_w)));
-
-    var stack = content;
-    var tab_rect: ?region.Rect = null;
-    if (hud.tabs != null) {
-        const c = stack.cutTop(self.line_h);
-        tab_rect = c.strip;
-        stack = c.rest;
-    }
-    // A pane that declares no status line (a one-row strip) gives the row
-    // to its body.
-    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
-    const status_rect = status_cut.strip;
-    const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
-    const panel_rect = panel_cut.strip;
-    const body_rect = panel_cut.rest;
+    const tab_rect = regions.tab;
+    const status_rect = regions.status;
+    const panel_rect = regions.panel;
+    const body_rect = regions.body;
     self.body_h = body_rect.h;
     self.md_active = hud.semantic_view == null and hud.md_inline != null;
 
-    const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
+    const rows_visible = self.bodyRowsOf(body_rect);
     const cursor_off = if (editor) |ed| caretDrawOffset(ed, ed.primary, hud.caret_place) else 0;
 
     var runs: std.ArrayList(Run) = .empty;
@@ -482,8 +519,7 @@ pub fn build(
     } else if (editor) |ed| {
         const rope = ed.text();
         const total_rows = rope.lineCount();
-        scrollToCursor(ed, top_row, rows_visible);
-        if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
+        settleRows(ed, top_row, rows_visible);
         const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
         // Every block caret flips the glyph it covers, not only the primary's.
         var flips: std.ArrayList(usize) = .empty;

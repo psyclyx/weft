@@ -590,7 +590,8 @@ sidebar.
 - Named signals: `wl_signal_emit(name)` and `wl_signal_subscribe(name)` →
   `on_signal(id)`, delivered at the frame boundary like `on_offers_changed`. Core
   knows no signal names and carries no payload.
-- `wl_outline`: the active entry's outline symbols from the grammar's `outline.scm`.
+- `wl_outline(start, end)`: the active entry's outline symbols from the grammar's
+  `outline.scm` that overlap `[start, end)`, each whole.
 - A REPL session strips terminal controls (CSI, OSC, other escapes, CR, BEL) from
   what it streams into its buffer, even when a sequence straddles two reads.
 
@@ -613,8 +614,8 @@ The plugins:
   noticed on the next C-` or keystroke through the `wl_repl_exited` door (SDK
   `replExited`): the buffer says `[process exited N]` and a fresh shell starts.
 - **`breadcrumbs`** is a status-line provider for text entries. It shows ` › outer ›
-  inner` after the path, from the outline, cached against the document's snapshot
-  witness, so a caret move is a span scan and only an edit re-reads the outline. A
+  inner` after the path, from the outline items over the caret's byte only (the caret's
+  path through the tree, not the file), cached against the snapshot witness and caret. A
   crumb's command is `breadcrumbs-jump <offset>`.
 - config.js loads all four (SPC o p, SPC o t, SPC o P). helix.js loads them with no
   keys.
