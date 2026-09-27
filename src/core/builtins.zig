@@ -440,12 +440,6 @@ fn cRowUp(ctx: *Context, args: struct {}) anyerror!Value {
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .set_mark)) return ok;
-    // In a scene the focused row anchors a range of rows (`V j` in a
-    // listing): the next move grows the selection from here.
-    if (sceneRows(ctx)) |scene| {
-        scene.anchor = scene.head();
-        return ok;
-    }
     const ed = ctx.textEditor() catch |e| return editErr(e);
     try ed.setMark(ctx.gpa);
     return ok;
@@ -460,14 +454,24 @@ fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
     return if (scene.head() != null) scene else null;
 }
 
+/// `mark-rows`: anchor a range of ROWS at the focused one, whatever part of
+/// the row is focused — a listing focuses a row's name field, where
+/// `set-mark` selects text in the field (vim's `v`); a linewise mark over
+/// rows (vim's `V`) is this. The next move grows the range.
+fn cMarkRows(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const scene = sceneRows(ctx) orelse return ok;
+    scene.anchor = scene.head();
+    return ok;
+}
+
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    // In a scene: drop the row range this extent was growing — and any text
+    // selected in the field it focuses.
+    if (sceneRows(ctx)) |scene| scene.anchor = null;
     if (try semanticFieldInput(ctx, .clear_selection)) return ok;
-    // In a scene: drop the row range this extent was growing.
-    if (sceneRows(ctx)) |scene| {
-        scene.anchor = null;
-        return ok;
-    }
+    if (sceneRows(ctx) != null) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.clearSelection();
     return ok;
@@ -868,6 +872,7 @@ const table = [_]command.Command{
     command.define("row-down", "Move to the next projection row, on its actionable part.", cRowDown),
     command.define("row-up", "Move to the previous projection row, on its actionable part.", cRowUp),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark).maps(.each_extent),
+    command.define("mark-rows", "Start a range of rows at the focused row of a scene.", cMarkRows).maps(.each_extent),
     command.define("clear-selection", "Drop the selection.", cClearSelection).maps(.each_extent),
     command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),

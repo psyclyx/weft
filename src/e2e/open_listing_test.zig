@@ -274,3 +274,38 @@ test "e2e/sidebar: ide.js — a double click opens a sidebar row: a file in the 
     try expectPrimaryText(ed, "INNER\n");
     try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
 }
+
+/// How many rows of the focused listing are flagged for removal.
+fn rowsFlaggedDeleted(ed: *Editor) usize {
+    const instance = ed.session.system.semantic.views.get(ed.toolView() orelse return 0) orelse return 0;
+    var n: usize = 0;
+    for (instance.scene.content.container.children) |row| for (row.facts) |fact| {
+        if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete")) n += 1;
+    };
+    return n;
+}
+
+test "e2e/files: config.js — V j d over rows removes every row of the range, and nothing past it" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    // `V` anchors a range of rows at the focused one; `j` grows it.
+    ed.press("V", "");
+    ed.press("j", "");
+    const range = ed.head.scene_selection.primaryRows().?;
+    try t.expect(range.anchor != range.head);
+    // `d` hands the view the range as one request: both rows go.
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+    // …and the range is spent: one row again, back in the resting mode.
+    try t.expect(ed.head.scene_selection.anchor == null);
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
+}

@@ -920,10 +920,30 @@ fn visual() void { // v — charwise
 }
 fn visualLine() void { // V — linewise
     visual_linewise = true;
-    weft.run("set-mark");
+    // Over a listing's rows a line IS a row: the range is rows, whatever
+    // part of the row is focused.
+    weft.run(if (weft.posture() == .text) "set-mark" else "mark-rows");
     weft.setMode("visual");
 }
+/// Whether the selection is a range of more than one row of a scene.
+fn rowRange() bool {
+    const set = weft.selections();
+    if (set.items.len == 0) return false;
+    const s = set.items[set.primary];
+    return s.kind == .rows and s.anchor != s.head;
+}
+
 fn visualDelete() void {
+    if (visual_linewise and rowRange()) {
+        // `V j d` over rows: the rows selected are the view's to delete — a
+        // range of them is one request (the files listing flags each). One
+        // row goes the transfer's way, below: yanked, then flagged.
+        weft.run("selection-delete");
+        weft.run("clear-selection");
+        visual_linewise = false;
+        weft.exitToResting();
+        return;
+    }
     if (weft.posture() == .field) {
         const slot = consumeRegister();
         if (semanticDid(semantic_action.copy, slot)) {
@@ -936,11 +956,7 @@ fn visualDelete() void {
         }
         selected_register = slot;
     }
-    if (weft.posture() == .structural) {
-        // `V j d` over rows: the rows selected are the view's to delete —
-        // a range of them is one request (the files listing marks each).
-        weft.run("selection-delete");
-    } else if (weft.selection()) |s0| {
+    if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
