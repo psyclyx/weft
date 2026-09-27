@@ -215,7 +215,7 @@ pub fn resolveRelative(ctx: *command.Context, gpa: Allocator, rel: []const u8) !
 /// The words for a relative name in a place that has no local directory.
 pub const refuse_relative_elsewhere = "this place has no local directory to resolve a relative name against: give an absolute path or a weft:// designation";
 
-pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outcome {
+pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) anyerror!?Outcome {
     if (d.param(as_param)) |as| if (try openAs(ctx, d, text, as)) |outcome| return outcome;
     if (find(ctx.buffers, d)) |b| {
         try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
@@ -251,49 +251,74 @@ pub fn openHeld(ctx: *command.Context, d: Designation, text: []const u8) !?Outco
         .projection => |kind| {
             const openers = ctx.designations orelse return .{ .refused = refuse_no_producer };
             const opener = openers.find(kind) orelse return .{ .refused = refuse_no_producer };
-            // Copied out: the producer runs arbitrary code, reloads included.
-            var name_buf: [256]u8 = undefined;
-            if (opener.command.len > name_buf.len) return .{ .refused = refuse_no_producer };
-            @memcpy(name_buf[0..opener.command.len], opener.command);
-            const result = try command.run(ctx.commands, ctx, name_buf[0..opener.command.len], &.{.{ .string = text }});
-            return switch (result) {
-                .string => |why| .{ .refused = why },
-                else => .{ .opened = ctx.buffers.active_id },
-            };
+            const here = ctx.buffers.active().ref();
+            return try produce(ctx, opener, text, d, here, here);
         },
         .file, .directory => unreachable,
     }
 }
 
+/// Run `opener`'s command for `text` and answer what it produced: the entry it
+/// left active when that is not `before` — or is, and now shows `reuse` (a
+/// producer that keeps one entry and re-designates it). Anything else made
+/// nothing: refused, never reported as whatever happened to be active, and the
+/// head is put back on `restore`, as it is for the producer's own refusal.
+fn produce(ctx: *command.Context, opener: Openers.Opener, text: []const u8, reuse: ?Designation, before: Buffers.Ref, restore: Buffers.Ref) anyerror!Outcome {
+    // Copied out: the producer runs arbitrary code, reloads included.
+    var name_buf: [256]u8 = undefined;
+    if (opener.command.len > name_buf.len) return .{ .refused = refuse_no_producer };
+    @memcpy(name_buf[0..opener.command.len], opener.command);
+    const result = try command.run(ctx.commands, ctx, name_buf[0..opener.command.len], &.{.{ .string = text }});
+    const now = ctx.buffers.active();
+    const made = !std.meta.eql(now.ref(), before) or if (reuse) |want| blk: {
+        var buf: [max_len]u8 = undefined;
+        const have = parsed(now, &buf) orelse break :blk false;
+        break :blk have.designates(want);
+    } else false;
+    if (result != .string and made) return .{ .opened = now.id };
+    if (ctx.buffers.resolve(restore)) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
+    return .{ .refused = if (result == .string) result.string else refuse_produced_nothing };
+}
+
+pub const refuse_subject_unopened = "open: that projection's subject could not be opened";
+
 /// `d?as=<kind>` where a producer claims `<kind>` and `d` is not already of
 /// it: that producer's projection OF `d` — the symbols of an entry, the
 /// diagnostics of a place. The producer is run with the whole designation,
-/// and with `d`'s live entry active while it runs, so the document doors it
-/// reads are the subject's; the entry it leaves active is the projection.
-/// Null when `as` is no producer's kind: a layout `d`'s own producer reads
-/// from the parameter, routed the ordinary way.
-fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u8) !?Outcome {
+/// and with `d`'s entry active while it runs — opened first when none shows
+/// it, so the document doors it reads are always the subject's, never those
+/// of whatever else was active; the entry it leaves active is the
+/// projection. Null when `as` is no producer's kind: a layout `d`'s own
+/// producer reads from the parameter, routed the ordinary way.
+fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u8) anyerror!?Outcome {
     const openers = ctx.designations orelse return null;
     const opener = openers.find(as) orelse return null;
     switch (d.kind) {
         .projection => |kind| if (std.mem.eql(u8, kind, as)) return null,
         else => {},
     }
+    const restore = ctx.buffers.active().ref();
     // The subject is `d` as its own entry shows it: without the `as` that
     // asks for another producer's projection of it.
     var params_buf: [max_len]u8 = undefined;
-    const subject = find(ctx.buffers, d.without(as_param, &params_buf) catch d);
-    if (subject) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
-    const before = ctx.buffers.active_id;
-    var name_buf: [256]u8 = undefined;
-    if (opener.command.len > name_buf.len) return .{ .refused = refuse_no_producer };
-    @memcpy(name_buf[0..opener.command.len], opener.command);
-    const result = try command.run(ctx.commands, ctx, name_buf[0..opener.command.len], &.{.{ .string = text }});
-    if (result == .string) return .{ .refused = result.string };
-    // Still on the subject: the producer made nothing, and the viewport must
-    // not be handed the subject itself instead of its projection.
-    if (subject != null and ctx.buffers.active_id == before) return .{ .refused = refuse_produced_nothing };
-    return .{ .opened = ctx.buffers.active_id };
+    const subject_d = d.without(as_param, &params_buf) catch return .{ .refused = refuse_subject_unopened };
+    const subject = find(ctx.buffers, subject_d) orelse blk: {
+        // Not open: open it the way a person would (`open` routes every
+        // kind, paths and peers included), then find it again.
+        var subject_buf: [max_len]u8 = undefined;
+        const subject_text = subject_d.render(&subject_buf) catch return .{ .refused = refuse_subject_unopened };
+        const opened = try command.run(ctx.commands, ctx, "open", &.{.{ .string = subject_text }});
+        const found = find(ctx.buffers, subject_d);
+        if (opened == .string or found == null) {
+            if (ctx.buffers.resolve(restore)) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
+            return .{ .refused = if (opened == .string) opened.string else refuse_subject_unopened };
+        }
+        break :blk found.?;
+    };
+    if (subject.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, subject.id, ctx.head, ctx.keymap);
+    // Still on the subject afterwards: the producer made nothing, and the
+    // viewport must not be handed the subject instead of its projection.
+    return try produce(ctx, opener, text, null, subject.ref(), restore);
 }
 
 /// The opener kind that answers a process `ref` — `proc.<namespace>`, the
@@ -390,6 +415,7 @@ pub const Openers = struct {
 
 const t = std.testing;
 const task = @import("task.zig");
+const TestHost = @import("TestHost.zig");
 
 test "designation: a scratch entry is its document, a file entry its absolute path, a declared entry what was declared" {
     const gpa = t.allocator;
@@ -431,6 +457,92 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
         try t.expectError(error.NotAProjectionKind, openers.claim(gpa, reserved, "x", "git"));
     openers.release(gpa, "git");
     try t.expect(openers.find("git.status") == null);
+}
+
+/// The producers the opening tests register: one that makes nothing, and one
+/// that records which document was active when it ran and opens a view.
+const TestProducers = struct {
+    var saw: ?@import("Document.zig").Id = null;
+
+    fn nothing(_: *command.Context, _: struct { d: []const u8 }) anyerror!command.Value {
+        return .nil;
+    }
+
+    fn project(ctx: *command.Context, _: struct { d: []const u8 }) anyerror!command.Value {
+        saw = if (ctx.buffers.active().textEditor()) |ed| ed.doc.id else null;
+        const id = try ctx.buffers.create(ctx.gpa, "*projection*");
+        try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+        return .nil;
+    }
+
+    /// The kernel's `open`, cut down to what core answers.
+    fn open(ctx: *command.Context, args: struct { d: []const u8 }) anyerror!command.Value {
+        const d = durable.parse(args.d) orelse return .{ .string = "malformed" };
+        const outcome = (try openHeld(ctx, d, args.d)) orelse return .{ .string = "not core's" };
+        return switch (outcome) {
+            .opened => |id| .{ .integer = @intCast(id) },
+            .refused => |why| .{ .string = why },
+        };
+    }
+};
+
+test "designation: a producer that produces nothing is refused, never reported as the entry it left active" {
+    const gpa = t.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    var openers: Openers = .empty;
+    defer openers.deinit(gpa);
+    env.ctx.designations = &openers;
+    _ = try env.commands.bind(gpa, "t-nothing", command.define("t-nothing", "", TestProducers.nothing));
+    try openers.claim(gpa, "t.none", "t-nothing", "t");
+
+    const before = env.buffers.active_id;
+    const text = "weft://here/t.none/x";
+    const outcome = (try openHeld(&env.ctx, durable.parse(text).?, text)).?;
+    try t.expect(outcome == .refused);
+    try t.expectEqualStrings(refuse_produced_nothing, outcome.refused);
+    try t.expectEqual(before, env.buffers.active_id);
+}
+
+test "designation: a projection OF a subject runs with the subject open, and a refusal restores what was active" {
+    const gpa = t.allocator;
+    var env: TestHost = undefined;
+    try TestHost.init(gpa, &env);
+    defer env.deinit(gpa);
+    var openers: Openers = .empty;
+    defer openers.deinit(gpa);
+    env.ctx.designations = &openers;
+    _ = try env.commands.bind(gpa, "open", command.define("open", "", TestProducers.open));
+    _ = try env.commands.bind(gpa, "t-project", command.define("t-project", "", TestProducers.project));
+    _ = try env.commands.bind(gpa, "t-nothing", command.define("t-nothing", "", TestProducers.nothing));
+    try openers.claim(gpa, "t.proj", "t-project", "t");
+    try openers.claim(gpa, "t.none", "t-nothing", "t");
+
+    // A scratch document with text, closed: parked, so it can come back.
+    const subject = try env.buffers.create(gpa, "subject");
+    try env.buffers.get(subject).?.textEditor().?.insertText(gpa, "fn main() {}\n");
+    const doc = env.buffers.get(subject).?.textEditor().?.doc.id;
+    try env.buffers.close(gpa, subject, &env.head, &env.keymap);
+    const start_id = env.buffers.active_id;
+
+    // Its projection: the subject is opened first, and the producer reads IT,
+    // not whatever happened to be active.
+    var spelled = doc.text();
+    var buf: [max_len]u8 = undefined;
+    const as_proj = try std.fmt.bufPrint(&buf, "weft://here/doc/{s}?as=t.proj", .{&spelled});
+    const opened = (try openHeld(&env.ctx, durable.parse(as_proj).?, as_proj)).?;
+    try t.expect(opened == .opened);
+    try t.expect(TestProducers.saw.?.eql(doc));
+
+    // A projection that makes nothing: refused, and the head is back where it
+    // was before the open began.
+    try env.buffers.switchTo(gpa, start_id, &env.head, &env.keymap);
+    var buf2: [max_len]u8 = undefined;
+    const as_none = try std.fmt.bufPrint(&buf2, "weft://here/doc/{s}?as=t.none", .{&spelled});
+    const refused = (try openHeld(&env.ctx, durable.parse(as_none).?, as_none)).?;
+    try t.expectEqualStrings(refuse_produced_nothing, refused.refused);
+    try t.expectEqual(start_id, env.buffers.active_id);
 }
 
 test "designation: a title is absolute, abbreviates home, and falls back only for what is not a designation" {
