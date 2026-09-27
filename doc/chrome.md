@@ -155,6 +155,68 @@ styles on one frame and checks every chrome role renders under each.
   the chrome style; a tooltip appears after a delay with the label, key hint
   and, for a disabled item, the reason.
 
+*Landed (2026-09-27, branch `arc/chrome`).* All of §3.
+
+- **Primitives.** `scene.DrawItem` grew `rrect` (uniform radius; a fill, or
+  an outline when `stroke_width > 0`; `blur` for shadows) and `clip`
+  (replaces the clip for what follows, never nests; every item list starts
+  and ends unclipped), and `PathVerb` grew `close`. Skia is the only
+  backend in the build and implements all three. No plugin door emits them.
+  The view's `Rect` carries a `shape` (fill, rounded, icon) so a pill, its
+  icon and a highlight keep paint order in one list; a `Run` carries an
+  optional clip. `bench-raster`'s bare frames are byte-identical (same
+  hashes); its new chrome cases put the cost of a style at +0.03 ms (`text`)
+  and +0.11 ms (`text-icons`, `widget`) on a 1600×1000 frame.
+- **Icons.** `gfx/icons.zig` parses stroke-style SVG (every path command,
+  arcs to cubics; circle, ellipse, rect, line, poly) into path commands at
+  load. The bundled set is 47 Lucide icons, the upstream SVG files unchanged
+  in `src/gfx/icons/lucide/` beside Lucide's `LICENSE` (ISC, with the
+  Feather MIT notice it carries). Chrome asks for icons by chrome name
+  (`save`, `split-right`, `error`); `theme/icons` picks the set (`lucide`,
+  or `none` to turn icons off).
+- **Roles and styles.** `gfx/view/chrome.zig`: `Role`, `State`, `Content`,
+  and one painter per role under each of `text`, `text-icons` and `widget`.
+  Action nodes are buttons (a menu's are menu items across the row); tabs are
+  `tab` roles laid out per style, the close part always hit-testable and,
+  under `widget`, drawn only on the active or hovered tab; popup and menu
+  frames are panels (the text styles keep the old outlined box, so no popup
+  golden moved; `widget` rounds, outlines softly and shadows menus); pane
+  dividers and the offers plugin's separators (now `role = "separator"`)
+  are separators; status segments and chips go through roles, and the
+  bracketed save and fetch warnings are chips in the same columns. The
+  status line's layout and the menu's structure are unchanged — §4 and §2.
+- **The style is a theme value, live.** `theme/chrome` is read at the top of
+  every frame. config.js and helix.js set `text`, ide.js `widget`;
+  `theme.set-chrome <style>` and `theme.cycle-chrome` bind it at the
+  transient tier, so the next frame is in the new style.
+- **Hover.** `app/pointer.zig`'s `Hover` is frame input: motion updates the
+  target (pane, chrome part or scene node) and dirties the frame only when
+  the target changes — no keyspec, no dispatch. Each pane's `Hud.pointer`
+  carries the target, `pressed` and `tooltip`. The tooltip delay is a loop
+  timer (`tooltip_delay`); the pane built last paints the frame's tooltip
+  above every pane. Its key hint is a `chrome.KeyHints` hook that §1.3's
+  `keysFor` fills; until then hints are absent.
+
+What this leaves for the later lanes, and two things found on the way:
+
+- A button's icon comes from an `icon` fact on its node. Nothing supplies
+  one yet: §1.2's `icon` metadata has to reach the offers projection's
+  nodes. Status segments likewise have `icon` and `tooltip` fields no
+  producer fills.
+- A menu's focused row is still washed by the scene presenter's row
+  highlight, sharp in every style; §2's menu widget should route focus
+  through `menu_item` too, as hover already is.
+- `widget` tabs sit in a strip one text row tall, which is cramped for real
+  tabs. A taller strip is a carve (layout) change, for §4's layout pass.
+- `theme/chrome` and `theme/icons` share the `theme/<leaf>` family with
+  row-role styling, so a producer naming a row role `chrome` or `icons`
+  would read them. Harmless (an unknown class reads as `normal`), but a
+  sign the family holds two kinds of value.
+- `set-color` binds at the transient tier under one owner and never unbinds,
+  so a second `set-color` of the same name ties with the first and loses
+  (`Container.betterThan` keeps the earlier). The chrome switch unbinds its
+  last binding first; `set-color` should too.
+
 ## 4. The status bar
 
 ### 4.1 Status is a projection too
