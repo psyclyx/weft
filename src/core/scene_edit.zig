@@ -163,3 +163,90 @@ fn advertised(instance: *const view_runtime.view.Instance, path: semantic.focus.
     }
     return null;
 }
+
+const t = std.testing;
+
+/// A host-memory field: the provider contract, nothing else.
+const Memory = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    selection: view_runtime.field.Selection = .{ .anchor = 0, .caret = 0 },
+    revision: u64 = 1,
+
+    fn deinit(self: *Memory) void {
+        self.bytes.deinit(t.allocator);
+    }
+
+    pub fn snapshot(self: *Memory, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+        var owned = view_runtime.field.OwnedSnapshot.init(gpa);
+        errdefer owned.deinit();
+        const arena = owned.allocator();
+        owned.value = .{
+            .revision = try std.fmt.allocPrint(arena, "{d}", .{self.revision}),
+            .bytes = try arena.dupe(u8, self.bytes.items),
+            .selection = self.selection,
+            .single_line = true,
+        };
+        return owned;
+    }
+
+    pub fn edit(self: *Memory, expected: []const u8, value: view_runtime.field.Edit) view_runtime.field.Error!void {
+        var buf: [32]u8 = undefined;
+        if (!std.mem.eql(u8, expected, std.fmt.bufPrint(&buf, "{d}", .{self.revision}) catch unreachable)) return error.Stale;
+        try self.bytes.replaceRange(t.allocator, @intCast(value.start), @intCast(value.end - value.start), value.replacement);
+        if (value.selection_after) |selection| self.selection = selection;
+        self.revision += 1;
+    }
+};
+
+test "scene_edit: under `row` a focus is the row; begin edits the primary field, cancel puts it back; under `text` a focus edits" {
+    const gpa = t.allocator;
+    var name: Memory = .{};
+    defer name.deinit();
+    try name.bytes.appendSlice(gpa, "a.txt");
+    var services = Services.init(.here);
+    defer services.deinit(gpa);
+    const owner = try services.acquireOwner();
+    const ref = try services.insertField(gpa, owner, .init(&name));
+    // A row of a label and its primary name field; the row is what the focus
+    // order visits.
+    const cells = [_]semantic.scene.Node{
+        .{ .id = @enumFromInt(3), .content = .{ .label = "·" } },
+        .{ .id = @enumFromInt(4), .content = .{ .field = .{ .ref = ref, .single_line = true, .primary = true } } },
+    };
+    const rows = [_]semantic.scene.Node{
+        .{ .id = @enumFromInt(2), .focusable = true, .content = .{ .container = .{ .axis = .horizontal, .children = &cells } } },
+    };
+    const view = try services.publishView(gpa, owner, null, 1, .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &rows } } });
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    try t.expectEqual(@import("weft_input").Granularity.row, services.granularity);
+    _ = try services.focusView(&head, gpa, view, @enumFromInt(2));
+    try t.expect(head.scene_selection.field == null);
+
+    // Begin: the primary field is edited, all of it selected, its text kept.
+    try t.expect(try begin(&services, &head, gpa));
+    try t.expect(head.scene_selection.began);
+    try t.expect(head.scene_selection.field.?.eql(ref));
+    try t.expectEqual(@as(u64, 5), name.selection.caret);
+    try t.expect(try services.inputFocusedField(&head, gpa, .{ .commit = .from("b") }));
+    try t.expectEqualStrings("b", name.bytes.items);
+    // Cancel restores it, and the focus is the row again.
+    try t.expect(try cancel(&services, &head, gpa));
+    try t.expectEqualStrings("a.txt", name.bytes.items);
+    try t.expect(head.scene_selection.field == null and !head.scene_selection.began);
+    try t.expect(!try cancel(&services, &head, gpa));
+
+    // Commit keeps the text; unchanged, it applies nothing, and the focus is
+    // the row again.
+    try t.expect(try begin(&services, &head, gpa));
+    try t.expect(try commit(&services, &head, gpa));
+    try t.expect(head.scene_selection.field == null and !head.scene_selection.began);
+
+    // Under `text` the same focus edits the field it lands on, and nothing
+    // was begun: the grammar's own modes own the keys.
+    services.granularity = .text;
+    _ = try services.focusView(&head, gpa, view, @enumFromInt(4));
+    try t.expect(head.scene_selection.field.?.eql(ref));
+    try t.expect(!head.scene_selection.began);
+}

@@ -65,7 +65,7 @@ var list_all: bool = false;
 const default_hide =
     "cursor-* row-* pick-* insert-* delete-* selection-* hierarchy-* " ++
     "set-mark set-mode set-cursor cursor-blink clear-selection undo-barrier " ++
-    "posture-break-out menu-escape which-key-* repeat-change field-edit " ++
+    "posture-break-out menu-escape which-key-* repeat-change field-edit field-edit-* structural-focus " ++
     "target-open-focused echo save close split vsplit unsplit focus-other";
 
 /// `hide = <patterns>` — read once at init, defaulting to `default_hide`.

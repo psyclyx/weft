@@ -45,4 +45,5 @@ test {
     _ = @import("snapshot_frames_test.zig");
     _ = @import("projection_test.zig");
     _ = @import("remote_test.zig");
+    _ = @import("focus_test.zig");
 }

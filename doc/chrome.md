@@ -310,6 +310,62 @@ granularity a click places the caret, as now.
 - vim and helix keep modal editing of listings: in `text` granularity their
   normal mode already shows a block caret, which is honest.
 
+### 5.4 Landed (2026-09-27)
+
+What the build settled:
+
+- **The states.** `Head.SceneSelection.field` is the field being *edited*;
+  a row focus leaves it null. `core/scene_edit.zig` is the one place a
+  focus lands (`land`): every focus path (`Services.focusView`,
+  `moveHeadFocus`, a provider's focus request, the row mapping in
+  `selection.zig`) goes through it, and it alone reads the granularity.
+  `SceneSelection.began` marks an edit begun under `row`, with the text it
+  began from (`origin`) for cancel.
+- **The declaration** is a command, `structural-focus text|row`, stored as
+  `Services.granularity` (`input.Granularity`, default `row`). vim, helix and
+  emacs run it with `text`; ide with `row`. The files projection's one change
+  is `.primary = true` on the name field (`scene.Content.field.primary`,
+  carried in the field's flags byte on the wire, so older encoders decode
+  unchanged).
+- **Editing under `row`.** `std.editing.begin` is in the vocabulary; the
+  scene adapter offers it on a row that holds a field (labelled as the
+  provider labels `field.edit`, "Edit name"), routed to `field-edit`, which
+  selects the whole name. While an edit is begun the adapter offers
+  `std.target.activate` as *commit* (so every grammar's Return commits
+  without a binding) and `std.gesture.cancel` as *cancel*; ide binds Escape
+  to `["std.gesture.cancel", "ide-escape"]`. A begun edit takes printable
+  input itself (`Head.textCommit`: the mode's commit command, else core's
+  `insert-text` while an edit is begun), so ide stays in `ide-structural`
+  and needs no field-resting mode. Committing ends the edit and, when the
+  text changed, runs the view's `view.apply` — the files listing then asks
+  its apply question as it always did. Moving the focus off the edited row
+  commits the same way. Delete mid-edit deletes text, never the row.
+- **Type-ahead** (`core/type_ahead.zig`) runs where an unbound printable key
+  finds no commit, under `row`, with no edit in progress: a 1 s prefix
+  searched from the focused row, one repeated key stepping through the rows
+  it starts, wrapping, case-insensitive. A row's label is its primary
+  field's text, else its focusable node's label.
+- **Pointer.** The platform marks a press `slow` when it follows the
+  previous press of its button after the double-click interval
+  (`multi_click_ms`) but within `slow_click_ms` (3×). `pointer-click` under
+  `row` begins an edit on a slow second click that lands on the focused row
+  the previous press also hit, and activates on a double click; a double
+  click whose first half began an edit ends it first.
+- **The caret** is derived in `CursorConfig.styleFor(mode, inserts)`: where
+  typing inserts, the declared shape or a bar; where it does not, a block
+  (an `underline` a grammar keeps). ide no longer declares a shape for
+  `ide-structural`. The scene renderer draws a field's caret only for
+  `Document.editing`. A text projection focused by rows (the status
+  listing) sets `Hud.row_focus`: its line is washed as a focused row and no
+  caret is drawn.
+- **For free:** the problems list, outline, dashboard and places are scenes
+  of focusable labels and action rows, so they get the row focus, the
+  highlight and type-ahead; the status listing gets the row focus through
+  `row_focus`. Action rows keep acting on a single click (a button is its
+  action), and type-ahead does not reach text projections.
+- Found on the way: the files apply dialog bound `enter`/`escape`, which no
+  key is spelled; they are `Return`/`Escape` now.
+
 ## 6. Order
 
 1. **Command identity:** the id grammar and rename, presentation metadata,

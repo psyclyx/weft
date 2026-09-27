@@ -409,12 +409,13 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 }
 
 /// Whether the entry's focus is a ROW of its text: a produced projection (a
-/// status listing) whose point is on no editable span, under a grammar that
-/// focuses rows (doc/chrome.md §5.2). Such a pane shows the row, not a caret.
-fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer) bool {
+/// status listing) whose point is on no editable span, in a mode where a
+/// printable key inserts nothing, under a grammar that focuses rows
+/// (doc/chrome.md §5.2). Such a pane shows the row, not a caret.
+fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, mode: []const u8) bool {
     if (fx.semantic.granularity != .row) return false;
-    if (buffer.projection == null) return false;
-    return buffer.posture(buffer.fieldAtPoint()) == .structural;
+    if (buffer.projection == null or buffer.fieldAtPoint()) return false;
+    return fx.head.textCommitIn(fx.keymap, mode) == null;
 }
 
 fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
@@ -960,7 +961,7 @@ pub const FrameBuilder = struct {
             .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, fx.head.textCommitIn(fx.keymap, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
-            .row_focus = rowFocused(fx, abuf),
+            .row_focus = rowFocused(fx, abuf, cursor_mode),
             .dirty = doc_status.dirty,
             .save_failed = doc_status.save_failed,
             .backing = backing_chip,
