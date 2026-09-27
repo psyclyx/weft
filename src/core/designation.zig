@@ -47,9 +47,9 @@ pub fn of(entry: *Buffers.Buffer, out: []u8) ?[]const u8 {
             // the only honest name the entry has.
             if (Designation.ofPath(.file, f.path)) |d| return d.render(out) catch null;
         },
-        // A remote shell's file is named when it is opened (the shell knows
-        // its host; the backing does not), and declared then.
-        .shell, .none => {},
+        // A remote file is named when it is opened (its tier knows the
+        // authority; the backing does not), and declared then.
+        .remote, .none => {},
     }
     const id = ed.doc.id.text();
     return Designation.ofDoc(.here, &id).render(out) catch null;
@@ -166,6 +166,22 @@ pub fn presentTarget(ctx: *command.Context, entry: *Buffers.Buffer, located: sem
     const name = try ctx.gpa.dupe(u8, shown);
     ctx.gpa.free(entry.name);
     entry.name = name;
+}
+
+/// The place a published directory IS (doc/place.md §2): the container, on
+/// the locus its binder's designation names — `here`, a peer by its
+/// fingerprint, a shell by its id (substrate §7, R1/R2). Read from the one
+/// name a trusted publisher bound, so a container's locus cannot disagree
+/// with what it is called: there is no second field to set wrong. Null when
+/// the container is unnamed, stale, or on a locus this embedding cannot hold
+/// (no `Loci`), since a place whose locus is unknown must not read as here.
+pub fn placeOf(ctx: *command.Context, located: semantic_model.target.Located) Allocator.Error!?@import("place.zig").Place {
+    const router = ctx.filesystems orelse return null;
+    const text = router.designationOf(located.target, located.revision) orelse return null;
+    const d = durable.parse(text) orelse return null;
+    if (d.kind != .directory) return null;
+    const locus: @import("locus.zig").Locus = if (d.authority == .here) .here else if (ctx.loci) |loci| try loci.of(d.authority) else return null;
+    return .{ .container = .{ .locus = locus, .ref = located.target, .revision = located.revision } };
 }
 
 /// What an open came to: the entry now showing the designation, or why

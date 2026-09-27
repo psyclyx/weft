@@ -29,16 +29,16 @@ fn under(proj: *Project, buf: []u8, kind: []const u8, rest: []const u8) []const 
     return std.fmt.bufPrint(buf, "weft://here/{s}{s}{s}", .{ kind, proj.root, rest }) catch unreachable;
 }
 
-fn sidebarPane(ed: *Editor) !*window_layout.Node {
+pub fn sidebarPane(ed: *Editor) !*window_layout.Node {
     return ed.win_layout.dockedPanel(.left) orelse error.NoSidebar;
 }
 
-fn paneEntry(ed: *Editor, pane: *window_layout.Node) !*core.Buffers.Buffer {
+pub fn paneEntry(ed: *Editor, pane: *window_layout.Node) !*core.Buffers.Buffer {
     return ed.buffers.get(pane.pane().buffer_id) orelse error.NoEntry;
 }
 
 /// What the sidebar lists: the designation of the entry it shows.
-fn sidebarShows(ed: *Editor) ![]const u8 {
+pub fn sidebarShows(ed: *Editor) ![]const u8 {
     return (try paneEntry(ed, try sidebarPane(ed))).designationText();
 }
 
@@ -46,7 +46,7 @@ fn sidebarShows(ed: *Editor) ![]const u8 {
 /// revealed highlight names (never its selection), through the target that
 /// row links (whose name its trusted publisher bound: the parent's plus the
 /// provider's leaf).
-fn sidebarHighlights(ed: *Editor) ?[]const u8 {
+pub fn sidebarHighlights(ed: *Editor) ?[]const u8 {
     const pane = sidebarPane(ed) catch return null;
     const entry = paneEntry(ed, pane) catch return null;
     const views = &ed.session.system.semantic.views;
@@ -67,7 +67,7 @@ fn files(ed: *Editor) usize {
     return n;
 }
 
-fn makeProjects(gpa: std.mem.Allocator) !void {
+pub fn makeProjects(gpa: std.mem.Allocator) !void {
     try core.file.writeBytes(gpa, "a.txt", "alpha\n");
     try core.file.writeBytesMakingDirs(gpa, "sub", "sub/inner.txt", "INNER\n");
     // Another project: its own marker makes it its own place.
@@ -409,7 +409,7 @@ fn symbolDepth(ed: *Editor, view: semantic_model.view.Ref, name: []const u8) ?[]
 /// (`Collab.reconcileRemoteFilesystem`) — the remote-filesystem provider
 /// under its own authority, speaking the peer_fs protocol to a server over
 /// the peer's confined root — as designation_test's peer gate builds it.
-const PeerTree = struct {
+pub const PeerTree = struct {
     local: h.fs_platform.Provider,
     alice_root: h.fs.contract.Root,
     server: h.fs_remote.Server,
@@ -428,11 +428,16 @@ const PeerTree = struct {
         }
     };
 
-    fn init(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor, shared: []const u8, fp: []const u8) !void {
+    pub fn init(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor, shared: []const u8, fp: []const u8) !void {
+        return self.initGranting(gpa, b, shared, fp, .read);
+    }
+
+    /// `init`, the peer granting `access` over its tree.
+    pub fn initGranting(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor, shared: []const u8, fp: []const u8, access: h.fs_remote.Access) !void {
         const system = b.session.system;
         self.local = h.fs_platform.Provider.init(gpa);
         self.alice_root = try self.local.acquireRoot(shared);
-        self.server = try h.fs_remote.Server.init(gpa, self.local.provider(), self.alice_root, .read);
+        self.server = try h.fs_remote.Server.init(gpa, self.local.provider(), self.alice_root, access);
         self.exchange = .{ .server = &self.server };
         self.provider = try h.fs_remote.Provider.init(@enumFromInt(77), .init(&self.exchange));
         try system.filesystems.register(self.provider.authority, self.provider.provider());
@@ -449,7 +454,7 @@ const PeerTree = struct {
         b.share_ctx.setPeerLabel("alice.example:7000");
     }
 
-    fn deinit(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor) void {
+    pub fn deinit(self: *PeerTree, gpa: std.mem.Allocator, b: *Editor) void {
         const system = b.session.system;
         b.share_ctx.closeRemoteChildren(&system.semantic.targets);
         b.share_ctx.remote_children.deinit(gpa);
@@ -522,7 +527,7 @@ test "e2e/projection: the sidebar follows local, another local project, then a p
     }
     b.applyWindow();
     try t.expectEqualStrings(file_designation, b.buffers.active().designationText());
-    try t.expect(b.buffers.active().read_only);
+    try t.expect(b.buffers.active().read_only != null);
     {
         const text = try b.textAlloc();
         defer gpa.free(text);
@@ -635,7 +640,7 @@ test "e2e/projection: the places list shows a peer's tree the frame it is shared
     try t.expect(placesList(&b, view, under(&proj, &buf, "dir", "/other")));
 }
 
-fn openOk(ed: *Editor, spec: []const u8) bool {
+pub fn openOk(ed: *Editor, spec: []const u8) bool {
     const outcome = core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = spec }}) catch return false;
     ed.applyWindow();
     return outcome != .string;

@@ -8,6 +8,16 @@
 //! hot path; callers run these on task-pool workers. One in-flight
 //! command at a time (mutex); the shell is a serial channel.
 //!
+//! Spawning does NOT wait for the far end: it starts the spawner and sends
+//! the capability probe, and the first command collects the probe's answer
+//! before its own. So a slow `ssh` handshake is never paid by whoever made
+//! the channel — it is paid, once, by the first thing that needs the far
+//! side — and the channel says where it is (`liveness`, substrate §7 R5):
+//! `connecting` until the far side has answered once, `connected` after,
+//! `degraded` while a round trip has been outstanding past
+//! `degraded_after_ns`, `offline` once the shell died or spoke garbage.
+//! Nothing remote is simply up.
+//!
 //! Concurrency contract (doc/substrate.md §7): `hashToken`
 //! detects external writers; `writeGuarded` is a remote test-and-set —
 //! it replaces the file only if the target still hashes to the state the
@@ -21,6 +31,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const task = @import("task.zig");
+const Liveness = @import("session.zig").Liveness;
 
 const ShellFs = @This();
 
@@ -31,7 +42,21 @@ mutex: task.Mutex = .{},
 seq: u64 = 0,
 /// The hash command detected on the remote (sha256sum → cksum). Hash
 /// values are opaque tokens: compared for equality, never interpreted.
+/// Read under `mutex`, after `ready`.
 hash_cmd: []const u8 = "",
+/// The sequence number of the capability probe `spawn` sent whose answer
+/// nobody has read yet; 0 once it has been read. Under `mutex`.
+probe_seq: u64 = 0,
+/// `Liveness` as an integer: written by whichever thread holds `mutex`,
+/// read by anyone (the status line) without it.
+state: std.atomic.Value(u8) = .init(@intFromEnum(Liveness.connecting)),
+/// When the round trip in flight was sent (monotonic ns), 0 when none is.
+/// What `degraded` is measured from.
+inflight_since_ns: std.atomic.Value(u64) = .init(0),
+
+/// A round trip outstanding this long reads as `degraded` — the session's
+/// own threshold for a silent peer.
+pub const degraded_after_ns: u64 = 3 * std.time.ns_per_s;
 
 pub const Error = error{
     /// Transport or protocol failure — the shell died or spoke garbage.
@@ -54,12 +79,19 @@ pub const Entry = struct {
     name: []const u8,
     kind: Kind,
     size: u64,
+    /// The `ls -l` fields before the name — mode, links, owner, group, size
+    /// and date — verbatim. Opaque: it moves when any of them does, which
+    /// makes it this tier's mtime+size revision stamp (substrate §2's
+    /// lowest-fidelity change detector, with its wider race window).
+    stamp: []const u8,
 };
 
 /// Directory listing: entries + the arena they borrow from.
 pub const Listing = struct {
     entries: []Entry,
     bytes: []u8,
+    /// The directory's own `stamp` (its `.` line), empty when `ls` gave none.
+    stamp: []const u8 = "",
 
     pub fn deinit(self: *Listing, gpa: Allocator) void {
         gpa.free(self.entries);
@@ -71,6 +103,8 @@ pub const Listing = struct {
 /// Spawn the shell. `argv` is the spawner command — `{"ssh", host,
 /// "sh"}` for the default tier, `{"/bin/sh"}` for local/tests. The
 /// remote end must be a POSIX sh with coreutils (base64 required).
+/// Returns once the spawner runs and the probe is sent: the far side's
+/// answer is the first command's to collect (`connecting` until then).
 pub fn spawn(gpa: Allocator, argv: []const []const u8, environ: std.process.Environ) Error!ShellFs {
     var self: ShellFs = .{
         .gpa = gpa,
@@ -86,11 +120,13 @@ pub fn spawn(gpa: Allocator, argv: []const []const u8, environ: std.process.Envi
     }) catch return error.Shell;
     errdefer self.child.kill(io);
     // Deterministic parsing locale; detect the hash tool once.
-    const probe = try self.run(gpa, "LC_ALL=C; export LC_ALL; command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo cksum");
-    defer gpa.free(probe.out);
-    if (probe.status != 0) return error.Shell;
-    const tool = std.mem.trim(u8, probe.out, " \t\r\n");
-    self.hash_cmd = if (std.mem.eql(u8, tool, "sha256sum")) "sha256sum" else "cksum";
+    // A far side that is already gone makes an `offline` channel, not a
+    // failed spawn: whether the write beat its exit is a race, and what the
+    // caller sees must not depend on who won it.
+    self.probe_seq = self.send(gpa, "LC_ALL=C; export LC_ALL; command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo cksum") catch |err| switch (err) {
+        error.Shell => 0,
+        else => |e| return e,
+    };
     return self;
 }
 
@@ -102,6 +138,16 @@ pub fn deinit(self: *ShellFs) void {
     self.* = undefined;
 }
 
+/// How reachable the far side is now (R5). Lock-free: the status line
+/// reads it every frame while a worker may be mid round trip.
+pub fn liveness(self: *const ShellFs) Liveness {
+    const state = self.stateNow();
+    if (state != .connected) return state;
+    const since = self.inflight_since_ns.load(.acquire);
+    if (since != 0 and task.nowNs() -| since > degraded_after_ns) return .degraded;
+    return .connected;
+}
+
 // ── Protocol ────────────────────────────────────────────────────────
 // One command per round-trip; completion and exit status are delimited
 // by a sentinel line the command's own output cannot contain (ASCII RS
@@ -109,28 +155,43 @@ pub fn deinit(self: *ShellFs) void {
 
 const Reply = struct { out: []u8, status: u8 };
 
-/// Run one shell command, capturing stdout until the sentinel. The
-/// command must not read stdin (the channel is the command stream).
-fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+/// Write one command and its sentinel; the sequence number to wait for.
+/// Under `mutex` (or before the channel is shared, in `spawn`).
+fn send(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!u64 {
     const io = self.threaded.io();
     self.seq += 1;
-
     const script = try std.fmt.allocPrint(
         gpa,
         "{s}\nprintf '\\n\\036weft {d} %d\\n' \"$?\"\n",
         .{ cmd, self.seq },
     );
     defer gpa.free(script);
-    const stdin = self.child.stdin orelse return error.Shell;
-    stdin.writeStreamingAll(io, script) catch return error.Shell;
+    const stdin = self.child.stdin orelse return self.died();
+    stdin.writeStreamingAll(io, script) catch return self.died();
+    return self.seq;
+}
 
-    const stdout = self.child.stdout orelse return error.Shell;
+/// The channel is gone: say so, and fail the call.
+fn died(self: *ShellFs) error{Shell} {
+    self.state.store(@intFromEnum(Liveness.offline), .release);
+    return error.Shell;
+}
+
+fn stateNow(self: *const ShellFs) Liveness {
+    return @enumFromInt(self.state.load(.acquire));
+}
+
+/// Read stdout up to command `seq`'s sentinel, the wait stamped for
+/// `liveness`. Under `mutex`.
+fn receive(self: *ShellFs, gpa: Allocator, seq: u64) Error!Reply {
+    self.inflight_since_ns.store(task.nowNs(), .release);
+    defer self.inflight_since_ns.store(0, .release);
+    const io = self.threaded.io();
+    const stdout = self.child.stdout orelse return self.died();
     var acc: std.ArrayList(u8) = .empty;
     errdefer acc.deinit(gpa);
     var needle_buf: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1eweft {d} ", .{self.seq}) catch unreachable;
+    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1eweft {d} ", .{seq}) catch unreachable;
     var buf: [16384]u8 = undefined;
     while (true) {
         if (std.mem.indexOf(u8, acc.items, needle)) |at| {
@@ -138,19 +199,52 @@ fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
             const rest = acc.items[at + needle.len ..];
             const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse {
                 // Status digits not complete yet; read more.
-                const n = stdout.readStreaming(io, &.{&buf}) catch return error.Shell;
-                if (n == 0) return error.Shell;
+                const n = stdout.readStreaming(io, &.{&buf}) catch return self.died();
+                if (n == 0) return self.died();
                 try acc.appendSlice(gpa, buf[0..n]);
                 continue;
             };
-            const status = std.fmt.parseInt(u8, std.mem.trim(u8, rest[0..nl], " \r"), 10) catch return error.Shell;
+            const status = std.fmt.parseInt(u8, std.mem.trim(u8, rest[0..nl], " \r"), 10) catch return self.died();
             acc.items.len = at; // drop sentinel; keep exact output bytes
             return .{ .out = try acc.toOwnedSlice(gpa), .status = status };
         }
-        const n = stdout.readStreaming(io, &.{&buf}) catch return error.Shell;
-        if (n == 0) return error.Shell; // shell exited under us
+        const n = stdout.readStreaming(io, &.{&buf}) catch return self.died();
+        if (n == 0) return self.died(); // shell exited under us
         try acc.appendSlice(gpa, buf[0..n]);
     }
+}
+
+/// Collect the probe `spawn` sent, once: the far side has answered, so the
+/// channel is `connected` and the hash tool is known. Under `mutex`.
+fn ready(self: *ShellFs, gpa: Allocator) Error!void {
+    if (self.stateNow() == .offline) return error.Shell;
+    if (self.probe_seq == 0) return;
+    const probe = try self.receive(gpa, self.probe_seq);
+    defer gpa.free(probe.out);
+    if (probe.status != 0) return self.died();
+    const tool = std.mem.trim(u8, probe.out, " \t\r\n");
+    self.hash_cmd = if (std.mem.eql(u8, tool, "sha256sum")) "sha256sum" else "cksum";
+    self.probe_seq = 0;
+    self.state.store(@intFromEnum(Liveness.connected), .release);
+}
+
+/// Run one shell command, capturing stdout until the sentinel. The
+/// command must not read stdin (the channel is the command stream).
+fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    try self.ready(gpa);
+    return self.receive(gpa, try self.send(gpa, cmd));
+}
+
+/// The hash tool the far side has, once it has said (connecting first
+/// when it has not). Every command naming it goes through here, so none
+/// can be built from the empty name before the probe is answered.
+fn hashCmd(self: *ShellFs, gpa: Allocator) Error![]const u8 {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    try self.ready(gpa);
+    return self.hash_cmd;
 }
 
 /// Heredoc upload of base64 text into `qtmp` (already quoted). Lines
@@ -246,7 +340,7 @@ pub fn size(self: *ShellFs, gpa: Allocator, path: []const u8) Error!u64 {
 pub fn hashToken(self: *ShellFs, gpa: Allocator, path: []const u8) Error![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const cmd = try std.fmt.allocPrint(gpa, "{s} < {s}", .{ self.hash_cmd, q });
+    const cmd = try std.fmt.allocPrint(gpa, "{s} < {s}", .{ try self.hashCmd(gpa), q });
     defer gpa.free(cmd);
     const r = try self.run(gpa, cmd);
     defer gpa.free(r.out);
@@ -289,17 +383,18 @@ pub fn writeGuarded(
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(gpa);
     try appendUpload(gpa, &script, qtmp, b64);
+    const hc = try self.hashCmd(gpa);
     const guard = if (expected) |token|
         try std.fmt.allocPrint(
             gpa,
             "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s} && echo \"weft-ok $tok\"; else rm -f {s}; echo weft-stale; false; fi",
-            .{ self.hash_cmd, qtmp, self.hash_cmd, q, token, qtmp, q, qtmp },
+            .{ hc, qtmp, hc, q, token, qtmp, q, qtmp },
         )
     else
         try std.fmt.allocPrint(
             gpa,
             "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f {s}; echo weft-stale; false; else mv {s} {s} && echo \"weft-ok $tok\"; fi",
-            .{ self.hash_cmd, qtmp, q, qtmp, qtmp, q },
+            .{ hc, qtmp, q, qtmp, qtmp, q },
         );
     defer gpa.free(guard);
     try script.appendSlice(gpa, guard);
@@ -328,7 +423,7 @@ pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []co
     const mv = try std.fmt.allocPrint(
         gpa,
         "tok=$({s} < {s} | tr -d ' \\t-')\nmv {s} {s} && echo \"weft-ok $tok\"",
-        .{ self.hash_cmd, qtmp, qtmp, q },
+        .{ try self.hashCmd(gpa), qtmp, qtmp, q },
     );
     defer gpa.free(mv);
     try script.appendSlice(gpa, mv);
@@ -363,42 +458,72 @@ pub fn list(self: *ShellFs, gpa: Allocator, path: []const u8) Error!Listing {
 
     var entries: std.ArrayList(Entry) = .empty;
     errdefer entries.deinit(gpa);
+    var dir_stamp: []const u8 = "";
     var lines = std.mem.splitScalar(u8, r.out, '\n');
     while (lines.next()) |line| {
-        if (line.len == 0 or std.mem.startsWith(u8, line, "total")) continue;
-        // mode links owner group size month day time name...
-        var toks = std.mem.tokenizeAny(u8, line, " \t");
-        const mode = toks.next() orelse continue;
-        var skip: usize = 0;
-        var sz: u64 = 0;
-        var name_start: usize = 0;
-        // size = 5th field; name starts after the 8th.
-        while (toks.next()) |tok| {
-            skip += 1;
-            if (skip == 4) sz = std.fmt.parseInt(u64, tok, 10) catch 0;
-            if (skip == 7) {
-                name_start = (toks.index);
-                break;
-            }
-        }
-        if (skip < 7) continue;
-        var name = std.mem.trim(u8, line[name_start..], " \t\r");
-        if (mode[0] == 'l') {
-            if (std.mem.indexOf(u8, name, " -> ")) |arrow| name = name[0..arrow];
-        }
-        if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        try entries.append(gpa, .{
-            .name = name,
-            .kind = switch (mode[0]) {
-                '-' => .file,
-                'd' => .dir,
-                'l' => .link,
-                else => .other,
-            },
-            .size = sz,
-        });
+        const e = parseLine(line) orelse continue;
+        if (std.mem.eql(u8, e.name, ".")) dir_stamp = e.stamp;
+        if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
+        try entries.append(gpa, e);
     }
-    return .{ .entries = try entries.toOwnedSlice(gpa), .bytes = r.out };
+    return .{ .entries = try entries.toOwnedSlice(gpa), .bytes = r.out, .stamp = dir_stamp };
+}
+
+/// One `ls -l` line as an entry, borrowing from `line`; null for the
+/// `total` line and anything too short to be an entry.
+fn parseLine(line: []const u8) ?Entry {
+    if (line.len == 0 or std.mem.startsWith(u8, line, "total")) return null;
+    // mode links owner group size month day time name...
+    var toks = std.mem.tokenizeAny(u8, line, " \t");
+    const mode = toks.next() orelse return null;
+    var skip: usize = 0;
+    var sz: u64 = 0;
+    var name_start: usize = 0;
+    // size = 5th field; name starts after the 8th.
+    while (toks.next()) |tok| {
+        skip += 1;
+        if (skip == 4) sz = std.fmt.parseInt(u64, tok, 10) catch 0;
+        if (skip == 7) {
+            name_start = toks.index;
+            break;
+        }
+    }
+    if (skip < 7) return null;
+    var name = std.mem.trim(u8, line[name_start..], " \t\r");
+    if (mode[0] == 'l') {
+        if (std.mem.indexOf(u8, name, " -> ")) |arrow| name = name[0..arrow];
+    }
+    if (name.len == 0) return null;
+    return .{
+        .name = name,
+        .kind = switch (mode[0]) {
+            '-' => .file,
+            'd' => .dir,
+            'l' => .link,
+            else => .other,
+        },
+        .size = sz,
+        .stamp = std.mem.trim(u8, line[0..name_start], " \t"),
+    };
+}
+
+/// What `path` itself is (`ls -ld`, no link followed): an entry named by
+/// the whole path, borrowing from `bytes`, which the caller frees. Null
+/// when there is nothing there.
+pub fn stat(self: *ShellFs, gpa: Allocator, path: []const u8) Error!?struct { entry: Entry, bytes: []u8 } {
+    const q = try quote(gpa, path);
+    defer gpa.free(q);
+    const cmd = try std.fmt.allocPrint(gpa, "ls -ld {s} 2>/dev/null", .{q});
+    defer gpa.free(cmd);
+    const r = try self.run(gpa, cmd);
+    errdefer gpa.free(r.out);
+    if (r.status != 0) {
+        gpa.free(r.out);
+        return null;
+    }
+    const line = std.mem.trimEnd(u8, r.out, "\n");
+    const entry = parseLine(line) orelse return error.Shell;
+    return .{ .entry = entry, .bytes = r.out };
 }
 
 // ── Tests (local /bin/sh — the same protocol ssh would carry) ───────
@@ -512,4 +637,29 @@ test "shellfs: list parses names, kinds, sizes" {
     }
     try t.expect(saw_file);
     try t.expect(saw_dir);
+    try t.expect(listing.stamp.len > 0);
+}
+
+test "shellfs: connecting until the far side answers, degraded while a round trip hangs, offline once it dies (R5)" {
+    const gpa = t.allocator;
+    var fs = try spawn(gpa, &.{"/bin/sh"}, testEnviron());
+    defer fs.deinit();
+    // The spawn returned without waiting for the probe's answer.
+    try t.expectEqual(Liveness.connecting, fs.liveness());
+    try t.expectEqual(@as(u64, 0), try fs.size(gpa, "/dev/null"));
+    try t.expectEqual(Liveness.connected, fs.liveness());
+    // A round trip outstanding past the threshold reads as degraded (the
+    // stamp a worker leaves while it waits on the far side).
+    fs.inflight_since_ns.store(task.nowNs() -| (degraded_after_ns + 1), .release);
+    try t.expectEqual(Liveness.degraded, fs.liveness());
+    fs.inflight_since_ns.store(0, .release);
+    // The far side exits: the next call fails, and the channel says so.
+    {
+        fs.mutex.lock();
+        defer fs.mutex.unlock();
+        _ = try fs.send(gpa, "exit 0");
+    }
+    try t.expectError(error.Shell, fs.size(gpa, "/dev/null"));
+    try t.expectEqual(Liveness.offline, fs.liveness());
+    try t.expectError(error.Shell, fs.size(gpa, "/dev/null"));
 }

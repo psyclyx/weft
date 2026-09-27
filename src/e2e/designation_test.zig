@@ -368,7 +368,7 @@ test "e2e/designation: a peer's shared tree opens by designation — the same pa
     const file_designation = try (durable.Designation{ .authority = .{ .peer = &fp }, .kind = .file, .ref = "/src/main.zig" }).render(&file_name);
     try t.expect(openRaw(&b, file_designation) == null);
     try t.expectEqualStrings(file_designation, named(&b));
-    try t.expect(b.buffers.active().read_only);
+    try t.expect(b.buffers.active().read_only != null);
     // One the peer does not have is refused by name.
     var missing_name: [128]u8 = undefined;
     const missing = try (durable.Designation{ .authority = .{ .peer = &fp }, .kind = .file, .ref = "/src/nope.zig" }).render(&missing_name);

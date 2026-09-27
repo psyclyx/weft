@@ -2273,7 +2273,7 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
-    env.buffers.active().read_only = true;
+    env.buffers.active().read_only = @import("../Buffers.zig").produced;
 
     const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
     env.head.echo.clearRetainingCapacity();

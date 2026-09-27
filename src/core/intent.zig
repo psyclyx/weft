@@ -572,7 +572,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
         .lang = Actions.langOfName(entry.name),
         .tool = entry.tool,
         .role = entry.focusedRole(),
-        .locality = localityOf(entry),
+        .locality = entry.locality(),
         .posture = @tagName(entry.posture(focus.field != null)),
         .pane = pane,
         .context = open,
@@ -684,14 +684,6 @@ fn packageOf(name: []const u8) []const u8 {
 fn lastSegment(name: []const u8) []const u8 {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
     return name[dot + 1 ..];
-}
-
-/// WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
-/// only now that an entry has a place. A tool entry is `.tool` first: its
-/// content is a projection, so "are the files real here" is not a question
-/// about it.
-fn localityOf(entry: anytype) @import("weft_facts").Locality {
-    return if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
 }
 
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {

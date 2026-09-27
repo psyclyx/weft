@@ -310,15 +310,13 @@ shared tree.
 
 ## 3.5 Open gaps found while building
 
-- **Remote shells can't be followed.** A `shell:` place has no filesystem
-  provider that lists directories; making the coreutils tier (substrate §7) a
-  real filesystem provider closes it.
-- **Locality of peer places reads `local`.** The locus registry isn't wired,
-  so a peer place's locus is `here`. §3's example (Build dropping for a
-  remote file) holds for peer *documents* today by other facts, but locality
-  is wrong until the registry is wired.
-- **Peer files open read-only.** Editing one still means sharing it as a
-  document; a remote-file backing (substrate §2) is the general answer.
+- **Remote places, what is left.** A shell's tree lists and reveals but is
+  not edited through a listing's draft (its provider refuses `apply`; its
+  files open and save through their own backing). Listing a shell's or a
+  peer's directory is still one round trip on the thread that asks, as
+  peer listings always were. A shell listing's revisions are `ls -l` stamps,
+  minute-grained (substrate §2's mtime+size fallback). Only the outbound
+  connection binds a peer locus; hub peers share no tree to be a place.
 - **An answer's QUESTION key** still holds the local buffer ref and a local
   revision (`Context.revisionOf`: the log length and the tree generation), so
   a peer-rendered view needs an opaque remote version. What an answer is
@@ -331,6 +329,23 @@ shared tree.
   projection kinds only in its own namespace; it registers its
   `onContextChanged`/`onSubjectChanged` handlers from JS, which the host
   cannot see, so every loaded JS plugin is delivered the context event.
+
+*Landed (2026-09-27): remote places.* `locus.Loci` is wired (on `System`,
+`Context.loci`) and keyed by identity — a peer by its fingerprint, a shell by
+its id — with the transport a rebindable binding (R2); a published
+container's place is on the locus its designation names
+(`designation.placeOf`), so peer and shell entries read `locality = remote`
+by locus, `Buffer.locality()` is the one reading, and ide.js offers
+build/test/debug/run in local source only. The coreutils tier is a
+filesystem provider (`ShellProvider`, mounted under `Router.freshAuthority`):
+`open weft://shell:<id>/dir/…` lists, a shell file is in its directory's
+place, the sidebar follows and reveals, and the status line reports a remote
+place's liveness (R5; `ShellFs` no longer blocks its spawn on the far side).
+A peer's file is editable: `Backing.remote` is one `backing.Remote` seam for
+the shell and peer tiers — guarded save (temp, then rename with
+`expected = .entry`, else STALE → merge → retry) and external changes merged
+as the backing peer's ops — and without the peer's write surface the entry is
+read-only with the reason (`Buffer.read_only` holds it).
 
 ## 4. What retires
 

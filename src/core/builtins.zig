@@ -593,7 +593,7 @@ fn cBufferCreate(ctx: *Context, args: struct { name: []const u8 }) anyerror!Valu
 /// Mark the active buffer read-only (tool buffers): text input is
 /// swallowed; commands still run.
 fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
-    ctx.buffer().read_only = args.on;
+    ctx.buffer().read_only = if (args.on) @import("Buffers.zig").produced else null;
     return ok;
 }
 
@@ -737,7 +737,7 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
                 f.sync.token = null; // guard on non-existence at the new path
             }
         },
-        .shell => return .{ .string = "unsupported backing for save-as" },
+        .remote => return .{ .string = "save-as: a remote file saves where it is" },
     }
     try ed.requestSave(ctx.gpa);
     return ok;

@@ -699,7 +699,7 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
 
     // A read-only buffer is refused by the same door, and says which refusal
     // it was — the builtin holds no permission check of its own.
-    host.buffers.active().read_only = true;
+    host.buffers.active().read_only = core.Buffers.produced;
     host.head.echo.clearRetainingCapacity();
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());

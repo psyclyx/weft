@@ -60,7 +60,7 @@ pub fn isActive(p: anytype, b: *Buffers.Buffer) bool {
 }
 
 pub fn isReadOnly(_: anytype, b: *Buffers.Buffer) bool {
-    return b.read_only;
+    return b.read_only != null;
 }
 
 /// The entry's file backing — `edit.zig`'s `wl_path` generalized off the

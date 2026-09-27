@@ -631,7 +631,7 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill
 fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.Ref {
     if (bufs.findByName(name)) |id| return (bufs.get(id) orelse return null).ref();
     const nb = bufs.get(bufs.create(gpa, name) catch return null) orelse return null;
-    nb.read_only = true;
+    nb.read_only = Buffers.produced;
     return nb.ref();
 }
 
