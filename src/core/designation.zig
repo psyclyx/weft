@@ -210,8 +210,9 @@ pub fn resolveRelative(ctx: *command.Context, gpa: Allocator, rel: []const u8) !
 pub const refuse_relative_elsewhere = "this place has no local directory to resolve a relative name against: give an absolute path or a weft:// designation";
 
 /// Open what `d` designates, for the kinds core itself can answer: a live
-/// entry already showing it (any kind), a document (live, or reopened from
-/// the parked store), a process (only while its entry lives), a projection
+/// entry already showing it (any kind), a document (live, or reopened by
+/// `Buffers.revive` — parked, or restored from the document store, which
+/// outlives the process), a process (only while its entry lives), a projection
 /// (its producer re-run with `text`, the designation, as the one argument).
 /// Paths and peers are the shell's — it owns the filesystems and the
 /// connections — so for those this answers only the live-entry case and

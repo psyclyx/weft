@@ -58,7 +58,7 @@ const detachProviders = providers.detachProviders;
 /// - `weft://shell:<host>/file/<path>` (or `host:path`): over that shell;
 /// - `weft://<peer>/…`: to the peer (its shared tree, a document it shares);
 /// - a document, a process, a projection: as core answers them
-///   (`designation.openHeld`) — a live entry, a parked document, a producer
+///   (`designation.openHeld`) — a live entry, a kept document, a producer
 ///   re-run.
 ///
 /// A relative path is resolved once, here, against the place the command runs
@@ -102,7 +102,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
 fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: durable.Designation, text: []const u8) anyerror!core.command.Value {
     const opened: core.command.Value = if (try core.designation.openHeld(ctx, d, text)) |outcome| switch (outcome) {
         .opened => |id| blk: {
-            // A document reopened from the parked store comes back without
+            // A kept document reopened (parked, or from the store) comes without
             // the providers its close detached.
             if (ctx.buffers.get(id)) |b| try attachProviders(command_context.attachments, b);
             break :blk .{ .integer = @intCast(id) };

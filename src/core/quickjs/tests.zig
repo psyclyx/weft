@@ -822,7 +822,7 @@ test "quickjs: no grant, however broad, reaches the editor's own machinery (gues
     defer gpa.free(cached);
     const kv_dir = @import("../kv_file.zig").stateDir(gpa).?;
     defer gpa.free(kv_dir);
-    const kv_blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("../kv_file.zig").store_file });
+    const kv_blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("../kv_file.zig").plugins_file });
     defer gpa.free(kv_blob);
     var ibuf: [512]u8 = undefined;
     const id_path = @import("../identity.zig").configPath(&ibuf, machinery.Posix{});
@@ -927,7 +927,7 @@ test "quickjs: an agent's fileWrite cannot bind a buffer onto the editor's machi
     // same carve-out has to hold here: refused, and NO buffer bound.
     const kv_dir = @import("../kv_file.zig").stateDir(gpa).?;
     defer gpa.free(kv_dir);
-    const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("../kv_file.zig").store_file });
+    const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("../kv_file.zig").plugins_file });
     defer gpa.free(blob);
 
     const src = try std.fmt.allocPrint(gpa,

@@ -112,6 +112,17 @@ pub const Id = @import("weft_semantic").durable.DocId;
 /// document. Identity and revision stay separate, the split doc/place.md
 /// makes for places.
 id: Id = .{ .bytes = @splat(0) },
+/// WHICH IN-MEMORY INSTANCE this is: unique in the process, minted by `init`
+/// and `restore`, never persisted. The id says what document this is; this
+/// says whether a LOCAL handle into it — an `AnchorHandle`, which indexes
+/// this instance's `anchors` and nothing else — still means anything. The
+/// two part ways exactly when a document is written out and read back
+/// (`DocStore`): the id comes back, the anchor set does not. So a holder of
+/// a local handle keeps the incarnation it was taken in and reads the handle
+/// only against that one (`jumplist.Jump.incarnation`): an equal id alone
+/// would let a handle into a released instance index a restored one's
+/// anchors.
+incarnation: u64 = 0,
 doc: ObjectDoc = .empty,
 /// `self.doc`'s body text object — resolved once (`resolveBody`) and
 /// cached, not re-resolved on every use. Why that is safe: `ObjId` IS
@@ -266,7 +277,64 @@ pub fn init(gpa: Allocator, user_agent: []const u8) Error!Document {
     self.body = resolveBody(&self.doc);
     try self.doc.setAgent(gpa, user_agent);
     self.id = mintId();
+    self.incarnation = mintIncarnation();
     return self;
+}
+
+pub const RestoreError = Error || error{Corrupt};
+
+/// Document `id` again, from `history` — the whole-history bootstrap batch
+/// `serialize` wrote — as the user peer's replica. Built exactly the way
+/// `addPeer` builds a shadow (`ObjectDoc.open` of the history, then the local
+/// agent registered on it), so re-registering `user_agent` continues that
+/// agent's event numbering, which is causally sound.
+///
+/// What comes back is the DOCUMENT, not the session that edited it: the
+/// commit log — and so the local undo stack, which is only a subscriber of
+/// it (`undo.zig`) — anchors, peers and grants are local state, not part of
+/// the document format, and start empty. Undo reaches back to the restore
+/// and no further; the text is the whole history's.
+///
+/// `history` is untrusted (it came off disk): anything that is not a
+/// `Document`-shaped history — a batch that does not decode, or one whose
+/// root does not hold the body text object — is `error.Corrupt`, never a
+/// panic.
+pub fn restore(gpa: Allocator, user_agent: []const u8, id: Id, history: []const u8) RestoreError!Document {
+    var self: Document = .{};
+    errdefer self.deinit(gpa);
+    self.user_name = try gpa.dupe(u8, user_agent);
+    self.doc = ObjectDoc.open(gpa, history) catch |e| switch (e) {
+        error.Corrupt, error.MissingDependency, error.Unrealized => return error.Corrupt,
+        else => |err| return err,
+    };
+    const body = self.doc.root().mapGet(body_key) orelse return error.Corrupt;
+    if (body.kind() != .text) return error.Corrupt;
+    self.body = body.objId().?;
+    try self.doc.setAgent(gpa, user_agent);
+    self.id = id;
+    self.incarnation = mintIncarnation();
+    return self;
+}
+
+/// Document `id` again from its TEXT alone — the fallback for one whose
+/// history was too large to keep (`DocStore.history_cap`). The bulk-load
+/// path (`adoptContent`): one base event whatever the size, so the history
+/// is gone but the identity and every byte are not. Non-UTF-8 `content` is
+/// `error.Corrupt`, checked here because `adoptContent` treats its own
+/// `Corrupt` as unreachable and this content came off disk.
+pub fn restoreContent(gpa: Allocator, user_agent: []const u8, id: Id, content: []const u8) RestoreError!Document {
+    if (!std.unicode.utf8ValidateSlice(content)) return error.Corrupt;
+    var self = try Document.init(gpa, user_agent);
+    errdefer self.deinit(gpa);
+    try self.adoptContent(gpa, content);
+    self.id = id;
+    return self;
+}
+
+var incarnations: std.atomic.Value(u64) = .init(1);
+
+fn mintIncarnation() u64 {
+    return incarnations.fetchAdd(1, .monotonic);
 }
 
 /// A fresh document identity from the kernel CSPRNG (getrandom(2), the same

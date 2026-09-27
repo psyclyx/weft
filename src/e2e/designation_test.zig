@@ -488,3 +488,50 @@ test "e2e/designation: a place is named by its designation — the builtin reads
     // Only a directory names a place.
     try t.expectEqualStrings("refused", result(ed, &buf, "ow-context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "v" }, .{ .string = "weft://here/proc/x" } }));
 }
+
+test "e2e/designation: a scratch document outlives the process and opens by its name in the next one" {
+    const gpa = t.allocator;
+    // A private state directory, armed the way main.zig arms it, around two
+    // whole editors booted one after the other: the second is the next run.
+    const dir = try core.kv_file.testDir(gpa, "e2e-documents");
+    defer gpa.free(dir);
+    defer core.kv_file.removeTestDir(gpa, dir); // LIFO: after the file is gone
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, core.kv_file.documents_file });
+    defer gpa.free(path);
+    core.file.deleteFile(gpa, path);
+    defer core.file.deleteFile(gpa, path);
+
+    var name_buf: [durable.DocId.text_len + 32]u8 = undefined;
+    const name = blk: {
+        var app: App = undefined;
+        try app.init(gpa);
+        defer app.deinit();
+        const ed = &app.ed;
+        var documents = core.Buffers.DocumentFile.openIn(gpa, ed.buffers, try gpa.dupe(u8, dir));
+        ed.runStr("buffer-create", "*draft*");
+        try ed.buffers.active().textEditor().?.insertText(gpa, "written last run\n");
+        const spelled = ed.buffers.active().textEditor().?.doc.id.text();
+        // Shutdown: the draft is still open, and is kept.
+        documents.close();
+        break :blk try std.fmt.bufPrint(&name_buf, "weft://here/doc/{s}", .{&spelled});
+    };
+
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    var documents = core.Buffers.DocumentFile.openIn(gpa, ed.buffers, try gpa.dupe(u8, dir));
+    defer documents.close();
+    // Nothing is reopened at startup…
+    try t.expect(ed.buffers.findByName("*draft*") == null);
+    // …and `open` of its designation brings it back, name and text.
+    try t.expect(openRaw(ed, name) == null);
+    try t.expectEqualStrings("*draft*", ed.bufferName());
+    try t.expectEqualStrings(name, named(ed));
+    const te = ed.buffers.active().textEditor().?;
+    var text: [64]u8 = undefined;
+    const len = te.text().byteLen();
+    var sr = te.text().streamReader(.{ .start = 0, .end = len }, &.{});
+    try sr.interface.readSliceAll(text[0..len]);
+    try t.expectEqualStrings("written last run\n", text[0..len]);
+}
