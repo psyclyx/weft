@@ -23,8 +23,13 @@
 //! Placement is against the FRAME (`bounds`): a panel is clamped inside it, a
 //! submenu opens beside its item and flips to the other side when it would
 //! overflow, and a panel hung at a point flips above it when it would not fit
-//! below. The text styles keep every row and column on the cell grid — a clean
-//! outlined box; `widget` pads in pixels, rounds, and casts a shadow.
+//! below. A panel still taller than the frame once packed to the text grid
+//! scrolls: a window of its rows, an indicator where rows are hidden, kept
+//! across frames (`Scroll`) and moved to show the lit row whenever that row
+//! moves, or by the owner's wheel steps (the panel's `scroll` fact; its
+//! `opened` fact names each opening). The text styles keep every row and
+//! column on the cell grid — a clean outlined box; `widget` pads in pixels,
+//! rounds, and casts a shadow.
 //!
 //! A `menubar-item` is a menubar's title (`chrome.Role.menu_title`), laid out
 //! in a scene row like a button; the presenter paints it with this module's
@@ -71,6 +76,21 @@ pub const Item = struct {
 pub const Panel = struct {
     items: []const Item,
     parent: ?struct { panel: usize, item: usize } = null,
+    /// The panel's own node and the stamp of its opening (its `opened`
+    /// fact), which together name this opening of it across frames
+    /// (`Scroll`): opened again, it starts at its top.
+    node: ?NodeId = null,
+    opened: u32 = 0,
+    /// The wheel steps its owner has heard over it since it opened (its
+    /// `scroll` fact; down is positive). Only the change between frames
+    /// moves it.
+    wheel: i32 = 0,
+
+    /// The lit row, if one is.
+    pub fn lit(self: Panel) ?usize {
+        for (self.items, 0..) |it, i| if (it.lit) return i;
+        return null;
+    }
 };
 
 /// A role's last dotted segment: `offers.menu` and `menu` alike.
@@ -114,7 +134,9 @@ fn collect(arena: Allocator, out: *std.ArrayList(Panel), node: *const Node, pare
         else => return,
     };
     const index = out.items.len;
-    try out.append(arena, .{ .items = &.{}, .parent = parent });
+    const wheel = if (fact(node, "scroll")) |s| std.fmt.parseInt(i32, s, 10) catch 0 else 0;
+    const opened = if (fact(node, "opened")) |s| std.fmt.parseInt(u32, s, 10) catch 0 else 0;
+    try out.append(arena, .{ .items = &.{}, .parent = parent, .node = node.id, .opened = opened, .wheel = wheel });
     var items: std.ArrayList(Item) = .empty;
     var sub: ?*const Node = null;
     var sub_parent: usize = 0;
@@ -191,11 +213,39 @@ pub const RowBox = struct { item: usize, rect: region.Rect };
 
 pub const PanelBox = struct {
     box: region.Rect,
+    /// The rows shown: every row, or — in a panel taller than the frame —
+    /// the window of them it is scrolled to.
     rows: []const RowBox,
     columns: Columns,
     /// A submenu that opened on its parent's LEFT (it would have overflowed
     /// the frame on the right); a root panel that hangs ABOVE its point.
     flipped: bool = false,
+    /// A scrolled panel's indicators: rows are hidden above (`more_up`) or
+    /// below (`more_down`); each takes one row's height.
+    more_up: ?region.Rect = null,
+    more_down: ?region.Rect = null,
+};
+
+/// Wheel steps scroll this many rows.
+pub const wheel_rows = 3;
+
+/// Where each open panel taller than the frame is scrolled to, across
+/// frames — the menu's `top_row`. Kept by the view; a panel is known by its
+/// node and its opening, so another submenu at the same depth, or the same
+/// menu opened again, starts at its top. Settling is idempotent: a frame
+/// built twice from one input lays out the same rows.
+pub const Scroll = struct {
+    kept: [max_panels]Kept = @splat(.{}),
+
+    pub const Kept = struct {
+        /// The panel's node and the stamp of its opening.
+        key: ?[2]u64 = null,
+        top: usize = 0,
+        /// The lit row last laid out: the window follows it only when it moves.
+        lit: ?usize = null,
+        /// The panel's wheel count last seen.
+        wheel: i32 = 0,
+    };
 };
 
 pub const Anchor = union(enum) {
@@ -244,8 +294,13 @@ fn columnsFor(v: *const View, items: []const Item) struct { columns: Columns, wi
 }
 
 /// Lay out every panel of a menu inside `bounds`: the root at `anchor`, each
-/// submenu beside the row it opened from.
-pub fn layout(v: *const View, arena: Allocator, panels: []const Panel, anchor: Anchor, bounds: region.Rect) Allocator.Error![]const PanelBox {
+/// submenu beside the row it opened from. A panel taller than the frame,
+/// once packed, shows a window of its rows with an indicator for what is
+/// hidden above and below: scrolled by its owner's wheel steps, and moved —
+/// only as far as it must — to show the lit row whenever that row moves, so
+/// every row the keys can reach is one a person can see. `scroll` keeps the
+/// windows across frames; without it each panel starts at its top.
+pub fn layout(v: *const View, arena: Allocator, panels: []const Panel, anchor: Anchor, bounds: region.Rect, scroll: ?*Scroll) Allocator.Error![]const PanelBox {
     const roomy = Metrics.of(v);
     const out = try arena.alloc(PanelBox, panels.len);
     for (panels, 0..) |panel, pi| {
@@ -293,19 +348,104 @@ pub fn layout(v: *const View, arena: Allocator, panels: []const Panel, anchor: A
             x = @floor((x - bounds.x) / v.cell_w + 0.01) * v.cell_w + bounds.x;
             y = @round(y);
         }
-        const rows = try arena.alloc(RowBox, panel.items.len);
+        const avail = h - 2 * m.pad_y;
+        const shown = settle(panel, m, avail, if (scroll) |s| keptFor(s, panels, pi) else null);
+        const rows = try arena.alloc(RowBox, shown.end - shown.top);
+        const row_w = w - 2 * m.pad_x;
         var ry = y + m.pad_y;
-        var n: usize = 0;
-        for (panel.items, 0..) |it, i| {
+        var more_up: ?region.Rect = null;
+        if (shown.up) {
+            more_up = .{ .x = x + m.pad_x, .y = ry, .w = row_w, .h = m.row_h };
+            ry += m.row_h;
+        }
+        for (panel.items[shown.top..shown.end], shown.top.., rows) |it, i, *row| {
             const rh = if (it.separator) m.sep_h else m.row_h;
-            if (ry + rh > y + h - m.pad_y + 0.5) break; // what fits in the frame
-            rows[n] = .{ .item = i, .rect = .{ .x = x + m.pad_x, .y = ry, .w = w - 2 * m.pad_x, .h = rh } };
-            n += 1;
+            row.* = .{ .item = i, .rect = .{ .x = x + m.pad_x, .y = ry, .w = row_w, .h = rh } };
             ry += rh;
         }
-        out[pi] = .{ .box = .{ .x = x, .y = y, .w = w, .h = h }, .rows = rows[0..n], .columns = measured.columns, .flipped = flipped };
+        const more_down: ?region.Rect = if (shown.end < panel.items.len) .{ .x = x + m.pad_x, .y = ry, .w = row_w, .h = m.row_h } else null;
+        out[pi] = .{
+            .box = .{ .x = x, .y = y, .w = w, .h = h },
+            .rows = rows,
+            .columns = measured.columns,
+            .flipped = flipped,
+            .more_up = more_up,
+            .more_down = more_down,
+        };
     }
     return out;
+}
+
+/// Which rows of `panel` a window `avail` high shows, from row `top`: up to
+/// `end`, and whether indicators take a row above (`up`) and below.
+const Window = struct { top: usize, end: usize, up: bool };
+
+fn windowFrom(panel: Panel, m: Metrics, avail: f32, top: usize) Window {
+    const up = top > 0;
+    var room = avail - if (up) m.row_h else 0;
+    var end = fitting(panel, m, room, top);
+    if (end < panel.items.len) {
+        // Hidden below too: its indicator takes a row.
+        room -= m.row_h;
+        end = fitting(panel, m, room, top);
+    }
+    // A window always shows a row, however little room it has.
+    return .{ .top = top, .end = @max(end, @min(top + 1, panel.items.len)), .up = up };
+}
+
+/// How far from `top` the rows fit in `room`.
+fn fitting(panel: Panel, m: Metrics, room: f32, top: usize) usize {
+    var used: f32 = 0;
+    var end = top;
+    for (panel.items[top..]) |it| {
+        const rh = if (it.separator) m.sep_h else m.row_h;
+        if (used + rh > room + 0.5) break;
+        used += rh;
+        end += 1;
+    }
+    return end;
+}
+
+/// The window `panel` shows. Every row, when all fit. Else it scrolls: from
+/// where it was (`kept`), moved by the wheel steps since, then — when the
+/// lit row moved — only as far as shows it, and never past its last row.
+fn settle(panel: Panel, m: Metrics, avail: f32, kept: ?*Scroll.Kept) Window {
+    const n = panel.items.len;
+    const all = windowFrom(panel, m, avail, 0);
+    const lit = panel.lit();
+    var top: usize = 0;
+    var reveal = true;
+    if (kept) |k| {
+        const moved = (panel.wheel - k.wheel) * wheel_rows;
+        top = if (moved < 0) k.top -| @as(usize, @intCast(-moved)) else k.top + @as(usize, @intCast(moved));
+        reveal = !std.meta.eql(lit, k.lit);
+        k.wheel = panel.wheel;
+        k.lit = lit;
+    }
+    if (all.end == n) {
+        if (kept) |k| k.top = 0;
+        return all;
+    }
+    top = @min(top, n - 1);
+    if (reveal) if (lit) |at| {
+        if (at < top) top = at;
+        while (windowFrom(panel, m, avail, top).end <= at) top += 1;
+    };
+    // Scrolled past the end: back until the last row sits at the bottom.
+    while (top > 0 and windowFrom(panel, m, avail, top - 1).end == n) top -= 1;
+    if (kept) |k| k.top = top;
+    return windowFrom(panel, m, avail, top);
+}
+
+/// The kept window of panel `pi`, begun afresh when another panel, or
+/// another opening of it, now stands at that depth.
+fn keptFor(scroll: *Scroll, panels: []const Panel, pi: usize) ?*Scroll.Kept {
+    if (pi >= scroll.kept.len) return null;
+    const panel = panels[pi];
+    const key: [2]u64 = .{ if (panel.node) |node| @intFromEnum(node) else 0, panel.opened };
+    const k = &scroll.kept[pi];
+    if (k.key == null or !std.mem.eql(u64, &k.key.?, &key)) k.* = .{ .key = key, .wheel = panel.wheel };
+    return k;
 }
 
 fn panelHeight(panel: Panel, m: Metrics) f32 {
@@ -386,7 +526,7 @@ pub fn draw(
     // An empty root panel is a menu with nothing dropped down yet (a
     // menubar title lit from the keyboard): nothing to draw.
     if (panels.len == 0 or panels[0].items.len == 0) return .{ .hits = &.{}, .box = null };
-    const boxes = try layout(v, scratch, panels, anchor, bounds);
+    const boxes = try layout(v, scratch, panels, anchor, bounds, &v.menu_scroll);
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
     const th = &v.theme;
     const fill = switch (v.chrome) {
@@ -396,6 +536,8 @@ pub fn draw(
     var hits: std.ArrayList(Hit) = .empty;
     for (panels, boxes) |panel, pb| {
         try chrome.paintPanel(sink, pb.box, fill, th.status, .menu);
+        if (pb.more_up) |r| try chrome.paintMenuMore(sink, r, .up);
+        if (pb.more_down) |r| try chrome.paintMenuMore(sink, r, .down);
         for (pb.rows) |rb| {
             const it = panel.items[rb.item];
             if (it.separator) {
@@ -473,13 +615,13 @@ test "menu: a submenu opens beside its row, flips at the frame's edge, and every
     for ([_]chrome.Style{ .text, .text_icons, .widget }) |style| {
         v.chrome = style;
         // Room on the right: the submenu opens there, level with its row.
-        const beside = try layout(&v, a, &panels, .{ .below = .{ .x = 10, .y = 0, .w = 40, .h = 20 } }, bounds);
+        const beside = try layout(&v, a, &panels, .{ .below = .{ .x = 10, .y = 0, .w = 40, .h = 20 } }, bounds, null);
         try t.expectEqual(@as(f32, 20), beside[0].box.y);
         try t.expect(!beside[1].flipped);
         try t.expect(beside[1].box.x >= beside[0].box.x + beside[0].box.w - 4);
         try t.expectApproxEqAbs(beside[0].rows[2].rect.y, beside[1].rows[0].rect.y, 0.5);
         // No room: it flips to the parent's left.
-        const edge = try layout(&v, a, &panels, .{ .below = .{ .x = 700, .y = 0, .w = 40, .h = 20 } }, bounds);
+        const edge = try layout(&v, a, &panels, .{ .below = .{ .x = 700, .y = 0, .w = 40, .h = 20 } }, bounds, null);
         try t.expect(edge[1].flipped);
         try t.expect(edge[1].box.x + edge[1].box.w <= edge[0].box.x + 4);
         for (edge) |pb| {
@@ -487,10 +629,83 @@ test "menu: a submenu opens beside its row, flips at the frame's edge, and every
             try t.expect(pb.box.y >= 0 and pb.box.y + pb.box.h <= 600);
         }
         // Hung at a point near the bottom: above it instead.
-        const low = try layout(&v, a, panels[0..1], .{ .point = .{ 100, 590 } }, bounds);
+        const low = try layout(&v, a, panels[0..1], .{ .point = .{ 100, 590 } }, bounds, null);
         try t.expect(low[0].flipped);
         try t.expect(low[0].box.y + low[0].box.h <= 590);
         // The text styles keep the cell grid.
         if (style != .widget) try t.expectApproxEqAbs(@round(low[0].box.w / v.cell_w) * v.cell_w, low[0].box.w, 0.01);
     }
+}
+
+test "menu: a panel taller than the frame scrolls — the lit row is always laid out, wherever the keys took it" {
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(t.allocator, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var items: [60]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .node = @enumFromInt(100 + i), .label = "Row" };
+    const bounds: region.Rect = .{ .x = 0, .y = 0, .w = 800, .h = 200 };
+    for ([_]chrome.Style{ .text, .text_icons, .widget }) |style| {
+        v.chrome = style;
+        for ([_]usize{ 0, 30, 59 }) |lit| {
+            for (&items, 0..) |*it, i| it.lit = i == lit;
+            const panels = [_]Panel{.{ .items = &items }};
+            const boxes = try layout(&v, a, &panels, .{ .below = .{ .x = 10, .y = 0, .w = 40, .h = 20 } }, bounds, null);
+            const laid = for (boxes[0].rows) |r| {
+                if (r.item == lit) break true;
+            } else false;
+            try t.expect(laid);
+            // Indicators say where rows are hidden; every row shown is inside the panel.
+            try t.expectEqual(boxes[0].rows[0].item > 0, boxes[0].more_up != null);
+            try t.expectEqual(boxes[0].rows[boxes[0].rows.len - 1].item < 59, boxes[0].more_down != null);
+            const box = boxes[0].box;
+            for (boxes[0].rows) |r| try t.expect(r.rect.y >= box.y and r.rect.y + r.rect.h <= box.y + box.h + 0.5);
+        }
+    }
+}
+
+test "menu: a scrolled panel keeps its window — the lit row moves inside it, the wheel moves it, a new opening starts at the top" {
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(t.allocator, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    v.chrome = .text;
+    var items: [60]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .node = @enumFromInt(100 + i), .label = "Row" };
+    var scroll: Scroll = .{};
+    const Frame = struct {
+        fn at(vv: *View, aa: Allocator, its: []Item, lit: usize, wheel: i32, opened: u32, s: *Scroll) !PanelBox {
+            for (its, 0..) |*it, i| it.lit = i == lit;
+            const panels = [_]Panel{.{ .items = its, .node = @enumFromInt(1), .opened = opened, .wheel = wheel }};
+            const boxes = try layout(vv, aa, &panels, .{ .below = .{ .x = 10, .y = 0, .w = 40, .h = 20 } }, .{ .x = 0, .y = 0, .w = 800, .h = 200 }, s);
+            return boxes[0];
+        }
+    };
+    // Down past the bottom: the window follows, the lit row last.
+    const first = try Frame.at(&v, a, &items, 0, 0, 1, &scroll);
+    const shown = first.rows.len;
+    const deep = try Frame.at(&v, a, &items, shown + 4, 0, 1, &scroll);
+    try t.expectEqual(shown + 4, deep.rows[deep.rows.len - 1].item);
+    const top = deep.rows[0].item;
+    // Up one: the lit row moves inside the window, which stays.
+    const up = try Frame.at(&v, a, &items, shown + 3, 0, 1, &scroll);
+    try t.expectEqual(top, up.rows[0].item);
+    // Built again from the same input: the same rows.
+    const again = try Frame.at(&v, a, &items, shown + 3, 0, 1, &scroll);
+    try t.expectEqual(top, again.rows[0].item);
+    // Two wheel steps down move it `2 * wheel_rows`, lit row or not.
+    const wheeled = try Frame.at(&v, a, &items, shown + 3, 2, 1, &scroll);
+    try t.expectEqual(top + 2 * wheel_rows, wheeled.rows[0].item);
+    // Wheeled far past the end: the last row sits at the bottom.
+    const end = try Frame.at(&v, a, &items, shown + 3, 100, 1, &scroll);
+    try t.expectEqual(@as(usize, 59), end.rows[end.rows.len - 1].item);
+    try t.expect(end.more_down == null and end.more_up != null);
+    // Opened again: from the top.
+    const reopened = try Frame.at(&v, a, &items, 0, 0, 2, &scroll);
+    try t.expectEqual(@as(usize, 0), reopened.rows[0].item);
+    try t.expect(reopened.more_up == null);
 }

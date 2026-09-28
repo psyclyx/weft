@@ -288,9 +288,21 @@ Departures, and what is left:
   `weft.command` for placing any command. A second fragment setting `items`
   replaces the first's list (ide.js lists the menubar's toggle with its own).
 - No dynamic submenus (Open Recent is the project picker, not a ▸ of
-  recent files), no Revert for a file (there is no such command), no
-  Outline toggle (ide.js composes no outline), and nothing scrolls: a panel
-  taller than the frame packs its rows and, past that, loses its tail.
+  recent files), no Revert for a file (there is no such command), and no
+  Outline toggle (ide.js composes no outline).
+- **A panel taller than the frame scrolls** (it packs its rows to the text
+  grid first). It shows a window of its rows, with a chevron row above
+  and below for what is hidden; the window moves only as far as it must to
+  show the lit row whenever that row moves, so every row the keys can reach
+  is one on screen (they once walked into rows the layout had dropped, and
+  Enter ran one unseen), and the wheel over the menu scrolls it by three
+  rows (`wheel-up`/`wheel-down` are the menu interaction's, never the
+  editor's). Where a panel is scrolled to is the widget's to keep — only it
+  knows how many rows fit — in `View.menu_scroll`, as a pane keeps its
+  `top_row`: the cascade says only which opening a panel is (`opened`,
+  stamped per opening, kept while the pointer returns to its row) and the
+  wheel steps heard over it (`scroll`), and the widget starts a new opening
+  at its top.
 
 ## 3. How chrome looks: two styles, chosen by theme
 

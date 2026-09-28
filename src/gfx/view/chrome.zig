@@ -346,6 +346,17 @@ pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, c
     }
 }
 
+/// A scrolled menu panel's indicator row: a chevron centred in `box`,
+/// pointing to where rows are hidden.
+pub fn paintMenuMore(s: Sink, box: region.Rect, dir: enum { up, down }) !void {
+    const v = s.v;
+    const fg = mix(v.theme.background, v.theme.status, 0.7);
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    if (!try s.icon(if (dir == .up) "chevron-up" else "chevron-down", cx, cy, iconSide(v) * 0.9, fg))
+        try s.label(if (dir == .up) "▲" else "▼", cx - v.cell_w / 2, box.y + @round((box.h - v.line_h) / 2), fg, box);
+}
+
 /// A menubar title: a padded label, its mnemonic underlined, washed while its
 /// menu is open (`focused`) or the pointer is on it.
 fn paintTitle(s: Sink, state: State, content: Content, box: region.Rect) !void {

@@ -47,6 +47,7 @@ pub fn scene(a: std.mem.Allocator, c: *const Cascade, base: u64, anchor: ?Anchor
     var root = try panel(a, c, base, 0);
     if (anchor) |at| {
         var facts: std.ArrayList(Fact) = .empty;
+        try facts.appendSlice(a, root.facts);
         try facts.append(a, .{ .name = "anchor-view", .value = try std.fmt.allocPrint(a, "{d}.{d}", .{ at.view.slot, at.view.generation }) });
         try facts.append(a, .{ .name = "anchor-node", .value = try std.fmt.allocPrint(a, "{d}", .{at.node}) });
         root.facts = try facts.toOwnedSlice(a);
@@ -88,9 +89,17 @@ fn panel(a: std.mem.Allocator, c: *const Cascade, base: u64, k: usize) !Node {
         });
         if (lit and k + 1 < c.depth and row.opens()) try children.append(a, try panel(a, c, base, k + 1));
     }
+    // Which opening this is, and the wheel steps heard over it: the widget
+    // keeps where a panel taller than the frame is scrolled to.
+    var panel_facts: std.ArrayList(Fact) = .empty;
+    if (k < c.depth) {
+        try panel_facts.append(a, .{ .name = "opened", .value = try std.fmt.allocPrint(a, "{d}", .{c.opened[k]}) });
+        if (c.wheel[k] != 0) try panel_facts.append(a, .{ .name = "scroll", .value = try std.fmt.allocPrint(a, "{d}", .{c.wheel[k]}) });
+    }
     return .{
         .id = @enumFromInt(cascade.panelId(base, k)),
         .role = "menu",
+        .facts = try panel_facts.toOwnedSlice(a),
         .content = .{ .container = .{ .axis = .vertical, .children = try children.toOwnedSlice(a) } },
     };
 }
@@ -111,6 +120,9 @@ pub const Verb = union(enum) {
     hover,
     /// Consumed and ignored: the rest of a click, a key the menu does not use.
     swallow,
+    /// A wheel step over the menu: a panel taller than the frame scrolls.
+    @"scroll-up",
+    @"scroll-down",
     /// A letter or digit: a mnemonic, or a jump.
     letter: u8,
     /// Alt with a letter: a menubar's mnemonic.
@@ -126,7 +138,7 @@ pub const Verb = union(enum) {
         if (std.mem.startsWith(u8, rest, "key-") and rest.len == 5) return .{ .letter = rest[4] };
         if (std.mem.startsWith(u8, rest, "alt-") and rest.len == 5) return .{ .alt = rest[4] };
         if (std.mem.startsWith(u8, rest, "own-")) return .{ .other = rest[4..] };
-        inline for (.{ "up", "down", "left", "right", "home", "end", "choose", "close", "click", "hover", "swallow" }) |name| {
+        inline for (.{ "up", "down", "left", "right", "home", "end", "choose", "close", "click", "hover", "swallow", "scroll-up", "scroll-down" }) |name| {
             if (std.mem.eql(u8, rest, name)) return @unionInit(Verb, name, {});
         }
         return null;
@@ -147,7 +159,7 @@ pub const Verb = union(enum) {
         if (std.mem.startsWith(u8, text, "letter ") and text.len == 8) return .{ .letter = text[7] };
         if (std.mem.startsWith(u8, text, "alt ") and text.len == 5) return .{ .alt = text[4] };
         if (std.mem.startsWith(u8, text, "own ")) return .{ .other = text[4..] };
-        inline for (.{ "up", "down", "left", "right", "home", "end", "choose", "close", "click", "hover", "swallow" }) |name| {
+        inline for (.{ "up", "down", "left", "right", "home", "end", "choose", "close", "click", "hover", "swallow", "scroll-up", "scroll-down" }) |name| {
             if (std.mem.eql(u8, text, name)) return @unionInit(Verb, name, {});
         }
         return null;
@@ -173,10 +185,12 @@ const fixed = [_]struct { input: []const u8, action: []const u8 }{
     .{ .input = "up-mouse-1", .action = "menu.swallow" },
     .{ .input = "up-mouse-3", .action = "menu.swallow" },
     .{ .input = "drag-mouse-1", .action = "menu.swallow" },
+    .{ .input = "wheel-up", .action = "menu.scroll-up" },
+    .{ .input = "wheel-down", .action = "menu.scroll-down" },
     .{ .input = "*", .action = "menu.swallow" },
 };
 
-const fixed_actions = [_][]const u8{ "menu.up", "menu.down", "menu.left", "menu.right", "menu.home", "menu.end", "menu.choose", "menu.close", "menu.click", "menu.hover", "menu.swallow" };
+const fixed_actions = [_][]const u8{ "menu.up", "menu.down", "menu.left", "menu.right", "menu.home", "menu.end", "menu.choose", "menu.close", "menu.click", "menu.hover", "menu.swallow", "menu.scroll-up", "menu.scroll-down" };
 
 const letter_actions: [letters.len][]const u8 = blk: {
     var out: [letters.len][]const u8 = undefined;
@@ -244,6 +258,12 @@ fn takenBy(extra: []const Extra, input: []const u8) bool {
 /// The keyboard half of a verb, applied to `c`. Pointer verbs and the
 /// owner's own are the owner's (`pointedRow`, then `cascade.hover`/`click`).
 pub fn key(c: *Cascade, verb: Verb) Outcome {
+    // The wheel is the pointer's: it shows no underlines.
+    switch (verb) {
+        .@"scroll-up" => return cascade.scroll(c, -1),
+        .@"scroll-down" => return cascade.scroll(c, 1),
+        else => {},
+    }
     const was = c.keyboard;
     c.keyboard = true;
     const outcome: Outcome = switch (verb) {

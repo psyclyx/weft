@@ -480,6 +480,15 @@ test "e2e/menubar: Alt+F opens File from the keys, Enter runs in the primary con
     try t.expectEqualStrings("Undo", litLabel(try menu(ed)).?);
     ed.press("Left", "");
     try t.expectEqualStrings("File", litLabel(&(try barView(ed)).scene).?);
+    // The wheel over a menu is the menu's (it scrolls one taller than the
+    // frame): it neither closes it nor moves the lit row.
+    var lit_buf: [64]u8 = undefined;
+    const lit_before = try std.fmt.bufPrint(&lit_buf, "{s}", .{litLabel(try menu(ed)).?});
+    ed.press("wheel-down", "");
+    try t.expect(ed.head.interactions.active() != null);
+    try t.expectEqualStrings("File", litLabel(&(try barView(ed)).scene).?);
+    try t.expectEqualStrings(lit_before, litLabel(try menu(ed)).?);
+    try t.expectEqualStrings("1", fact(try menu(ed), "scroll").?);
     // Escape closes one level: the menu, then the bar.
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() != null);

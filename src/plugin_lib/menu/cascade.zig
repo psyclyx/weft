@@ -62,11 +62,20 @@ pub const Cascade = struct {
     /// click opened shows them from its first key on — the desktop's
     /// convention, which keeps a pointer user's menu free of underlines.
     keyboard: bool = false,
+    /// Each open panel's opening, stamped when it opened, and the wheel
+    /// steps heard over it since (down positive). Where a panel taller than
+    /// the frame is scrolled to is the widget's to keep — only it knows how
+    /// many rows fit — so the cascade says only these two: the widget starts
+    /// a new opening at its top, and moves the window by the steps it has
+    /// not yet seen.
+    opened: [max_depth]u32 = @splat(0),
+    wheel: [max_depth]i32 = @splat(0),
 
     /// Open `root` as a fresh cascade: one panel, its first choosable row
     /// lit when the keyboard opened it (a click lights nothing).
     pub fn open(root: []const Entry, keyboard: bool) Cascade {
         var c: Cascade = .{ .root = root, .depth = 1, .keyboard = keyboard };
+        c.opened[0] = stamp();
         if (keyboard) c.lit[0] = step(root, null, 1);
         return c;
     }
@@ -99,11 +108,24 @@ pub const Cascade = struct {
     /// Open the submenu of row `at` of panel `k` (closing anything deeper).
     fn openBelow(self: *Cascade, k: usize, at: usize, keyboard: bool) void {
         if (k + 1 >= max_depth) return;
+        // The submenu already open there stays the same opening.
+        const already = self.depth >= k + 2 and self.lit[k] == at;
         self.lit[k] = at;
         self.depth = k + 2;
         self.lit[k + 1] = if (keyboard) step(self.level(k + 1), null, 1) else null;
+        if (already) return;
+        self.opened[k + 1] = stamp();
+        self.wheel[k + 1] = 0;
     }
 };
+
+var openings: u32 = 0;
+
+/// A stamp no earlier opening of any panel carries.
+fn stamp() u32 {
+    openings +%= 1;
+    return openings;
+}
 
 /// The next choosable row from `from` (exclusive) in direction `dir`,
 /// wrapping; from nothing, the first (or, backwards, the last).
@@ -248,12 +270,23 @@ pub fn hover(c: *Cascade, k: usize, at: usize) Outcome {
     const rows = c.level(k);
     if (at >= rows.len) return .none;
     const before = c.*;
-    c.depth = k + 1;
+    // Back on the row whose submenu is open: the same opening, still open.
+    if (before.depth >= k + 2 and before.lit[k] == at) c.depth = k + 2 else c.depth = k + 1;
     if (rows[at].enabled()) {
         c.lit[k] = at;
         if (rows[at].opens()) c.openBelow(k, at, false);
     }
     return if (std.meta.eql(before.lit, c.lit) and before.depth == c.depth) .none else .redraw;
+}
+
+/// A wheel step over the menu (`dir` 1 down, -1 up): heard by the deepest
+/// panel, the one under the pointer (hovering a shallower panel's other
+/// rows closes the deeper ones). Nothing is lit or chosen; the widget
+/// scrolls a panel taller than the frame, and a panel that fits ignores it.
+pub fn scroll(c: *Cascade, dir: i32) Outcome {
+    if (c.depth == 0) return .none;
+    c.wheel[c.depth - 1] +%= dir;
+    return .redraw;
 }
 
 /// A click on row `at` of panel `k`: run it, or open its submenu.
@@ -485,6 +518,32 @@ test "cascade: the pointer lights a row, opens its submenu, and a click runs a l
     try t.expectEqual(@as(usize, 1), c.depth);
     try t.expectEqual(Outcome.none, click(&c, 0, 2));
     try t.expectEqualStrings("Quit", click(&c, 0, 1).activate.label);
+}
+
+test "cascade: the wheel is heard by the deepest panel; each opening is stamped anew, the pointer's return keeps it" {
+    const sub = [_]Entry{ .{ .label = "A" }, .{ .label = "B" } };
+    const rows = [_]Entry{ .{ .label = "Share", .children = &sub }, .{ .label = "More", .children = &sub }, .{ .label = "Quit" } };
+    var c = Cascade.open(&rows, false);
+    const first = c.opened[0];
+    try t.expect(Cascade.open(&rows, false).opened[0] != first);
+    try t.expectEqual(Outcome.redraw, scroll(&c, 1));
+    try t.expectEqual(@as(i32, 1), c.wheel[0]);
+    // A wheel step lights nothing and shows no underlines.
+    try t.expectEqual(@as(?usize, null), c.lit[0]);
+    try t.expect(!c.keyboard);
+    _ = hover(&c, 0, 0);
+    const share = c.opened[1];
+    _ = scroll(&c, -1);
+    try t.expectEqual(@as(i32, -1), c.wheel[1]);
+    try t.expectEqual(@as(i32, 1), c.wheel[0]);
+    // Back on Share: the same opening, its wheel kept.
+    _ = hover(&c, 0, 0);
+    try t.expectEqual(share, c.opened[1]);
+    try t.expectEqual(@as(i32, -1), c.wheel[1]);
+    // Another submenu at that depth: a new opening, from rest.
+    _ = hover(&c, 0, 1);
+    try t.expect(c.opened[1] != share);
+    try t.expectEqual(@as(i32, 0), c.wheel[1]);
 }
 
 test "cascade: shown labels drop their marks, and node ids round-trip" {

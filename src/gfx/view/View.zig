@@ -182,6 +182,9 @@ pane_maps: [max_pane_maps]PaneMap = undefined,
 pane_map_count: usize = 0,
 semantic_last_view: ?@import("weft_semantic").view.Ref = null,
 semantic_last_node: ?@import("weft_semantic").scene.NodeId = null,
+/// Where each open menu panel taller than the frame is scrolled to — a
+/// pane's `top_row`, for the floating menu (`menu.Scroll`).
+menu_scroll: @import("menu.zig").Scroll = .{},
 /// The current build's content origin (its frame inset by `margin`) — a
 /// pane renders into its own region, so layout and HUD baselines derive
 /// from here rather than the whole framebuffer. Defaults to the
