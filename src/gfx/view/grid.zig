@@ -174,46 +174,36 @@ pub fn draw(
         }
     }
 }
-
 /// The geometry of a grid READ as text (`Snapshot.reading`): for each row
-/// drawn, the line of the entry's document it is (`row(0)` is line
-/// `first_row`), with a caret stop at every cell that has text — the byte
-/// offset `core.grid.cellText` gives it, at that cell's x. So the document's
-/// caret, selections and flashes land ON the cells, and a click or a drag
-/// resolves to the offset of the cell under it (the view's geometry map).
+/// drawn, the part of the entry's document on it (`Snapshot.spans` — a
+/// logical line that wraps is one document line over several rows, a
+/// command line is its buffer flowed over its rows), with a caret stop at
+/// every scalar at the x of its cell (`core.grid.RowWalk`). So the
+/// document's caret, selections and flashes land ON the cells, and a click
+/// or a drag resolves to the offset under it (the view's geometry map).
 pub fn layoutRows(
     v: *const View,
     la: Allocator,
-    rope: anytype,
     g: *const core.grid.Snapshot,
     body: region.Rect,
 ) ![]layout.VisualLine {
     const x0 = v.origin_x;
     const rows_fit: usize = @intFromFloat(@max(0, @floor(body.h / v.line_h)));
-    const rows = @min(g.rows, rows_fit);
-    const lines_total = rope.lineCount();
+    const rows = @min(@min(g.rows, rows_fit), g.spans.len);
     var lines: std.ArrayList(layout.VisualLine) = .empty;
-    var buf: [4]u8 = undefined;
     for (0..rows) |r| {
-        const line = g.first_row + r;
-        if (line >= lines_total) break;
-        const src = rope.lineRange(line);
+        const span = g.spans[r];
         const y = body.y + @as(f32, @floatFromInt(r)) * v.line_h;
         var stops: std.ArrayList(layout.Stop) = .empty;
-        var off = src.start;
-        var col: usize = 0;
-        const row = g.row(r);
-        while (col < row.len) : (col += 1) {
-            const t = core.grid.cellText(row[col], &buf);
-            if (t.len == 0) continue;
-            if (off >= src.end) break;
-            try stops.append(la, .{ .off = @intCast(off), .x = x0 + @as(f32, @floatFromInt(col)) * v.cell_w });
-            off += t.len;
+        var walk = core.grid.RowWalk.init(g.row(r), span, g.flows[r]);
+        while (walk.next()) |s| {
+            if (s.off >= span.end) break;
+            try stops.append(la, .{ .off = @intCast(s.off), .x = x0 + @as(f32, @floatFromInt(s.col)) * v.cell_w });
         }
-        try stops.append(la, .{ .off = @intCast(src.end), .x = x0 + @as(f32, @floatFromInt(col)) * v.cell_w });
+        try stops.append(la, .{ .off = @intCast(span.end), .x = x0 + @as(f32, @floatFromInt(walk.endCol())) * v.cell_w });
         try lines.append(la, .{
-            .src = src,
-            .row = line,
+            .src = .{ .start = span.start, .end = span.end },
+            .row = g.first_row + r,
             .baseline_y = y + v.ascent,
             .ascent = v.ascent,
             .descent = v.line_h - v.ascent,

@@ -1004,3 +1004,145 @@ test "e2e/terminal: a fish prompt is a field too — ide types into it, Return r
     ed.press("Return", "");
     try waitFor(ed, "\nfish-field\n");
 }
+
+// ── Wrapped lines (doc/terminal.md §6, §8) ───────────────────────────
+
+/// The row of the grid the caret's offset is on.
+fn caretRow(ed: *Editor) usize {
+    const b = named(ed, term).?;
+    return b.grid.?.rowOfOffset(b.textEditor().?.cursorOffset());
+}
+
+test "e2e/terminal: out of capture a soft-wrapped line is one line — a search matches across the wrap, and a yank has no break in it" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("x.txt", "x\n");
+    try ed.setConfig("terminal", "shell", test_shell);
+    ed.runStr("terminal.open", "");
+    ed.applyWindow();
+    if (!h.drainToolContains(ed, term, "$")) return screenFailed(ed, error.PromptNeverShown);
+    const cols = (h.gridOf(ed, term) orelse return error.NoGrid).cols;
+    // A line whose marker `XYZWV` straddles the wrap: three columns before
+    // the edge, two after. (The typed line spells it apart.)
+    var cmd_buf: [160]u8 = undefined;
+    enter(ed, try std.fmt.bufPrint(&cmd_buf, "head -c {d} </dev/zero | tr '\\0' A; printf 'XYZ''WVBBBB\\n'; echo wrap-\"\"done", .{cols - 3}));
+    try waitFor(ed, "\nwrap-done\n$");
+    ed.press("C-backslash", "");
+    {
+        const text = try waitText(ed, term, "AXYZWVBBBB\n");
+        defer gpa.free(text);
+    }
+    // `/XYZWV` finds it — the match spans two rows of the screen.
+    ed.press("/", "");
+    ed.settle(5);
+    ed.typeText("XYZWV");
+    ed.settle(5);
+    ed.press("Return", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqual(@as(usize, cols + 6), line.len);
+        try t.expect(std.mem.endsWith(u8, line, "AXYZWVBBBB"));
+    }
+    // The caret is on the cell of its `X`: the row before the wrap, three
+    // columns from its edge.
+    try frameNow(ed);
+    const first_row = caretRow(ed);
+    // `yy` yanks the logical line whole: no break where it wrapped.
+    ed.typeText("yy");
+    const yanked = (ed.register.get(0) orelse return error.NothingYanked).slice();
+    try t.expectEqual(@as(usize, cols + 6), yanked.len);
+    try t.expect(std.mem.indexOfScalar(u8, yanked, '\n') == null);
+    // `$` goes to the line's end — on the next row.
+    ed.press("$", "");
+    try t.expectEqual(first_row + 1, caretRow(ed));
+}
+
+test "e2e/terminal: a zsh command line longer than the terminal is one field — vim's 0, $ and b cross the wrap, cw edits there, and Return runs it" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try vimAtPrompt(&app, "zsh", "");
+    const cols = h.gridOf(ed, term).?.cols;
+    // `straddle` starts four columns before the edge, so it crosses it.
+    const pad = cols - (test_prompt.len + 1) - "echo ".len - 1 - 4;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    try text.appendSlice(gpa, "echo ");
+    try text.appendNTimes(gpa, 'x', pad);
+    try text.appendSlice(gpa, " straddle omega");
+    ed.press("i", "i");
+    ed.typeText(text.items);
+    ed.press("Escape", "");
+    {
+        const f = try fieldText(ed);
+        defer gpa.free(f);
+        try t.expectEqualStrings(text.items, f);
+    }
+    try frameNow(ed);
+    const prompt_row = caretRow(ed) - 1;
+    // `0`: the line's start, the prompt's row. `$`: its end, the next row.
+    ed.press("0", "0");
+    try t.expectEqual(prompt_row, caretRow(ed));
+    ed.press("$", "");
+    try t.expectEqual(prompt_row + 1, caretRow(ed));
+    // `b` twice: back over `omega` to `straddle`, which starts on the row
+    // above.
+    ed.press("b", "b");
+    ed.press("b", "b");
+    try t.expectEqual(prompt_row, caretRow(ed));
+    ed.typeText("cwjoined");
+    ed.press("Escape", "");
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(gpa);
+    try want.appendSlice(gpa, "echo ");
+    try want.appendNTimes(gpa, 'x', pad);
+    try want.appendSlice(gpa, " joined omega");
+    {
+        const f = try fieldText(ed);
+        defer gpa.free(f);
+        try t.expectEqualStrings(want.items, f);
+    }
+    ed.press("Return", "");
+    try want.appendSlice(gpa, "\n");
+    const out = try waitText(ed, term, want.items[5..]);
+    gpa.free(out);
+}
+
+test "e2e/terminal: a zsh right prompt is never part of the command line — edited and run as typed" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try vimAtPrompt(&app, "zsh", "RPROMPT=rp-side");
+    try waitFor(ed, "rp-side");
+    {
+        const f = try fieldText(ed);
+        defer gpa.free(f);
+        try t.expectEqualStrings("", f);
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "rp-side") == null);
+    }
+    ed.press("i", "i");
+    ed.typeText("echo hirp");
+    ed.press("Escape", "");
+    ed.typeText("bcwthere");
+    ed.press("Escape", "");
+    {
+        const f = try fieldText(ed);
+        defer gpa.free(f);
+        try t.expectEqualStrings("echo there", f);
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings(test_prompt ++ " echo there", line);
+    }
+    ed.press("Return", "");
+    try waitFor(ed, "\nthere\n");
+}

@@ -68,10 +68,12 @@ pub fn cellText(cell: Cell, buf: *[4]u8) []const u8 {
 }
 
 /// Append row `cells`' text (trailing blanks dropped) to `out`.
-pub fn appendRowText(gpa: Allocator, out: *std.ArrayList(u8), cells: []const Cell) Allocator.Error!void {
+pub fn appendRowText(gpa: Allocator, out: *std.ArrayList(u8), cells: []const Cell, wraps: bool) Allocator.Error!void {
     const start = out.items.len;
     var buf: [4]u8 = undefined;
     for (cells) |c| try out.appendSlice(gpa, cellText(c, &buf));
+    // A row that wraps is whole: its trailing blanks are the line's own.
+    if (wraps) return;
     while (out.items.len > start and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
 }
 
@@ -109,6 +111,52 @@ pub const Grid = struct {
     /// (`grid_mirror`, doc/terminal.md §8).
     field_text: std.ArrayList(u8) = .empty,
     field_pushed: std.ArrayList(u8) = .empty,
+    /// Screen row `r` soft-wraps: its line goes on into row `r + 1`.
+    wraps: []bool = &.{},
+    /// Where each row's text is in the entry's document, as `grid_mirror`
+    /// last wrote it (`rowText`).
+    map: Map = .{},
+
+    /// The row ↔ document map. One LOGICAL line is one document line: a
+    /// row that soft-wraps runs on into the next with no break between.
+    /// History rows keep only their byte counts (their offsets are sums, so
+    /// cutting rows from the front shifts nothing stored); screen rows keep
+    /// their spans whole.
+    pub const Map = struct {
+        /// The grid `revision` this map describes; any other is stale.
+        revision: u64 = 0,
+        /// Per history row mirrored, oldest first: its text's bytes plus
+        /// its break (1, or 0 when it wraps).
+        hist_bytes: std.ArrayList(u32) = .empty,
+        /// Sum of `hist_bytes`.
+        hist_total: usize = 0,
+        screen: std.ArrayList(RowText) = .empty,
+        /// The command line's range in the document, while it is a field.
+        field: ?Range = null,
+        /// The document's length as the map was made: only the field is
+        /// edited between syncs, so the field's end moves by the difference.
+        doc_len: usize = 0,
+
+        fn deinit(self: *Map, gpa: Allocator) void {
+            self.hist_bytes.deinit(gpa);
+            self.screen.deinit(gpa);
+        }
+    };
+
+    pub const Range = struct { start: usize, end: usize };
+
+    /// Where a row's text is in the document, and how it lies on the row's
+    /// cells: bytes `[start, flow_start)` are the text of the row's cells
+    /// from column 0 (`cellText`), and bytes `[flow_start, end)` — a command
+    /// line's text, not its echo's cells — FLOW from column `flow_col`, a
+    /// scalar at a time by its width (`scalarWidth`). `end` is before the
+    /// row's break, if it has one.
+    pub const RowText = struct {
+        start: usize,
+        end: usize,
+        flow_start: usize,
+        flow_col: u16 = 0,
+    };
 
     pub const Input = struct {
         owns_keys: bool = true,
@@ -134,7 +182,7 @@ pub const Grid = struct {
     pub const Mirror = struct { start: u64, end: u64 };
 
     /// A history row: where its cells start in `history_cells`, how many.
-    pub const Span = struct { at: usize, len: u32 };
+    pub const Span = struct { at: usize, len: u32, wraps: bool = false };
 
     /// What a publish said beyond the rows, for the entry to take up.
     pub const Applied = struct {
@@ -154,6 +202,8 @@ pub const Grid = struct {
         gpa.free(self.input.claimed);
         self.field_text.deinit(gpa);
         self.field_pushed.deinit(gpa);
+        gpa.free(self.wraps);
+        self.map.deinit(gpa);
         self.* = undefined;
     }
 
@@ -194,6 +244,10 @@ pub const Grid = struct {
             const keep_cols = @min(self.cols, h.cols);
             for (0..@min(self.rows, h.rows)) |r|
                 @memcpy(cells[r * h.cols ..][0..keep_cols], self.cells[r * self.cols ..][0..keep_cols]);
+            const wraps = try gpa.alloc(bool, h.rows);
+            @memset(wraps, false);
+            gpa.free(self.wraps);
+            self.wraps = wraps;
             gpa.free(self.cells);
             self.cells = cells;
             self.cols = h.cols;
@@ -203,6 +257,7 @@ pub const Grid = struct {
             const r = m.row(i);
             const dst_cells = self.cells[@as(usize, r.index) * h.cols ..][0..h.cols];
             @memcpy(std.mem.sliceAsBytes(dst_cells), r.cells);
+            self.wraps[r.index] = r.wraps;
             if (!self.landmarks) for (dst_cells) |c| if (c.mark.prompt) {
                 self.landmarks = true;
                 break;
@@ -252,12 +307,13 @@ pub const Grid = struct {
         try self.history_rows.ensureUnusedCapacity(gpa, hist.head.count);
         try self.history_cells.ensureUnusedCapacity(gpa, (hist.rows.len - 4 * @as(usize, hist.head.count)) / @sizeOf(Cell));
         var rows = hist.iterator();
-        while (try rows.next()) |raw| {
+        while (try rows.next()) |hrow| {
+            const raw = hrow.cells;
             const n = raw.len / @sizeOf(Cell);
             const at = self.history_cells.items.len;
             const dst = self.history_cells.addManyAsSliceAssumeCapacity(n);
             @memcpy(std.mem.sliceAsBytes(dst), raw);
-            self.history_rows.appendAssumeCapacity(.{ .at = at, .len = @intCast(n) });
+            self.history_rows.appendAssumeCapacity(.{ .at = at, .len = @intCast(n), .wraps = hrow.wraps });
         }
     }
 
@@ -278,6 +334,69 @@ pub const Grid = struct {
         return if (i < n) self.historyRow(i) else self.row(i - n);
     }
 
+    /// Whether row `i` of `rowCount` soft-wraps into the next.
+    pub fn rowWraps(self: *const Grid, i: usize) bool {
+        const n = self.historyLen();
+        if (i < n) return self.history_rows.items[self.dead_rows + i].wraps;
+        const r = i - n;
+        return r < self.wraps.len and self.wraps[r];
+    }
+
+    /// Whether the map describes the grid as it is now.
+    pub fn mapped(self: *const Grid) bool {
+        return self.mirror != null and self.map.revision == self.revision and
+            self.map.hist_bytes.items.len == self.historyLen() and self.map.screen.items.len == self.rows;
+    }
+
+    /// Where row `i` of `rowCount`'s text is in the document. Only while
+    /// `mapped`. O(history) for a history row: offsets there are sums.
+    pub fn rowText(self: *const Grid, i: usize) RowText {
+        const n = self.historyLen();
+        if (i >= n) return self.map.screen.items[i - n];
+        var start: usize = 0;
+        for (self.map.hist_bytes.items[0..i]) |b| start += b;
+        return histText(self, i, start);
+    }
+
+    fn histText(self: *const Grid, i: usize, start: usize) RowText {
+        const len = self.map.hist_bytes.items[i] - @intFromBool(!self.rowWraps(i));
+        return .{ .start = start, .end = start + len, .flow_start = start + len };
+    }
+
+    /// The row whose text holds document offset `off` (the last row, past
+    /// the end). Only while `mapped`.
+    pub fn rowOfOffset(self: *const Grid, off: usize) usize {
+        var start: usize = 0;
+        for (self.map.hist_bytes.items, 0..) |b, i| {
+            if (off < start + b) return i;
+            start += b;
+        }
+        const n = self.historyLen();
+        for (self.map.screen.items, 0..) |s, r| {
+            const next = if (r + 1 < self.map.screen.items.len) self.map.screen.items[r + 1].start else std.math.maxInt(usize);
+            if (off >= s.start and off < next) return n + r;
+        }
+        return self.rowCount() -| 1;
+    }
+
+    /// The document offset of cell `col` of row `i` — where a caret on
+    /// that cell stands (its row's end, past its text). Only while `mapped`.
+    pub fn offsetAtCell(self: *const Grid, i: usize, col: usize) usize {
+        const span = self.rowText(i);
+        var walk = RowWalk.init(self.rowAt(i), span, self.flowBytes(span));
+        while (walk.next()) |s| if (s.col + s.width > col) return s.off;
+        return span.end;
+    }
+
+    /// The flowing text of `span`: the command line's bytes it holds.
+    pub fn flowBytes(self: *const Grid, span: RowText) []const u8 {
+        const f = self.map.field orelse return "";
+        if (span.flow_start >= span.end or span.flow_start < f.start) return "";
+        const from = span.flow_start - f.start;
+        const to = @min(span.end - f.start, self.field_text.items.len);
+        return if (from <= to) self.field_text.items[from..to] else "";
+    }
+
     /// A copy for one frame (doc/model.md §2.7) of the screen: what the pane
     /// draws is this, whatever the owner publishes while the frame is built.
     pub fn snapshot(self: *const Grid, arena: Allocator) Allocator.Error!Snapshot {
@@ -286,21 +405,138 @@ pub const Grid = struct {
 
     /// A copy for one frame of rows `[first, first + n)` of history and
     /// screen, each `cols` wide — what a pane READING the entry shows,
-    /// scrolled anywhere. Its cursor is none: the caret is the document's.
+    /// scrolled anywhere — with where each row's text is in the document
+    /// (`spans`, `flows`). Its cursor is none: the caret is the document's.
+    /// Only while `mapped`.
     pub fn snapshotRows(self: *const Grid, arena: Allocator, first: usize, n: usize) Allocator.Error!Snapshot {
         const total = self.rowCount();
         const from = @min(first, total);
         const count = @min(n, total - from);
         const cells = try arena.alloc(Cell, @as(usize, self.cols) * count);
         @memset(cells, .{ .cp = 0 });
-        for (0..count) |i| {
-            const src = self.rowAt(from + i);
+        const spans = try arena.alloc(RowText, count);
+        const flows = try arena.alloc([]const u8, count);
+        var start: usize = 0;
+        const hist = self.historyLen();
+        for (self.map.hist_bytes.items[0..@min(from, hist)]) |b| start += b;
+        for (0..count) |k| {
+            const i = from + k;
+            const src = self.rowAt(i);
             const w = @min(src.len, self.cols);
-            @memcpy(cells[i * self.cols ..][0..w], src[0..w]);
+            @memcpy(cells[k * self.cols ..][0..w], src[0..w]);
+            if (i < hist) {
+                spans[k] = self.histText(i, start);
+                start += self.map.hist_bytes.items[i];
+            } else spans[k] = self.map.screen.items[i - hist];
+            flows[k] = try arena.dupe(u8, self.flowBytes(spans[k]));
         }
-        return .{ .cols = self.cols, .rows = @intCast(count), .cells = cells, .cursor = .{}, .first_row = from, .reading = true };
+        return .{ .cols = self.cols, .rows = @intCast(count), .cells = cells, .cursor = .{}, .first_row = from, .reading = true, .spans = spans, .flows = flows };
     }
 };
+
+/// How many columns scalar `cp` takes on a terminal: 0 for a combining
+/// mark, 2 for an East Asian wide or emoji one, else 1 — what a shell's
+/// line editor assumes when it lays its command line out.
+pub fn scalarWidth(cp: u21) u2 {
+    if (cp == 0) return 0;
+    if ((cp >= 0x0300 and cp <= 0x036f) or (cp >= 0x200b and cp <= 0x200f) or (cp >= 0xfe00 and cp <= 0xfe0f)) return 0;
+    const wide = (cp >= 0x1100 and cp <= 0x115f) or (cp >= 0x2e80 and cp <= 0xa4cf) or
+        (cp >= 0xac00 and cp <= 0xd7a3) or (cp >= 0xf900 and cp <= 0xfaff) or
+        (cp >= 0xfe30 and cp <= 0xfe4f) or (cp >= 0xff00 and cp <= 0xff60) or
+        (cp >= 0xffe0 and cp <= 0xffe6) or (cp >= 0x1f300 and cp <= 0x1f64f) or
+        (cp >= 0x1f900 and cp <= 0x1f9ff) or (cp >= 0x20000 and cp <= 0x3fffd);
+    return if (wide) 2 else 1;
+}
+
+/// The scalars of one row's text, each with its document offset, its
+/// column and its width: the row's cells first (`cellText`, up to the
+/// span's `flow_start`), then its flowing text from `flow_col`. One walk
+/// both the caret's geometry and the program's cursor read, so they agree.
+pub const RowWalk = struct {
+    cells: []const Cell,
+    span: Grid.RowText,
+    flow: []const u8,
+    cell: usize = 0,
+    off: usize,
+    flow_at: usize = 0,
+    col: usize = 0,
+
+    pub const Step = struct { off: usize, col: usize, width: usize };
+
+    pub fn init(cells: []const Cell, span: Grid.RowText, flow: []const u8) RowWalk {
+        return .{ .cells = cells, .span = span, .flow = flow, .off = span.start };
+    }
+
+    pub fn next(self: *RowWalk) ?Step {
+        var buf: [4]u8 = undefined;
+        // The cells' part.
+        while (self.off < self.span.flow_start and self.cell < self.cells.len) {
+            const c = self.cells[self.cell];
+            const col = self.cell;
+            self.cell += 1;
+            const len = cellText(c, &buf).len;
+            if (len == 0) continue;
+            const s: Step = .{ .off = self.off, .col = col, .width = @max(1, c.width) };
+            self.off += len;
+            return s;
+        }
+        // The flowing part.
+        if (self.flow_at >= self.flow.len) return null;
+        if (self.flow_at == 0) {
+            self.off = self.span.flow_start;
+            self.col = self.span.flow_col;
+        }
+        const n = std.unicode.utf8ByteSequenceLength(self.flow[self.flow_at]) catch 1;
+        const len = @min(n, self.flow.len - self.flow_at);
+        const cp = std.unicode.utf8Decode(self.flow[self.flow_at..][0..len]) catch 0xfffd;
+        const w = scalarWidth(cp);
+        const s: Step = .{ .off = self.off, .col = self.col, .width = w };
+        self.flow_at += len;
+        self.off += len;
+        self.col += w;
+        return s;
+    }
+
+    /// The column after the last step.
+    pub fn endCol(self: *const RowWalk) usize {
+        return if (self.flow.len > 0) self.col else self.cell;
+    }
+};
+
+/// Lay `text` out from column `col0` of a row `cols` wide, as a line editor
+/// does: a scalar that would pass the right edge starts the next row, and
+/// a newline starts the next row at column 0. Calls `row(start, end, col)`
+/// for each row the text touches — the byte range on it and the column it
+/// starts at — so a command line's rows can be mapped without its echo.
+pub fn flowText(text: []const u8, col0: u16, cols: u16, ctx: anytype, comptime rowFn: fn (@TypeOf(ctx), usize, usize, u16) anyerror!void) !void {
+    var start: usize = 0;
+    var row_col: u16 = col0;
+    var col: usize = col0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            try rowFn(ctx, start, i, row_col);
+            i += 1;
+            start = i;
+            row_col = 0;
+            col = 0;
+            continue;
+        }
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const len = @min(n, text.len - i);
+        const cp = std.unicode.utf8Decode(text[i..][0..len]) catch 0xfffd;
+        const w = scalarWidth(cp);
+        if (w > 0 and col + w > cols) {
+            try rowFn(ctx, start, i, row_col);
+            start = i;
+            row_col = 0;
+            col = 0;
+        }
+        col += w;
+        i += len;
+    }
+    try rowFn(ctx, start, text.len, row_col);
+}
 
 /// A grid as one frame saw it.
 pub const Snapshot = struct {
@@ -308,12 +544,15 @@ pub const Snapshot = struct {
     rows: u16,
     cells: []const Cell,
     cursor: Cursor,
-    /// Which of the entry's rows (history then screen) `row(0)` is — its
-    /// line in the entry's document, when `reading`.
+    /// Which of the entry's rows (history then screen) `row(0)` is.
     first_row: usize = 0,
-    /// The pane reads the entry as text: rows are lines of its document,
-    /// and the caret and selections are the document's, drawn on cells.
+    /// The pane reads the entry as text: the caret and selections are the
+    /// document's, drawn on cells where `spans` put its text.
     reading: bool = false,
+    /// Per row, where its text is in the document (`Grid.RowText`), and the
+    /// flowing bytes it shows (`Grid.flowBytes`) — when `reading`.
+    spans: []const Grid.RowText = &.{},
+    flows: []const []const u8 = &.{},
 
     pub fn row(self: *const Snapshot, r: usize) []const Cell {
         return self.cells[r * self.cols ..][0..self.cols];
