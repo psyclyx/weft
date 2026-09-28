@@ -74,15 +74,19 @@ pub const Remote = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
-    /// Where the tier's calls may run. A shell channel serializes itself and
-    /// may be driven from a pool worker; a peer's tree rides the connection
-    /// the frame thread ticks, so its calls run on the thread that asked.
+    /// Where the tier's calls may run: on a pool worker (a shell channel
+    /// serializes itself; a peer's tree hands its requests to the tick of
+    /// the connection the frame thread owns), or on the thread that asked.
     pub const Affinity = enum { worker, caller };
 
     pub const VTable = struct {
         /// Status-chip word for the tier ("shell", "peer").
         label: []const u8,
         affinity: Affinity,
+        /// Run on the thread that asks, before a call is handed to a worker
+        /// (and before an open's fetch): resolve whatever the tier reads out
+        /// of state only that thread may touch, so the worker never does.
+        prepare: ?*const fn (ctx: *anyopaque) RemoteError!void = null,
         /// The path on the far side, for display. Borrowed.
         path: *const fn (ctx: *anyopaque) []const u8,
         fetch: *const fn (ctx: *anyopaque, gpa: Allocator, expected: ?[]const u8) RemoteError!?Fetched,
@@ -93,6 +97,10 @@ pub const Remote = struct {
 
     pub fn path(self: Remote) []const u8 {
         return self.vtable.path(self.ctx);
+    }
+    /// `VTable.prepare`, on the calling thread.
+    pub fn prepare(self: Remote) RemoteError!void {
+        if (self.vtable.prepare) |f| try f(self.ctx);
     }
     pub fn fetch(self: Remote, gpa: Allocator, expected: ?[]const u8) RemoteError!?Fetched {
         return self.vtable.fetch(self.ctx, gpa, expected);

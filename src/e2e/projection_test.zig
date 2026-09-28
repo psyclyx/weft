@@ -413,9 +413,24 @@ pub const PeerTree = struct {
     root_name: [96]u8,
     root_designation: []const u8,
 
-    const InProcess = struct {
+    /// The peer's server, answered in process — counting which thread asked:
+    /// the frame (the test's) or a worker. `hold` makes the peer slow: a
+    /// worker's request waits on it (the frame's never does — a frame that
+    /// asked would simply block, which is the thing measured).
+    pub const InProcess = struct {
         server: *h.fs_remote.Server,
+        frame: std.Thread.Id,
+        on_frame: std.atomic.Value(usize) = .init(0),
+        off_frame: std.atomic.Value(usize) = .init(0),
+        hold: ?*h.core.task.Gate = null,
+
         pub fn roundTrip(self: *@This(), allocator: std.mem.Allocator, request: []const u8) h.fs.contract.Error![]u8 {
+            if (std.Thread.getCurrentId() == self.frame) {
+                _ = self.on_frame.fetchAdd(1, .monotonic);
+            } else {
+                _ = self.off_frame.fetchAdd(1, .monotonic);
+                if (self.hold) |gate| gate.wait();
+            }
             return self.server.handle(allocator, request);
         }
     };
@@ -430,7 +445,7 @@ pub const PeerTree = struct {
         self.local = h.fs_platform.Provider.init(gpa);
         self.alice_root = try self.local.acquireRoot(shared);
         self.server = try h.fs_remote.Server.init(gpa, self.local.provider(), self.alice_root, access);
-        self.exchange = .{ .server = &self.server };
+        self.exchange = .{ .server = &self.server, .frame = std.Thread.getCurrentId() };
         self.provider = try h.fs_remote.Provider.init(@enumFromInt(77), .init(&self.exchange));
         try system.filesystems.register(self.provider.authority, self.provider.provider());
         self.root = try self.provider.acquireRoot();

@@ -289,6 +289,15 @@ pub const Router = struct {
         _ = try self.checkLease(source);
     }
 
+    /// The provider serving `root`, for a caller that resolves a directory
+    /// here (`authorizedDirectory`) and then drives it from somewhere the
+    /// router's tables may not be read — a pool worker. The same checks
+    /// `list` makes on the root.
+    pub fn providerOf(self: *const Router, root: contract.Root) Error!fs.service.Provider {
+        if (root.generation == 0) return error.InvalidHandle;
+        return self.providerFor(root.authority);
+    }
+
     fn providerFor(self: *const Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
         if (self.providers.get(authority)) |provider| return provider;
         if (self.retired.contains(authority)) return error.AuthorityRetired;

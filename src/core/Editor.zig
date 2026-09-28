@@ -313,6 +313,7 @@ pub fn openRemote(self: *Editor, gpa: Allocator, remote: backing_mod.Remote) (ba
     assert(self.backing == .none);
     var owned = true;
     errdefer if (owned) remote.deinit(gpa);
+    try remote.prepare();
     const fetched = (try remote.fetch(gpa, null)) orelse return error.Failed;
     defer gpa.free(fetched.bytes);
     defer gpa.free(fetched.token);
@@ -403,6 +404,7 @@ fn remotePollWorker(gpa: Allocator, remote: backing_mod.Remote, expected: []u8) 
 }
 
 /// Run `f` where `remote`'s calls may run: on a pool worker, or right here.
+/// The caller has prepared the tier (`Remote.prepare`) on this thread.
 fn onTier(self: *Editor, remote: backing_mod.Remote, comptime f: anytype, args: std.meta.ArgsTuple(@TypeOf(f))) Allocator.Error!Pending(@typeInfo(@TypeOf(f)).@"fn".return_type.?) {
     return switch (remote.vtable.affinity) {
         .worker => .{ .task = try self.pool.spawn(f, args) },
@@ -417,6 +419,10 @@ fn onTier(self: *Editor, remote: backing_mod.Remote, comptime f: anytype, args: 
 /// poll the backing (which merges), then request again.
 pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.save_state == .saving) return;
+    if (self.backing == .remote) self.backing.remote.remote.prepare() catch |err| {
+        self.save_state = if (err == error.Stale) .stale else .{ .failed = err };
+        return;
+    };
     const version = try self.doc.version(gpa);
     errdefer gpa.free(version);
     const pending: Pending(SaveError![]u8) = switch (self.backing) {
@@ -485,6 +491,7 @@ pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
         },
         .remote => |r| {
             const tk = r.sync.token orelse return;
+            r.remote.prepare() catch return; // transient; the next poll retries
             self.poll_state = .{ .polling = try self.onTier(r.remote, remotePollWorker, .{ gpa, r.remote, try gpa.dupe(u8, tk) }) };
         },
     }

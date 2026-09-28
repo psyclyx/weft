@@ -16,8 +16,11 @@
 //! as the backing peer's ops, like any other tier's. Tokens are the peer
 //! provider's revision tokens: opaque, compared for equality only.
 //!
-//! Calls run on the thread that asked (`Affinity.caller`): the tree's
-//! transport is the connection the frame thread ticks.
+//! Calls run on a pool worker (`Affinity.worker`), never the frame: the
+//! frame resolves the file's directory and provider (`prepare`), the worker
+//! drives the provider, and the tree's transport — the connection the frame
+//! thread ticks — carries the worker's requests through that tick
+//! (`collab.RemoteExchange`).
 
 const std = @import("std");
 const core = @import("weft_core");
@@ -37,6 +40,14 @@ router: *fs_runtime.Router,
 fingerprint: []u8,
 /// The file's path in the peer's tree (`/src/main.zig`).
 path: []u8,
+/// Its directory and the provider serving it, resolved on the frame thread
+/// (`prepare`) — the semantic targets and the router are the frame's — and
+/// read by the worker the call runs on. Under `mutex`: a poll's worker may
+/// still be reading while the frame prepares a save.
+at: ?Resolved = null,
+mutex: core.task.Mutex = .{},
+
+const Resolved = struct { dir: fs.target.Directory, provider: fs.service.Provider };
 
 /// Why a peer's file cannot be written — the reason its entry refuses edits.
 pub const refuse_no_write = "read-only: the peer shares this tree without a write grant";
@@ -100,9 +111,15 @@ pub fn of(remote: core.backing.Remote) ?*PeerFile {
     return if (remote.vtable == &vtable) cast(remote.ctx) else null;
 }
 
+/// A peer's tree rides the connection the frame thread ticks — and a slow
+/// peer must not stall a frame — so the calls run on a pool worker: the
+/// frame resolves where the file is (`prepare`), the worker drives the
+/// provider, and the provider's round trips go through the connection's
+/// tick (`collab.RemoteExchange`), never touching the connection itself.
 const vtable: core.backing.Remote.VTable = .{
     .label = "peer",
-    .affinity = .caller,
+    .affinity = .worker,
+    .prepare = prepare,
     .path = pathOf,
     .fetch = fetch,
     .write = write,
@@ -135,11 +152,31 @@ fn mapError(err: anyerror) RemoteError {
     };
 }
 
-/// The directory the file is in, as the router authorizes it.
+/// The directory the file is in, as the router authorizes it. The frame's.
 fn parentDirectory(self: *PeerFile) RemoteError!fs.target.Directory {
     var why: []const u8 = "";
     const parent = (directory(self.sc, self.services, self.router, self.fingerprint, self.dirPath(), &why) catch |err| return mapError(err)) orelse return error.Unreachable;
     return self.router.authorizedDirectory(parent.target, parent.revision) catch |err| mapError(err);
+}
+
+/// On the frame thread, before a call leaves it: where the file is now, and
+/// who serves it. Cheap once the directory has been reached (the children
+/// along the way are kept), so every save and poll re-resolves — a peer that
+/// reconnected is found again.
+fn prepare(ctx: *anyopaque) RemoteError!void {
+    const self = cast(ctx);
+    const dir = try self.parentDirectory();
+    const provider = self.router.providerOf(dir.root) catch |err| return mapError(err);
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    self.at = .{ .dir = dir, .provider = provider };
+}
+
+/// What `prepare` resolved, for the worker.
+fn resolved(self: *PeerFile) RemoteError!Resolved {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    return self.at orelse error.Unreachable;
 }
 
 /// `name` in `dir` as the provider lists it now: its ref and revision
@@ -148,15 +185,15 @@ fn parentDirectory(self: *PeerFile) RemoteError!fs.target.Directory {
 /// is created with, so the move keeps them.
 const Found = struct { ref: contract.EntryRef, token: []u8, mode: ?u32 = null };
 
-fn find(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, name: []const u8) RemoteError!?Found {
-    return self.scan(gpa, dir, name, null);
+fn find(self: *PeerFile, gpa: std.mem.Allocator, at: Resolved, name: []const u8) RemoteError!?Found {
+    return self.scan(gpa, at, name, null);
 }
 
 /// `find`, and — when `litter` is given — every temp an earlier save of
 /// `name` left behind (its connection lost between upload and move), taken
 /// back as it is seen: one listing either way.
-fn scan(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, name: []const u8, litter: ?[]const u8) RemoteError!?Found {
-    var listing = self.router.list(gpa, dir.root, dir.node) catch |err| return mapError(err);
+fn scan(self: *PeerFile, gpa: std.mem.Allocator, at: Resolved, name: []const u8, litter: ?[]const u8) RemoteError!?Found {
+    var listing = at.provider.list(gpa, at.dir.root, at.dir.node) catch |err| return mapError(err);
     defer listing.deinit();
     var found: ?Found = null;
     errdefer if (found) |f| gpa.free(f.token);
@@ -166,7 +203,7 @@ fn scan(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, name:
             .root => continue,
         };
         if (litter) |prefix| if (e.observation.kind == .regular and isTemp(e.name.bytes, prefix)) {
-            self.discard(gpa, dir, ref, e.observation.revision.token);
+            self.discard(gpa, at, ref, e.observation.revision.token);
             continue;
         };
         if (!std.mem.eql(u8, e.name.bytes, name)) continue;
@@ -188,14 +225,14 @@ fn isTemp(name: []const u8, prefix: []const u8) bool {
 
 fn fetch(ctx: *anyopaque, gpa: std.mem.Allocator, expected: ?[]const u8) RemoteError!?core.backing.Fetched {
     const self = cast(ctx);
-    const dir = try self.parentDirectory();
-    const found = (try self.find(gpa, dir, self.leaf())) orelse return error.Failed;
+    const at = try self.resolved();
+    const found = (try self.find(gpa, at, self.leaf())) orelse return error.Failed;
     errdefer gpa.free(found.token);
     if (expected) |e| if (std.mem.eql(u8, e, found.token)) {
         gpa.free(found.token);
         return null;
     };
-    var read = self.router.read(gpa, .{ .source = .{ .entry = .{ .root = dir.root, .ref = found.ref, .revision = .{ .token = found.token } } } }) catch |err| return mapError(err);
+    var read = at.provider.read(gpa, .{ .source = .{ .entry = .{ .root = at.dir.root, .ref = found.ref, .revision = .{ .token = found.token } } } }) catch |err| return mapError(err);
     defer read.deinit();
     return .{ .bytes = try gpa.dupe(u8, read.value.bytes), .token = found.token };
 }
@@ -208,18 +245,21 @@ fn parentRef(dir: fs.target.Directory) contract.ParentRef {
 }
 
 /// Apply a one-operation plan; its outcome.
-fn applyOne(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, operation: contract.Operation, id: u8) RemoteError!std.meta.Tag(contract.Outcome) {
+fn applyOne(_: *PeerFile, gpa: std.mem.Allocator, at: Resolved, operation: contract.Operation, id: u8) RemoteError!std.meta.Tag(contract.Outcome) {
     var op_id: contract.OperationId = @splat(0);
     op_id[0] = id;
     const plan = [_]contract.Planned{.{ .id = op_id, .operation = operation }};
-    var report = self.router.apply(gpa, .{ .root = dir.root, .base_revision = &.{}, .operations = &plan }) catch |err| return mapError(err);
+    const effect_plan: contract.Plan = .{ .root = at.dir.root, .base_revision = &.{}, .operations = &plan };
+    // What the router checks before it hands a plan on (`Router.apply`).
+    fs.plan.validate(gpa, effect_plan) catch |err| return mapError(err);
+    var report = at.provider.apply(gpa, effect_plan) catch |err| return mapError(err);
     defer report.deinit();
     return std.meta.activeTag(report.value.entries[0].outcome);
 }
 
 fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?[]const u8) RemoteError![]u8 {
     const self = cast(ctx);
-    const dir = try self.parentDirectory();
+    const at = try self.resolved();
     const name = self.leaf();
     // A fresh temp name, and the prefix every save of this file's temp has.
     const temp = try core.ShellFs.tempName(gpa, std.Io.Threaded.global_single_threaded.io(), name);
@@ -227,7 +267,7 @@ fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?
     defer gpa.free(temp.name);
     // Test: the file is still what this side last merged (or still absent),
     // taking back what a lost save left beside it on the way.
-    const current = try self.scan(gpa, dir, name, temp.prefix);
+    const current = try self.scan(gpa, at, name, temp.prefix);
     defer if (current) |c| gpa.free(c.token);
     if (expected) |e| {
         const c = current orelse return error.Stale;
@@ -236,49 +276,49 @@ fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?
 
     // Upload beside it, with the file's own mode (an executable stays one).
     const tmp_name = temp.name;
-    const tmp_slot: contract.Slot = .{ .parent = parentRef(dir), .name = contract.Name.init(tmp_name) catch return error.Failed };
+    const tmp_slot: contract.Slot = .{ .parent = parentRef(at.dir), .name = contract.Name.init(tmp_name) catch return error.Failed };
     const mode = if (current) |c| c.mode else null;
-    switch (try self.applyOne(gpa, dir, .{ .create_file = .{ .destination = tmp_slot, .contents = bytes, .mode = mode } }, 1)) {
+    switch (try self.applyOne(gpa, at, .{ .create_file = .{ .destination = tmp_slot, .contents = bytes, .mode = mode } }, 1)) {
         .applied => {},
         .stale => return error.Stale,
         else => return error.Failed,
     }
-    const tmp = (try self.find(gpa, dir, tmp_name)) orelse return error.Failed;
+    const tmp = (try self.find(gpa, at, tmp_name)) orelse return error.Failed;
     defer gpa.free(tmp.token);
 
     // Set: move it over the file iff the file is still the one tested.
-    const destination: contract.Slot = .{ .parent = parentRef(dir), .name = contract.Name.init(name) catch return error.Failed };
+    const destination: contract.Slot = .{ .parent = parentRef(at.dir), .name = contract.Name.init(name) catch return error.Failed };
     const guard: contract.Expected = if (current) |c| .{ .entry = .{ .ref = c.ref, .revision = .{ .token = c.token } } } else .absent;
-    const moved = self.applyOne(gpa, dir, .{ .rename = .{
-        .source = .{ .root = dir.root, .ref = tmp.ref, .revision = .{ .token = tmp.token } },
+    const moved = self.applyOne(gpa, at, .{ .rename = .{
+        .source = .{ .root = at.dir.root, .ref = tmp.ref, .revision = .{ .token = tmp.token } },
         .destination = destination,
         .expected = guard,
     } }, 2) catch |err| {
-        self.discard(gpa, dir, tmp.ref, tmp.token);
+        self.discard(gpa, at, tmp.ref, tmp.token);
         return err;
     };
     switch (moved) {
         .applied => {},
         .stale, .conflict => {
-            self.discard(gpa, dir, tmp.ref, tmp.token);
+            self.discard(gpa, at, tmp.ref, tmp.token);
             return error.Stale;
         },
         else => {
-            self.discard(gpa, dir, tmp.ref, tmp.token);
+            self.discard(gpa, at, tmp.ref, tmp.token);
             return error.Failed;
         },
     }
     // The written content's token: the file as the provider lists it now.
-    const landed = (try self.find(gpa, dir, name)) orelse return error.Failed;
+    const landed = (try self.find(gpa, at, name)) orelse return error.Failed;
     return landed.token;
 }
 
 /// Take a temp back — after a failed move, or one a lost save left. Best
 /// effort: a temp left behind is litter (the next save takes it), never a
 /// lost update.
-fn discard(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, ref: contract.EntryRef, token: []const u8) void {
-    _ = self.applyOne(gpa, dir, .{ .remove = .{
-        .source = .{ .root = dir.root, .ref = ref, .revision = .{ .token = token } },
+fn discard(self: *PeerFile, gpa: std.mem.Allocator, at: Resolved, ref: contract.EntryRef, token: []const u8) void {
+    _ = self.applyOne(gpa, at, .{ .remove = .{
+        .source = .{ .root = at.dir.root, .ref = ref, .revision = .{ .token = token } },
         .policy = .permanent,
     } }, 3) catch {};
 }

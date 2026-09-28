@@ -35,6 +35,31 @@ fn fact(ed: *Editor, key: []const u8) []const u8 {
     return core.intent.factsFor(ed.ctx).get(key) orelse "";
 }
 
+/// Fold a requested save once its worker is done: whether it saved. Bounded
+/// by a generous deadline, a genuine-hang backstop (`Editor.waitSave`'s).
+fn awaitSave(te: *core.Editor) bool {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        if (te.pollSave(t.allocator)) return true;
+        if (te.save_state != .saving) return false;
+        std.Thread.yield() catch {};
+    }
+    return false;
+}
+
+/// Fold a requested backing poll once its worker is done: whether the
+/// buffer changed. False at once when none is in flight.
+fn awaitPoll(te: *core.Editor) !bool {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        if (te.poll_state != .polling) return false;
+        const changed = try te.pollBacking(t.allocator);
+        if (te.poll_state != .polling) return changed;
+        std.Thread.yield() catch {};
+    }
+    return false;
+}
+
 /// What the status line says about where the active entry is.
 fn remoteNote(ed: *Editor) !?[]const u8 {
     return h.app.frame_builder.FrameBuilder.remoteNote(t.allocator, ed.ctx.loci, ed.buffers.active().place);
@@ -291,14 +316,13 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
         try t.expect(std.mem.endsWith(u8, note, " offline"));
     }
 
-    // An edit saves back through the peer's write surface. The peer's tree
-    // rides the connection the frame thread ticks, so every step lands on
-    // the call: no worker to wait for.
+    // An edit saves back through the peer's write surface — on a pool
+    // worker, so each step is waited for.
     const te = b.buffers.active().textEditor().?;
     te.moveTo(te.text().byteLen());
     try te.insertText(gpa, "// edited\n");
     try te.requestSave(gpa);
-    try t.expect(te.pollSave(gpa));
+    try t.expect(awaitSave(te));
     try t.expect(!try te.isDirty(gpa));
     {
         const on_disk = try pair.disk(gpa);
@@ -313,7 +337,7 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     te.moveTo(0);
     try te.insertText(gpa, "// mine\n");
     try te.requestSave(gpa);
-    try t.expect(!te.pollSave(gpa));
+    try t.expect(!awaitSave(te));
     try t.expect(te.save_state == .stale);
     {
         const on_disk = try pair.disk(gpa);
@@ -322,9 +346,9 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     }
     // (A poll the frame loop asked for before the peer's write is folded
     // first: it saw nothing new, and says so.)
-    _ = try te.pollBacking(gpa);
+    _ = try awaitPoll(te);
     try te.requestBackingPoll(gpa);
-    try t.expect(try te.pollBacking(gpa));
+    try t.expect(try awaitPoll(te));
     try t.expect(te.save_state == .idle);
     const merged = "// mine\npub fn main() void {}\n// edited\n// theirs\n";
     {
@@ -333,7 +357,7 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
         try t.expectEqualStrings(merged, text);
     }
     try te.requestSave(gpa);
-    try t.expect(te.pollSave(gpa));
+    try t.expect(awaitSave(te));
     {
         const on_disk = try pair.disk(gpa);
         defer gpa.free(on_disk);
@@ -349,6 +373,42 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
         defer gpa.free(text);
         try t.expectEqualStrings("pub fn main() void {}\n// edited\n// theirs\n", text);
     }
+}
+
+test "e2e/remote: a peer file's save and poll never run on the frame — a slow peer stalls a worker, not a frame" {
+    const gpa = t.allocator;
+    var pair: PeerPair = undefined;
+    try pair.init(gpa, .read_write);
+    defer pair.deinit(gpa);
+    const b = &pair.b;
+    try t.expect(projection.openOk(b, try pair.fileDesignation()));
+    const te = b.buffers.active().textEditor().?;
+    const exchange = &pair.tree.exchange;
+    exchange.on_frame.store(0, .monotonic);
+
+    // The peer is slow: it answers only when the gate opens. The frame that
+    // asked for the save is back at once, the save still in flight.
+    var gate: core.task.Gate = .{};
+    exchange.hold = &gate;
+    try te.insertText(gpa, "// edited\n");
+    const asked = core.task.nowNs();
+    try te.requestSave(gpa);
+    const frame_ns = core.task.nowNs() - asked;
+    std.debug.print("[e2e/remote] requestSave with the peer not answering: {d} us on the frame\n", .{frame_ns / std.time.ns_per_us});
+    try t.expect(te.save_state == .saving);
+    try t.expectEqual(@as(usize, 0), exchange.on_frame.load(.monotonic));
+    gate.open();
+    try t.expect(awaitSave(te));
+    exchange.hold = null;
+
+    // The poll, likewise: off the frame, and it sees the peer's own write.
+    // (A poll the open asked for is folded first: it saw nothing new.)
+    _ = try awaitPoll(te);
+    try core.file.writeBytes(gpa, "shared/src/main.zig", "// theirs\n");
+    try te.requestBackingPoll(gpa);
+    try t.expect(try awaitPoll(te));
+    try t.expectEqual(@as(usize, 0), exchange.on_frame.load(.monotonic));
+    try t.expect(exchange.off_frame.load(.monotonic) > 0);
 }
 
 test "e2e/remote: a peer save keeps the file's mode, and a temp a lost save left behind neither blocks the next save nor outlives it" {
@@ -368,7 +428,7 @@ test "e2e/remote: a peer save keeps the file's mode, and a temp a lost save left
     te.moveTo(te.text().byteLen());
     try te.insertText(gpa, "// edited\n");
     try te.requestSave(gpa);
-    try t.expect(te.pollSave(gpa));
+    try t.expect(awaitSave(te));
     try t.expectEqual(@as(u32, 0o755), core.file.statFull(gpa, "shared/src/main.zig").mode);
     try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp").kind == core.file.Stat.absent.kind);
     try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp-0123456789abcdef").kind == core.file.Stat.absent.kind);

@@ -241,7 +241,8 @@ fn dupeZ(gpa: Allocator, path: []const u8) Allocator.Error![:0]u8 {
     return gpa.dupeZ(u8, path);
 }
 
-fn reply(gpa: Allocator, status: Status, payload: []const u8) Allocator.Error![]u8 {
+/// A response envelope: `status`, then `payload` (what `decodeResponse` reads).
+pub fn reply(gpa: Allocator, status: Status, payload: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.append(gpa, @intFromEnum(status));

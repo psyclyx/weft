@@ -46,6 +46,24 @@ pub const Mutex = struct {
     }
 };
 
+/// A one-shot latch: `wait` parks until `open`. What a pool worker waits on
+/// when the answer it needs is produced by the frame thread's own tick (a
+/// request that rides a connection only the frame thread touches) — so the
+/// worker blocks, never the frame. Never waited on from the hot path.
+pub const Gate = struct {
+    state: std.atomic.Value(u32) = .init(0),
+
+    pub fn wait(self: *Gate) void {
+        assertMayBlock();
+        while (self.state.load(.acquire) == 0) futexWait(&self.state, 0);
+    }
+
+    pub fn open(self: *Gate) void {
+        self.state.store(1, .release);
+        futexWake(&self.state, std.math.maxInt(i32));
+    }
+};
+
 fn futexWake(word: *const std.atomic.Value(u32), max_waiters: i32) void {
     _ = linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(max_waiters));
 }
