@@ -1059,10 +1059,6 @@ pub const FrameBuilder = struct {
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));
             } else null,
         };
-        // Whether panes carry status lines of their own: a config that shows
-        // status in one bar instead (config/statusbar.js) turns them off.
-        const pane_status = !configIs(fx.config, "editor", "pane-status", "off");
-
         const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
         // Carve the window-bottom dock off the window FIRST, so the panes lay
         // out in what remains — the picker (or a plugin's `.bottom` surface,
@@ -1077,7 +1073,16 @@ pub const FrameBuilder = struct {
         var slots: [window_layout.max_panes]window_layout.Slot = undefined;
         const focused = window_layout.headFocus(&self.win_layout, fx.head);
         // A row-sized dock is as tall as the rows the view draws NOW.
-        self.win_layout.rows = .{ .line_h = self.view.line_h, .inset = 2 * view_mod.View.pane_margin };
+        // Whether panes carry status lines of their own — a config that shows
+        // status in one bar instead (config/statusbar.js) turns them off — is
+        // part of what a pane's rows ARE, so the carve reserves a status row
+        // exactly where the pane draws one (`Rows.statusLine`).
+        self.win_layout.rows = .{
+            .line_h = self.view.line_h,
+            .inset = 2 * view_mod.View.pane_margin,
+            .pane_status = !configIs(fx.config, "editor", "pane-status", "off"),
+        };
+        const rows = self.win_layout.rows;
         const nslots = self.win_layout.collect(focused, frame_rect, &slots);
         // The tab strip lists the documents, so it sits on a pane that shows
         // them: the focused one when it is an ordinary pane, else the first
@@ -1118,7 +1123,7 @@ pub const FrameBuilder = struct {
                 .hud = .{
                     .mode = other_facts.mode,
                     .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
-                    .status_line = slot.pane.attrs.status_line and pane_status,
+                    .status_line = rows.statusLine(slot.pane.attrs),
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
                     .cursor_on = false, // the caret belongs to the focused pane
@@ -1134,7 +1139,7 @@ pub const FrameBuilder = struct {
         fhud.pane_border = foc_border;
         fhud.float_bounds = frame_rect;
         if (tabs_pane != focused.pane().id) fhud.tabs = null;
-        fhud.status_line = focused.pane().attrs.status_line and pane_status;
+        fhud.status_line = rows.statusLine(focused.pane().attrs);
         try self.capturePane(fx, input, .{
             .buffer = abuf,
             .pane = focused.pane().id,

@@ -159,13 +159,24 @@ pub const Rows = struct {
     line_h: f32 = 16,
     /// Margins around a pane's body, both sides together.
     inset: f32 = 16,
+    /// Whether panes carry status lines of their own at all — off where a
+    /// config shows status in one bar instead (`editor/pane-status off`).
+    pane_status: bool = true,
+
+    /// Whether a pane under `attrs` draws a status line of its own: the one
+    /// reading the carve and the frame both take, so a row is reserved
+    /// exactly where one is drawn.
+    pub fn statusLine(self: Rows, attrs: core.viewport.Attrs) bool {
+        return attrs.status_line and self.pane_status;
+    }
 
     /// The pixel extent of `n` body rows in a pane under `attrs`: its own
     /// status line is one more row, flush, outside the margins. A pane of no
-    /// body rows is only its status line, with no body to put margins round.
+    /// body rows is only its status line (a bar presenting a status), with
+    /// no body to put margins round.
     pub fn px(self: Rows, n: u16, attrs: core.viewport.Attrs) f32 {
-        const status: f32 = if (attrs.status_line) self.line_h else 0;
-        if (n == 0) return status;
+        if (n == 0) return if (attrs.status_line) self.line_h else 0;
+        const status: f32 = if (self.statusLine(attrs)) self.line_h else 0;
         return @as(f32, @floatFromInt(n)) * self.line_h + self.inset + status;
     }
 };
@@ -974,6 +985,22 @@ test "dock: a bar of no body rows is exactly its status line, across the whole f
     try t.expectEqual(Rect{ .x = 0, .y = 280, .w = 400, .h = 20 }, l.focusedRect(bar, frame));
     try t.expectEqual(@as(f32, 280), l.focusedRect(side, frame).h);
     try t.expectEqual(@as(f32, 280), l.focusedRect(editor, frame).h);
+}
+
+test "dock: a row-sized panel reserves no status row where panes draw none" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const panel = try l.dock(.bottom, .{ .rows = 12 }, 5, companion);
+    l.rows = .{ .line_h = 20, .inset = 16 };
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
+    try t.expectApproxEqAbs(@as(f32, 12 * 20 + 16 + 20), l.focusedRect(panel, frame).h, 0.01);
+    // `editor/pane-status off`: no pane draws a line, so none is carved.
+    l.rows.pane_status = false;
+    try t.expect(!l.rows.statusLine(companion));
+    try t.expectApproxEqAbs(@as(f32, 12 * 20 + 16), l.focusedRect(panel, frame).h, 0.01);
+    // A bar of no body rows is its status line whatever panes do.
+    const bar = try l.dock(.bottom, .{ .rows = 0 }, 7, .{ .cycles = false, .persistent = true, .takes_focus = false });
+    try t.expectApproxEqAbs(@as(f32, 20), l.focusedRect(bar, frame).h, 0.01);
 }
 
 test "dock: the workspace enforces the attributes the panel declares" {

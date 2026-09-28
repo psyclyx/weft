@@ -486,3 +486,22 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     const shown = panelEntry(ed) orelse return error.PanelNotShown;
     try t.expect(!std.mem.eql(u8, shown.name, "intruder"));
 }
+
+test "e2e/panels: a panel declared `rows: 12` shows 12 body rows where panes carry no status line of their own" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "x.txt", "x\n");
+    ed.press("C-j", "");
+    ed.applyWindow();
+    try frame(ed);
+    // ide.js uses the one status bar (config/statusbar.js): no pane — the
+    // panel neither — draws a line of its own, so none may be reserved.
+    const node = ed.viewportPane("panel") orelse return error.PanelNotShown;
+    const v = try ed.ensureView();
+    const rect = ed.win_layout.focusedRect(node, ed.application.last_frame_rect);
+    try t.expectEqual(@as(usize, 12), v.rowsIn(rect.h));
+}
