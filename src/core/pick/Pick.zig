@@ -551,8 +551,11 @@ fn refilter(self: *Pick, gpa: Allocator) !void {
     }
     std.mem.sort(Scored, scored.items, {}, struct {
         fn lt(_: void, a: Scored, b: Scored) bool {
-            // Word-boundary hits first (acronyms / word starts), then a
-            // tighter span, then an earlier first match, then frecency.
+            // A word-start run first, then word-boundary hits (acronyms /
+            // word starts), then a tighter span — the order an item's own
+            // best occurrence is chosen by (`match.better`) — then an
+            // earlier first match, then frecency.
+            if (a.m.word != b.m.word) return a.m.word;
             if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
             if (a.m.span != b.m.span) return a.m.span < b.m.span;
             if (a.m.start != b.m.start) return a.m.start < b.m.start;
