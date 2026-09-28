@@ -60,7 +60,7 @@ pub fn cycleChromeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
 /// screen whichever tier bound it; an unchanged value moves nothing.
 pub fn publishStyle(ctx: *core.command.Context, style: Style) void {
     const context = ctx.context orelse return;
-    _ = context.store.set("theme", .global, "theme.chrome", style.name()) catch {};
+    _ = context.store.setCore(.global, "theme.chrome", style.name()) catch {};
 }
 
 /// One choice per style: a command a menu row, a key or the palette runs,

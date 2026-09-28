@@ -321,7 +321,7 @@ pub const Registry = struct {
         for (self.list.items) |d| {
             var buf: [96]u8 = undefined;
             const key = std.fmt.bufPrint(&buf, "viewport.{s}.shown", .{d.name}) catch continue;
-            _ = context.store.set("viewport", .global, key, if (d.shown) "on" else "") catch {};
+            _ = context.store.setCore(.global, key, if (d.shown) "on" else "") catch {};
         }
     }
 

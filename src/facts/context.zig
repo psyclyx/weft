@@ -24,6 +24,10 @@
 //!     on load order (`ownsKey`; a write outside one's namespace is
 //!     `error.NotOwnNamespace`). `error.Held` stays as the store's own
 //!     guard for a write by a different owner of a held key.
+//!   - **Core's own dotted keys are in namespaces no plugin owns**
+//!     (`core_namespaces`: `viewport.<name>.shown`, `theme.chrome`), written
+//!     only through `setCore`. Core does not borrow a made-up plugin name to
+//!     publish under — that name would be any plugin's that took it.
 //!
 //! Values are strings, because the values worth publishing are names — and a
 //! durable name for content is a designation, which is a string
@@ -71,11 +75,30 @@ pub fn isPublishableKey(key: []const u8) bool {
     return dots > 0 and !prev_dot;
 }
 
+/// The namespaces core publishes under (`Store.setCore`): what is on screen
+/// (`viewport.<name>.shown`), the style it is drawn in (`theme.chrome`).
+/// They are nobody's plugin name to take — `ownsKey` refuses a key in one
+/// to every publisher — so a plugin that happens to be called `theme` owns
+/// no `theme.*` key and cannot forge a check mark on a View menu.
+pub const core_namespaces = [_][]const u8{ "viewport", "theme" };
+
+/// The owner a core publication is stored under: empty, which no publisher
+/// can be (`ownsKey` refuses an empty owner), so no plugin's `set` or
+/// `retractOwner` reaches it.
+const core_owner = "";
+
+fn inCoreNamespace(key: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, key, '.') orelse return false;
+    for (core_namespaces) |ns| if (std.mem.eql(u8, key[0..dot], ns)) return true;
+    return false;
+}
+
 /// Whether publisher `owner` may write `key`: the key's namespace (its first
-/// segment) is the owner's name.
+/// segment) is the owner's name, and not one of core's.
 pub fn ownsKey(owner: []const u8, key: []const u8) bool {
     return owner.len != 0 and key.len > owner.len and
-        std.mem.startsWith(u8, key, owner) and key[owner.len] == '.';
+        std.mem.startsWith(u8, key, owner) and key[owner.len] == '.' and
+        !inCoreNamespace(key);
 }
 
 /// A key a reader or predicate may name: a builtin or a publishable key.
@@ -229,6 +252,18 @@ pub const Store = struct {
     pub fn set(self: *Store, owner: []const u8, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
         if (!isPublishableKey(key)) return error.BadKey;
         if (!ownsKey(owner, key)) return error.NotOwnNamespace;
+        return self.put(owner, scope, key, value);
+    }
+
+    /// Publish a key in one of `core_namespaces`, as core. The one writer of
+    /// those keys: `set` refuses them to every publisher.
+    pub fn setCore(self: *Store, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
+        if (!isPublishableKey(key)) return error.BadKey;
+        if (!inCoreNamespace(key)) return error.NotOwnNamespace;
+        return self.put(core_owner, scope, key, value);
+    }
+
+    fn put(self: *Store, owner: []const u8, scope: Scope, key: []const u8, value: []const u8) SetError!bool {
         if (scope == .place and scope.place.len == 0) return error.NoPlace;
         if (value.len > max_value_len) return error.BadValue;
         if (self.find(scope, key)) |i| {
@@ -426,6 +461,20 @@ test "context: a key has one possible owner — its namespace's — whoever publ
     try t.expect(s.revision != rev);
     try t.expectEqual(@as(?[]const u8, null), s.get(.{ .place = "weft://here/dir/p1" }, "repl.session"));
     try t.expectEqualStrings("mine", s.get(.{ .place = "weft://here/dir/p1" }, "other.session").?);
+}
+
+test "context: core's namespaces are no plugin's — a plugin named theme or viewport cannot forge what core says is on screen" {
+    var s = Store.init(t.allocator);
+    defer s.deinit();
+    try t.expectError(error.NotOwnNamespace, s.set("theme", .global, "theme.chrome", "widget"));
+    try t.expectError(error.NotOwnNamespace, s.set("viewport", .global, "viewport.sidebar.shown", "on"));
+    // Core says it, and no plugin can take it back or over.
+    try t.expect(try s.setCore(.global, "theme.chrome", "text"));
+    try t.expectError(error.NotOwnNamespace, s.set("theme", .global, "theme.chrome", ""));
+    try t.expectEqual(@as(usize, 0), s.retractOwner("theme"));
+    try t.expectEqualStrings("text", s.get(.{}, "theme.chrome").?);
+    // Core's door is only for core's namespaces.
+    try t.expectError(error.NotOwnNamespace, s.setCore(.global, "repl.session", "x"));
 }
 
 test "context: a place is its designation — named by value, held by the store, never empty" {
