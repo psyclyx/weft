@@ -764,12 +764,15 @@ pub fn build(
                 .hover = on_close or hud.pointer.onChrome(.tab, tb.index, .body),
                 .pressed = hud.pointer.pressed and hud.pointer.onChrome(.tab, tb.index, .body),
             };
-            try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = "file" }, box, if (close.w > 0) close else null, on_close);
-            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else tab.path };
+            try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = chrome_mod.tabIconName(tab) }, box, if (close.w > 0) close else null, on_close);
+            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else if (tab.path.len > 0) tab.path else tab.name };
             if (box.w <= 0) continue;
             // The body is the tab less its close glyph, so the two parts'
-            // hit regions never overlap.
-            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id });
+            // hit regions never overlap. A COMMAND tab carries its command
+            // here, the same door a status segment's click runs through
+            // (`core.pointer.clickChrome`); it has no close sub-region (see
+            // `layoutTabs`), so only the body hit is ever recorded for one.
+            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id, .command = tab.command });
             if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id });
         }
     }

@@ -631,6 +631,21 @@ pub const Editor = struct {
         return null;
     }
 
+    /// The centre of a COMMAND tab (a docked pane's header, `weft.viewport`'s
+    /// `tabs`) whose command is `cmd` — what a person aims a click at to
+    /// switch a panel to it, or to run its trailing close affordance
+    /// (`"viewport.toggle <name>"`).
+    pub fn pointAtTabCommand(self: *Editor, cmd: []const u8) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.chrome) |c| {
+                if (c.kind != .tab or !std.mem.eql(u8, c.command, cmd)) continue;
+                return .{ c.rect.x + c.rect.w / 2, c.rect.y + c.rect.h / 2 };
+            }
+        }
+        return null;
+    }
+
     /// The centre of the status segment with command `command`, in any pane.
     pub fn pointAtStatusCommand(self: *Editor, cmd: []const u8) ?[2]f32 {
         const v = self.ensureView() catch return null;

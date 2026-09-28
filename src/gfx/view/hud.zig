@@ -196,6 +196,14 @@ pub const Tab = struct {
     /// What the tab's tooltip names: the entry's full path, where the tab
     /// shows only its base name.
     path: []const u8 = "",
+    /// A COMMAND tab (a docked pane's header, `weft.viewport`'s `tabs`):
+    /// clicking it runs this (`name [argument]`, the same shape a status
+    /// segment's command is) instead of switching to an entry by `id`. Empty
+    /// for an ordinary buffer tab.
+    command: []const u8 = "",
+    /// An icon name for a command tab (from its presentation); a buffer tab
+    /// defaults to "file" at the paint site regardless of this field.
+    icon: []const u8 = "",
 };
 
 /// The glyph a text-style tab closes through (a style that draws icons draws

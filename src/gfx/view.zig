@@ -27,6 +27,7 @@ pub const Tab = hud_mod.Tab;
 pub const ChromeHit = hud_mod.ChromeHit;
 pub const Hover = hud_mod.Hover;
 pub const TabPart = hud_mod.TabPart;
+pub const tab_close_glyph = hud_mod.tab_close_glyph;
 
 /// How chrome looks: roles, states and the three styles (doc/chrome.md §3).
 pub const chrome = @import("view/chrome.zig");

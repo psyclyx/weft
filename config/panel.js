@@ -8,6 +8,8 @@
 // opens on demand; `viewport.toggle panel` shows and hides it.
 weft.viewport("panel", {
   edge: "bottom",
+  // 12 rows TOTAL — header strip plus body — matching every other row-sized
+  // viewport's `extent`: what you declare is what you get on screen.
   extent: { rows: 12 },
   // It owns its entry: an open from a problem row lands in the editor,
   // never in the panel.
@@ -18,6 +20,10 @@ weft.viewport("panel", {
   cycles: false,
   followFocus: false,
   shown: false,
+  // The header strip: one tab per command, labeled and iconed from its own
+  // metadata (`weft.command`) — a click switches the panel to it, like a
+  // VS Code / JetBrains docked panel.
+  tabs: ["problems.open", "terminal.open"],
 });
 
 // Which viewport each panel plugin takes — the name above.

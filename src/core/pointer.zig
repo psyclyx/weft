@@ -394,6 +394,13 @@ fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
     } else _ = focusHitPane(ctx);
     switch (chrome.kind) {
         .tab => {
+            // A COMMAND tab (a docked pane's header — `weft.viewport`'s
+            // `tabs`) runs its command instead of switching to an entry by
+            // id: it names no entry at all (`Hud.Tab`'s doc).
+            if (chrome.command().len > 0) {
+                try runLine(ctx, chrome.command());
+                return ok;
+            }
             const entry = chrome.entry orelse return ok;
             if (chrome.part == .close) return closeEntry(ctx, entry);
             _ = try command.run(ctx.commands, ctx, "buffer.switch", &.{.{ .integer = entry }});
@@ -432,6 +439,10 @@ fn cPointerCloseTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const chrome = ctx.head.pointer.hit.chrome orelse return ok;
     if (chrome.kind != .tab) return ok;
+    // A COMMAND tab (a docked pane's header) names no entry to close —
+    // middle-click on it does nothing, never `chrome.entry`'s default 0,
+    // which could otherwise misname a real buffer.
+    if (chrome.command().len > 0) return ok;
     _ = focusHitPane(ctx);
     return closeEntry(ctx, chrome.entry orelse return ok);
 }

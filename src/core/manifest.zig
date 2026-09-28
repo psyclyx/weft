@@ -271,6 +271,10 @@ pub const ViewportDecl = struct {
     /// `{shown: false}`: the viewport starts hidden (a panel opened on
     /// demand). Only its first declaration reads this.
     hidden: bool = false,
+    /// `opts.tabs`: command ids for a docked pane's header strip, '\n'-joined
+    /// (empty = no header). A list of things the declaration can show, so it
+    /// lives beside `name`, not in `attrs` (doc/rendering.md).
+    tabs: []u8 = &.{},
 };
 
 /// `weft.present(viewport, {subject, as, reveal})` (doc/configuration.md
@@ -490,7 +494,10 @@ pub const Manifest = struct {
             gpa.free(d.root);
         }
         self.grants.deinit(gpa);
-        for (self.viewports.items) |d| gpa.free(d.name);
+        for (self.viewports.items) |d| {
+            gpa.free(d.name);
+            gpa.free(d.tabs);
+        }
         self.viewports.deinit(gpa);
         for (self.presents.items) |d| {
             gpa.free(d.viewport);
@@ -640,7 +647,9 @@ pub const Manifest = struct {
             .root = try self.gpa.dupe(u8, root),
         });
     }
-    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent, hidden: bool) !void {
+    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: viewport_mod.Extent, hidden: bool, tabs: []const u8) !void {
+        const owned_tabs = try self.gpa.dupe(u8, tabs);
+        errdefer self.gpa.free(owned_tabs);
         try self.viewports.append(self.gpa, .{
             .name = try self.gpa.dupe(u8, name),
             .attrs = attrs,
@@ -650,6 +659,7 @@ pub const Manifest = struct {
                 .rows => |n| .{ .rows = if (attrs.status_line) n else @max(n, 1) },
             },
             .hidden = hidden,
+            .tabs = owned_tabs,
         });
     }
     pub fn addPresent(self: *Manifest, name: []const u8, p: viewport_mod.Presentation) !void {
@@ -805,6 +815,7 @@ pub const Manifest = struct {
                     h.update(std.mem.asBytes(&n));
                 },
             }
+            hStr(h, d.tabs);
         }
         hLen(h, self.presents.items.len);
         for (self.presents.items) |d| {
@@ -1050,7 +1061,7 @@ pub const Manifest = struct {
         // reportable typo, never a silently ignored line.
         if (actx.ctx.viewports) |registry| {
             for (self.viewports.items) |d|
-                registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
+                registry.declareWith(gpa, d.name, d.attrs, d.extent, d.tabs, .{ .hidden = d.hidden }) catch {};
             for (self.presents.items) |d| registry.present(gpa, d.viewport, d.presentation()) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
             if (actx.ctx.context) |context| registry.publishShown(context);

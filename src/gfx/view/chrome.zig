@@ -432,22 +432,34 @@ pub fn paintSeparator(s: Sink, box: region.Rect, axis: Axis) !void {
 /// Where one tab of a strip landed: its whole box and its close glyph.
 pub const TabBox = struct { index: usize, box: region.Rect, close: region.Rect };
 
+/// The icon a tab paints, or null for none: an ordinary buffer tab always
+/// shows "file"; a COMMAND tab (`tab.command` set — a docked pane's header)
+/// shows its own icon from its presentation, or none (the trailing close
+/// affordance, whose glyph IS its label — see `Hud.Tab`'s doc).
+pub fn tabIconName(tab: hud_mod.Tab) ?[]const u8 {
+    if (tab.command.len == 0) return "file";
+    return if (tab.icon.len > 0) tab.icon else null;
+}
+
 /// Lay a tab strip out in `strip`, as many tabs as start inside it (the last
 /// may be cut off, and is clipped when painted). Text styles: one cell of
 /// padding, the label, a cell of padding, the close glyph, a cell, and a
 /// one-cell gap between tabs. `widget`: the same parts in pixels, with an
-/// icon before the label.
+/// icon before the label. A COMMAND tab reserves no close-glyph width — its
+/// whole body is the click target, and it carries its own trailing close
+/// affordance as another tab, not a sub-region of this one.
 pub fn layoutTabs(v: *const View, scratch: Allocator, tabs: []const hud_mod.Tab, strip: region.Rect) ![]TabBox {
     var out: std.ArrayList(TabBox) = .empty;
     var x = strip.x;
     const right = strip.x + strip.w;
-    const has_icon = v.icon("file") != null;
     for (tabs, 0..) |tab, i| {
         if (x >= right) break;
+        const is_command = tab.command.len > 0;
+        const has_icon = if (tabIconName(tab)) |name| v.icon(name) != null else false;
         const label_w = colsW(v, cols(tab.name));
         var w: f32 = undefined;
         var close_x: f32 = undefined;
-        const close_w: f32 = if (v.chrome == .widget) v.line_h else v.cell_w;
+        const close_w: f32 = if (is_command) 0 else if (v.chrome == .widget) v.line_h else v.cell_w;
         switch (v.chrome) {
             .text, .text_icons => {
                 const icon_w: f32 = if (v.chrome == .text_icons and has_icon) 2 * v.cell_w else 0;

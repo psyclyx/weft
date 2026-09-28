@@ -239,6 +239,20 @@ pub const Declaration = struct {
     /// A pending `take`: put the entry opening this designation in the
     /// viewport, show it, and focus it, at the next layout phase. Owned.
     take: ?[]u8 = null,
+    /// `opts.tabs`: command ids for this pane's header strip, '\n'-joined,
+    /// owned. Empty (`&.{}`) means the pane draws no header — a docked pane
+    /// that declares tabs gets one per command, in order (doc/rendering.md);
+    /// nothing here says a tab is active — the frame builder decides that
+    /// from what is presently shown.
+    tabs: []u8 = &.{},
+    /// `"viewport.toggle <name>"`, owned, precomputed alongside `tabs` (empty
+    /// when `tabs` is): the header's trailing close affordance's command. A
+    /// FRAME builds its `Hud.Tab` list fresh every time from short-lived
+    /// arena text, but a chrome hit recorded off it is read back later, after
+    /// that arena is gone — so this one string, read into the tab instead of
+    /// formatted there, has to outlive the frame that shows it. Declared
+    /// data does; that transient arena text never could.
+    close_command: []u8 = &.{},
 
     /// The empty state's entry and the view it shows.
     pub const EmptyState = struct { entry_generation: u64, view: semantic.view.Ref };
@@ -278,6 +292,8 @@ pub const Registry = struct {
             if (d.entry) |held| gpa.free(held);
             if (d.take) |held| gpa.free(held);
             if (d.resolved) |held| gpa.free(held);
+            gpa.free(d.tabs);
+            gpa.free(d.close_command);
         }
         self.list.deinit(gpa);
         self.* = undefined;
@@ -290,8 +306,19 @@ pub const Registry = struct {
         return null;
     }
 
+    /// The declaration materialized into `pane` (`window_layout.PaneId`), or
+    /// null when `pane` is not one (an ordinary tiled pane): what the render
+    /// path asks to find a docked pane's header tabs (`weft.viewport`'s
+    /// `tabs`) without knowing the viewport's name.
+    pub fn findByPane(self: *const Registry, pane: u32) ?*const Declaration {
+        for (self.list.items) |*d| {
+            if (d.pane == pane) return d;
+        }
+        return null;
+    }
+
     pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent) !void {
-        return self.declareWith(gpa, name, attrs, extent, .{});
+        return self.declareWith(gpa, name, attrs, extent, "", .{});
     }
 
     pub const DeclareOptions = struct {
@@ -301,15 +328,35 @@ pub const Registry = struct {
         hidden: bool = false,
     };
 
-    pub fn declareWith(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent, opts: DeclareOptions) !void {
+    /// `"viewport.toggle <name>"`, owned — `close_command`'s value, computed
+    /// once so no frame ever formats it into text that will not outlive the
+    /// frame (`Declaration.close_command`'s doc).
+    fn closeCommand(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+        return std.fmt.allocPrint(gpa, "viewport.toggle {s}", .{name});
+    }
+
+    pub fn declareWith(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent, tabs: []const u8, opts: DeclareOptions) !void {
         if (self.find(name)) |d| {
             d.attrs = attrs;
             d.extent = extent;
+            if (!std.mem.eql(u8, d.tabs, tabs)) {
+                const owned_tabs = try gpa.dupe(u8, tabs);
+                errdefer gpa.free(owned_tabs);
+                const owned_close = if (tabs.len > 0) try closeCommand(gpa, d.name) else @as([]u8, &.{});
+                gpa.free(d.tabs);
+                d.tabs = owned_tabs;
+                gpa.free(d.close_command);
+                d.close_command = owned_close;
+            }
             return;
         }
         const owned = try gpa.dupe(u8, name);
         errdefer gpa.free(owned);
-        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .shown = !opts.hidden });
+        const owned_tabs = try gpa.dupe(u8, tabs);
+        errdefer gpa.free(owned_tabs);
+        const owned_close = if (tabs.len > 0) try closeCommand(gpa, owned) else @as([]u8, &.{});
+        errdefer gpa.free(owned_close);
+        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .shown = !opts.hidden, .tabs = owned_tabs, .close_command = owned_close });
     }
 
     /// Publish every declared viewport's shown state into `context` as the
@@ -558,16 +605,50 @@ test "viewport: edge names round-trip; an unknown spelling is not an edge" {
     try t.expectEqual(@as(?Edge, null), parseEdge("LEFT"));
 }
 
+test "viewport: tabs declares a header's commands, precomputes its close command, and findByPane finds it" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+    const panel: Attrs = .{ .dock = .bottom, .persistent = true, .cycles = false };
+
+    // No tabs named: no header, no close command to precompute.
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{});
+    try t.expectEqualStrings("", reg.find("panel").?.tabs);
+    try t.expectEqualStrings("", reg.find("panel").?.close_command);
+
+    // Tabs named: both are set, the close command naming THIS viewport.
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "problems.open\nterminal.open", .{});
+    const d = reg.find("panel").?;
+    try t.expectEqualStrings("problems.open\nterminal.open", d.tabs);
+    try t.expectEqualStrings("viewport.toggle panel", d.close_command);
+    d.pane = 7;
+    try t.expectEqual(@as(*const Declaration, d), reg.findByPane(7).?);
+    try t.expectEqual(@as(?*const Declaration, null), reg.findByPane(8));
+
+    // Re-declaring with the SAME tabs changes nothing (no needless realloc);
+    // with DIFFERENT tabs, both are replaced, not appended to.
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "problems.open\nterminal.open", .{});
+    try t.expectEqualStrings("problems.open\nterminal.open", reg.find("panel").?.tabs);
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "terminal.open", .{});
+    try t.expectEqualStrings("terminal.open", reg.find("panel").?.tabs);
+    try t.expectEqualStrings("viewport.toggle panel", reg.find("panel").?.close_command);
+
+    // Tabs withdrawn: the header goes, and so does its close command.
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{});
+    try t.expectEqualStrings("", reg.find("panel").?.tabs);
+    try t.expectEqualStrings("", reg.find("panel").?.close_command);
+}
+
 test "viewport: a panel can start hidden, take an entry, and holds it as chrome" {
     const gpa = t.allocator;
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
     const panel: Attrs = .{ .dock = .bottom, .persistent = true, .cycles = false };
-    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, .{ .hidden = true });
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{ .hidden = true });
     try t.expect(!reg.find("panel").?.shown);
     // A re-declaration never re-hides what the user showed.
     reg.find("panel").?.shown = true;
-    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, .{ .hidden = true });
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{ .hidden = true });
     try t.expect(reg.find("panel").?.shown);
 
     reg.find("panel").?.shown = false;
