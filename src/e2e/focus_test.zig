@@ -79,8 +79,23 @@ fn expectCaret(ed: *Editor, shape: enum { bar, block }) !void {
 }
 
 /// The name node of the files row for `name` in the focused listing.
+/// Whether a row named `name` is on screen (a folded folder's children are
+/// not even in the scene).
+fn shown(ed: *Editor, name: []const u8) bool {
+    _ = pointAtName(ed, name) catch return false;
+    return true;
+}
+
+fn sidebarView(ed: *Editor) ?h.semantic_model.view.Ref {
+    const pane = ed.viewportPane("sidebar") orelse return null;
+    const entry = ed.buffers.get(pane.pane().buffer_id) orelse return null;
+    return entry.tool_view orelse entry.scene_selection.view;
+}
+
 fn nameNode(ed: *Editor, name: []const u8) !h.semantic_model.scene.NodeId {
-    const view_ref = ed.toolView() orelse return error.NoFilesView;
+    // The focused listing, else the docked sidebar's (the editor may hold
+    // the keys while the pointer works the sidebar).
+    const view_ref = ed.toolView() orelse sidebarView(ed) orelse return error.NoFilesView;
     const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
     for (instance.scene.content.container.children) |row| {
         for (row.content.container.children) |node| {
@@ -271,6 +286,43 @@ test "e2e/focus: ide.js — Escape cancels an edit, putting the name back; movin
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f n.txt && test ! -e m.txt && printf ok", "ok"));
 }
 
+test "e2e/focus: ide.js — the sidebar works by mouse from the editor: one click opens a file, one click folds a folder in place" {
+    var app: IdeApp = undefined;
+    try app.init(t.allocator);
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(ed.gpa, "m.txt", "x\n");
+    try core.file.writeBytesMakingDirs(ed.gpa, "dir", "dir/inner.txt", "inner\n");
+    try ide.openFile(ed, "zeta.txt", "zeta\n");
+    ed.applyWindow();
+    // The EDITOR has the keys: the click is the sidebar's anyway, because a
+    // pointer key means what the pane under it says (ide-structural), not
+    // what the focused editor would do with it (place a caret).
+    try t.expect(!std.mem.eql(u8, ed.mode(), "ide-structural"));
+
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    try t.expect(fileOpen(ed, "m.txt"));
+    // The listing is still the root: the file opened in the editor pane.
+    try t.expect(ed.pointAtNode(try nameNode(ed, "m.txt")) != null);
+
+    // One click on a folder opens it IN PLACE (a tree, not a descent).
+    try t.expect(!shown(ed, "inner.txt"));
+    ed.click(try pointAtName(ed, "dir"));
+    ed.applyWindow();
+    _ = try pointAtName(ed, "inner.txt");
+    try t.expect(ed.pointAtNode(try nameNode(ed, "m.txt")) != null);
+
+    // A double click is ONE toggle — it folds the folder shut, and never
+    // descends into it on its second click.
+    const dir = try pointAtName(ed, "dir");
+    ed.click(dir);
+    ed.clickAgain(dir);
+    ed.applyWindow();
+    try t.expect(!shown(ed, "inner.txt"));
+    try t.expect(ed.pointAtNode(try nameNode(ed, "m.txt")) != null);
+}
+
 test "e2e/focus: ide.js — a slow second click on the focused row edits its name; a double click opens it instead" {
     var app: IdeApp = undefined;
     try sidebarApp(&app);
@@ -289,15 +341,16 @@ test "e2e/focus: ide.js — a slow second click on the focused row edits its nam
     ed.press("Escape", "");
     try expectRow(ed, "m.txt");
 
-    // A slow click on a row that was NOT focused only focuses it.
+    // A slow click on a row that was NOT focused is an ordinary click: in ide
+    // that opens it (one click opens, as an explorer does), and edits nothing.
     const main_zig = try pointAtName(ed, "main.zig");
     ed.clickSlow(main_zig);
     try expectRow(ed, "main.zig");
     try t.expect(ed.head.scene_selection.edit == null);
+    try t.expect(fileOpen(ed, "main.zig"));
 
     // A double click opens the row, and edits nothing — even when its first
     // click was a slow one that began an edit on the way.
-    try t.expect(!fileOpen(ed, "main.zig"));
     ed.clickSlow(main_zig);
     ed.clickAgain(main_zig);
     try t.expect(fileOpen(ed, "main.zig"));
@@ -509,7 +562,8 @@ test "e2e/focus: ide.js — a double click in the name being edited selects in i
     ed.clickAgain(in_field);
     try t.expect(ed.head.scene_selection.edit != null);
     try expectRow(ed, "foo");
-    try t.expect(!fileOpen(ed, "main.zig"));
+    // (main.zig is open from the click that focused it; the double click
+    // inside the edit opened nothing further and renamed nothing.)
     try t.expect(!fileOpen(ed, "foo"));
     const out = try app.proj.oracle("test -f main.zig && test ! -e foo && printf ok");
     defer ed.gpa.free(out);

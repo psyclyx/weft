@@ -486,6 +486,23 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
 ///
 /// Any edit made here — directly or by a helper plugin (dw/autopair) — is the
 /// user's, so it joins the user's undo history (see command.edit).
+/// A pointer gesture over a pane the head is NOT on means what that pane's
+/// grammar says it means: a click on the ide sidebar while the editor has the
+/// keys is the listing's click (open the row), not the editor's (place a
+/// caret). So a pointer key resolves in the binding mode of the entry under
+/// the pointer — the mode it rests in (`intent.restingModeOf`, the same one
+/// its status line shows), its structural layer when it shows a scene. Keys
+/// from the keyboard always resolve where the focus is.
+fn pointerBindingMode(ctx: *core.command.Context, spec: []const u8) ?[]const u8 {
+    if (!core.pointer.isPointerSpec(spec)) return null;
+    const id = ctx.head.pointer.hit.entry orelse return null;
+    if (id == ctx.buffers.active_id) return null;
+    const entry = ctx.buffers.get(id) orelse return null;
+    const mode = core.intent.restingModeOf(ctx.buffers, entry);
+    if (entry.tool_view != null) if (ctx.keymap.variantFor(mode, .structural)) |variant| return variant;
+    return entry.bindingMode(ctx.keymap, mode);
+}
+
 pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) !void {
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
@@ -570,7 +587,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     }
     // Feed the key through the pending SEQUENCE. `SPC f f` is a chord; `SPC C-w`
     // never fires global `C-w` — a menu is a sequence, not a mode.
-    const binding_mode = ctx.bindingMode();
+    const binding_mode = pointerBindingMode(ctx, spec) orelse ctx.bindingMode();
     switch (ctx.head.feedInMode(ctx.gpa, ctx.keymap, binding_mode, spec) catch core.Keymap.Feed.none) {
         .pending, .none => return,
         .unbound => {}, // nothing bound it — fall through to the commit path

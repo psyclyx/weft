@@ -752,6 +752,11 @@ fn initExtra() void {
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
+    // Up a level in a listing: Alt+Up (Explorer, Finder's Cmd+Up) and
+    // Backspace (Explorer). Only where nothing takes text, so Backspace in a
+    // file still deletes; a listing with no container simply isn't offered it.
+    weft.bindKeys("ide-structural", "M-Up", &.{"std.hierarchy.step-out"});
+    weft.bindKeys("ide-structural", "BackSpace", &.{ "std.hierarchy.step-out", "edit.delete-backward" });
     // Over text, THESE are what the transfer words mean: core offers
     // std.transfer.* where a grammar provides the matching action, so the
     // context menu over text has Cut, Copy and Paste, and the keys above
@@ -790,6 +795,13 @@ fn initExtra() void {
         .{ "triple-mouse-1", "ide.select-line-at-pointer" }, .{ "C-mouse-1", "pointer.add-selection" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
+    // A listing is a list/tree control here: ONE click opens a file and folds
+    // a folder open or shut, as an IDE's explorer does (`pointer.open-row`);
+    // a double click is the same act, not a second one. Selecting without
+    // opening is C-click (mark) or a right click (the context menu focuses
+    // the row it opens over).
+    weft.bindKey("ide-structural", "mouse-1", "pointer.open-row");
+    weft.bindKey("ide-structural", "double-mouse-1", "pointer.open-row");
 
     // A bar caret where `ide` types: a modeless editor is always between
     // cells. `ide-structural` declares no shape — typing inserts nothing

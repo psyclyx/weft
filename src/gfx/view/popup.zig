@@ -393,9 +393,14 @@ pub fn drawSurfaces(
     dock: region.Rect,
     caret_y: ?f32,
 ) !void {
-    // A surface floats within `body`; cap the row count to what fits, so a
-    // popup can never extend past the region it was handed.
-    const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)) -| 1);
+    // A corner/center surface floats over the whole FRAME (`hud.float_bounds`,
+    // the rect menus float in), not the focused pane: a hint about the keys
+    // is the window's, and a short pane (the bottom panel) must not squeeze
+    // it until its footer — which-key's paging keys — falls off. The caret
+    // popup keeps its pane (it points at text there); `.bottom` has its dock.
+    const area = hud.float_bounds orelse body;
+    // Cap the row count to what fits, so a popup never extends past its area.
+    const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1);
     for (hud.surfaces) |surf| {
         if (!surf.active or surf.rows.items.len == 0) continue;
         if (surf.placement == .caret) {
@@ -407,10 +412,17 @@ pub fn drawSurfaces(
             continue;
         }
 
-        const nrows = @min(surf.rows.items.len, max_rows);
+        // When the rows don't all fit, the LAST row still shows: a surface
+        // ends with its footer (which-key's page and paging keys), and a
+        // footer cut off is exactly how a clipped hint stops saying how to
+        // see the rest. The rows dropped are the ones just before it.
+        const total = surf.rows.items.len;
+        const nrows = @min(total, max_rows);
+        const shown = try scratch.alloc(*const core.surface.Row, nrows);
+        for (shown, 0..) |*slot, i| slot.* = &surf.rows.items[if (nrows < total and i == nrows - 1) total - 1 else i];
         // Width = widest row, in cells (one space between spans).
         var max_cols: usize = 0;
-        for (surf.rows.items[0..nrows]) |row| {
+        for (shown) |row| {
             var cols: usize = 0;
             for (row.spans.items, 0..) |sp, si| {
                 if (si != 0) cols += 1;
@@ -430,27 +442,28 @@ pub fn drawSurfaces(
         // (where the box would land), it flips to the bottom-right instead,
         // so a which-key popup never covers the line you're editing.
         const corner_top = if (caret_y) |cy|
-            cy > body.y + body.h / 2
+            cy > area.y + area.h / 2
         else
             true;
         const raw_x, const raw_y = switch (surf.placement) {
             .corner => .{
-                body.x + body.w - box_w - pad_x,
-                if (corner_top) body.y + pad_x else body.y + body.h - box_h - pad_x,
+                area.x + area.w - box_w - pad_x,
+                if (corner_top) area.y + pad_x else area.y + area.h - box_h - pad_x,
             },
-            .center => .{ body.x + (body.w - box_w) / 2, body.y + (body.h - box_h) / 2 },
+            .center => .{ area.x + (area.w - box_w) / 2, area.y + (area.h - box_h) / 2 },
             .bottom, .caret => unreachable, // skipped above
         };
-        const box_x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
-        const box_y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
+        const box_x = std.math.clamp(raw_x, area.x, @max(area.x, area.x + area.w - box_w));
+        const box_y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));
         // Panel background with a thin accent outline, so the popup reads
         // as a distinct floating box (not text bleeding over the buffer).
         const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
         try chrome.paintPanel(sink, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h }, v.theme.selection, v.theme.accent, .popup);
 
-        for (surf.rows.items[0..nrows], 0..) |row, i| {
+        for (shown, 0..) |row, i| {
             const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * v.line_h;
-            if (surf.selected != null and surf.selected.? == i) {
+            const index = if (nrows < total and i == nrows - 1) total - 1 else i;
+            if (surf.selected != null and surf.selected.? == index) {
                 try chrome.paintSelected(sink, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h }, v.theme.accent);
             }
             var x = box_x + pad_x;
