@@ -374,7 +374,7 @@ test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, fo
     try t.expectEqualStrings("*problems*", ed.buffers.active().name);
 
     // The ordinary window close: one pane leaving the tree, like any other.
-    ed.runStr("window.close", "");
+    ed.run("window.close");
     ed.applyWindow();
     try t.expect(ed.viewportPane("panel") == null);
     try t.expectEqualStrings("a.txt", activeName(ed));
@@ -390,4 +390,65 @@ test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, fo
     ed.press("C-j", "");
     ed.applyWindow();
     try t.expectEqualStrings("*problems*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+}
+
+/// What each named viewport's pane shows, by viewport index — to check that
+/// closing and cycling documents never touches chrome.
+fn chromeEntries(ed: *Editor, out: *[8]?u32) void {
+    out.* = @splat(null);
+    const Visit = struct {
+        fn f(o: *[8]?u32, p: *window_layout.Pane) void {
+            if (p.viewport) |i| if (i < o.len) {
+                o[i] = p.buffer_id;
+            };
+        }
+    };
+    ed.win_layout.eachPane(out, Visit.f);
+}
+
+test "e2e/panels: closing and cycling documents never hands a pane a viewport's chrome, and a viewport whose entry closed shows it again" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "alpha\n");
+    try ide.openFile(ed, "b.txt", "beta\n");
+    try frame(ed);
+    var chrome: [8]?u32 = undefined;
+    chromeEntries(ed, &chrome);
+
+    // Cycling steps through documents only — the scratch, a, b — never the
+    // toolbar or the file tree, and comes back round.
+    const start = ed.buffers.active_id;
+    for (0..3) |_| {
+        ed.run("buffer.next");
+        ed.applyWindow();
+        try t.expect(ed.session.system.viewports.isDocument(ed.buffers.active()));
+    }
+    try t.expectEqual(start, ed.buffers.active_id);
+
+    // Closing every document leaves a fresh scratch in the editor — and every
+    // chrome pane exactly as it was.
+    for (0..3) |_| {
+        ed.run("buffer.close-force");
+        ed.applyWindow();
+    }
+    try t.expectEqualStrings("*scratch*", ed.buffers.active().name);
+    var after: [8]?u32 = undefined;
+    chromeEntries(ed, &after);
+    try t.expectEqualSlices(?u32, &chrome, &after);
+
+    // C-w with the sidebar focused closes its listing — which the sidebar
+    // opens again rather than showing whatever is active.
+    try frame(ed);
+    const sb = ed.viewportPane("sidebar") orelse return error.NoSidebar;
+    const r = ed.win_layout.focusedRect(sb, ed.application.last_frame_rect);
+    ed.click(.{ r.x + 20, r.y + r.h - 20 });
+    ed.press("C-w", "");
+    ed.applyWindow();
+    const listing = ed.buffers.get(ed.viewportPane("sidebar").?.pane().buffer_id) orelse return error.SidebarLost;
+    try t.expect(std.mem.startsWith(u8, listing.name, "files:"));
+    chromeEntries(ed, &after);
+    for (chrome, after, 0..) |was, now, i| if (i != 0) try t.expectEqual(was, now);
 }

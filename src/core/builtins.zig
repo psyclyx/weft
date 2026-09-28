@@ -634,14 +634,23 @@ fn fieldHere(ctx: *Context) bool {
 
 fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.head, ctx.keymap);
+    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument) orelse return ok;
+    try ctx.buffers.switchTo(ctx.gpa, next, ctx.head, ctx.keymap);
     return ok;
 }
 
 fn cBufferPrevious(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.prevId(), ctx.head, ctx.keymap);
+    const prev = ctx.buffers.cycle(.prev, ctx.viewports, isDocument) orelse return ok;
+    try ctx.buffers.switchTo(ctx.gpa, prev, ctx.head, ctx.keymap);
     return ok;
+}
+
+/// A document, not a docked viewport's chrome (`viewport.Registry.isDocument`);
+/// with no workspace, every entry is one.
+fn isDocument(viewports: ?*@import("viewport.zig").Registry, b: *@import("Buffers.zig").Buffer) bool {
+    const registry = viewports orelse return true;
+    return registry.isDocument(b);
 }
 
 /// Return to the previously active buffer — where a tool's `q` lands you (back
@@ -703,7 +712,10 @@ pub fn holdsUnsavedWork(ctx: *Context, b: *@import("Buffers.zig").Buffer) bool {
 fn retireActive(ctx: *Context) anyerror!Value {
     const b = ctx.buffers.active();
     if (ctx.entry_shell) |shell| shell.retire(shell.context, ctx, b);
-    try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
+    // The pane gets the next DOCUMENT, or a fresh scratch — never a docked
+    // viewport's chrome, which the next close would then take down.
+    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument);
+    try ctx.buffers.closeTo(ctx.gpa, b.id, next, ctx.head, ctx.keymap);
     return ok;
 }
 
