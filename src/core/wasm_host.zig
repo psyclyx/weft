@@ -47,6 +47,8 @@ pub fn hostEnviron() @import("std").process.Environ {
     return plugin.g_environ;
 }
 pub const resolvePeerWp = plugin.resolvePeerWp;
+/// Where a plugin says something from a background entry — no head asked.
+pub const noteBackground = plugin.noteBackground;
 
 const fs = @import("wasm_host/fs.zig");
 pub const PeerFsBridge = fs.PeerFsBridge;

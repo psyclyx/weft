@@ -1,5 +1,5 @@
 //! Per-dispatch data marshalling across the membrane: echo to the status line
-//! (the asking head's, or the system's status feed from a background entry),
+//! (the asking head's, or a notice to the system from a background entry),
 //! the command args a guest reads during on_command (arg_count/int/str) and the
 //! result it sets back (set_result_int/str). Integers cross as i32 — the
 //! membrane word; string results borrow the plugin's result_buf.
@@ -16,9 +16,9 @@ pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     defer p.gpa.free(msg);
     // A dispatching entry answers the head that asked. A BACKGROUND entry
     // (`on_activate`, `on_complete`, `on_fill_token`, …) has no head that
-    // asked, so what it says is a notice to the whole system: the status feed
-    // every status line draws, where core's own background refusals already
-    // go. It used to trap — the message was lost and the rest of the guest's
+    // asked, so what it says is a notice to the whole system
+    // (`Buffers.notices`), shown briefly where core's own background refusals
+    // already go. It used to trap — the message was lost and the rest of the guest's
     // callback aborted with it, so every plugin had to remember a nested
     // `wl_run` to say anything off a keystroke, and three did not. Head state
     // is still never written from the background.

@@ -443,7 +443,7 @@ fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     var resolved: [1]usize = undefined;
     doc.resolveAnchors(gpa, &.{job.target}, &resolved) catch return;
     const at = resolved[0];
-    command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
+    command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
 }
 
 fn shellFree(ctx: ?*anyopaque) void {
@@ -684,12 +684,12 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         if (end > 0) {
             const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
             defer gpa.free(sep);
-            command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
+            command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
         } else {
-            command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
+            command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
         }
     } else {
-        command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+        command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
 
     // The text has landed: tell the issuing plugin WHICH fill it was, so it can
@@ -1165,7 +1165,7 @@ fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     doc.resolveAnchors(gpa, &.{ job.start, job.end }, &resolved) catch return;
     const rs = resolved[0];
     const re = resolved[1];
-    command.renderInto(gpa, &job.buffers.status, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
+    command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
 }
 
 fn filterFree(ctx: ?*anyopaque) void {

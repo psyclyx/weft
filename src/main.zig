@@ -649,6 +649,7 @@ pub fn main(init: std.process.Init) !void {
     var flash_ctx: loop_sources.FlashCtx = .{ .flash = &session.system.caps.flash, .flash_start_ns = &application.flash_start_ns, .flash_duration_ns = &application.flash_duration_ns };
     _ = try sched.addTimer(&flash_ctx, loop_sources.flashDue, "flash_expiry");
     _ = try sched.addTimer(&application.echo_timing, loop_sources.echoDue, "echo_expiry");
+    _ = try sched.addTimer(&application.notice_timing, loop_sources.echoDue, "notice_expiry");
     var reconnect_ctx: loop_sources.ReconnectCtx = .{
         .share_ctx = &collab_state.share_ctx,
         .next_reconnect_ns = &collab_state.next_reconnect_ns,

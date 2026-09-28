@@ -188,6 +188,8 @@ pub const StatuslineArgs = struct {
         echo: ?[]const u8 = null,
         /// The persistent plugin-published chip (`core.status_feed`).
         feed: ?[]const u8 = null,
+        /// The system's last notice, while it is brief (`status_feed.Notices`).
+        notice: ?[]const u8 = null,
         /// The trust chip for the host we connected out to.
         trust: ?[]const u8 = null,
     };
@@ -316,6 +318,16 @@ fn echoProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
     const msg = (a.head orelse return false).echo orelse return false;
     if (msg.len == 0) return false;
     try a.out.append(gpa, .{ .text = try gpa.dupe(u8, msg), .priority = 88, .elide = .end });
+    return true;
+}
+
+/// What no head asked to hear — a background echo, a refusal — while it is
+/// brief. A message of its own, beside the head's and the plugin chip.
+fn noticeProvider(_: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const a = argsOf(raw);
+    const msg = (a.head orelse return false).notice orelse return false;
+    if (msg.len == 0) return false;
+    try a.out.append(gpa, .{ .text = try gpa.dupe(u8, msg), .role = .muted, .priority = 58, .elide = .end });
     return true;
 }
 
@@ -714,6 +726,7 @@ pub fn bindDefaultStatusline(c: *container.Container) !void {
         .{ .call = backingProvider, .priority = 70 },
         .{ .call = trustProvider, .priority = 69 },
         .{ .call = echoProvider, .priority = 60 },
+        .{ .call = noticeProvider, .priority = 59 },
         .{ .call = positionProvider, .priority = 45 },
         .{ .call = selectionsProvider, .priority = 44 },
         .{ .call = languageProvider, .priority = 40 },

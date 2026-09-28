@@ -320,7 +320,7 @@ pub const Session = struct {
         const ed = b.textEditor() orelse return false;
         const doc = &ed.doc;
         const end = ed.text().byteLen();
-        command.renderInto(s.gpa, &s.ctx.buffers.status, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.pending.bytes.items }}) catch {
+        command.renderInto(s.gpa, &s.ctx.buffers.notices, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.pending.bytes.items }}) catch {
             s.pending.bytes.clearRetainingCapacity();
             return false;
         };

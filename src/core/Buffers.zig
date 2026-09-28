@@ -71,10 +71,13 @@ default_mode: []u8 = &.{},
 /// asking what tool it is looking at. Empty = undeclared, which falls back
 /// through `restingModeFor`.
 posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
-/// The status chip plugins publish (`weft.status`) and background refusals
-/// are announced on — this system's, beside its entries, so a second system
-/// in the process never shows this one's chip.
+/// The status chip plugins publish (`weft.status`) — this system's, beside
+/// its entries, so a second system in the process never shows this one's
+/// chip. Nothing else writes it.
 status: @import("status_feed.zig").Feed = .{},
+/// What no head asked to hear — background echoes and refusals — said to
+/// this system, and shown briefly (`status_feed.Notices`).
+notices: @import("status_feed.zig").Notices = .{},
 /// Documents whose entries closed, newest last (doc/model.md §2.2). An entry
 /// is a local OPENING of a designation, so closing the entry is not deleting
 /// what it opened: a scratch document — which has no file to be reopened

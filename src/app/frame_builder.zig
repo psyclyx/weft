@@ -1047,6 +1047,9 @@ pub const FrameBuilder = struct {
             // shows at rest: the diagnostic under the caret.
             .echo = if (echo_live) try arena.dupe(u8, fx.head.echo.items) else cursor_diag,
             .feed = if (fx.buffers.status.get()) |s| try arena.dupe(u8, s) else null,
+            // What no head asked to hear, while it is brief — beside the
+            // chip, never in it.
+            .notice = if (!fx.notice_timing.showing) null else if (fx.buffers.notices.get()) |s| try arena.dupe(u8, s) else null,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));

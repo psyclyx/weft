@@ -144,18 +144,20 @@ pub const EchoTiming = struct {
 
     pub const default_ns = 4 * std.time.ns_per_s;
 
-    /// Note `echo` at `now`: a new saying starts its time, and a message
-    /// past its time stops showing; `ms` is the configured duration, when
-    /// there is one. True when what the line shows moved — a new saying, or
-    /// shown, then gone — so the frame is due.
-    pub fn note(self: *EchoTiming, echo: *const core.Head.Echo, now: u64, ms: ?u64) bool {
-        const new = echo.said != self.said;
+    /// Note a message said `said` times so far (`Head.Echo.said`,
+    /// `status_feed.Notices.said`), holding text or not, at `now`: a new
+    /// saying starts its time, and a message past its time stops showing;
+    /// `ms` is the configured duration, when there is one. True when what the
+    /// line shows moved — a new saying, or shown, then gone — so the frame is
+    /// due.
+    pub fn note(self: *EchoTiming, said: u64, has_text: bool, now: u64, ms: ?u64) bool {
+        const new = said != self.said;
         if (new) {
-            self.said = echo.said;
+            self.said = said;
             self.since_ns = now;
             self.duration_ns = if (ms) |m| m * std.time.ns_per_ms else default_ns;
         }
-        const showing = echo.items.len > 0 and now -| self.since_ns < self.duration_ns;
+        const showing = has_text and now -| self.since_ns < self.duration_ns;
         defer self.showing = showing;
         return new or showing != self.showing;
     }
@@ -175,20 +177,20 @@ test "echo timing: a message shows for its duration from its saying, and again w
     const s = std.time.ns_per_s;
     echo.clearRetainingCapacity();
     try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.note(&echo, 10 * s, null));
+    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 10 * s, null));
     try std.testing.expect(timing.showing);
-    try std.testing.expect(!timing.note(&echo, 13 * s, null)); // nothing moved
+    try std.testing.expect(!timing.note(echo.said, echo.items.len > 0, 13 * s, null)); // nothing moved
     try std.testing.expect(timing.showing);
     try std.testing.expectEqual(@as(?u64, 14 * s), timing.due(13 * s));
-    try std.testing.expect(timing.note(&echo, 15 * s, null)); // gone
+    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 15 * s, null)); // gone
     try std.testing.expect(!timing.showing);
     try std.testing.expect(timing.due(15 * s) == null);
     // The same words, said again: shown again.
     echo.clearRetainingCapacity();
     try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.note(&echo, 20 * s, 1000));
+    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 20 * s, 1000));
     try std.testing.expect(timing.showing);
-    try std.testing.expect(timing.note(&echo, 21 * s + 1, 1000));
+    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 21 * s + 1, 1000));
     try std.testing.expect(!timing.showing);
 }
 
@@ -256,6 +258,8 @@ pub const FrameCtx = struct {
     flash_duration_ns: *u64,
     /// When the head's message was said, as the frame first saw it.
     echo_timing: *const EchoTiming,
+    /// The system's last notice (`Buffers.notices`), timed as an echo is.
+    notice_timing: *const EchoTiming,
     /// The `weft.set` values the frame reads live (`editor/flash-ms`,
     /// `editor/flash-undo`). Null in an embedding with no configuration.
     config: ?*const core.kv.Store = null,

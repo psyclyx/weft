@@ -39,6 +39,8 @@ pub const Application = struct {
     /// When the head's message was said, for how long the frame shows it —
     /// noted at each wake's boundary (`observe`), read by the frame.
     echo_timing: frame.EchoTiming = .{},
+    /// The same for the system's last notice (`Buffers.notices`).
+    notice_timing: frame.EchoTiming = .{},
     /// This wake's clock (`tickAsync`'s `frame_start`), for what `observe`
     /// notes just before the frame.
     wake_ns: u64 = 0,
@@ -131,6 +133,7 @@ pub const Application = struct {
                 .flash_was_active = &self.flash_was_active,
                 .flash_duration_ns = &self.flash_duration_ns,
                 .echo_timing = &self.echo_timing,
+                .notice_timing = &self.notice_timing,
                 .config = args.config orelse &args.session.system.config_kv,
                 .cmd_ctx = &args.session.cmd_ctx,
             },
@@ -354,7 +357,12 @@ pub const Application = struct {
         // The head's message, timed where it was said: the last thing noted
         // before the frame, so whatever this wake said is in it, and the
         // frame only reads whether it shows.
-        if (self.echo_timing.note(&self.session.head.echo, self.wake_ns, echoMs(self.driver.ctx.config))) damaged = true;
+        // A notice — what no head asked to hear — is timed by the same rule.
+        const echo = &self.session.head.echo;
+        const notices = &self.driver.ctx.buffers.notices;
+        const ms = echoMs(self.driver.ctx.config);
+        if (self.echo_timing.note(echo.said, echo.items.len > 0, self.wake_ns, ms)) damaged = true;
+        if (self.notice_timing.note(notices.said, notices.len > 0, self.wake_ns, ms)) damaged = true;
         return damaged;
     }
 

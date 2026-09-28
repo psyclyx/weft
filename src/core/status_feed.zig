@@ -39,6 +39,32 @@ pub const Feed = struct {
     }
 };
 
+/// What NO head asked to hear — a plugin's background echo, a spawn or render
+/// refused — said to the whole system (doc/chrome.md §4.4). Not a plugin's
+/// chip: a `Feed` is only ever what a plugin published for itself, and a
+/// notice written there replaced it for the session (a background lsp
+/// refusal over dap's `● *debug* · running`). A notice is a message: it
+/// counts its sayings, and the frame shows each briefly, timed as an echo
+/// is, then the line shows what it shows at rest.
+pub const Notices = struct {
+    buf: [160]u8 = undefined,
+    len: usize = 0,
+    /// Sayings so far — a notice said again shows again.
+    said: u64 = 0,
+
+    /// Say `text` (truncated to the slot).
+    pub fn say(self: *Notices, text: []const u8) void {
+        self.len = @min(text.len, self.buf.len);
+        @memcpy(self.buf[0..self.len], text[0..self.len]);
+        self.said +%= 1;
+    }
+
+    /// The last notice said, or null when none was.
+    pub fn get(self: *const Notices) ?[]const u8 {
+        return if (self.len == 0) null else self.buf[0..self.len];
+    }
+};
+
 test "two feeds do not share a chip" {
     var a: Feed = .{};
     var b: Feed = .{};

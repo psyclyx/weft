@@ -123,7 +123,8 @@ pub fn flashDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return due;
 }
 
-// ── 5b. A message's lapse — the frame times it (`frame.EchoTiming`); this
+// ── 5b. A message's lapse — an echo's or a notice's, timed at the wake's boundary
+// (`frame.EchoTiming.note`); this
 // wakes the loop when the one showing lapses, so the line redraws without
 // it. ──
 

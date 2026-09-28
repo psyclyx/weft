@@ -677,7 +677,7 @@ pub const RenderError = Document.AddPeerError || error{Unauthorized};
 /// a plugin that simply produced nothing.
 pub fn renderInto(
     gpa: Allocator,
-    status: *status_feed.Feed,
+    notices: *status_feed.Notices,
     doc: *Document,
     role: authority.Role,
     name: []const u8,
@@ -688,22 +688,21 @@ pub fn renderInto(
         .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
     };
     if (!grade.canEdit()) {
-        noteRenderRefusal(status, name, "view access");
+        noteRenderRefusal(notices, name, "view access");
         return error.Unauthorized;
     }
     const pid = try doc.peerNamed(gpa, name);
     doc.peerReplaceAll(gpa, pid, items) catch {};
 }
 
-/// Make a background refusal observable: a host log line always, plus the
-/// generic `weft.status` chip the status line already renders — the same
-/// surface a plugin publishes progress on, so a denied producer is visible
-/// to the user without inventing a UI for it.
-fn noteRenderRefusal(status: *status_feed.Feed, name: []const u8, why: []const u8) void {
+/// Make a background refusal observable: a host log line always, plus a
+/// notice (`status_feed.Notices`), which every status line shows briefly —
+/// never a plugin's own chip, which is the plugin's to say.
+fn noteRenderRefusal(notices: *status_feed.Notices, name: []const u8, why: []const u8) void {
     std.log.warn("render refused: '{s}' — {s}", .{ name, why });
     var buf: [96]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "render refused: {s} ({s})", .{ name, why }) catch "render refused";
-    status.set(text);
+    notices.say(text);
 }
 
 /// [FIX 2] (doc/extensibility-native-surface.md, release-blocking): apply a capability
@@ -773,7 +772,7 @@ pub const ApplyActionError = RenderError || error{ NotAnAction, StaleVersion, Ou
 
 pub fn applyActionResult(
     gpa: Allocator,
-    status: *status_feed.Feed,
+    notices: *status_feed.Notices,
     doc: *Document,
     fired: position.StampedRange,
     result: *const capability.Result,
@@ -804,7 +803,7 @@ pub fn applyActionResult(
             return a.range.start < b.range.start;
         }
     }.lessThan);
-    try renderInto(gpa, status, doc, .plugin, result.provider, items);
+    try renderInto(gpa, notices, doc, .plugin, result.provider, items);
     return items.len;
 }
 
@@ -1898,7 +1897,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult refuses an out-of-range 
     });
     const bad_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const bad_result = &env.caps.session(bad_session).?.all()[0];
-    try t.expectError(error.OutOfRange, applyActionResult(gpa, &env.buffers.status, doc, fired, bad_result));
+    try t.expectError(error.OutOfRange, applyActionResult(gpa, &env.buffers.notices, doc, fired, bad_result));
     // Refused wholesale: the document is untouched.
     const unchanged = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(unchanged);
@@ -1940,7 +1939,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batc
     });
     const good_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const good_result = &env.caps.session(good_session).?.all()[0];
-    const applied = try applyActionResult(gpa, &env.buffers.status, doc, fired, good_result);
+    const applied = try applyActionResult(gpa, &env.buffers.notices, doc, fired, good_result);
     try t.expectEqual(@as(usize, 1), applied);
 
     const after = try doc.text().toOwnedSlice(gpa);
@@ -2010,19 +2009,21 @@ test "command: the undo door — a region-narrowed principal cannot smuggle an o
     try t.expectEqualStrings("0123456789", restored);
 }
 
-test "command: a refused background render is observable (log + status chip)" {
+test "command: a refused background render is observable (log + notice)" {
     const gpa = t.allocator;
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const doc = env.ctx.document().?;
 
     doc.my_grant = .view; // this replica may read, never write
-    try t.expectError(error.Unauthorized, renderInto(gpa, &env.buffers.status, doc, .plugin, "ci-plugin", &.{
+    try t.expectError(error.Unauthorized, renderInto(gpa, &env.buffers.notices, doc, .plugin, "ci-plugin", &.{
         .{ .range = .{ .start = 0, .end = 0 }, .bytes = "3 failing" },
     }));
 
-    // No Head to echo on, so the chip is the user-visible seam.
-    const chip = env.buffers.status.get() orelse return error.TestUnexpectedResult;
+    // No Head to echo on, so a notice is the user-visible seam — and the
+    // plugin chip is left alone.
+    try t.expect(env.buffers.status.get() == null);
+    const chip = env.buffers.notices.get() orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
     try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
 }

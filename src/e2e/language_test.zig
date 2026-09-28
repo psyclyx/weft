@@ -424,7 +424,7 @@ fn nextQuoted(rest: *[]const u8) ?[]const u8 {
 // that asked — and the plugin's `weft.echo` there used to trap: the message
 // was lost and the rest of the activation (decorations, diagnostics) aborted
 // with it. A background echo is a notice to the whole system: it lands on the
-// status feed every status line draws.
+// notices every status line shows briefly (`Buffers.notices`).
 test "e2e/languages: a language server that cannot start says so from a background entry" {
     const gpa = t.allocator;
     var proj: h.Project = undefined;
@@ -449,9 +449,9 @@ test "e2e/languages: a language server that cannot start says so from a backgrou
     ed.runStr("file.open", file);
     ed.applyWindow();
     ed.settle(2);
-    const said = ed.buffers.status.get() orelse "";
+    const said = ed.buffers.notices.get() orelse "";
     if (std.mem.indexOf(u8, said, "lsp: this place has no local directory") == null) {
-        std.debug.print("[e2e/languages] status feed: '{s}', echo: '{s}'\n", .{ said, ed.echoText() });
+        std.debug.print("[e2e/languages] notice: '{s}', echo: '{s}'\n", .{ said, ed.echoText() });
         return error.TestExpectedEqual;
     }
 }

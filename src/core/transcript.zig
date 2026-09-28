@@ -244,7 +244,7 @@ pub const node_fact = "node";
 /// `command.renderInto`, which (like `Context.render`) bypasses
 /// read-only by design: read-only blocks `edit` (interactive typing),
 /// never `render`/`renderInto` (model-driven production).
-pub fn fill(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
+pub fn fill(gpa: Allocator, notices: *@import("status_feed.zig").Notices, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
     const Span = struct { start: usize, end: usize, node: GraphDoc.ObjId };
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
@@ -264,7 +264,7 @@ pub fn fill(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const
     }
 
     const old_len = doc.text().byteLen();
-    try command.renderInto(gpa, status, doc, .plugin, projection_author, &.{
+    try command.renderInto(gpa, notices, doc, .plugin, projection_author, &.{
         .{ .range = .{ .start = 0, .end = old_len }, .bytes = text.items },
     });
 
@@ -329,8 +329,8 @@ pub fn lastRowClaim(subs: *const subbuffer.SubBuffers, doc: *const Document) ?*s
 /// second admission path invented here — `changed` is already
 /// frame-driven, this just answers the one extra question a graph-backed
 /// projection needs answered before a redraw would show anything true.
-pub fn refillOnChange(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
-    if (changed) try fill(gpa, status, tr, doc, subs);
+pub fn refillOnChange(gpa: Allocator, notices: *@import("status_feed.zig").Notices, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
+    if (changed) try fill(gpa, notices, tr, doc, subs);
 }
 
 // ── `on_save` reconciliation (§2.6's `ReconcileMode.on_save`, formalized) ──
@@ -573,7 +573,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // coarseness left imprecise, and drops the `stale` rows' now-inert
     // claims) — the same "re-gather after apply" discipline files's
     // `on_save_apply` follows.
-    try fill(gpa, &ctx.buffers.status, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
+    try fill(gpa, &ctx.buffers.notices, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
         ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
@@ -626,7 +626,7 @@ pub fn openBuffer(gpa: Allocator, buffers: *Buffers, display_name: []const u8) B
 
 const t = std.testing;
 /// Where a fill in these tests announces a refusal; none reads it.
-var test_status: @import("status_feed.zig").Feed = .{};
+var test_status: @import("status_feed.zig").Notices = .{};
 
 test "TranscriptDoc: append/read/edit" {
     const gpa = t.allocator;

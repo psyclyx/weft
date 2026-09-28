@@ -683,7 +683,7 @@ pub fn deliverToBuffer(ctx: *command.Context, buf_name: []const u8, author: []co
     const doc = &ed.doc;
     const end = ed.text().byteLen();
     // Proc output + peer-listing delivery, authored as the plugin peer.
-    command.renderInto(gpa, &ctx.buffers.status, doc, .plugin, author, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
+    command.renderInto(gpa, &ctx.buffers.notices, doc, .plugin, author, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// Bridge for the async `.peer` filesystem: the guest queues LIST requests

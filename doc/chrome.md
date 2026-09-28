@@ -469,6 +469,16 @@ All of §4.
   (`core.status_segment`, restated in `weft_statusline`) carries the compact
   form, priority, icon and tooltip; `surface.Role` learned `warning` and
   `danger` (the problems counts were the third user of those colours).
+- **Notices are not a plugin's chip.** The chip (`weft.status`,
+  `Buffers.status`) is only ever what a plugin published for itself. What
+  no head asked for — a plugin's background echo, a spawn or render refusal
+  — is a NOTICE (`Buffers.notices`, `status_feed.Notices`): a feed of its
+  own that counts its sayings, drawn as its own segment beside the head's
+  message under the same timing rule as an echo (`editor/echo-ms` from the
+  wake that sees it said, then gone). `renderInto`, `applyActionResult` and
+  the transcript fill take a `Notices`, so a refusal cannot be written into
+  the chip: a background lsp refusal no longer replaces dap's `● *debug* ·
+  running` for the rest of the session.
 - **Mode names.** A grammar declares a mode's name and tone
   (`weft.modeDisplay`, `wl_mode_display`): vim `NORMAL`, `INSERT`,
   `VISUAL`/`V-LINE`, `O-PENDING`, `REPLACE`; helix `NOR`, `INS`, `SEL`;

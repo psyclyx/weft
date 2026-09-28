@@ -530,21 +530,22 @@ pub fn resolveSpawnEnv(p: *WasmPlugin, gpa: std.mem.Allocator) ?std.process.Envi
 }
 
 /// Surface a refusal the way a denied render already is: a host log line
-/// always, plus the status chip the status line renders, so a background
+/// always, plus a notice every status line shows briefly, so a background
 /// refusal is visible without inventing a UI for it.
 pub fn noteSpawnRefusal(ctx: *@import("../command.zig").Context, plugin: []const u8, why: []const u8) void {
     std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
     var buf: [128]u8 = undefined;
-    ctx.buffers.status.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
+    ctx.buffers.notices.say(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
 }
 
 /// What a plugin says from a BACKGROUND entry — no head asked, so it is the
-/// system's to hear: the status feed, which every status line draws. The wasm
+/// system's to hear: a notice (`Buffers.notices`), which every status line
+/// shows briefly — never a plugin's own chip. The wasm
 /// and JS planes both land here, so the two cannot disagree about where a
 /// background message goes.
 pub fn noteBackground(ctx: *@import("../command.zig").Context, plugin: []const u8, msg: []const u8) void {
     std.log.info("plugin '{s}' (background): {s}", .{ plugin, msg });
-    ctx.buffers.status.set(msg);
+    ctx.buffers.notices.say(msg);
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

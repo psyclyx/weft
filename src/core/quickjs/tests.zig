@@ -35,7 +35,7 @@ const kv = @import("../kv.zig");
 const Buffers = @import("../Buffers.zig");
 const subbuffer = @import("../subbuffer.zig");
 /// Where a transcript fill announces a refusal; these tests read none.
-var test_status: @import("../status_feed.zig").Feed = .{};
+var test_status: @import("../status_feed.zig").Notices = .{};
 const pick_mod = @import("../pick.zig");
 const grants_mod = @import("../grants.zig");
 const manifest_mod = @import("../manifest.zig");
@@ -559,11 +559,12 @@ test "quickjs: an echo from a background entry reaches the status feed, never a 
     _ = try command.run(&env.commands, &env.ctx, "go", &.{});
     env.head.echo.clearRetainingCapacity();
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
-    while (env.buffers.status.get() == null and task.nowNs() < deadline) {
+    while (env.buffers.notices.get() == null and task.nowNs() < deadline) {
         _ = plugin.tick();
         std.Thread.yield() catch {};
     }
-    try t.expectEqualStrings("bg:pong", env.buffers.status.get() orelse "");
+    try t.expectEqualStrings("bg:pong", env.buffers.notices.get() orelse "");
+    try t.expect(env.buffers.status.get() == null); // no plugin chip was published
     try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
 }
 

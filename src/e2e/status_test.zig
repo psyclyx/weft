@@ -221,6 +221,35 @@ test "e2e/status: the bar carries no one pane's detail, and a message on any lin
     try t.expect(later.has("a.zig")); // the rest of the bar stays
 }
 
+test "e2e/status: background-notice — a background notice is brief and never replaces a plugin's own chip" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.zig", "const a = 1;\n");
+    ed.applyWindow();
+    // dap's chip, as it publishes it while a session runs.
+    ed.buffers.status.set("● *debug* · running");
+
+    // A plugin says something from a background entry — lsp refusing to
+    // start, say. It shows, beside the chip, not in its place…
+    core.wasm_host.noteBackground(ed.ctx, "lsp", "lsp: no server here");
+    const said = core.task.nowNs();
+    ed.gpa.free(try ed.renderCompositeAt(said));
+    const now = try lineOf(ed, try barPane(ed));
+    errdefer now.print();
+    try t.expect(now.has("● *debug* · running"));
+    try t.expect(now.has("lsp: no server here"));
+
+    // …and it is brief, as a message is; the chip stays.
+    ed.gpa.free(try ed.renderCompositeAt(said + 30 * std.time.ns_per_s));
+    const later = try lineOf(ed, try barPane(ed));
+    errdefer later.print();
+    try t.expect(later.has("● *debug* · running"));
+    try t.expect(!later.has("lsp: no server here"));
+}
+
 test "e2e/status: a pane's own line still says where its entry stands" {
     const gpa = t.allocator;
     var proj: h.Project = undefined;

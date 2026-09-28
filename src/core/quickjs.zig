@@ -931,7 +931,7 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const start = ed.text().byteLen();
-    command.renderInto(gpa, &ctx.buffers.status, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
+    command.renderInto(gpa, &ctx.buffers.notices, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
 
@@ -1061,7 +1061,7 @@ pub fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: 
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
     const ed = b.textEditor() orelse return;
     try b.setTool(gpa, TranscriptDoc.projection_author);
-    try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, &ed.doc, &conv.subs);
+    try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.notices, tr, &ed.doc, &conv.subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
     // safe to grab right here (nothing else claims on `ed.doc`
@@ -1129,14 +1129,14 @@ pub fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text:
     if (sub == null or sub.?.doc != doc) {
         // Slow path: no trustworthy cached claim (see this fn's doc
         // comment for the two cases) — a full re-fill is always correct.
-        try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, doc, &conv.subs);
+        try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.notices, tr, doc, &conv.subs);
         conv.live_sub = TranscriptDoc.lastRowClaim(&conv.subs, doc);
         return;
     }
     // Fast path: grow the buffer and the one claim that names this row,
     // nothing else touched.
     const at = sub.?.resolve().end;
-    try command.renderInto(gpa, &self.activeCtx().buffers.status, doc, .plugin, TranscriptDoc.projection_author, &.{
+    try command.renderInto(gpa, &self.activeCtx().buffers.notices, doc, .plugin, TranscriptDoc.projection_author, &.{
         .{ .range = .{ .start = at, .end = at }, .bytes = text },
     });
     try sub.?.extendEnd(gpa, at + text.len);
@@ -1486,7 +1486,7 @@ pub fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const end = ed.text().byteLen();
-    command.renderInto(gpa, &bufs.status, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
+    command.renderInto(gpa, &bufs.notices, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// The framed blob the shim encodes — one decoder, shared with the guest ABI
@@ -2080,7 +2080,7 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     }
     // Reached only in LIVE mode (config-eval already returned above). A
     // resident plugin's BACKGROUND `weft_on_output` has no head that asked:
-    // what it says goes to the system's status feed, exactly as the wasm
+    // what it says is a notice to the system (`Buffers.notices`), exactly as the wasm
     // plane's `hEcho` routes it — never the head's echo line, never a trap.
     if (!(br.in_dispatch or br.loading)) return perm_gate.noteBackground(br.activeCtx(), br.owner, msg);
     br.activeCtx().head.echo.clearRetainingCapacity();
