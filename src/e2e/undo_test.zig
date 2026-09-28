@@ -147,3 +147,87 @@ test "e2e/undo: ide.js — a word typed is ONE step; moving the caret and typing
     ed.press("C-z", "");
     try expectText(ed, "\n");
 }
+
+// ── The undo tree (undo_tree, config/undo.js) ────────────────────────
+
+const projection = @import("projection_test.zig");
+const NodeId = h.semantic_model.scene.NodeId;
+
+/// Where `node` of the scene shown in `pane` was drawn — its hit's centre.
+fn pointAtNodeIn(ed: *Editor, pane: u32, node: NodeId) ?[2]f32 {
+    const v = ed.ensureView() catch return null;
+    for (v.pane_maps[0..v.pane_map_count]) |m| {
+        if (m.pane != pane) continue;
+        for (m.hits) |hit| if (hit.node == node)
+            return .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
+    }
+    return null;
+}
+
+/// Step `k` of the history, as the tree draws it (`undo_tree`'s `step_base`).
+fn stepNode(k: u64) NodeId {
+    return @enumFromInt(2 + k);
+}
+
+fn expectEditorText(ed: *Editor, doc: *h.core.Editor, want: []const u8) !void {
+    const got = try doc.text().toOwnedSlice(ed.gpa);
+    defer ed.gpa.free(got);
+    try t.expectEqualStrings(want, got);
+}
+
+test "e2e/undo: config.js — SPC u shows the undo tree beside the editor; a click on the other branch brings the text there" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("u.txt", "one\n");
+    const doc = ed.buffers.active().textEditor().?;
+
+    // Two branches from the start: " two" typed, undone, " three" typed.
+    keys(ed, &.{"A"});
+    ed.typeText(" two");
+    ed.press("Escape", "");
+    ed.press("u", "u");
+    keys(ed, &.{"A"});
+    ed.typeText(" three");
+    ed.press("Escape", "");
+    try expectEditorText(ed, doc, "one three\n");
+
+    ed.chord("SPC u");
+    ed.applyWindow();
+    const pane = try chrome.viewportPane(ed, "undo");
+    const entry = try projection.paneEntry(ed, pane);
+    try t.expect(std.mem.startsWith(u8, entry.designationText(), "weft://here/undo-tree/"));
+    {
+        const text = try ed.semanticText(entry.scene_selection.view.?);
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "1 + two") != null);
+        try t.expect(std.mem.indexOf(u8, text, "2 + three") != null);
+    }
+    app.proj.shot(ed, "undo-tree");
+
+    // A click on the undone branch: " three" leaves, " two" comes back.
+    const at = pointAtNodeIn(ed, pane.pane().id, stepNode(1)) orelse return error.StepNotDrawn;
+    ed.click(at);
+    ed.applyWindow();
+    try expectEditorText(ed, doc, "one two\n");
+    try t.expectEqual(@as(u32, 1), doc.history.currentNode());
+    // And back: every step is a click away.
+    ed.click(pointAtNodeIn(ed, pane.pane().id, stepNode(2)) orelse return error.StepNotDrawn);
+    ed.applyWindow();
+    try expectEditorText(ed, doc, "one three\n");
+
+    // By keys, in the grammar's own words for a listing: back through the
+    // steps in the order they were taken — the other branch, then the
+    // original — and activate it: the original text.
+    try t.expect(ed.head.scene_selection.head() == stepNode(2));
+    ed.press("k", "k");
+    try t.expect(ed.head.scene_selection.head() == stepNode(1));
+    ed.press("k", "k");
+    try t.expect(ed.head.scene_selection.head() == stepNode(0));
+    ed.press("Return", "");
+    ed.applyWindow();
+    try expectEditorText(ed, doc, "one\n");
+    try t.expectEqual(@as(u32, 0), doc.history.currentNode());
+}

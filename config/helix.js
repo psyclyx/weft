@@ -67,6 +67,7 @@ weft.plugin("acp.js");
 weft.use("defaults"); // picker and which-key navigation keys
 weft.use("semantic"); // SPC v, bound into helix-structural (and vim's layer)
 weft.use("panel");    // a hidden bottom panel the problems list and terminal take
+weft.use("undo");     // the undo history as a tree, docked right when shown (SPC u)
 // weft.use("menus"); weft.use("menubar"); // File, Edit, … with helix's keys beside each row (F10, Alt+letter)
 
 // ── Values ───────────────────────────────────────────────────────────
@@ -160,6 +161,7 @@ weft.group("helix-normal", "SPC t", "Text toggles");
 weft.bind("helix-normal", "SPC SPC", "files.find");
 weft.bind("helix-normal", "SPC :", "palette.open");
 weft.bind("helix-normal", "SPC ,", "buffer.pick");
+weft.bind("helix-normal", "SPC u", "undo-tree.open"); // the undo history as a tree (config/undo.js)
 
 // SPC O — `O s` asks the focused entry for the persistence intention first:
 // in a *git-commit* draft that commits, in a note it saves.

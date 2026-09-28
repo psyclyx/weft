@@ -18,6 +18,7 @@ Edit	format	2	Format with Language Server	lsp.format
 Edit	history	10	Undo	edit.undo
 Edit	history	20	Redo	edit.redo
 Edit	history	30	Repeat Last Change	edit.repeat
+Edit	history	40	Undo History	undo-tree.open
 Edit	refactor	1	Rename Symbol…	lsp.rename
 Edit	refactor	1	Rename Symbol…	plugin.code.rename
 Edit	refactor	2	Code Actions…	lsp.code-actions

@@ -193,9 +193,9 @@ pub const UndoLog = struct {
     ///   `<id>\t<parent>\t<flags>\t<inserted>\t<removed>\t<text>`
     ///
     /// `flags` holds `c` for the current node, `a` for a node applied (on the
-    /// path to it), `r` for the child its parent's redo walks to. `text` is
-    /// the step's summary text (`Summary`), prefixed `-` when it is text the
-    /// step removed, with tabs and line breaks shown as `→` and `⏎`. Folds in
+    /// path to it), `r` for the child its parent's redo walks to, `x` when
+    /// `text` is text the step removed. `text` is the step's summary text
+    /// (`Summary`), with tabs and line breaks shown as `→` and `⏎`. Folds in
     /// pending own commits first. Borrowed until the next call.
     pub fn describe(self: *UndoLog, gpa: Allocator, doc: *const Document) Allocator.Error![]const u8 {
         try self.ingest(gpa, doc);
@@ -204,7 +204,7 @@ pub const UndoLog = struct {
         for (0..self.nodeCount()) |i| {
             const id: NodeId = @intCast(i);
             const n = self.nodeAt(id).?;
-            var flags: [3]u8 = undefined;
+            var flags: [4]u8 = undefined;
             var nf: usize = 0;
             if (id == self.current) {
                 flags[nf] = 'c';
@@ -218,7 +218,11 @@ pub const UndoLog = struct {
                 flags[nf] = 'r';
                 nf += 1;
             }
-            try w.print(gpa, "{d}\t{d}\t{s}\t{d}\t{d}\t{s}", .{ id, n.parent, flags[0..nf], n.summary.inserted, n.summary.removed, if (n.summary.text_removed) "-" else "" });
+            if (n.summary.text_removed) {
+                flags[nf] = 'x';
+                nf += 1;
+            }
+            try w.print(gpa, "{d}\t{d}\t{s}\t{d}\t{d}\t", .{ id, n.parent, flags[0..nf], n.summary.inserted, n.summary.removed });
             const text = n.summary.text();
             // Whole scalars only: the summary may have cut one short.
             var end = text.len;
@@ -768,7 +772,7 @@ test "undo: a new own commit after an undo BRANCHES — redo takes the new step,
         "0\t0\ta\t0\t0\t\n" ++
             "1\t0\t\t3\t0\tabc\n" ++
             "2\t0\tar\t3\t0\txyz\n" ++
-            "3\t2\tcar\t0\t2\t-yz\n",
+            "3\t2\tcarx\t0\t2\tyz\n",
         try log.describe(gpa, &doc),
     );
 }

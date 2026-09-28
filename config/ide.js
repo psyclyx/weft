@@ -304,6 +304,10 @@ bindWorkspace("C-j", "panel.toggle");
 bindWorkspace("C-grave", "terminal.open");
 bindWorkspace("C-S-m", "problems.open");
 
+// The undo history as a tree, docked right (config/undo.js): Edit ▸ Undo
+// History shows and hides it, and a click on a step goes there.
+weft.use("undo");
+
 // ── The status bar ───────────────────────────────────────────────────
 // One bar along the bottom of the window (config/statusbar.js), presenting
 // the editor's status: the place, git's branch, the problems counts and a
