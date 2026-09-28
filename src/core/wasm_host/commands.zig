@@ -381,6 +381,20 @@ pub fn hCommandCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     results[0] = @intCast(p.activeCtx().commands.count());
 }
 
+/// Where the command registry and the config's presentations stand: moves
+/// whenever what a typed name could mean changes (a command bound, unbound,
+/// described), so a guest's cache of a reading keys on it. Only equality is
+/// meaningful; it wraps.
+pub fn hCommandRevision(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    const described: u64 = if (ctx.presentations) |pr| pr.revision else 0;
+    // Both only ever count up, so their sum moves whenever either does.
+    results[0] = @bitCast(@as(u32, @truncate(ctx.commands.revision +% described)));
+}
+
 pub fn hCommandName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));

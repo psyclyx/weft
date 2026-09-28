@@ -95,11 +95,14 @@ pub fn Invoker(comptime cfg: Config) type {
         // (~a tenth of a millisecond against a full registry, an order of
         // magnitude under a frame). The head token stops changing the moment a
         // space is typed, and this cache makes every keystroke after that one
-        // free — which is the half where a hint is doing the most work.
+        // free — which is the half where a hint is doing the most work. A
+        // short name is a reading of the WHOLE registry (only one command has
+        // it), so the cache is of one registry revision: a command loaded
+        // or unloaded since makes it ask again.
         var cached_name: [NAME_CAP]u8 = undefined;
         var cached_len: usize = 0;
         var cached_index: usize = 0;
-        var cached_valid: bool = false;
+        var cached_revision: ?u32 = null;
 
         /// The argument prompt. Its accept stores one argument and either asks
         /// for the next or runs — so a two-argument command is two questions,
@@ -439,10 +442,11 @@ pub fn Invoker(comptime cfg: Config) type {
             put(&cand_buf, &cand_len, cn);
         }
 
-        /// This command's index in the registry, or null. Cached on the name,
-        /// because the `:` line resolves once per keystroke.
+        /// This command's index in the registry, or null. Cached on the name
+        /// and the registry's revision, because the `:` line resolves once
+        /// per keystroke.
         fn resolve(cmd: []const u8) ?usize {
-            if (cached_valid and cached_len == cmd.len and
+            if (cached_revision == weft.commandRevision() and cached_len == cmd.len and
                 std.mem.eql(u8, cached_name[0..cached_len], cmd)) return cached_index;
             const n = weft.commandCount();
             var i: usize = 0;
@@ -461,7 +465,7 @@ pub fn Invoker(comptime cfg: Config) type {
             cached_len = typed.len;
             @memcpy(cached_name[0..cached_len], typed);
             cached_index = i;
-            cached_valid = true;
+            cached_revision = weft.commandRevision();
         }
 
         var note_buf: [256]u8 = undefined;

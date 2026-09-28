@@ -24,6 +24,11 @@ pub fn Registry(comptime T: type) type {
         /// class, and the e2e id gate refuses it by reading this.
         rebinds: usize = 0,
         first_rebound: ?Name = null,
+        /// Moves on every change to what a name resolves to — a name
+        /// interned, bound, rebound or unbound — so a reader that derived
+        /// something from the whole registry (a short name only one command
+        /// has) knows when to derive it again.
+        revision: u64 = 0,
 
         pub const Name = enum(u32) { _ };
 
@@ -42,6 +47,7 @@ pub fn Registry(comptime T: type) type {
                 errdefer _ = self.map.pop();
                 gop.key_ptr.* = try gpa.dupe(u8, name);
                 gop.value_ptr.* = null;
+                self.revision +%= 1;
             }
             return @enumFromInt(gop.index);
         }
@@ -65,15 +71,18 @@ pub fn Registry(comptime T: type) type {
                 if (self.first_rebound == null) self.first_rebound = n;
             }
             self.map.values()[@intFromEnum(n)] = value;
+            self.revision +%= 1;
             return n;
         }
 
         pub fn bindName(self: *Self, name: Name, value: T) void {
             self.map.values()[@intFromEnum(name)] = value;
+            self.revision +%= 1;
         }
 
         pub fn unbind(self: *Self, name: Name) void {
             self.map.values()[@intFromEnum(name)] = null;
+            self.revision +%= 1;
         }
 
         /// The binding *right now* — late binding is exactly this lookup

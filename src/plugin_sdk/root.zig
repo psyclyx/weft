@@ -1051,6 +1051,12 @@ pub fn runArgsIn(where: OfferContext, cmd: []const u8, args: []const []const u8)
 pub fn commandCount() usize {
     return e.wl_command_count();
 }
+/// Where the command registry stands: a different value means a command was
+/// bound, unbound or described since. Key any reading of the whole registry
+/// on it.
+pub fn commandRevision() u32 {
+    return e.wl_command_revision();
+}
 /// The `i`-th command's name (into `scratch`), or null for an empty slot.
 pub fn commandName(i: usize) ?[]const u8 {
     const n = e.wl_command_name(@intCast(i), p(&scratch), scratch.len);

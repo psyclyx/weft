@@ -153,7 +153,10 @@ All of §1.
   answers are listed, never guessed. Tab completes the same reading, then by
   prefix, and shows the candidates when there are several. Not aliases:
   nothing is registered twice, and `internal` commands are never offered by
-  a short name or a label.
+  a short name or a label. A reading is a fact about the whole registry, so
+  the line's cache of one is kept only for the registry's revision
+  (`wl_command_revision`: a command bound, unbound or described moves it) —
+  a plugin loaded later with its own `listen` makes `listen` ambiguous.
 
 Found on the way: which-key's page clamp, stepping 12 but clamping to a
 multiple of 32, cycled a short menu (0, 12, 0, …) under repeated page-down;

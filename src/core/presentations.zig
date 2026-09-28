@@ -27,6 +27,9 @@ const codec = @import("weft_membrane").presentation;
 /// each decoded from is kept, and the fields borrow it).
 pub const Presentations = struct {
     map: std.StringArrayHashMapUnmanaged(Entry) = .empty,
+    /// Moves whenever a description is made or dropped — what a person may
+    /// call a command, and whether it is offered at all, changed.
+    revision: u64 = 0,
 
     const Entry = struct {
         text: []u8,
@@ -63,6 +66,7 @@ pub const Presentations = struct {
             };
         }
         gop.value_ptr.* = .{ .text = text, .owner = owned_owner, .value = codec.decode(text) };
+        self.revision +%= 1;
     }
 
     /// Forget every description `owner` made (a config reload).
@@ -76,6 +80,7 @@ pub const Presentations = struct {
                 gpa.free(v.owner);
                 self.map.swapRemoveAt(i);
                 gpa.free(k);
+                self.revision +%= 1;
             } else i += 1;
         }
     }

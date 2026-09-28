@@ -1620,7 +1620,7 @@ pub const ShortNames = struct {
         ran[1] += 1;
         return .nil;
     }
-    fn twinB(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+    pub fn twinB(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
         ran[2] += 1;
         return .nil;
     }

@@ -127,6 +127,7 @@ pub extern "weft:abi/1" fn wl_run_argv(ptr: u32, len: u32, vec: u32, argc: u32) 
 pub extern "weft:abi/1" fn wl_run_argv_at(where: u32, ptr: u32, len: u32, vec: u32, argc: u32) i32;
 // Introspection (palettes/help/buffers pickers).
 pub extern "weft:abi/1" fn wl_command_count() u32;
+pub extern "weft:abi/1" fn wl_command_revision() u32;
 pub extern "weft:abi/1" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_owner(i: u32, out_ptr: u32, out_cap: u32) i32;

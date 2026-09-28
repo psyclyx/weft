@@ -404,6 +404,7 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     // registry — no `command.run` at all.
     .{ .name = "wl_register", .args = 0 },
     .{ .name = "wl_command_count", .args = 0 },
+    .{ .name = "wl_command_revision", .args = 0 },
     .{ .name = "wl_command_name", .args = 0 },
     .{ .name = "wl_command_summary", .args = 0 },
     .{ .name = "wl_command_owner", .args = 0 },

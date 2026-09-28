@@ -2123,6 +2123,30 @@ test "authoring: the `:` line reads a short name, then a label, lists an ambiguo
     try t.expectEqualStrings("kept", disk);
 }
 
+test "authoring: a short name the `:` line read once is read again after the registry changes — a second `frob-widget` makes it ambiguous" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const names = h.ShortNames;
+    try names.bind(ed);
+
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    // A plugin loaded later registers another command with that short name:
+    // the word no longer names one command, so it runs neither.
+    _ = try ed.ctx.commands.bind(gpa, "zzq.frob-widget", core.command.define("zzq.frob-widget", "Another.", names.twinB).present(.{ .label = "Another Gadget" }));
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    try t.expectEqual(@as(usize, 0), names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.frob-widget") != null);
+    // …and once it is gone again, the word is the first one's once more.
+    ed.ctx.commands.unbind(ed.ctx.commands.find("zzq.frob-widget").?);
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;
