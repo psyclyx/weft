@@ -39,7 +39,9 @@ const cmds = [_]weft.CommandEntry{
     // Plumbing and diagnostics: in the palette, not in a menu — a
     // conventional File menu has no "remember" or "where is the root" row.
     .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "Remember this project so it shows up in recents.", .label = "Remember Project" },
-    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the files you visited recently.", .label = "List Recent Files" },
+    // The list as text, for the dashboard's section and a picker to read;
+    // a person chooses from `project.open-recent`.
+    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the files you visited recently.", .internal = true },
     .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "List recently visited project roots.", .internal = true },
     .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "Say where this project's root is.", .label = "Show Project Root" },
     .{ .name = "project.open-recent", .arity = .whole, .call = openRecent, .summary = "Choose a file you visited recently and open it.", .label = "Open Recent", .prompts = true, .menu = "File", .group = "open", .order = 6, .icon = "history" },

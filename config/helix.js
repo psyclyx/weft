@@ -165,7 +165,7 @@ weft.bind("helix-normal", "SPC ,", "buffer.pick");
 weft.bind("helix-normal", "SPC O f", "files.find");
 weft.bind("helix-normal", "SPC O s", ["std.persistence.save", "file.save"]);
 weft.bind("helix-normal", "SPC O S", "file.save-as");
-weft.bind("helix-normal", "SPC O r", "project.recent");
+weft.bind("helix-normal", "SPC O r", "project.open-recent");
 weft.bind("helix-normal", "SPC O d", "files.browse");
 
 weft.bind("helix-normal", "SPC B d", "buffer.close");
@@ -186,7 +186,7 @@ weft.bind("helix-normal", ".", "edit.repeat");
 // lands in the `/` register vim reads too. `C-o`/`C-i` walk the jumplist, a
 // focused view's own history first — the plugin binds those as well.
 
-weft.bind("helix-normal", "SPC l p", "project.recent");
+weft.bind("helix-normal", "SPC l p", "project.open-recent");
 weft.bind("helix-normal", "SPC l f", "files.find");
 weft.bind("helix-normal", "SPC l R", "project.show-root");
 weft.bind("helix-normal", "SPC l /", "grep.search");

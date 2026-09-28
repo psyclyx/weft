@@ -350,3 +350,25 @@ test "e2e/identity: which-key reads the keys inside `d`, `d i`, `d a` and helix'
     try t.expect(h.whichKeyShows(ed, "Goto Last Line"));
     ed.press("Escape", "");
 }
+
+test "e2e/identity: the recent-files keys open the picker; the text blob behind it is plumbing" {
+    // `project.recent` answers with the list as text, for the dashboard and
+    // the pickers to read; a person pressing SPC f r wants to choose a file.
+    const gpa = t.allocator;
+    const Key = struct { config: []const u8, mode: []const u8, key: []const u8 };
+    const keys = [_]Key{
+        .{ .config = "config.js", .mode = "normal", .key = "SPC f r" },
+        .{ .config = "config.js", .mode = "normal", .key = "SPC p p" },
+        .{ .config = "helix.js", .mode = "helix-normal", .key = "SPC O r" },
+        .{ .config = "helix.js", .mode = "helix-normal", .key = "SPC l p" },
+    };
+    for (keys) |k| {
+        var b: Booted = .{};
+        try b.init(gpa, k.config);
+        defer b.deinit();
+        var key_buf: [64]u8 = undefined;
+        const arms = b.ed.keymap.lookupArms(k.mode, core.Keymap.normalizeKey(&key_buf, k.key)) orelse return error.KeyUnbound;
+        try t.expectEqualStrings("project.open-recent", arms[0]);
+        try t.expect(core.presentations.of(b.ed.ctx, "project.recent").?.internal);
+    }
+}

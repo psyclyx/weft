@@ -280,7 +280,7 @@ weft.bind("normal", "SPC ,", "buffer.pick");      // SPC ,   — switch buffer
 weft.bind("normal", "SPC f f", "files.find");
 weft.bind("normal", "SPC f s", ["std.persistence.save", "file.save"]);
 weft.bind("normal", "SPC f S", "file.save-as");
-weft.bind("normal", "SPC f r", "project.recent");
+weft.bind("normal", "SPC f r", "project.open-recent");
 weft.bind("normal", "SPC f d", "files.browse");
 
 // SPC b — buffers
@@ -369,7 +369,7 @@ weft.bind("normal", "SPC s p", "grep.search");
 weft.bind("normal", "SPC s w", "grep.search-word");
 
 // SPC p — project
-weft.bind("normal", "SPC p p", "project.recent");
+weft.bind("normal", "SPC p p", "project.open-recent");
 weft.bind("normal", "SPC p f", "files.find");
 weft.bind("normal", "SPC p R", "project.show-root"); // echo the VCS root (projectile-style)
 weft.bind("normal", "SPC p /", "grep.search");
