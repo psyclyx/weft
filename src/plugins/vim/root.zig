@@ -238,9 +238,13 @@ fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
     if (op_copies) yankCurrent(r.start, r.end, false);
     if (op_edit_cmd) |cmd| {
+        // A change (`c`) moves FIRST: a motion cuts the undo unit, and the
+        // delete and the typing that follows it are one change, one `u`.
+        const changes = std.mem.eql(u8, op_after, "insert");
+        if (changes) weft.jump(r.start);
         weft.runRangeArg(cmd, hnd);
         flashAfter(hnd);
-        weft.jump(r.start);
+        if (!changes) weft.jump(r.start);
         enterAfterOp();
     } else {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
@@ -1339,12 +1343,15 @@ fn visualChange() void {
         selected_register = slot;
     }
     const r = visualRange();
-    if (r) |s| {
+    const range = if (r) |s| anchored: {
         yankVisual(s);
-        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
-    }
+        break :anchored weft.anchorRange(.{ .start = s.start, .end = s.end });
+    } else null;
+    // Clear and move FIRST: a motion cuts the undo unit, and the delete and
+    // the typing that follows it are one change, one `u`.
     weft.run("selection.clear");
     if (r) |s| weft.jump(s.start);
+    if (range) |h| weft.runRangeArg("operators.delete", h);
     enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (comment.toggle, operators.upcase, …) over
