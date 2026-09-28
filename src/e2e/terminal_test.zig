@@ -284,3 +284,81 @@ test "e2e/terminal: $SHELL (bash, zsh or sh) runs in the place's environment, an
     defer gpa.free(text);
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, text, "echo $((6*7)) >&2"));
 }
+
+/// A flood through the terminal, timed frame by frame: how long the output
+/// takes to reach the screen, and what one frame (read the pty, emulate,
+/// publish the changed rows, build and draw) costs meanwhile. Opt-in
+/// (`WEFT_BENCH_TERMINAL=1`): it measures, it does not gate.
+fn floodBench(cmd: []const u8, label: []const u8) !void {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openShell(&app, test_shell);
+    var line_buf: [256]u8 = undefined;
+    // The marker is spelled apart on the typed line, so only the shell's
+    // answer reads `flood-done`.
+    enter(ed, try std.fmt.bufPrint(&line_buf, "{s}; echo flood-\"\"done", .{cmd}));
+    var frames: std.ArrayList(u64) = .empty;
+    defer frames.deinit(gpa);
+    const start = core.task.nowNs();
+    const deadline = start + 120 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        const f0 = core.task.nowNs();
+        const pixels = try ed.renderComposite();
+        gpa.free(pixels);
+        try frames.append(gpa, core.task.nowNs() - f0);
+        const text = h.toolText(ed, term) orelse continue;
+        defer gpa.free(text);
+        if (std.mem.indexOf(u8, text, "flood-done") != null) break;
+    } else return error.FloodNeverEnded;
+    const total = core.task.nowNs() - start;
+    std.mem.sort(u64, frames.items, {}, std.sort.asc(u64));
+    const n = frames.items.len;
+    std.debug.print("[bench/terminal] {s}: {d} ms to the screen, {d} frames; frame p50 {d} us, p90 {d} us, max {d} us\n", .{
+        label, total / std.time.ns_per_ms, n, frames.items[n / 2] / 1000, frames.items[n * 9 / 10] / 1000, frames.items[n - 1] / 1000,
+    });
+}
+
+test "bench/terminal: yes and ls -R floods" {
+    if (std.c.getenv("WEFT_BENCH_TERMINAL") == null) return error.SkipZigTest;
+    try floodBench("yes | head -n 200000", "yes x200000");
+    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000");
+    try floodBench("true", "idle prompt");
+}
+
+/// The median of `rounds` forced frames of `ed` as it is now, in µs.
+fn medianFrameUs(ed: *Editor, rounds: usize) !u64 {
+    var frames: [64]u64 = undefined;
+    const n = @min(rounds, frames.len);
+    for (frames[0..n]) |*f| {
+        const f0 = core.task.nowNs();
+        const pixels = try ed.renderComposite();
+        ed.gpa.free(pixels);
+        f.* = core.task.nowNs() - f0;
+    }
+    std.mem.sort(u64, frames[0..n], {}, std.sort.asc(u64));
+    return frames[n / 2] / 1000;
+}
+
+test "bench/terminal: a frame with a full terminal in the panel, against one with text there" {
+    if (std.c.getenv("WEFT_BENCH_TERMINAL") == null) return error.SkipZigTest;
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    // The baseline: the problems list in the panel (text rows).
+    try ide.openFile(ed, "x.txt", "x\n");
+    ed.press("C-S-m", "");
+    ed.applyWindow();
+    const text_us = try medianFrameUs(ed, 32);
+    // The same panel, a terminal with every row full and coloured.
+    try ed.setConfig("terminal", "shell", test_shell);
+    ed.press("C-grave", "");
+    enter(ed, "for i in $(seq 40); do printf '\\033[3%dm%s\\033[0m\\n' $((i%8)) \"$(seq -s ' ' 60)\"; done; echo full-\"\"screen");
+    try waitFor(ed, "full-screen");
+    const grid_us = try medianFrameUs(ed, 32);
+    std.debug.print("[bench/terminal] frame median: text panel {d} us, full terminal panel {d} us\n", .{ text_us, grid_us });
+}
