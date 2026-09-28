@@ -46,6 +46,7 @@ pub const Buffers = @import("Buffers.zig");
 /// core's tests do rather than hand-roll a fourth copy of it.
 pub const TestHost = @import("TestHost.zig");
 pub const Keymap = @import("Keymap.zig");
+pub const step = @import("step.zig");
 pub const input = @import("weft_input");
 pub const TextCommit = input.TextCommit;
 pub const Head = @import("Head.zig");

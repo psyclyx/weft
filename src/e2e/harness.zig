@@ -2328,6 +2328,7 @@ pub const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "offers", @embedFile("guest_offers_wasm") },
     .{ "menu", @embedFile("guest_menu_wasm") },
     .{ "symbols", @embedFile("guest_symbols_wasm") },
+    .{ "undo_tree", @embedFile("guest_undo_tree_wasm") },
     .{ "panel", @embedFile("guest_panel_wasm") },
     .{ "problems", @embedFile("guest_problems_wasm") },
     .{ "terminal", @embedFile("guest_terminal_wasm") },

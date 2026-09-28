@@ -203,14 +203,14 @@ pub const CompletionUi = struct {
         const cur = editor.cursorOffset();
         const start = cur -| self.prefix_len;
         // The one edit door: authored by the invoking principal and grade
-        // -gated (a view peer's accept is refused, leaving no ghost). The
-        // user path owns undo ingest, so we only mark the unit boundary.
+        // -gated (a view peer's accept is refused, leaving no ghost). Which
+        // undo step the accept belongs to is the grammar's declaration, cut
+        // by dispatch (`step.zig`): its own step where typing runs are
+        // steps, part of the insert session where that is one.
         ctx.edit(.{ .start = start, .end = cur }, choice) catch |e| {
             if (e == error.Unauthorized) return;
             return e;
         };
-        // Completion is its own undo unit — the next typing starts fresh.
-        editor.history.barrier();
     }
 };
 

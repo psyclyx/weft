@@ -170,6 +170,10 @@ weft.use("defaults");
 // terminal each bring themselves into it (SPC o p, SPC o t), one at a time.
 weft.use("panel");
 
+// `undo` docks the undo history, drawn as the tree it is, on the right: hidden
+// until SPC u shows it (config/undo.js).
+weft.use("undo");
+
 // ── Values: weft.set(owner, key, value) ──────────────────────────────
 // Every value has an OWNER — the plugin (or core namespace) that reads it.
 // There is no grab-bag namespace; an unknown owner is refused, not stored.
@@ -443,6 +447,7 @@ weft.bind("normal", "SPC o h", "http.get");     // fetch a URL into its own *htt
 weft.bind("normal", "SPC o p", "problems.open");     // the diagnostics list, in the bottom panel
 weft.bind("normal", "SPC o t", "terminal.open");     // the shell, in the bottom panel
 weft.bind("normal", "SPC o P", "panel.toggle"); // hide or show whichever the panel holds
+weft.bind("normal", "SPC u", "undo-tree.open");     // the undo history as a tree, docked right
 
 // SPC a — coding agents (ACP). Each `acp.start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo

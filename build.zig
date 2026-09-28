@@ -513,6 +513,9 @@ const guests = [_]Guest{
     // The symbols projection: an entry's outline as a tree of rows — what an
     // outline viewport presents `as: "symbols"` (config/outline.js).
     .{ .name = "symbols", .import = "guest_symbols_wasm", .install = true },
+    // The undo-tree projection (doc/undo.md): an entry's undo history drawn as
+    // the tree it is, a step a click away.
+    .{ .name = "undo_tree", .import = "guest_undo_tree_wasm", .install = true },
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },

@@ -160,6 +160,33 @@ displays: std.StringArrayHashMapUnmanaged(ModeDisplay) = .empty,
 /// two grammars loaded side by side each keep theirs — there is no
 /// system-wide granularity for the last loader to overwrite.
 granularities: std.StringArrayHashMapUnmanaged(Granularity) = .empty,
+/// mode → what one undo step is while a head is in it (`UndoStep`): the
+/// GRAMMAR's declaration for its own modes, read down the fallback chain
+/// (`undoStepOf`). Dispatch reads it wherever a keystroke runs something
+/// (`step.zig`); core names no mode and no grammar.
+undo_steps: std.StringArrayHashMapUnmanaged(UndoStep) = .empty,
+
+/// What ONE undo step is while a head is in a mode — the grammar's
+/// declaration (`mode.set-undo-step <mode> command|continue|run`), read by
+/// dispatch at every point a keystroke runs something (doc/undo.md).
+///
+///   command   every command is its own step: the unit open before it is
+///             cut. What a mode no grammar declared gets — vim's normal,
+///             every menu, every picker.
+///   continue  a command here CONTINUES the step that entered the mode: vim's
+///             and helix's insert, so `cw…Esc` and `o…Esc` are one step.
+///   run       a run of the SAME command is one step, and any other command
+///             cuts: conventional typing, where a word typed is one step and
+///             moving the caret (another command) ends it.
+pub const UndoStep = enum(u32) {
+    command,
+    @"continue",
+    run,
+
+    pub fn parse(name: []const u8) ?UndoStep {
+        return std.meta.stringToEnum(UndoStep, name);
+    }
+};
 
 /// What kind of state a mode is, for its chip's colour — the theme maps
 /// each to a colour (`Theme.modeChipColor`). Declared with the display name;
@@ -230,6 +257,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.displays.deinit(gpa);
     for (self.granularities.keys()) |k| gpa.free(k);
     self.granularities.deinit(gpa);
+    for (self.undo_steps.keys()) |k| gpa.free(k);
+    self.undo_steps.deinit(gpa);
     // A keymap emptied and filled again is a change too, never a return to
     // a revision something derived from before.
     self.* = .{ .revision = self.revision +% 1 };
@@ -289,6 +318,30 @@ pub fn granularityOf(self: *const Keymap, mode: []const u8) ?Granularity {
         cur = self.parents.get(cur) orelse return null;
     }
     return null;
+}
+
+/// DECLARE what one undo step is while a head is in `mode` (and every mode
+/// falling back to it). Re-declaring replaces.
+pub fn setUndoStep(self: *Keymap, gpa: Allocator, mode: []const u8, step: UndoStep) Allocator.Error!void {
+    const gop = try self.undo_steps.getOrPut(gpa, mode);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = gpa.dupe(u8, mode) catch |err| {
+            self.undo_steps.swapRemoveAt(gop.index);
+            return err;
+        };
+    }
+    gop.value_ptr.* = step;
+}
+
+/// The undo step declared for `mode` or the nearest mode its fallback chain
+/// reaches; `command` where no grammar declared one on the way.
+pub fn undoStepOf(self: *const Keymap, mode: []const u8) UndoStep {
+    var cur = mode;
+    for (0..8) |_| {
+        if (self.undo_steps.get(cur)) |s| return s;
+        cur = self.parents.get(cur) orelse return .command;
+    }
+    return .command;
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`

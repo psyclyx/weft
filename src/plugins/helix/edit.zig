@@ -88,28 +88,25 @@ pub fn yank() void {
 
 /// Delete the selection, first yanking it into `slot` (null: no yank),
 /// leaving a caret where it was.
-fn remove(slot: ?u8, then: enum { delete, change }) void {
+fn remove(slot: ?u8) void {
     const r = sel.span(sel.get());
     if (slot) |s| weft.yankRangeIn(s, r.start, r.end, sel.isLinewise(r));
-    // A change places the caret FIRST: a selection change cuts the undo
-    // unit, and the delete and the typing after it are one change, one `u`.
-    if (then == .change) sel.put(sel.caret(r.start));
     weft.edit(r, "");
-    if (then == .delete) sel.put(sel.caret(r.start));
+    sel.put(sel.caret(r.start));
     noteEdit();
 }
 
 /// `d`'s text arm (and `A-d`, which keeps the register).
 pub fn delete(keep_register: bool) void {
     const slot = state.takeRegister();
-    remove(if (keep_register) null else slot, .delete);
+    remove(if (keep_register) null else slot);
     weft.exitToResting();
 }
 
 /// `c` (and `A-c`): delete the selection, then type where it was.
 pub fn change(keep_register: bool) void {
     const slot = state.takeRegister();
-    if (onText()) remove(if (keep_register) null else slot, .change);
+    if (onText()) remove(if (keep_register) null else slot);
     enterInsert();
 }
 

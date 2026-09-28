@@ -650,6 +650,10 @@ fn initExtra() void {
     // `editEach`), so `i` after `C` types on both lines.
     weft.setFallback("helix-insert", "default");
     weft.textInput("helix-insert", "edit.insert-text");
+    // One undo step, in helix's terms: a normal-mode command, and
+    // `helix-insert` CONTINUES the step that entered it (`c`, `o`, `i` and the
+    // typing after them are one `u`).
+    weft.runStr2("mode.set-undo-step", "helix-insert", "continue");
 
     // Select mode: helix-normal with motions that EXTEND. Everything else
     // falls through to helix-normal.
@@ -903,7 +907,6 @@ fn enterHelix() void {
 /// Escape RETURNS to the entry's declared resting state (§10.4) — it never
 /// picks one, so a projection's own resting mode survives an edit + Escape.
 fn hxNormal() void {
-    weft.run("edit.seal-undo");
     weft.exitToResting();
 }
 

@@ -321,7 +321,7 @@ test "document: peer lifecycle — duplicates rejected, slots reused" {
 const Editor = core.Editor;
 const task = core.task;
 
-test "editor: typing, movement, selection, vim-flavored undo units" {
+test "editor: typing, movement, selection, undo units cut between steps" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
@@ -331,8 +331,11 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
     try ed.insertText(gpa, "hello world");
     try t.expectEqual(@as(usize, 11), ed.cursorOffset());
 
-    // Move to line start, type — the placement is an undo barrier.
+    // Move to line start, type. The placement alone cuts nothing — a step is
+    // cut by dispatch where the grammar declares one (`step.zig`), which is
+    // what this barrier stands for.
     ed.placeCursor(0);
+    ed.history.barrier();
     try ed.insertText(gpa, ">> ");
     {
         const s = try ed.text().toOwnedSlice(gpa);
@@ -448,6 +451,7 @@ test "editor: typing, backspace and delete land at every caret, in reverse order
     defer ed.deinit(gpa);
 
     try ed.insertText(gpa, "aa bb cc");
+    ed.history.barrier(); // the seed is its own step
     try ed.setSelections(gpa, &.{ .{ .anchor = 2, .head = 2 }, .{ .anchor = 5, .head = 5 }, .{ .anchor = 8, .head = 8 } }, 2);
     try ed.insertText(gpa, "XY");
     try expectEdText(gpa, &ed, "aaXY bbXY ccXY");

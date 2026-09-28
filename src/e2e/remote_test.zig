@@ -335,6 +335,9 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     // backing peer's ops beside the unsaved edit; the retry lands both.
     try core.file.writeBytes(gpa, "shared/src/main.zig", "pub fn main() void {}\n// edited\n// theirs\n");
     te.moveTo(0);
+    // Another step (what a dispatch would cut: this drives the editor
+    // directly, and a caret move is no undo boundary of its own).
+    te.history.barrier();
     try te.insertText(gpa, "// mine\n");
     try te.requestSave(gpa);
     try t.expect(!awaitSave(te));

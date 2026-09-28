@@ -281,6 +281,16 @@ fn cStructuralFocus(ctx: *Context, args: struct { mode: []const u8, granularity:
     return ok;
 }
 
+/// `mode.set-undo-step <mode> command|continue|run` — a grammar's DECLARATION
+/// of what one undo step is while a head is in `mode` (`Keymap.UndoStep`).
+/// Per mode, read down the fallback chain; dispatch reads it wherever a
+/// keystroke runs something (`step.zig`) and knows no grammar's name.
+fn cUndoStep(ctx: *Context, args: struct { mode: []const u8, step: []const u8 }) anyerror!Value {
+    const step = @import("Keymap.zig").UndoStep.parse(args.step) orelse return error.InvalidArgument;
+    try ctx.keymap.setUndoStep(ctx.gpa, args.mode, step);
+    return ok;
+}
+
 fn cViewRefresh(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     return invokeSemanticAction(ctx, semantic_model.action.standard.refresh);
@@ -361,6 +371,39 @@ fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     const did = ed.redo(ctx.gpa, ctx.undoGate());
     flashChanged(ctx, &ed.doc, before);
     return undid(did);
+}
+
+/// `edit.undo-tree` — the active entry's history TREE as text, one line a
+/// step (`UndoLog.describe` says the shape): a data source for a tool that
+/// draws it (`weft.callString`). Empty where the entry holds no text.
+fn cUndoTree(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const ed = ctx.textEditor() catch return .{ .string = "" };
+    return .{ .string = try ed.history.describe(ctx.gpa, &ed.doc) };
+}
+
+/// `edit.undo-to <step> <entry>` — bring the active entry to step `<step>` of
+/// its history tree, wherever it is: undo up to the common ancestor, redo
+/// down the other branch, each through the invoking principal's undo gate.
+/// `<entry>` is the designation of the entry whose tree the step was read
+/// from; a different active entry refuses (a step number means nothing in
+/// another entry's tree). Empty: the active entry, whatever it is.
+fn cUndoTo(ctx: *Context, args: struct { step: []const u8, entry: []const u8 }) anyerror!Value {
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    if (args.entry.len > 0) {
+        var buf: [designation.max_len]u8 = undefined;
+        const here = designation.of(ctx.buffers.active(), &buf) orelse "";
+        if (!std.mem.eql(u8, here, args.entry)) return .{ .string = "undo: that step is in another entry's history" };
+    }
+    const step = std.fmt.parseInt(@import("undo.zig").NodeId, std.mem.trim(u8, args.step, " "), 10) catch return error.InvalidArgument;
+    const before = ed.doc.commitCount();
+    defer flashChanged(ctx, &ed.doc, before);
+    ed.undoTo(ctx.gpa, step, ctx.undoGate()) catch |e| return switch (e) {
+        error.NoSuchNode => .{ .string = "undo: no such step" },
+        error.Unauthorized, error.OutOfLimit, error.Collapsed => .{ .boolean = false },
+        else => e,
+    };
+    return ok;
 }
 
 /// Record what an undo/redo just put back as an `undo` flash. Only core sees
@@ -548,12 +591,10 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
 fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffers.active().textEditor() == null) return ok;
-    // Seal the open undo unit so the next edit starts a fresh one. Cursor
-    // motions already barrier (Editor.moveTo); this exposes the same seam to a
-    // modal plugin, which fires it on the boundaries a motion doesn't cover —
-    // notably LEAVING insert (vim's `i…Esc` is one undo unit; the next command
-    // must be its own, or `Esc` then `dd` then `u` reverses BOTH the typing and
-    // the delete instead of just the delete).
+    // Seal the open undo unit so the next edit starts a fresh one — a cut in
+    // the middle of a step, for a command that means one there. Where steps
+    // begin is otherwise the grammar's per-mode declaration, cut by dispatch
+    // (`mode.set-undo-step`, `step.zig`); nothing needs this to end a step.
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.history.barrier();
     return ok;
@@ -999,6 +1040,7 @@ const table = [_]command.Command{
     command.define("field.commit-edit", "Finish the field edit, applying the change when there is one.", cFieldEditCommit).present(.{ .internal = true }),
     command.define("field.cancel-edit", "Cancel the field edit, restoring the original text.", cFieldEditCancel).present(.{ .internal = true }),
     command.define("mode.set-structural-focus", "Declare whether a head in a mode focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
+    command.define("mode.set-undo-step", "Declare what one undo step is in a mode: each command, the step that entered it, or a run of one command.", cUndoStep).present(.{ .internal = true }),
     command.define("view.refresh", "Refresh the focused view.", cViewRefresh).present(.{ .label = "Refresh" }),
     command.define("view.revert", "Discard the focused view's draft and show it as it is.", cViewRevert).present(.{ .label = "Revert" }),
     command.define("view.apply", "Apply the focused view's draft.", cViewApply).present(.{ .label = "Apply" }),
@@ -1010,6 +1052,8 @@ const table = [_]command.Command{
     command.define("edit.delete-after", "Delete the selection, or the character after the cursor.", cDeleteForward).present(.{ .label = "Delete Forward" }),
     command.define("edit.undo", "Undo your most recent edit.", cUndo).present(.{ .label = "Undo", .icon = "undo" }),
     command.define("edit.redo", "Redo the edit you most recently undid.", cRedo).present(.{ .label = "Redo", .icon = "redo" }),
+    command.define("edit.undo-tree", "The entry's undo history as a tree, one line a step (a data source).", cUndoTree).present(.{ .internal = true }),
+    command.define("edit.undo-to", "Bring the entry to a step of its undo tree, across branches.", cUndoTo).present(.{ .internal = true }),
     command.define("file.write", "Write the buffer to its file.", cSaveFile).present(.{ .internal = true }),
     command.define("field.word-prev", "Move the field cursor to the start of the previous word.", fieldMotion(.word_previous)).present(.{ .internal = true }),
     command.define("field.word-next", "Move the field cursor to the start of the next word.", fieldMotion(.word_next)).present(.{ .internal = true }),

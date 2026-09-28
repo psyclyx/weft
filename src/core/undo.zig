@@ -1,7 +1,7 @@
 //! Per-peer selective undo, by op inverse — never state restoration.
 //!
 //! `UndoLog` is a *subscriber* of a Document's commit log (a cursor and
-//! two stacks); the Document knows nothing about undo. Undoing one of
+//! a tree of steps); the Document knows nothing about undo. Undoing one of
 //! your own commits builds its inverse from the commit's own patches
 //! (they carry both inserted and removed bytes, so every commit is
 //! invertible), *transforms* that inverse through every commit that
@@ -9,12 +9,18 @@
 //! applies it as a fresh commit. Other peers' edits are never touched:
 //! selective undo is just "invert mine, rebase over everyone else's".
 //!
-//! Redo is undo of an undo (the machinery is symmetric), and a new
-//! user-authored commit empties the redo stack.
+//! History is a TREE of steps (`Node`), rooted at the state before any of
+//! your edits. Undo walks to the parent, redo to the child last walked from
+//! (undo of an undo — the machinery is symmetric), and a new own commit after
+//! an undo starts a BRANCH beside the undone step instead of discarding it.
+//! `jump` reaches any node: undo up to the common ancestor, then redo down
+//! the other branch — each step through the same gated apply, so a jump is
+//! exactly the undos and redos a person could have typed.
 //!
 //! Grouping: consecutive user commits coalesce into one undo unit until
-//! `barrier()` (the editor calls it on cursor motion, mode change,
-//! command boundaries — vim-flavored units for free).
+//! `barrier()`. Dispatch calls it where the grammar DECLARED that a step
+//! begins (`step.zig`, `mode.set-undo-step`): a caret motion or a mode change
+//! is no boundary of its own.
 //!
 //! Authority: applying an inverse is applying an edit, so `undo`/`redo`
 //! take a `Gate` the one apply site must clear — a narrowed principal
@@ -75,6 +81,69 @@ const Group = struct {
     }
 };
 
+/// A node of the history tree: its index in `UndoLog.nodes`, which is also
+/// the order steps were taken in.
+pub const NodeId = u32;
+
+/// The state before any own edit.
+pub const root: NodeId = 0;
+
+/// What a step did, as it was first taken: how many bytes it inserted and
+/// removed, and the start of the text it wrote (else of the text it took
+/// away) — enough for a tool to tell one step from another.
+pub const Summary = struct {
+    pub const cap = 32;
+
+    inserted: u32 = 0,
+    removed: u32 = 0,
+    text_buf: [cap]u8 = undefined,
+    text_len: u8 = 0,
+    /// Whether `text` is removed text (nothing was inserted).
+    text_removed: bool = false,
+
+    pub fn text(self: *const Summary) []const u8 {
+        return self.text_buf[0..self.text_len];
+    }
+
+    fn add(self: *Summary, c: *const Document.Commit) void {
+        self.inserted +|= @intCast(@min(c.bytes.len, std.math.maxInt(u32)));
+        self.removed +|= @intCast(@min(c.removed_bytes.len, std.math.maxInt(u32)));
+        if (c.bytes.len > 0 and self.text_removed) {
+            // Inserted text says more than removed text: it replaces it.
+            self.text_len = 0;
+            self.text_removed = false;
+        }
+        const from = if (c.bytes.len > 0) c.bytes else if (self.text_len == 0 or self.text_removed) c.removed_bytes else "";
+        if (c.bytes.len == 0 and from.len > 0) self.text_removed = true;
+        const room = cap - self.text_len;
+        const n = @min(room, from.len);
+        @memcpy(self.text_buf[self.text_len..][0..n], from[0..n]);
+        self.text_len += @intCast(n);
+    }
+};
+
+/// Node `id` as a reader of the tree sees it.
+pub const NodeInfo = struct {
+    parent: NodeId,
+    /// On the path from the root to the current node.
+    applied: bool,
+    /// The child a redo from here walks to.
+    redo_child: ?NodeId = null,
+    summary: Summary,
+};
+
+const Node = struct {
+    /// Older than this node; the root is its own parent.
+    parent: NodeId,
+    /// The commits that last expressed this step: its forward commits while
+    /// applied, the inverse commits that undid it while not. Toggling it
+    /// inverts exactly these.
+    live: Group = .{},
+    applied: bool,
+    redo_child: ?NodeId = null,
+    summary: Summary = .{},
+};
+
 pub const UndoLog = struct {
     /// Whose commits this log owns. `.user` is the interactive default;
     /// a spawned peer (`Document.spawnPeer`) gets its own log keyed to its
@@ -82,9 +151,15 @@ pub const UndoLog = struct {
     /// per-peer selective undo. Set at construction, never changed.
     author: Document.PeerId = .user,
     cursor: usize = 0,
-    undoable: std.ArrayList(Group) = .empty,
-    redoable: std.ArrayList(Group) = .empty,
-    /// The top of `undoable` still accepts newly ingested commits.
+    /// Every step ever taken, in the order taken: index 0 is the root (the
+    /// state before any own edit), and a node's parent is always older than
+    /// it. Nodes are never removed, so an index names one step for the life
+    /// of the log — what a tool showing the tree hands back to `jump`.
+    nodes: std.ArrayList(Node) = .empty,
+    /// The node the document is at: every step on the path from the root to
+    /// it is applied, every other is not.
+    current: NodeId = root,
+    /// `current` still accepts newly ingested commits (the step is open).
     open: bool = false,
     /// Depth of `beginUnit`/`endUnit` brackets. While held, `barrier()` does
     /// not close the open unit, so a composite edit whose steps move the
@@ -98,16 +173,92 @@ pub const UndoLog = struct {
     /// and its own un-delete, and makes linear undo *exact*. Foreign
     /// commits are never in a pair, so concurrency still transforms.
     pairs: std.ArrayList([2]usize) = .empty,
+    /// The tree as text, as `describe` last wrote it (borrowed by whoever
+    /// asked, until the next `describe`).
+    listing: std.ArrayList(u8) = .empty,
 
     pub const empty: UndoLog = .{};
 
     pub fn deinit(self: *UndoLog, gpa: Allocator) void {
-        for (self.undoable.items) |*g| g.deinit(gpa);
-        self.undoable.deinit(gpa);
-        for (self.redoable.items) |*g| g.deinit(gpa);
-        self.redoable.deinit(gpa);
+        for (self.nodes.items) |*n| n.live.deinit(gpa);
+        self.nodes.deinit(gpa);
         self.pairs.deinit(gpa);
+        self.listing.deinit(gpa);
         self.* = .{};
+    }
+
+    /// The whole tree as text, one line per node in the order taken, the
+    /// root first — what a tool reads to draw it (`edit.undo-tree`):
+    ///
+    ///   `<id>\t<parent>\t<flags>\t<inserted>\t<removed>\t<text>`
+    ///
+    /// `flags` holds `c` for the current node, `a` for a node applied (on the
+    /// path to it), `r` for the child its parent's redo walks to, `x` when
+    /// `text` is text the step removed. `text` is the step's summary text
+    /// (`Summary`), with tabs and line breaks shown as `→` and `⏎`. Folds in
+    /// pending own commits first. Borrowed until the next call.
+    pub fn describe(self: *UndoLog, gpa: Allocator, doc: *const Document) Allocator.Error![]const u8 {
+        try self.ingest(gpa, doc);
+        self.listing.clearRetainingCapacity();
+        const w = &self.listing;
+        for (0..self.nodeCount()) |i| {
+            const id: NodeId = @intCast(i);
+            const n = self.nodeAt(id).?;
+            var flags: [4]u8 = undefined;
+            var nf: usize = 0;
+            if (id == self.current) {
+                flags[nf] = 'c';
+                nf += 1;
+            }
+            if (n.applied) {
+                flags[nf] = 'a';
+                nf += 1;
+            }
+            if (id != root and self.nodeAt(n.parent).?.redo_child == id) {
+                flags[nf] = 'r';
+                nf += 1;
+            }
+            if (n.summary.text_removed) {
+                flags[nf] = 'x';
+                nf += 1;
+            }
+            try w.print(gpa, "{d}\t{d}\t{s}\t{d}\t{d}\t", .{ id, n.parent, flags[0..nf], n.summary.inserted, n.summary.removed });
+            const text = n.summary.text();
+            // Whole scalars only: the summary may have cut one short.
+            var end = text.len;
+            while (end > 0 and (std.unicode.utf8ValidateSlice(text[0..end]) == false)) end -= 1;
+            for (text[0..end]) |b| switch (b) {
+                '\t' => try w.appendSlice(gpa, "→"),
+                '\n' => try w.appendSlice(gpa, "⏎"),
+                0...8, 11...31, 127 => try w.append(gpa, ' '),
+                else => try w.append(gpa, b),
+            };
+            try w.append(gpa, '\n');
+        }
+        return w.items;
+    }
+
+    /// The node the document is at.
+    pub fn currentNode(self: *const UndoLog) NodeId {
+        return self.current;
+    }
+
+    /// How many nodes the tree holds, the root included (at least one).
+    pub fn nodeCount(self: *const UndoLog) usize {
+        return @max(self.nodes.items.len, 1);
+    }
+
+    /// Node `id` as a reader sees it (the root reads as an empty step that
+    /// is its own parent). Null past the end.
+    pub fn nodeAt(self: *const UndoLog, id: NodeId) ?NodeInfo {
+        if (id == root and self.nodes.items.len == 0) return .{ .parent = root, .applied = true, .summary = .{} };
+        if (id >= self.nodes.items.len) return null;
+        const n = &self.nodes.items[id];
+        return .{ .parent = n.parent, .applied = n.applied, .redo_child = n.redo_child, .summary = n.summary };
+    }
+
+    fn ensureRoot(self: *UndoLog, gpa: Allocator) Allocator.Error!void {
+        if (self.nodes.items.len == 0) try self.nodes.append(gpa, .{ .parent = root, .applied = true });
     }
 
     fn skippable(self: *const UndoLog, j: usize, window_start: usize) bool {
@@ -118,22 +269,27 @@ pub const UndoLog = struct {
     }
 
     /// Fold newly logged commits into undo bookkeeping: own commits
-    /// become (or extend) the open undo unit and clear the redo stack;
-    /// foreign commits are ignored (transform handles them at undo
-    /// time). Call before reading either stack; `undo`/`redo` call it
+    /// become (or extend) the open step — a new step is a new CHILD of the
+    /// current node, beside any step undone from there, never in place of
+    /// one; foreign commits are ignored (transform handles them at undo
+    /// time). Call before reading the tree; `undo`/`redo`/`jump` call it
     /// themselves.
     pub fn ingest(self: *UndoLog, gpa: Allocator, doc: *const Document) Allocator.Error!void {
         const total = doc.commitCount();
         while (self.cursor < total) : (self.cursor += 1) {
             const c = doc.commitAt(self.cursor);
             if (c.author != self.author) continue;
-            self.clearRedo(gpa);
+            try self.ensureRoot(gpa);
             if (!self.open) {
-                try self.undoable.append(gpa, .{});
+                const id: NodeId = @intCast(self.nodes.items.len);
+                try self.nodes.append(gpa, .{ .parent = self.current, .applied = true });
+                self.nodes.items[self.current].redo_child = id;
+                self.current = id;
                 self.open = true;
             }
-            const top = &self.undoable.items[self.undoable.items.len - 1];
-            try top.indices.append(gpa, self.cursor);
+            const top = &self.nodes.items[self.current];
+            try top.live.indices.append(gpa, self.cursor);
+            top.summary.add(c);
         }
     }
 
@@ -159,17 +315,13 @@ pub const UndoLog = struct {
         if (self.held == 0) self.open = false;
     }
 
-    fn clearRedo(self: *UndoLog, gpa: Allocator) void {
-        for (self.redoable.items) |*g| g.deinit(gpa);
-        self.redoable.clearRetainingCapacity();
-    }
-
     pub fn canUndo(self: *const UndoLog) bool {
-        return self.undoable.items.len > 0;
+        return self.current != root;
     }
 
     pub fn canRedo(self: *const UndoLog) bool {
-        return self.redoable.items.len > 0;
+        if (self.nodes.items.len == 0) return false;
+        return self.nodes.items[self.current].redo_child != null;
     }
 
     /// Would `undo` find a unit, counting own commits `ingest` has not folded
@@ -180,7 +332,8 @@ pub const UndoLog = struct {
     }
 
     /// Would `redo` find a unit? An own commit still waiting for `ingest`
-    /// empties the redo stack the moment it is folded in, so it answers no.
+    /// becomes a new step the moment it is folded in — the node redo would
+    /// start from — so it answers no.
     pub fn hasRedo(self: *const UndoLog, doc: *const Document) bool {
         return self.canRedo() and !self.pendingOwn(doc);
     }
@@ -193,35 +346,90 @@ pub const UndoLog = struct {
         return false;
     }
 
-    /// Undo the newest unit. Returns false if there is nothing to undo;
-    /// refuses (leaving the unit undoable) when `gate` denies the inverse.
+    /// Undo the current step: walk to its parent. Returns false at the root;
+    /// refuses (leaving the step applied) when `gate` denies the inverse.
     pub fn undo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
         try self.ingest(gpa, doc);
-        // Unconditionally, not `barrier()`: the unit is about to leave the
-        // stack, so nothing may keep extending it even inside a held unit.
+        // Unconditionally, not `barrier()`: the step is about to be undone,
+        // so nothing may keep extending it even inside a held unit.
         self.open = false;
-        var group = self.undoable.pop() orelse return false;
-        const inverse = self.invertGroup(gpa, doc, group.indices.items, gate) catch |e| {
-            self.undoable.appendAssumeCapacity(group); // the pop left this slot free
-            return e;
-        };
-        defer group.deinit(gpa);
-        try self.redoable.append(gpa, inverse);
+        if (self.current == root) return false;
+        try self.stepUp(gpa, doc, gate);
         return true;
     }
 
-    /// Redo the newest undone unit. Returns false if there is none.
+    /// Redo: walk to the child last walked from here (the branch most
+    /// recently undone, or most recently made). Returns false where no step
+    /// was ever taken from the current node.
     pub fn redo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
         try self.ingest(gpa, doc);
-        var group = self.redoable.pop() orelse return false;
-        const inverse = self.invertGroup(gpa, doc, group.indices.items, gate) catch |e| {
-            self.redoable.appendAssumeCapacity(group);
-            return e;
-        };
-        defer group.deinit(gpa);
-        try self.undoable.append(gpa, inverse);
         self.open = false;
+        if (self.nodes.items.len == 0) return false;
+        const child = self.nodes.items[self.current].redo_child orelse return false;
+        try self.stepDown(gpa, doc, child, gate);
         return true;
+    }
+
+    /// Bring the document to node `target`, wherever it is in the tree:
+    /// undo up to the common ancestor, then redo down to it. Each move is
+    /// the gated apply an undo or redo is, so a refusal stops the walk
+    /// where it was refused (the document consistent, `current` true to
+    /// it). `error.NoSuchNode` for an id the tree never held.
+    pub fn jump(self: *UndoLog, gpa: Allocator, doc: *Document, target: NodeId, gate: Gate) (Error || error{NoSuchNode})!void {
+        try self.ingest(gpa, doc);
+        self.open = false;
+        if (target != root and target >= self.nodes.items.len) return error.NoSuchNode;
+        if (target == self.current) return;
+        // Every ancestor of the target, the target first: a parent is older
+        // than its child, so the path is a descending chain of indices.
+        var down: std.ArrayList(NodeId) = .empty;
+        defer down.deinit(gpa);
+        var n = target;
+        while (true) {
+            try down.append(gpa, n);
+            if (n == root) break;
+            n = self.nodes.items[n].parent;
+        }
+        // Up from the current node until the path to the target is met.
+        while (std.mem.indexOfScalar(NodeId, down.items, self.current) == null)
+            try self.stepUp(gpa, doc, gate);
+        // Then down it: the common ancestor's child on the path, and on.
+        const at = std.mem.indexOfScalar(NodeId, down.items, self.current).?;
+        var i = at;
+        while (i > 0) {
+            i -= 1;
+            try self.stepDown(gpa, doc, down.items[i], gate);
+        }
+    }
+
+    /// Undo the current step (not the root): its inverse lands, it becomes
+    /// its parent's redo child, and the parent is current.
+    fn stepUp(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!void {
+        const id = self.current;
+        assert(id != root);
+        try self.toggle(gpa, doc, id, gate);
+        const parent = self.nodes.items[id].parent;
+        self.nodes.items[parent].redo_child = id;
+        self.current = parent;
+    }
+
+    /// Redo `child`, a child of the current node.
+    fn stepDown(self: *UndoLog, gpa: Allocator, doc: *Document, child: NodeId, gate: Gate) Error!void {
+        assert(self.nodes.items[child].parent == self.current);
+        try self.toggle(gpa, doc, child, gate);
+        self.nodes.items[self.current].redo_child = child;
+        self.current = child;
+    }
+
+    /// Flip node `id` between applied and undone by inverting the commits
+    /// that last expressed it — the forward commits while applied, the
+    /// inverse ones while undone. Those new commits are its `live` group now.
+    fn toggle(self: *UndoLog, gpa: Allocator, doc: *Document, id: NodeId, gate: Gate) Error!void {
+        const inverse = try self.invertGroup(gpa, doc, self.nodes.items[id].live.indices.items, gate);
+        const node = &self.nodes.items[id];
+        node.live.deinit(gpa);
+        node.live = inverse;
+        node.applied = !node.applied;
     }
 
     /// Invert every commit of a unit (newest first — each inversion
@@ -506,7 +714,20 @@ test "undo: spawned peers each undo only their own edits" {
     try t.expect(!try log_b.undo(gpa, &doc, .user_driven));
 }
 
-test "undo: new own commit clears redo" {
+fn expectDoc(doc: *const Document, want: []const u8) !void {
+    const s = try doc.text().toOwnedSlice(t.allocator);
+    defer t.allocator.free(s);
+    try t.expectEqualStrings(want, s);
+}
+
+/// One own step: `bytes` appended, then the step closed.
+fn appendStep(log: *UndoLog, doc: *Document, bytes: []const u8) !void {
+    try doc.insert(t.allocator, doc.text().byteLen(), bytes);
+    try log.ingest(t.allocator, doc);
+    log.barrier();
+}
+
+test "undo: a new own commit after an undo BRANCHES — redo takes the new step, the undone one stays reachable" {
     const gpa = t.allocator;
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
@@ -518,8 +739,111 @@ test "undo: new own commit clears redo" {
     try t.expect(log.canRedo());
     try doc.insert(gpa, 0, "xyz");
     try log.ingest(gpa, &doc);
+    // Nothing to redo from the new step…
     try t.expect(!log.canRedo());
     try t.expect(!try log.redo(gpa, &doc, .user_driven));
+    // …and both steps are children of the root: a branch, not a loss.
+    try t.expectEqual(@as(usize, 3), log.nodeCount());
+    try t.expectEqual(root, log.nodeAt(1).?.parent);
+    try t.expectEqual(root, log.nodeAt(2).?.parent);
+    try t.expectEqualStrings("abc", log.nodeAt(1).?.summary.text());
+    try t.expectEqualStrings("xyz", log.nodeAt(2).?.summary.text());
+    try t.expectEqual(@as(NodeId, 2), log.currentNode());
+
+    // Redo from the root walks the branch last walked: the new one.
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try expectDoc(&doc, "");
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
+    try expectDoc(&doc, "xyz");
+
+    // The undone step is a jump away, and back.
+    try log.jump(gpa, &doc, 1, .user_driven);
+    try expectDoc(&doc, "abc");
+    try t.expectEqual(@as(NodeId, 1), log.currentNode());
+    try t.expect(log.nodeAt(1).?.applied and !log.nodeAt(2).?.applied);
+    try log.jump(gpa, &doc, 2, .user_driven);
+    try expectDoc(&doc, "xyz");
+    try t.expectError(error.NoSuchNode, log.jump(gpa, &doc, 9, .user_driven));
+
+    // What a tool reads: every node, the current one and the path to it
+    // marked, and which child redo takes.
+    try doc.delete(gpa, .{ .start = 1, .end = 3 });
+    try t.expectEqualStrings(
+        "0\t0\ta\t0\t0\t\n" ++
+            "1\t0\t\t3\t0\tabc\n" ++
+            "2\t0\tar\t3\t0\txyz\n" ++
+            "3\t2\tcarx\t0\t2\tyz\n",
+        try log.describe(gpa, &doc),
+    );
+}
+
+test "undo: jump across branches — up to the common ancestor, down the other branch" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    var log: UndoLog = .empty;
+    defer log.deinit(gpa);
+
+    try appendStep(&log, &doc, "base"); // 1
+    try appendStep(&log, &doc, " A"); // 2
+    try appendStep(&log, &doc, " B"); // 3
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try appendStep(&log, &doc, " C"); // 4, beside 2
+    try appendStep(&log, &doc, " D"); // 5
+    try expectDoc(&doc, "base C D");
+    try t.expectEqual(@as(NodeId, 1), log.nodeAt(4).?.parent);
+
+    try log.jump(gpa, &doc, 3, .user_driven);
+    try expectDoc(&doc, "base A B");
+    for ([_]bool{ true, true, true, true, false, false }, 0..) |applied, id|
+        try t.expectEqual(applied, log.nodeAt(@intCast(id)).?.applied);
+    try log.jump(gpa, &doc, 5, .user_driven);
+    try expectDoc(&doc, "base C D");
+    // Mid-branch, and the root.
+    try log.jump(gpa, &doc, 2, .user_driven);
+    try expectDoc(&doc, "base A");
+    try log.jump(gpa, &doc, root, .user_driven);
+    try expectDoc(&doc, "");
+    try t.expect(!log.canUndo());
+    // Redo from the root now walks toward where the jump came from.
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
+    try expectDoc(&doc, "base A");
+}
+
+test "undo: collaboration — a jump across branches never undoes a remote peer's commits" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    var log: UndoLog = .empty;
+    defer log.deinit(gpa);
+
+    try appendStep(&log, &doc, "SEED"); // 1
+    try appendStep(&log, &doc, "-a"); // 2
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try appendStep(&log, &doc, "-b"); // 3, a branch beside 2
+
+    // A peer, caught up, wraps the text while the tree stands.
+    const p = try doc.addPeer(gpa, "peer");
+    var s0 = try doc.peerSnapshot(gpa, p);
+    s0.deinit(gpa);
+    try doc.peerInsert(gpa, p, 0, "<<");
+    try doc.peerInsert(gpa, p, 8, ">>");
+    _ = try doc.peerCommit(gpa, p);
+    try expectDoc(&doc, "<<SEED-b>>");
+
+    // Across to the other branch: our "-b" leaves, our "-a" returns, the
+    // peer's wrapping is untouched.
+    try log.jump(gpa, &doc, 2, .user_driven);
+    try expectDoc(&doc, "<<SEED-a>>");
+    // All the way up: only the peer's text is left.
+    try log.jump(gpa, &doc, root, .user_driven);
+    try expectDoc(&doc, "<<>>");
+    // The peer's commit is in no node: the tree holds only our steps.
+    try t.expectEqual(@as(usize, 4), log.nodeCount());
+    try log.jump(gpa, &doc, 3, .user_driven);
+    try expectDoc(&doc, "<<SEED-b>>");
 }
 
 test "undo: hasUndo/hasRedo answer before ingest, without moving the log" {

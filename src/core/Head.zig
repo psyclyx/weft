@@ -136,6 +136,11 @@ view_range: ?ViewRange = null,
 /// without core holding a keymap that knows it is one.
 key_serial: u32 = 0,
 
+/// What the last undo step this head began ran, as `step.zig` identifies it
+/// (mode and command) — how a `run` mode knows the next keystroke continues
+/// the same run. Zero before the first.
+step_last: u64 = 0,
+
 /// This head's pointer facts: the gesture being dispatched and what is under
 /// the pointer (`pointer.zig`). Per-head because the pointer is: another
 /// head's click must never move this head's drag origin.

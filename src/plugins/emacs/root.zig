@@ -104,6 +104,9 @@ fn initExtra() void {
     // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("emacs", "default");
     weft.textInput("emacs", "edit.insert-text");
+    // One undo step is a RUN of one command, as emacs amalgamates
+    // self-insertion: typing is one step until something else runs.
+    weft.runStr2("mode.set-undo-step", "emacs", "run");
 
     // §10.4: a MODELESS grammar's resting mode commits text, so "the entry
     // takes no text" cannot be a state emacs is already in — it needs a
