@@ -750,12 +750,13 @@ pub fn findByDocument(self: *const Buffers, doc: Document.Id) ?Id {
     return null;
 }
 
-/// The buffer already backed by `path`, if any (dedupe on open).
+/// The buffer already backed by the LOCAL file `path`, if any (dedupe on
+/// open). A remote file at the same path is another file.
 pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
     var it = self.iterator();
     while (it.next()) |b| {
         const ed = b.textEditor() orelse continue;
-        if (ed.backingPath()) |p| {
+        if (ed.localPath()) |p| {
             if (std.mem.eql(u8, p, path)) return b.id;
         }
     }

@@ -206,9 +206,26 @@ pub fn announce(why: Refusal) void {
 /// two are the refusals `announce` speaks.
 pub const KeyError = error{ Unserved, NoPlace, OutOfMemory };
 
+/// The active file's name as spelled, for what its spelling says (its
+/// extension) and nothing else: the local path, or a remote file's
+/// designation — whose path is not one here (`weft.path` is null for it),
+/// but whose extension names its language just the same, so the refusal to
+/// start a server there is still said.
+fn spelledFile() ?[]const u8 {
+    if (weft.path()) |p| return p;
+    const d = weft.designation() orelse return null;
+    const scheme = "weft://";
+    if (!std.mem.startsWith(u8, d, scheme)) return null;
+    const rest = d[scheme.len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    if (!std.mem.startsWith(u8, rest[slash..], "/file/")) return null;
+    const ref = rest[slash + "/file".len ..];
+    return ref[0 .. std.mem.indexOfScalar(u8, ref, '?') orelse ref.len];
+}
+
 /// The active file's language id (its extension), copied out of scratch.
 pub fn activeLang() KeyError![]u8 {
-    const path = weft.path() orelse return error.Unserved;
+    const path = spelledFile() orelse return error.Unserved;
     const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return error.Unserved;
     const ext = path[dot + 1 ..];
     if (ext.len == 0) return error.Unserved;

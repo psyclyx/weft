@@ -85,15 +85,20 @@ fn on_activate() callconv(.c) void {
     _ = recordActive();
 }
 
-/// Push the active buffer's path onto the recent list (front, deduped, capped).
-/// Returns the new count, or -1 when the buffer has no path (a tool buffer).
+/// Push the active buffer's file onto the recent list (front, deduped,
+/// capped), named so `file.open` reopens the same file: a local file by its
+/// absolute path (`open`'s sugar for `weft://here/file/…`), a remote one by
+/// its designation — its path alone would reopen whatever is at that path
+/// HERE. Returns the new count, or -1 when the buffer is no file (a tool
+/// buffer, a scratch).
 fn recordActive() i32 {
     const alloc = weft.allocator;
     // Copy both borrowed reads out before the next call reuses the shim
     // scratch. Owned, not copied into a fixed field: a truncated path names a
     // DIFFERENT file, and a recents list that quietly offers you one is worse
     // than a recents list that is short.
-    const path = alloc.dupe(u8, weft.path() orelse return -1) catch return -1;
+    const name = weft.path() orelse remoteFile(weft.designation() orelse return -1) orelse return -1;
+    const path = alloc.dupe(u8, name) catch return -1;
     defer alloc.free(path);
     const root = alloc.dupe(u8, weft.placeRoot()) catch return -1;
     defer alloc.free(root);
@@ -108,6 +113,16 @@ fn recordActive() i32 {
     const list = prepend(existing, path) orelse return -1;
     weft.kvPut(recent_key, list);
     return @intCast(countLines(list));
+}
+
+/// `designation` when it names a file (`weft://<authority>/file/…`), else
+/// null — a document or a projection is not a recent file.
+fn remoteFile(designation: []const u8) ?[]const u8 {
+    const scheme = "weft://";
+    if (!std.mem.startsWith(u8, designation, scheme)) return null;
+    const rest = designation[scheme.len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    return if (std.mem.startsWith(u8, rest[slash..], "/file/")) designation else null;
 }
 
 /// The `project.remember` command: record + report the count.

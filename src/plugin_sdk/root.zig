@@ -333,7 +333,12 @@ pub fn pointer() ?Pointer {
         .focused = w[7] & 2 != 0,
     };
 }
-/// The active buffer's backing path, or null. Valid until the next read call.
+/// The path of the LOCAL file backing the active buffer, or null — for a
+/// scratch, a projection, and a remote file (a shell's, a peer's), whose
+/// path names a file on another locus: taking it for this machine's would
+/// act on a different file. A path from here is safe to open, run and hand
+/// to a local tool; a remote entry is named by its `designation()`. Valid
+/// until the next read call.
 pub fn path() ?[]const u8 {
     const n = e.wl_path(p(&scratch), scratch.len);
     if (n < 0) return null;

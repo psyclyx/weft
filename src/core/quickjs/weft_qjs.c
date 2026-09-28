@@ -1253,8 +1253,9 @@ static JSValue js_selection(JSContext *ctx, JSValueConst this_val,
     return o;
 }
 
-// weft.path() -> string | null: the entry's backing file, null when it has
-// none (a scratch or tool buffer) — again distinct from "".
+// weft.path() -> string | null: the entry's LOCAL backing file, null when it
+// has none (a scratch or tool buffer) or its file is remote (a far-side path
+// is not a path here; weft.designation names it) — again distinct from "".
 static JSValue js_path(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;

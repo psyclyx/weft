@@ -202,7 +202,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_slice", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "copy `[start,end)` of the active document into guest memory" },
     .{ .name = "wl_line_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "write the `[start,end)` byte span of the line containing `offset`" },
     .{ .name = "wl_selection", .params = &.{.u32}, .results = &.{.u32}, .group = .edit, .doc = "the active selection's other endpoint (mark), or the cursor if none" },
-    .{ .name = "wl_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the active buffer's path into guest memory, or -1 if unnamed" },
+    .{ .name = "wl_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the path of the local file backing the active buffer into guest memory, or -1 (unnamed, or a remote file: its path is on another locus — read its designation)" },
     .{ .name = "wl_editor_step", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "the pure step primitive a motion composes (char boundary or line motion); no cursor move" },
     .{ .name = "wl_set_selection", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "select `[start,end)` (mark at start, cursor at end)" },
     .{ .name = "wl_edit", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "the gated edit door: replace `[start,end)` with bytes, authored as the plugin's own peer" },

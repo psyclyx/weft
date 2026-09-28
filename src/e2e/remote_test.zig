@@ -115,6 +115,42 @@ test "e2e/remote: a shell place lists, the sidebar follows into it and reveals t
     try t.expect(ide.offered(&ed, "plugin.code.run"));
 }
 
+test "e2e/remote: a far-side path is never a local one — recents keep the shell file's designation, and opening the same path here opens the local file" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    try core.file.writeBytesMakingDirs(gpa, "box/etc", "box/etc/hosts", "far side\n");
+    var fbuf: [4096]u8 = undefined;
+    var lbuf: [4096]u8 = undefined;
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootIde(gpa, &proj, &ed, &loader);
+    ed.prov.attach_deps.spawner = .{ .command = &local_sh };
+
+    // The "far side" is this machine's sh, so the far-side path also names
+    // a local file — exactly what a remote path must never be taken for.
+    const file = try std.fmt.bufPrint(&fbuf, "weft://shell:box/file{s}/box/etc/hosts", .{proj.root});
+    const local = try std.fmt.bufPrint(&lbuf, "{s}/box/etc/hosts", .{proj.root});
+    try t.expect(projection.openOk(&ed, file));
+    const shell_id = ed.buffers.active().id;
+    _ = try core.command.run(ed.commands, ed.ctx, "project.remember", &.{});
+    const recent = try core.command.run(ed.commands, ed.ctx, "project.recent", &.{});
+    var lines = std.mem.splitScalar(u8, recent.string, '\n');
+    try t.expectEqualStrings(file, lines.first());
+
+    // Opening the path here is the local file: a new entry, not the shell's.
+    ed.runStr("file.open", local);
+    try t.expect(ed.buffers.active().id != shell_id);
+    var hbuf: [4096]u8 = undefined;
+    const here = try std.fmt.bufPrint(&hbuf, "weft://here/file{s}", .{local});
+    try t.expectEqualStrings(here, ed.buffers.active().designationText());
+}
+
 test "e2e/remote: a shell that is gone reads offline in the status line, and its directory refuses by name" {
     const gpa = t.allocator;
     var proj: Project = undefined;

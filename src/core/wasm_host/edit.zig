@@ -165,7 +165,7 @@ pub fn pathBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32
         results[0] = -1;
         return;
     };
-    const path = ed.backingPath() orelse {
+    const path = ed.localPath() orelse {
         results[0] = -1;
         return;
     };

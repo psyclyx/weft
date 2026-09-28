@@ -230,6 +230,22 @@ fn primarySelection(self: *const Editor) Selection {
 // ── Files & backings ────────────────────────────────────────────────
 
 /// The display/save path, when the backing has one.
+/// The path of the LOCAL file backing this entry, or null — for a scratch,
+/// a projection, and a remote file, whose path names a file on another
+/// locus. Whatever will act on a path here (reopen it, dedupe an open by
+/// it, hand it to a local tool or server) reads this, never `backingPath`:
+/// a far-side `/etc/hosts` taken for this machine's is a different file.
+/// A remote entry is named by its designation.
+pub fn localPath(self: *const Editor) ?[]const u8 {
+    return switch (self.backing) {
+        .file => |f| f.path,
+        else => null,
+    };
+}
+
+/// The backing's path on whichever locus holds it — for DISPLAY and for
+/// what a path's spelling says (a language by its extension), never for
+/// acting on here (`localPath`).
 pub fn backingPath(self: *const Editor) ?[]const u8 {
     return switch (self.backing) {
         .file => |f| f.path,
