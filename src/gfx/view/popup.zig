@@ -358,6 +358,21 @@ pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), 
     }
 }
 
+/// Which of a surface's `total` rows the `i`th of the `nrows` that fit shows:
+/// the first rows in order, except that the LAST one that fits is the
+/// surface's own last row (its footer), whenever rows were dropped.
+fn shownRow(total: usize, nrows: usize, i: usize) usize {
+    return if (nrows < total and i == nrows - 1) total - 1 else i;
+}
+
+test "popup: a surface that doesn't fit keeps its footer as its last row" {
+    // 10 rows, 4 fit: rows 0, 1, 2, then the footer (9).
+    const want = [_]usize{ 0, 1, 2, 9 };
+    for (want, 0..) |w, i| try std.testing.expectEqual(w, shownRow(10, 4, i));
+    // Everything fits: rows in order, nothing substituted.
+    for (0..3) |i| try std.testing.expectEqual(i, shownRow(3, 3, i));
+}
+
 /// A `top` surface: a panel floating at the top centre of the frame — where a
 /// command palette sits in most editors — with the dock's rows (query line
 /// first). Wide enough to read a label and its key, never the whole window.
@@ -460,7 +475,7 @@ pub fn drawSurfaces(
         const total = surf.rows.items.len;
         const nrows = @min(total, max_rows);
         const shown = try scratch.alloc(*const core.surface.Row, nrows);
-        for (shown, 0..) |*slot, i| slot.* = &surf.rows.items[if (nrows < total and i == nrows - 1) total - 1 else i];
+        for (shown, 0..) |*slot, i| slot.* = &surf.rows.items[shownRow(total, nrows, i)];
         // Width = widest row, in cells (one space between spans).
         var max_cols: usize = 0;
         for (shown) |row| {
@@ -503,7 +518,7 @@ pub fn drawSurfaces(
 
         for (shown, 0..) |row, i| {
             const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * v.line_h;
-            const index = if (nrows < total and i == nrows - 1) total - 1 else i;
+            const index = shownRow(total, nrows, i);
             if (surf.selected != null and surf.selected.? == index) {
                 try chrome.paintSelected(sink, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h }, v.theme.accent);
             }
