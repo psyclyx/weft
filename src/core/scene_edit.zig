@@ -4,7 +4,7 @@
 //! Focusing a row and editing its text are different states. A row focus is
 //! the scene selection's path; an edit is `SceneSelection.field`, a text
 //! extent inside the row. Which one a focus becomes is the loaded grammar's
-//! declared granularity (`Services.granularity`, `input.Granularity`), read
+//! declared granularity of the mode the head is in (`Services.granularityFor`, `input.Granularity`), read
 //! here and nowhere else:
 //!
 //!   text  the focus edits the field it lands on — the editable listings
@@ -54,9 +54,9 @@ pub fn land(services: *Services, head: *Head, gpa: std.mem.Allocator, path: sema
         };
     }
     var next = path;
-    if (how == .navigate and services.granularity == .row) next.field = null;
+    if (how == .navigate and services.granularityFor(head) == .row) next.field = null;
     try selection.set(gpa, next);
-    if (how == .enter and services.granularity == .row and next.field != null) try markBegun(services, head, gpa);
+    if (how == .enter and services.granularityFor(head) == .row and next.field != null) try markBegun(services, head, gpa);
 }
 
 pub const Error = Services.FieldInputError || view_runtime.view.Error || error{ActionRefused};
@@ -86,7 +86,7 @@ pub fn begin(services: *Services, head: *Head, gpa: std.mem.Allocator) Error!boo
     // The primary field may not be the leaf navigation stops on; the row
     // stays where the next move is measured from.
     if (row != target.node) selection.setNavigationAnchor(row);
-    if (services.granularity == .text) return true;
+    if (services.granularityFor(head) == .text) return true;
     try markBegun(services, head, gpa);
     try provider.edit(snapshot.value.revision, .{ .start = 0, .end = 0, .replacement = &.{}, .selection_after = .{
         .anchor = 0,
@@ -103,7 +103,7 @@ pub fn commit(services: *Services, head: *Head, gpa: std.mem.Allocator) !bool {
     if (!selection.began) return false;
     const changed = try changedFromOrigin(services, selection, gpa);
     selection.began = false;
-    if (services.granularity == .row) selection.field = null;
+    if (services.granularityFor(head) == .row) selection.field = null;
     if (!changed) return true;
     _ = services.invokeFocusedAction(&head.interactions, head, gpa, standard.apply) catch |err| switch (err) {
         error.ActionUnavailable, error.ProviderUnavailable => {},
@@ -119,7 +119,7 @@ pub fn cancel(services: *Services, head: *Head, gpa: std.mem.Allocator) Services
     if (!selection.began) return false;
     selection.began = false;
     const field = selection.field orelse return true;
-    if (services.granularity == .row) selection.field = null;
+    if (services.granularityFor(head) == .row) selection.field = null;
     const provider = services.fields.get(field) orelse return error.StaleField;
     var snapshot = try provider.snapshot(gpa);
     defer snapshot.deinit();
@@ -171,12 +171,15 @@ const Memory = struct {
     bytes: std.ArrayList(u8) = .empty,
     selection: view_runtime.field.Selection = .{ .anchor = 0, .caret = 0 },
     revision: u64 = 1,
+    /// Refuse snapshots, as a provider whose plugin went away does.
+    gone: bool = false,
 
     fn deinit(self: *Memory) void {
         self.bytes.deinit(t.allocator);
     }
 
     pub fn snapshot(self: *Memory, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+        if (self.gone) return error.Stale;
         var owned = view_runtime.field.OwnedSnapshot.init(gpa);
         errdefer owned.deinit();
         const arena = owned.allocator();
@@ -220,7 +223,7 @@ test "scene_edit: under `row` a focus is the row; begin edits the primary field,
     var head: Head = .empty;
     defer head.deinit(gpa);
 
-    try t.expectEqual(@import("weft_input").Granularity.row, services.granularity);
+    try t.expectEqual(@import("weft_input").Granularity.row, services.granularityFor(&head));
     _ = try services.focusView(&head, gpa, view, @enumFromInt(2));
     try t.expect(head.scene_selection.field == null);
 
@@ -245,7 +248,7 @@ test "scene_edit: under `row` a focus is the row; begin edits the primary field,
 
     // Under `text` the same focus edits the field it lands on, and nothing
     // was begun: the grammar's own modes own the keys.
-    services.granularity = .text;
+    services.granularity_of = .always(.text);
     _ = try services.focusView(&head, gpa, view, @enumFromInt(4));
     try t.expect(head.scene_selection.field.?.eql(ref));
     try t.expect(!head.scene_selection.began);

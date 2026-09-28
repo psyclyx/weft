@@ -245,6 +245,20 @@ viewports: viewport_mod.Registry = .empty,
 /// they unload.
 designations: @import("designation.zig").Openers = .empty,
 
+/// `Services.granularity_of` over this system's keymap: what `mode` or its
+/// fallback chain declares; else — a menu, the picker — what the mode the
+/// active entry rests in declares, so a transient mode keeps its grammar's
+/// focus; else — a tool's own mode (`git`), which no grammar owns — what
+/// the config's base mode declares (`Buffers.default_mode`: the grammar
+/// the config chose, not whichever loaded last); else `row`.
+fn granularityOf(ctx: *anyopaque, mode: []const u8) @import("weft_input").Granularity {
+    const self: *System = @ptrCast(@alignCast(ctx));
+    if (self.keymap.granularityOf(mode)) |g| return g;
+    const resting = intent_mod.restingModeOf(&self.buffers, self.buffers.active());
+    if (self.keymap.granularityOf(resting)) |g| return g;
+    return self.keymap.granularityOf(self.buffers.default_mode) orelse .row;
+}
+
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
 /// floor installed (`core.builtins.install` — the same modeless baseline
@@ -285,6 +299,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // An edit the head carries out of its entry is committed on the way
     // (`Buffers.leave_edit`), by the structural views that own edits.
     self.buffers.leave_edit = self.semantic.leaveEdit();
+    // How a head focuses a row is its mode's declaration, in this keymap.
+    self.semantic.granularity_of = .{ .ctx = self, .get = granularityOf };
     // The one slot core both fires and decodes (`pick/annotate.zig`). Core
     // declares it because core has to READ the answers, and it can only do
     // that against a shape it knows; a plugin-declared schema would leave

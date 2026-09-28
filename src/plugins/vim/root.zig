@@ -773,7 +773,7 @@ fn initExtra() void {
     weft.modeDisplay("op-to", "O-PENDING", .pending);
     weft.modeDisplay("replace-char", "REPLACE", .replace);
     // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
-    weft.runStr("mode.set-structural-focus", "text");
+    weft.runStr2("mode.set-structural-focus", "normal", "text");
     // The break-out chord capture can never take away (§10.4), retained in
     // both the state vim rests in and the one it types in.
     for ([_][]const u8{ "normal", "insert" }) |m|

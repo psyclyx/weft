@@ -458,7 +458,7 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 /// printable key inserts nothing, under a grammar that focuses rows
 /// (doc/chrome.md §5.2). Such a pane shows the row, not a caret.
 fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, mode: []const u8) bool {
-    if (fx.semantic.granularity != .row) return false;
+    if (fx.semantic.granularityFor(fx.head) != .row) return false;
     if (buffer.projection == null or buffer.fieldAtPoint()) return false;
     return fx.head.textCommitIn(fx.keymap, mode) == null;
 }

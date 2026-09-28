@@ -352,7 +352,7 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
         // (doc/chrome.md §5.2), whatever the grammar bound: a double click
         // activates the row the first click focused, and a slow second
         // click on the focused row edits its name.
-        const rows = if (ctx.semantic) |services| services.granularity == .row else false;
+        const rows = if (ctx.semantic) |services| services.granularityFor(ctx.head) == .row else false;
         if (rows and ctx.head.pointer.clicks >= 2) return if (ctx.head.pointer.clicks == 2) cPointerActivate(ctx, .{}) else ok;
         const again = rows and slowClickOnFocus(ctx, node);
         // A click is THE selection, as it is in text: marked rows go.

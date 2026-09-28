@@ -574,9 +574,15 @@ What the build settled:
   `selection.zig`) goes through it, and it alone reads the granularity.
   `SceneSelection.began` marks an edit begun under `row`, with the text it
   began from (`origin`) for cancel.
-- **The declaration** is a command, `structural-focus text|row`, stored as
-  `Services.granularity` (`input.Granularity`, default `row`). vim, helix and
-  emacs run it with `text`; ide with `row`. The files projection's one change
+- **The declaration** is a command, `mode.set-structural-focus <mode>
+  text|row`, stored PER MODE in the keymap (`Keymap.granularityOf`, like a
+  mode's display name) and read down the fallback chain, else from the mode
+  the active entry rests in (a menu, the picker), else `row`
+  (`Services.granularityFor`). vim declares `text` for `normal`, helix for
+  `helix-normal`, emacs for `emacs`; ide `row` for `ide`. It was one
+  system-wide value, so the last grammar loaded set every listing's
+  granularity (loading ide's plugin beside vim turned vim's listings into
+  rows); per mode, each grammar keeps its own. The files projection's one change
   is `.primary = true` on the name field (`scene.Content.field.primary`,
   carried in the field's flags byte on the wire, so older encoders decode
   unchanged).

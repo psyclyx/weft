@@ -24,10 +24,14 @@ pub const Services = struct {
     transfer: ?semantic.transfer.OwnedItem = null,
     named_transfers: [26]?semantic.transfer.OwnedItem = @splat(null),
     next_owner: u64 = 1,
-    /// How the loaded grammar focuses a row that holds a field (doc/chrome.md
-    /// §5.2) — its declaration (`mode.set-structural-focus`), `row` when it made none.
-    /// Read only where a focus lands (`scene_edit.land`).
-    granularity: input.Granularity = .row,
+    /// How a head focuses a row that holds a field (doc/chrome.md §5.2): the
+    /// declaration of the mode it is in (`Keymap.granularityOf`, declared by
+    /// `mode.set-structural-focus`), asked of the system that owns the
+    /// keymap. Never a value of its own: a system-wide granularity is one
+    /// the last grammar loaded would set for every other grammar's modes.
+    /// Unwired (a bare registry under test), every mode reads `row`, the
+    /// default for a grammar that declares nothing.
+    granularity_of: ?GranularityOf = null,
 
     pub const Released = struct {
         targets: usize = 0,
@@ -39,6 +43,34 @@ pub const Services = struct {
     };
 
     pub const SemanticCommand = struct { name: []u8 };
+
+    /// The granularity a mode declares, read through its owner.
+    pub const GranularityOf = struct {
+        ctx: *anyopaque,
+        get: *const fn (ctx: *anyopaque, mode: []const u8) input.Granularity,
+
+        /// One answer for every mode — a test's grammar.
+        pub fn always(comptime granularity: input.Granularity) GranularityOf {
+            const S = struct {
+                var anchor: u8 = 0;
+                fn get(_: *anyopaque, _: []const u8) input.Granularity {
+                    return granularity;
+                }
+            };
+            return .{ .ctx = &S.anchor, .get = S.get };
+        }
+    };
+
+    /// How a head in `mode` focuses a row that holds a field.
+    pub fn granularityIn(self: *const Services, mode: []const u8) input.Granularity {
+        const of = self.granularity_of orelse return .row;
+        return of.get(of.ctx, mode);
+    }
+
+    /// `granularityIn` the mode `head` is in.
+    pub fn granularityFor(self: *const Services, head: *const Head) input.Granularity {
+        return self.granularityIn(head.currentMode());
+    }
 
     pub const ViewAdmissionError = view_runtime.view.Error || error{ StaleTarget, StaleField };
 
@@ -2281,7 +2313,7 @@ test "ordinary editor input targets semantic fields and focus order" {
     defer services.deinit(std.testing.allocator);
     // The field-editing vocabulary, as a `text` granularity grammar reaches it:
     // focus lands editing.
-    services.granularity = .text;
+    services.granularity_of = .always(.text);
     const owner = try services.acquireOwner();
     const first_ref = try services.insertField(std.testing.allocator, owner, .init(&first));
     const second_ref = try services.insertField(std.testing.allocator, owner, .init(&second));

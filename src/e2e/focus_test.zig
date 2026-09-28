@@ -429,7 +429,7 @@ fn expectEditsOnFocus(config: []const u8, insert_key: []const u8) !void {
     try configSidebar(&app, config);
     defer app.deinit();
     const ed = &app.ed;
-    try t.expectEqual(core.input.Granularity.text, ed.session.system.semantic.granularity);
+    try t.expectEqual(core.input.Granularity.text, ed.session.system.semantic.granularityFor(ed.head));
 
     // A click edits the name, as it always did: the field posture, and a
     // BLOCK caret — the resting mode inserts nothing, so no bar says it does.
@@ -448,4 +448,22 @@ fn expectEditsOnFocus(config: []const u8, insert_key: []const u8) !void {
 test "e2e/focus: config.js and helix.js keep editable listings — a click edits the name under a block caret, `i` types" {
     try expectEditsOnFocus("config.js", "i");
     try expectEditsOnFocus("helix.js", "i");
+}
+
+// ── Regressions (review of arc/chrome) ───────────────────────────────
+
+test "e2e/focus: config.js with ide's plugin loaded too — each grammar's modes keep their own granularity" {
+    var app: h.App = undefined;
+    try configSidebar(&app, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    // A second grammar loaded later declares `row` for ITS modes; vim's
+    // listing, in vim's `normal`, still edits the name it focuses.
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, app.loader.loader(), &ed.config_kv, null, "weft.plugin(\"ide\");");
+    // (Loading a grammar moves the head into its mode; come back to vim's.)
+    ed.setMode("normal");
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
+    try t.expect(ed.head.scene_selection.field != null);
 }

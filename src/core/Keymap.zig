@@ -30,6 +30,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BindingFacet = @import("weft_input").BindingFacet;
+const Granularity = @import("weft_input").Granularity;
 
 const Keymap = @This();
 
@@ -108,6 +109,12 @@ variants: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// named has no chip, so a modeless grammar shows none and no internal mode
 /// id (`ide-structural`) ever reaches the screen.
 displays: std.StringArrayHashMapUnmanaged(ModeDisplay) = .empty,
+/// mode → how a head in it focuses a structural row that holds a field
+/// (doc/chrome.md §5.2): the GRAMMAR's declaration for its own modes, read
+/// down the fallback chain (`granularityOf`). Per mode, like `displays`, so
+/// two grammars loaded side by side each keep theirs — there is no
+/// system-wide granularity for the last loader to overwrite.
+granularities: std.StringArrayHashMapUnmanaged(Granularity) = .empty,
 
 /// What kind of state a mode is, for its chip's colour — the theme maps
 /// each to a colour (`Theme.modeChipColor`). Declared with the display name;
@@ -177,6 +184,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v.name);
     }
     self.displays.deinit(gpa);
+    for (self.granularities.keys()) |k| gpa.free(k);
+    self.granularities.deinit(gpa);
     self.* = .{};
 }
 
@@ -208,6 +217,32 @@ pub fn setModeDisplay(self: *Keymap, gpa: Allocator, mode: []const u8, name: []c
 /// it. Borrowed until the next declaration for `mode`.
 pub fn modeDisplay(self: *const Keymap, mode: []const u8) ?ModeDisplay {
     return self.displays.get(mode);
+}
+
+/// DECLARE how a head in `mode` (and every mode falling back to it) focuses
+/// a structural row that holds a field. Re-declaring replaces.
+pub fn setGranularity(self: *Keymap, gpa: Allocator, mode: []const u8, granularity: Granularity) Allocator.Error!void {
+    const gop = try self.granularities.getOrPut(gpa, mode);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = gpa.dupe(u8, mode) catch |err| {
+            self.granularities.swapRemoveAt(gop.index);
+            return err;
+        };
+    }
+    gop.value_ptr.* = granularity;
+}
+
+/// The granularity declared for `mode` or the nearest mode its fallback
+/// chain reaches, or null where no grammar declared one on the way (a menu,
+/// a picker, a mode of no grammar) — the caller then asks the mode the
+/// entry rests in.
+pub fn granularityOf(self: *const Keymap, mode: []const u8) ?Granularity {
+    var cur = mode;
+    for (0..8) |_| {
+        if (self.granularities.get(cur)) |g| return g;
+        cur = self.parents.get(cur) orelse return null;
+    }
+    return null;
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
@@ -1280,4 +1315,19 @@ test "keymap: a mode's status-line name is the grammar's declaration — undecla
     try t.expect(km.modeDisplay("normal") == null);
     // An unknown tone on the wire is the resting one, not a trap.
     try t.expectEqual(ModeTone.normal, ModeTone.fromWire(99));
+}
+
+test "keymap: structural focus granularity is per mode — two grammars keep theirs whatever loads last, and a fallback lends it" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setFallback(gpa, "visual", "normal");
+    try km.setFallback(gpa, "ide-structural", "ide");
+    try km.setGranularity(gpa, "normal", .text);
+    try km.setGranularity(gpa, "ide", .row);
+    try t.expectEqual(Granularity.text, km.granularityOf("normal").?);
+    try t.expectEqual(Granularity.text, km.granularityOf("visual").?);
+    try t.expectEqual(Granularity.row, km.granularityOf("ide-structural").?);
+    // A mode no grammar declared for, on its chain, says nothing.
+    try t.expect(km.granularityOf("pick") == null);
 }

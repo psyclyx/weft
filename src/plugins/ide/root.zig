@@ -723,7 +723,7 @@ fn initExtra() void {
     weft.restingPosture(.structural, "ide-structural");
     // A listing is a list control here: focus is the row, and its name is
     // edited only when asked (F2, a slow second click) — doc/chrome.md §5.2.
-    weft.runStr("mode.set-structural-focus", "row");
+    weft.runStr2("mode.set-structural-focus", "ide", "row");
     // The break-out capture can never take away, retained in both resting
     // states (§10.4). Escape reaches it too, from a capture.
     for ([_][]const u8{ "ide", "ide-structural" }) |m|

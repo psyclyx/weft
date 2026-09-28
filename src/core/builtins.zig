@@ -269,13 +269,15 @@ fn cFieldEditCancel(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
-/// `structural-focus text|row` — the loaded grammar's DECLARATION of how it
-/// focuses a row that holds a field (doc/chrome.md §5.2, `input.Granularity`).
-/// A grammar says it once, like its resting postures; core reads it where a
-/// focus lands and knows no grammar's name.
-fn cStructuralFocus(ctx: *Context, args: struct { granularity: []const u8 }) anyerror!Value {
-    const services = ctx.semantic orelse return ok;
-    services.granularity = @import("weft_input").Granularity.parse(args.granularity) orelse return error.InvalidArgument;
+/// `mode.set-structural-focus <mode> text|row` — a grammar's DECLARATION of
+/// how a head in `mode`, and every mode falling back to it, focuses a row
+/// that holds a field (doc/chrome.md §5.2, `input.Granularity`). Per mode,
+/// like a mode's display name, so a second grammar loaded beside the first
+/// declares for its own modes and changes nothing of the first's; core
+/// reads it where a focus lands and knows no grammar's name.
+fn cStructuralFocus(ctx: *Context, args: struct { mode: []const u8, granularity: []const u8 }) anyerror!Value {
+    const granularity = @import("weft_input").Granularity.parse(args.granularity) orelse return error.InvalidArgument;
+    try ctx.keymap.setGranularity(ctx.gpa, args.mode, granularity);
     return ok;
 }
 
@@ -929,7 +931,7 @@ const table = [_]command.Command{
     command.define("field.edit", "Start editing the focused row's main field.", cFieldEdit).maps(null).present(.{ .label = "Edit" }),
     command.define("field.commit-edit", "Finish the field edit, applying the change when there is one.", cFieldEditCommit).present(.{ .internal = true }),
     command.define("field.cancel-edit", "Cancel the field edit, restoring the original text.", cFieldEditCancel).present(.{ .internal = true }),
-    command.define("mode.set-structural-focus", "Declare whether the grammar focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
+    command.define("mode.set-structural-focus", "Declare whether a head in a mode focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
     command.define("view.refresh", "Refresh the focused view.", cViewRefresh).present(.{ .label = "Refresh" }),
     command.define("view.revert", "Discard the focused view's draft and show it as it is.", cViewRevert).present(.{ .label = "Revert" }),
     command.define("view.apply", "Apply the focused view's draft.", cViewApply).present(.{ .label = "Apply" }),

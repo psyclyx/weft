@@ -120,7 +120,7 @@ fn initExtra() void {
     weft.restingPosture(.text, "emacs");
     weft.restingPosture(.structural, "emacs-structural");
     // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
-    weft.runStr("mode.set-structural-focus", "text");
+    weft.runStr2("mode.set-structural-focus", "emacs", "text");
     // The break-out capture can never take away — retained in both resting
     // states (§10.4).
     for ([_][]const u8{ "emacs", "emacs-structural" }) |m|

@@ -84,7 +84,7 @@ pub fn feed(ctx: *command.Context, bytes: []const u8) !bool {
 
 pub fn feedAt(ctx: *command.Context, bytes: []const u8, now_ns: u64) !bool {
     const services = ctx.semantic orelse return false;
-    if (services.granularity != .row) return false;
+    if (services.granularityFor(ctx.head) != .row) return false;
     const selection = &ctx.head.scene_selection;
     if (selection.path()) |path| {
         if (selection.field != null) return false;
