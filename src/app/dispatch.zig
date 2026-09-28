@@ -560,6 +560,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // out. Before dot-repeat: a keystroke sent to a terminal is not an edit
     // to repeat.
     if (try captureKey(ctx, spec, commit)) return;
+    // At a program's prompt the grammar edits the command line; what the
+    // key changed there reaches the program once the key is done.
+    defer flushField(ctx);
+    // A key the program claims at its prompt (Tab, Return) is its own,
+    // whatever the grammar binds it to.
+    if (claimedKey(ctx, spec, commit)) return;
 
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
@@ -681,7 +687,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             return;
         },
     }
-    if (commit.isEmpty()) return;
+    // Unbound, and nothing to commit: at a program's prompt it is the
+    // program's (its own bindings, history search), after the line.
+    if (commit.isEmpty()) {
+        _ = unboundToProgram(ctx, spec, commit);
+        return;
+    }
     // The commit reaches the editable endpoint ONLY through a mode that
     // DECLARES it commits text. A structural mode declares none, so an unbound
     // key there is simply unhandled — nothing is synthesized (§10.1). This IS
@@ -699,7 +710,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     if (jumped) return;
     // A begun field edit commits too (`scene_edit.textCommit`); anywhere nothing
     // does, the key is unhandled.
-    const commit_cmd = core.scene_edit.textCommit(ctx.semantic, ctx.keymap, ctx.head, ctx.head.currentMode()) orelse return;
+    const commit_cmd = core.scene_edit.textCommit(ctx.semantic, ctx.keymap, ctx.head, ctx.head.currentMode()) orelse {
+        // A mode that commits no text left the key: the program's, at its
+        // prompt.
+        _ = unboundToProgram(ctx, spec, commit);
+        return;
+    };
     core.step.begin(ctx, commit_cmd);
     core.task.beginHotSection();
     defer core.task.endHotSection();
@@ -759,6 +775,70 @@ fn captureKey(ctx: *core.command.Context, spec: []const u8, commit: core.TextCom
     }
     deliverCaptured(ctx, endpoint, spec, commit.bytes);
     return true;
+}
+
+// ── A program's prompt (doc/terminal.md §8) ─────────────────────────
+//
+// An entry with a capture endpoint whose program DECLARED a prompt (a grid's
+// `input` section: it does not own the keys, and holds a command line) is
+// not capturing: the grammar has the keys and edits the command line as a
+// field of the entry's text, with undo. The program hears what the grammar
+// leaves — the keys it claims at its prompt (Tab, Return), and the keys the
+// grammar binds to nothing — each after the command line as the editor
+// holds it, so its completion and history see the line being edited. And a
+// keystroke that changed the line tells the program, so what it shows is
+// what is edited.
+
+/// The entry whose program's prompt `ctx`'s keys edit, or null.
+fn atPrompt(ctx: *core.command.Context) ?*core.Buffers.Buffer {
+    const b = ctx.buffer();
+    if (b.capture_endpoint.len == 0 or b.declared_posture == .capture) return null;
+    if (!core.grid_mirror.fieldLive(b)) return null;
+    return b;
+}
+
+/// A key the program claims at its prompt: its own, after the line.
+fn claimedKey(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) bool {
+    const b = atPrompt(ctx) orelse return false;
+    if (core.pointer.isPointerSpec(spec) or ctx.head.pending.len > 0) return false;
+    if (!b.grid.?.input.claims(spec)) return false;
+    toProgram(ctx, b, spec, commit.bytes);
+    return true;
+}
+
+/// A key the grammar left: the program's, at its prompt. False elsewhere.
+fn unboundToProgram(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) bool {
+    const b = atPrompt(ctx) orelse return false;
+    if (core.pointer.isPointerSpec(spec)) return false;
+    toProgram(ctx, b, spec, commit.bytes);
+    return true;
+}
+
+/// Hand `spec` to `b`'s program with the command line as the editor holds
+/// it and where the caret stands in it (`""` spec: the line alone).
+fn toProgram(ctx: *core.command.Context, b: *core.Buffers.Buffer, spec: []const u8, text: []const u8) void {
+    _ = core.grid_mirror.takeField(ctx.gpa, b) catch {};
+    const g = b.grid.?;
+    var cursor_buf: [20]u8 = undefined;
+    const cursor = std.fmt.bufPrint(&cursor_buf, "{d}", .{core.grid_mirror.fieldCursor(b)}) catch "0";
+    const endpoint = ctx.gpa.dupe(u8, b.capture_endpoint) catch return;
+    defer ctx.gpa.free(endpoint);
+    const line = ctx.gpa.dupe(u8, g.field_text.items) catch return;
+    defer ctx.gpa.free(line);
+    g.field_pushed.resize(ctx.gpa, line.len) catch return;
+    @memcpy(g.field_pushed.items, line);
+    _ = core.command.run(ctx.commands, ctx, endpoint, &.{ .{ .string = spec }, .{ .string = text }, .{ .string = line }, .{ .string = cursor } }) catch |err| {
+        std.log.warn("prompt: {s} failed: {t}", .{ endpoint, err });
+    };
+}
+
+/// After a key: a command line it changed reaches the program.
+fn flushField(ctx: *core.command.Context) void {
+    const b = atPrompt(ctx) orelse return;
+    _ = core.grid_mirror.takeField(ctx.gpa, b) catch return;
+    const g = b.grid.?;
+    if (std.mem.eql(u8, g.field_text.items, g.field_pushed.items)) return;
+    toProgram(ctx, b, "", "");
 }
 
 fn deliverCaptured(ctx: *core.command.Context, endpoint: []const u8, spec: []const u8, text: []const u8) void {

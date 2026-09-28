@@ -635,6 +635,11 @@ fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
     if (!ctx.buffer().resumeCapture()) return ok;
     const resting = ctx.buffers.restingModeFor(ctx.posture());
     if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
+    // Back at a program's prompt: the caret goes to its command line.
+    if (@import("grid_mirror.zig").fieldRange(ctx.buffer())) |f| if (ctx.buffer().textEditor()) |ed| {
+        ed.clearSelection();
+        ed.placeCursor(f.end);
+    };
     return ok;
 }
 

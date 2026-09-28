@@ -248,12 +248,18 @@ const test_prompt = "weft-e2e>";
 /// `ZDOTDIR` (zsh) and `ENV` (sh), published as the environment of the place
 /// the terminal runs in. The user's own rc files — which may take seconds or
 /// print — are not read, and zsh skips the system-wide ones too.
-fn hermeticShellHome(app: *IdeApp) !void {
+fn hermeticShellHome(app: anytype) !void {
+    return hermeticShellHomeWith(app, "");
+}
+
+/// `hermeticShellHome`, with `rc` (a shell line, single-quote free) added
+/// to both shells' startup files after the prompt: `bindkey -v`, say.
+fn hermeticShellHomeWith(app: anytype, comptime rc: []const u8) !void {
     const gpa = app.ed.gpa;
     const out = try app.proj.oracle("mkdir -p home && " ++
-        "printf \"PS1='" ++ test_prompt ++ " '\\n\" > home/.bashrc && " ++
+        "printf \"PS1='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.bashrc && " ++
         "printf 'setopt no_global_rcs\\n' > home/.zshenv && " ++
-        "printf \"PROMPT='" ++ test_prompt ++ " '\\n\" > home/.zshrc && " ++
+        "printf \"PROMPT='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.zshrc && " ++
         "cp home/.bashrc home/.shrc");
     gpa.free(out);
     const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00", .{app.proj.root});
@@ -675,7 +681,7 @@ test "e2e/terminal: out of capture under ide, a drag selects the terminal's cell
 // ── Shell integration (doc/terminal.md §7) ───────────────────────────
 
 /// Whether `program` is on the PATH the tests run with.
-fn have(app: *IdeApp, program: []const u8) !bool {
+fn have(app: anytype, program: []const u8) !bool {
     var buf: [128]u8 = undefined;
     const found = try app.proj.oracle(try std.fmt.bufPrint(&buf, "command -v {s} >/dev/null && echo yes || echo no", .{program}));
     defer app.ed.gpa.free(found);
@@ -726,6 +732,12 @@ fn integrationCase(app: *IdeApp, shell: []const u8) !void {
         const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline and !std.mem.eql(u8, placeDir(ed), want)) ed.settle(1);
         try t.expectEqualStrings(want, placeDir(ed));
+    }
+    // OSC 2: the title — the directory, at a prompt — is the entry's label,
+    // what its tab in the panel's header reads.
+    {
+        const b = named(ed, term).?;
+        try t.expect(std.mem.endsWith(u8, b.label(), "sub/deeper"));
     }
 
     // Two commands, then out of capture: the prompts are landmarks.
@@ -816,4 +828,156 @@ test "e2e/terminal: integration off, or a whole command line, runs the shell as 
     try waitFor(ed, test_prompt);
     const row = rowReading(ed, test_prompt) orelse return screenFailed(ed, error.NoPromptRow);
     try t.expect(!row[0].mark.prompt);
+}
+
+// ── The command line is a field; keys route by declared state (§8) ──
+
+/// Drive the editor until the terminal's program declares its prompt: the
+/// entry stops capturing, and a command line is there for the grammar.
+fn waitPrompt(ed: *Editor) !void {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        const b = named(ed, term) orelse continue;
+        if (b.declared_posture != .capture and core.grid_mirror.fieldRange(b) != null) return;
+    }
+    return screenFailed(ed, error.PromptNeverDeclared);
+}
+
+/// The terminal's command line as the editor holds it.
+fn fieldText(ed: *Editor) ![]u8 {
+    const b = named(ed, term) orelse return error.NoTerminal;
+    const f = core.grid_mirror.fieldRange(b) orelse return error.NoField;
+    const out = try ed.gpa.alloc(u8, f.end - f.start);
+    b.textEditor().?.text().copyRange(out, f);
+    return out;
+}
+
+/// A vim editor (config.js) with the terminal on `shell`, at its prompt.
+fn vimAtPrompt(app: *chrome.GrammarApp, shell: []const u8, comptime rc: []const u8) !void {
+    const ed = &app.ed;
+    try app.open("x.txt", "x\n");
+    try hermeticShellHomeWith(app, rc);
+    try ed.setConfig("terminal", "shell", shell);
+    ed.runStr("terminal.open", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+    try waitPrompt(ed);
+}
+
+test "e2e/terminal: at a zsh prompt in vi mode, vim edits the command line with undo, and Return runs the edited command" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    if (!try have(&app, "zsh")) return error.SkipZigTest;
+    // The user's zsh is in vi mode: weft's line still lands, whatever
+    // keymap the shell is in.
+    try vimAtPrompt(&app, "zsh", "bindkey -v");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+
+    // vim's own editing: insert, a word motion, a change, undo and redo.
+    ed.press("i", "i");
+    try t.expectEqualStrings("insert", ed.head.currentMode());
+    ed.typeText("echo abc def");
+    ed.press("Escape", "");
+    ed.press("b", "b");
+    ed.press("c", "c");
+    ed.press("w", "w");
+    ed.typeText("xyz");
+    ed.press("Escape", "");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc xyz", line);
+    }
+    ed.press("u", "u");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc def", line);
+    }
+    ed.press("C-r", "");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc xyz", line);
+    }
+    // The shell was told each change: its own echo of the line is weft's.
+    try waitFor(ed, test_prompt ++ " echo abc xyz");
+    // Return — in normal mode as in insert — runs the line as edited.
+    ed.press("Return", "");
+    try waitFor(ed, "\nabc xyz\n" ++ test_prompt);
+    // A fresh prompt: an empty command line again.
+    try waitPrompt(ed);
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("", line);
+    }
+}
+
+test "e2e/terminal: at the prompt workspace chords are the grammar's — C-w moves focus with no break-out" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    try vimAtPrompt(&app, shell, "");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    // The panel is below the editor: C-w k is vim's, and the editor has
+    // the keys now.
+    ed.press("C-w", "");
+    ed.press("k", "k");
+    ed.applyWindow();
+    try t.expectEqualStrings("x.txt", ed.buffers.active().name);
+}
+
+test "e2e/terminal: a running program gets every key — C-w and Escape included — and the prompt gives them back" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    try vimAtPrompt(&app, shell, "");
+    ed.press("i", "i");
+    // A program reading the keyboard raw: three bytes, then their codes.
+    ed.typeText("stty raw -echo; echo raw-\"\"now; dd bs=1 count=3 2>/dev/null | od -An -tx1; stty sane");
+    ed.press("Return", "");
+    // A command runs (OSC 133 C): the program owns the keys.
+    {
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline and ed.ctx.posture() != core.input.Posture.capture) ed.settle(1);
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    }
+    // C-w (vim's window prefix) and Escape (vim's normal mode) are the
+    // program's, as bytes 0x17 and 0x1b — once the tty is raw.
+    try waitFor(ed, "raw-now");
+    ed.press("C-w", "");
+    ed.press("Escape", "");
+    ed.press("x", "x");
+    try waitFor(ed, "17 1b 78");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    // The prompt again: the grammar has the keys.
+    try waitPrompt(ed);
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+
+    // A full-screen program declares the alternate screen: every key its.
+    if (try have(&app, "less")) {
+        const made = try app.proj.oracle("printf 'page one\\npage two\\n' > page.txt");
+        gpa.free(made);
+        ed.press("i", "i");
+        ed.typeText("less page.txt");
+        ed.press("Return", "");
+        try waitFor(ed, "page one\npage two");
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+        ed.press("q", "q");
+        try waitPrompt(ed);
+        try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    }
 }

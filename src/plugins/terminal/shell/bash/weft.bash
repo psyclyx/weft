@@ -41,6 +41,42 @@ if [[ $- == *i* && -z ${_weft_loaded-} ]]; then
 	PROMPT_COMMAND="_weft_prompt_command${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 	PS0=$'\e]133;C\a'"${PS0-}"
 
+	# The command line (doc/terminal.md §8): weft edits it with its own
+	# grammar at the prompt. readline has no redraw hook, so bash reports its
+	# line when asked — ESC [ 7781 ~ — and weft hands a line back as
+	# ESC [ 7780 ~ SEQ;CURSOR;HEX BEL; both are bound in every keymap, so vi
+	# mode and emacs mode alike take them. The report:
+	#   OSC 7780 ; line ; SEQ ; CURSOR ; HEX
+	_weft_seq=0
+	_weft_hex() {
+		local LC_ALL=C s=$1 out='' h i
+		for ((i = 0; i < ${#s}; i++)); do
+			printf -v h '%02x' "'${s:i:1}"
+			out+=$h
+		done
+		REPLY=$out
+	}
+	_weft_report_now() {
+		_weft_hex "$READLINE_LINE"
+		builtin printf '\e]7780;line;%s;%s;%s\a' "$_weft_seq" "$READLINE_POINT" "$REPLY"
+	}
+	_weft_set_line() {
+		local payload='' esc='' i
+		IFS= builtin read -r -d $'\a' payload
+		_weft_seq=${payload%%;*}
+		payload=${payload#*;}
+		local cur=${payload%%;*} hex=${payload#*;}
+		for ((i = 0; i < ${#hex}; i += 2)); do esc+="\\x${hex:i:2}"; done
+		builtin printf -v READLINE_LINE '%b' "$esc"
+		READLINE_POINT=$cur
+	}
+	for _weft_km in emacs vi-insert vi-command; do
+		builtin bind -m "$_weft_km" -x '"\e[7780~": _weft_set_line'
+		builtin bind -m "$_weft_km" -x '"\e[7781~": _weft_report_now'
+	done
+	unset _weft_km
+	builtin printf '\e]7780;hello;1\a'
+
 	_weft_hook=${XDG_CONFIG_HOME:-$HOME/.config}/weft/shell/bash
 	if [[ -r $_weft_hook ]]; then
 		builtin source "$_weft_hook"

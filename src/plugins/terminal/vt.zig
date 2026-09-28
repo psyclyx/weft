@@ -176,6 +176,13 @@ pub const Vt = struct {
         return screen == c.GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
     }
 
+    /// The kitty keyboard protocol flags the program pushed (0: none).
+    pub fn kittyFlags(self: *Vt) u8 {
+        var flags: u8 = 0;
+        _ = c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, @ptrCast(&flags));
+        return flags;
+    }
+
     pub fn bracketedPaste(self: *Vt) bool {
         return self.mode(2004);
     }
@@ -247,7 +254,7 @@ pub const Vt = struct {
     /// scrolled up into the scrollback since core last heard (a history
     /// section), and a new title. Nothing when nothing changed. `msg` is
     /// scratch the message is built in, grown as needed.
-    pub fn publish(self: *Vt, name: []const u8, msg: *std.ArrayList(u8), reading: bool) void {
+    pub fn publish(self: *Vt, name: []const u8, msg: *std.ArrayList(u8), reading: bool, input: ?[]const u8) void {
         var hist: std.ArrayList(u8) = .empty;
         defer hist.deinit(weft.allocator);
         // Read, the screen is the live one, whatever S-Prior scrolled to.
@@ -256,7 +263,7 @@ pub const Vt = struct {
         if (c.ghostty_render_state_update(self.render, self.term) != c.GHOSTTY_SUCCESS) return;
         var dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         _ = c.ghostty_render_state_get(self.render, c.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
-        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty and !history and !self.title_dirty and !self.pwd_dirty) return;
+        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty and !history and !self.title_dirty and !self.pwd_dirty and input == null) return;
         const all = self.all_dirty or dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FULL;
         self.all_dirty = false;
 
@@ -307,6 +314,7 @@ pub const Vt = struct {
             weft.grid.appendSection(msg, weft.allocator, .title, self.title()) catch return;
             self.title_dirty = false;
         }
+        if (input) |payload| weft.grid.appendSection(msg, weft.allocator, .input, payload) catch return;
         if (self.pwd_dirty) {
             var buf: [4096]u8 = undefined;
             if (decodePwd(self.pwd(), &buf)) |dir| weft.grid.appendSection(msg, weft.allocator, .cwd, dir) catch return;

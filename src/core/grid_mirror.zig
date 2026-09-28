@@ -74,9 +74,18 @@ pub fn sync(gpa: Allocator, buffers: *Buffers, b: *Buffers.Buffer) !void {
         try grid_mod.appendRowText(gpa, &tail, g.historyRow(i));
         try tail.append(gpa, '\n');
     }
+    const field_row: ?usize = if (fieldLive(b)) g.input.line.?.row else null;
     for (0..g.rows) |r| {
         if (r > 0) try tail.append(gpa, '\n');
-        try grid_mod.appendRowText(gpa, &tail, g.row(r));
+        if (field_row == r) {
+            // The command line is the editor's while it edits it: the prompt
+            // as the cells have it (blanks kept — they end where typing
+            // starts), then the field's own text, whatever the cells echo.
+            const line = g.input.line.?;
+            var buf: [4]u8 = undefined;
+            for (g.row(r)[0..@min(line.col, g.cols)]) |c| try tail.appendSlice(gpa, grid_mod.cellText(c, &buf));
+            try tail.appendSlice(gpa, g.field_text.items);
+        } else try grid_mod.appendRowText(gpa, &tail, g.row(r));
     }
     // Only what changed: the tail's common prefix and suffix stay.
     const end = rope.byteLen();
@@ -131,6 +140,70 @@ pub fn cursorOffset(b: *Buffers.Buffer) ?usize {
     var buf: [4]u8 = undefined;
     for (g.row(g.cursor.y)[0..@min(g.cursor.x, g.cols)]) |c| off += grid_mod.cellText(c, &buf).len;
     return range.start + @min(off, range.end - range.start);
+}
+
+// ── The command line: a field at the prompt (doc/terminal.md §8) ─────
+
+/// Whether `b` has a command line the editor edits: its program declared a
+/// line at a prompt, does not own the keys, and the user has not broken
+/// out (out of capture a terminal is read, not typed into).
+pub fn fieldLive(b: *const Buffers.Buffer) bool {
+    const g = b.grid orelse return false;
+    return g.input.line != null and !g.input.owns_keys and !b.broken_out;
+}
+
+/// The document range of `b`'s command line: from where its row's prompt
+/// ends to the end of that line. Null when there is none, or the document
+/// is not in step with the cells.
+pub fn fieldRange(b: *Buffers.Buffer) ?Document.Range {
+    if (!fieldLive(b)) return null;
+    const g = b.grid.?;
+    const ed = b.textEditor() orelse return null;
+    if (!inStep(g, ed)) return null;
+    const line = g.input.line.?;
+    const range = ed.text().lineRange(g.historyLen() + line.row);
+    var prefix: usize = 0;
+    var buf: [4]u8 = undefined;
+    for (g.row(line.row)[0..@min(line.col, g.cols)]) |c| prefix += grid_mod.cellText(c, &buf).len;
+    return .{ .start = range.start + @min(prefix, range.end - range.start), .end = range.end };
+}
+
+/// Why an edit of `r` (writing `bytes`) on grid entry `b` is refused, or
+/// null when it may land: only the command line takes edits, and only on
+/// its one line. For an entry that is no grid, its `read_only` reason.
+pub fn writeRefusal(b: *Buffers.Buffer, r: Document.Range, bytes: []const u8) ?[]const u8 {
+    if (b.grid == null) return b.read_only;
+    const f = fieldRange(b) orelse return b.read_only orelse read_only;
+    if (r.start < f.start or r.end > f.end) return "terminal output: only the command line takes edits";
+    if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return "the command line is one line";
+    return null;
+}
+
+/// Take the command line's text from the document after a keystroke
+/// (`field_text`). True when it changed.
+pub fn takeField(gpa: Allocator, b: *Buffers.Buffer) !bool {
+    const f = fieldRange(b) orelse return false;
+    const g = b.grid.?;
+    const ed = b.textEditor().?;
+    const len = f.end - f.start;
+    if (len == g.field_text.items.len) {
+        var buf: [256]u8 = undefined;
+        if (len <= buf.len) {
+            ed.text().copyRange(buf[0..len], f);
+            if (std.mem.eql(u8, buf[0..len], g.field_text.items)) return false;
+        }
+    }
+    try g.field_text.resize(gpa, len);
+    ed.text().copyRange(g.field_text.items, f);
+    return true;
+}
+
+/// Where `b`'s caret stands in its command line, in bytes from its start
+/// (clamped to it).
+pub fn fieldCursor(b: *Buffers.Buffer) usize {
+    const f = fieldRange(b) orelse return 0;
+    const at = b.textEditor().?.cursorOffset();
+    return @min(at -| f.start, f.end - f.start);
 }
 
 // ── Landmarks: where a program marked its turns (a shell's prompts) ───

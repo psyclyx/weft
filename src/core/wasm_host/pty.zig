@@ -184,11 +184,52 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         b.setTitle(gpa, line[0..@min(line.len, 256)]) catch {};
     }
     if (applied.cwd) |dir| followCwd(p, b, dir);
+    // The program's word on its command line: a new prompt's, or one it
+    // changed itself (completion, history) — the field's text from now on.
+    const input = applied.input;
+    if (input) |in| takeLine(gpa, g, in) catch return;
     _ = grid_mirror.ensureDocument(gpa, bufs, b) catch return;
+    // Who has the keys follows what the program declared, unless the user
+    // broke out.
+    const flipped = b.followProgram();
     if (b.declared_posture != .capture) grid_mirror.sync(gpa, bufs, b) catch |err| {
         std.log.warn("grid: the text of {s} could not follow its cells: {t}", .{ b.name, err });
     };
+    if (input) |in| restAt(p, b, in, flipped);
     results[0] = 0;
+}
+
+fn takeLine(gpa: std.mem.Allocator, g: *grid_mod.Grid, in: @import("weft_membrane").grid.Input) !void {
+    const Head = @import("weft_membrane").grid.InputHead;
+    if (in.head.flags & Head.line == 0) {
+        g.field_text.clearRetainingCapacity();
+        g.field_pushed.clearRetainingCapacity();
+        return;
+    }
+    if (in.head.flags & (Head.fresh | Head.authoritative) == 0) return;
+    try g.field_text.resize(gpa, in.line.len);
+    @memcpy(g.field_text.items, in.line);
+    try g.field_pushed.resize(gpa, in.line.len);
+    @memcpy(g.field_pushed.items, in.line);
+}
+
+/// Where the head rests after the program's declaration: the grammar's
+/// resting mode for what the entry now is — capture when the program took
+/// the keys, text at a prompt — and at a prompt the caret where the
+/// program's cursor is, when the program spoke for its line. Only for the
+/// head whose entry this is; another entry's mode is its own.
+fn restAt(p: *WasmPlugin, b: *Buffers.Buffer, in: @import("weft_membrane").grid.Input, flipped: bool) void {
+    const Head = @import("weft_membrane").grid.InputHead;
+    const ctx = p.activeCtx();
+    const spoke = in.head.flags & (Head.fresh | Head.authoritative) != 0;
+    if (spoke) if (grid_mirror.fieldRange(b)) |f| if (b.textEditor()) |ed| {
+        ed.clearSelection();
+        ed.placeCursor(f.start + @min(in.head.cursor, f.end - f.start));
+    };
+    if (ctx.buffer() != b) return;
+    if (!flipped and in.head.flags & Head.fresh == 0) return;
+    const resting = ctx.buffers.restingModeFor(b.posture(false));
+    if (resting.len > 0) ctx.capturedCtx().setMode(resting) catch {};
 }
 
 /// The program behind grid entry `b` says it is in local directory `dir`
@@ -250,9 +291,13 @@ pub fn anyExtentMoved(p: *WasmPlugin) bool {
 
 /// `wl_declare_capture(cmd)`: the addressed entry CAPTURES input (§10.4):
 /// every key but the grammar's break-out chord runs `cmd` with the key's
-/// spec and the text it committed (`app/dispatch.zig`). Only the entry's
-/// maker may: capture is how keystrokes leave the grammar, so no plugin may
-/// turn an entry it does not own into a keylogger.
+/// spec and the text it committed (`app/dispatch.zig`) — while its program
+/// owns the keys, which is always, unless a grid's program declared a
+/// prompt (doc/terminal.md §8); then the grammar edits its command line and
+/// `cmd` hears the keys the grammar leaves. It also takes the entry back
+/// from a break-out. Only the entry's maker may: capture is how keystrokes
+/// leave the grammar, so no plugin may turn an entry it does not own into a
+/// keylogger.
 pub fn hDeclareCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -265,5 +310,6 @@ pub fn hDeclareCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     }
     p.gpa.free(b.capture_endpoint);
     b.capture_endpoint = cmd;
-    b.declarePosture(.capture);
+    b.broken_out = false;
+    if (b.programOwnsKeys()) b.declarePosture(.capture) else _ = b.releaseCapture();
 }

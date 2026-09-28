@@ -123,7 +123,65 @@ pub const Tag = enum(u8) {
     /// Where the program is: an absolute local directory (a shell's OSC 7
     /// cwd, decoded). The entry's place becomes it.
     cwd = 3,
+    /// Who has the keys, as the program DECLARED it: `InputHead`, then the
+    /// command line's bytes, then the keys the program claims at its
+    /// prompt, '\n'-joined. Sent when it changes.
+    input = 4,
     _,
+};
+
+/// An input section's head (doc/terminal.md §8). The program owns every
+/// key (`owns_keys`) — it said so: the alternate screen, the kitty keyboard
+/// protocol, mouse tracking, a command running — or it sits at a prompt with
+/// a command LINE the editor edits as a field: at screen row `row`, from cell
+/// `col`, holding `line_len` bytes with the program's cursor at byte
+/// `cursor`. `authoritative`: that line is the program's word (a new prompt,
+/// or the program changed it — completion, history), to replace the field's
+/// text; otherwise it is only what the program shows.
+pub const InputHead = extern struct {
+    flags: u32 = 0,
+    row: u32 = 0,
+    col: u32 = 0,
+    cursor: u32 = 0,
+    line_len: u32 = 0,
+    claimed_len: u32 = 0,
+
+    pub const owns_keys: u32 = 1;
+    pub const line: u32 = 2;
+    pub const authoritative: u32 = 4;
+    /// A new prompt: the line is a fresh field (its edits are a new
+    /// history), and the editor comes to rest there.
+    pub const fresh: u32 = 8;
+};
+
+comptime {
+    std.debug.assert(@sizeOf(InputHead) == 24);
+}
+
+/// An input section, read in place and checked whole.
+pub const Input = struct {
+    head: InputHead,
+    line: []const u8,
+    claimed: []const u8,
+
+    pub fn parse(bytes: []const u8) DecodeError!Input {
+        if (bytes.len < @sizeOf(InputHead)) return error.Malformed;
+        const head = std.mem.bytesToValue(InputHead, bytes[0..@sizeOf(InputHead)]);
+        const rest = bytes[@sizeOf(InputHead)..];
+        if (rest.len != @as(usize, head.line_len) + head.claimed_len) return error.Malformed;
+        if (head.cursor > head.line_len) return error.Malformed;
+        return .{ .head = head, .line = rest[0..head.line_len], .claimed = rest[head.line_len..] };
+    }
+
+    /// The section's payload into `out`.
+    pub fn encode(out: *std.ArrayList(u8), gpa: std.mem.Allocator, head: InputHead, line_text: []const u8, claimed: []const u8) std.mem.Allocator.Error!void {
+        var h = head;
+        h.line_len = @intCast(line_text.len);
+        h.claimed_len = @intCast(claimed.len);
+        try out.appendSlice(gpa, std.mem.asBytes(&h));
+        try out.appendSlice(gpa, line_text);
+        try out.appendSlice(gpa, claimed);
+    }
 };
 
 pub const SectionHead = extern struct {

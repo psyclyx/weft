@@ -99,6 +99,35 @@ pub const Grid = struct {
     /// Some cell ever said it is part of a prompt (a shell with integration):
     /// the rows have LANDMARKS to move between (`grid_mirror.landmark`).
     landmarks: bool = false,
+    /// Who has the keys, as the program DECLARED it (`input` sections,
+    /// doc/terminal.md §8). Until one says otherwise the program owns every
+    /// key: a terminal with no shell integration captures, as it always did.
+    input: Input = .{},
+    /// The command line as the editor holds it — the document's text there,
+    /// owned, taken after every keystroke that changed it — and what the
+    /// program was last told it is. Meaningful while `input.line` is set
+    /// (`grid_mirror`, doc/terminal.md §8).
+    field_text: std.ArrayList(u8) = .empty,
+    field_pushed: std.ArrayList(u8) = .empty,
+
+    pub const Input = struct {
+        owns_keys: bool = true,
+        /// The command line at a prompt, when there is one for the editor
+        /// to edit as a field: its screen row and the cell it starts at.
+        line: ?Line = null,
+        /// Keys the program claims at its prompt ('\n'-joined specs, owned):
+        /// they reach it whatever the grammar binds them to (Tab, Return).
+        claimed: []u8 = &.{},
+
+        pub const Line = struct { row: u16, col: u16 };
+
+        /// Whether `spec` is one of the claimed keys.
+        pub fn claims(self: *const Input, spec: []const u8) bool {
+            var it = std.mem.splitScalar(u8, self.claimed, '\n');
+            while (it.next()) |k| if (k.len > 0 and std.mem.eql(u8, k, spec)) return true;
+            return false;
+        }
+    };
 
     /// The document is history rows `[start, end)` (absolute), one line
     /// each, then the screen's rows.
@@ -113,12 +142,18 @@ pub const Grid = struct {
         title: ?[]const u8 = null,
         /// Where the program now is (borrowed), when the message said.
         cwd: ?[]const u8 = null,
+        /// Who has the keys, when the message said (borrowed): what the entry
+        /// takes up beyond `input`, the program's command line.
+        input: ?wire.Input = null,
     };
 
     pub fn deinit(self: *Grid, gpa: Allocator) void {
         gpa.free(self.cells);
         self.history_cells.deinit(gpa);
         self.history_rows.deinit(gpa);
+        gpa.free(self.input.claimed);
+        self.field_text.deinit(gpa);
+        self.field_pushed.deinit(gpa);
         self.* = undefined;
     }
 
@@ -147,6 +182,7 @@ pub const Grid = struct {
         while (it.next()) |s| switch (s.tag) {
             .title => applied.title = s.bytes,
             .cwd => applied.cwd = s.bytes,
+            .input => applied.input = try wire.Input.parse(s.bytes),
             .history => history = try wire.History.parse(s.bytes),
             _ => {},
         };
@@ -173,6 +209,15 @@ pub const Grid = struct {
             };
         }
         if (history) |hist| try self.applyHistory(gpa, hist);
+        if (applied.input) |in| {
+            const claimed = try gpa.dupe(u8, in.claimed);
+            gpa.free(self.input.claimed);
+            self.input = .{
+                .owns_keys = in.head.flags & wire.InputHead.owns_keys != 0,
+                .line = if (in.head.flags & wire.InputHead.line != 0) .{ .row = @intCast(@min(in.head.row, h.rows -| 1)), .col = @intCast(@min(in.head.col, h.cols)) } else null,
+                .claimed = claimed,
+            };
+        }
         self.cursor = .{
             .x = @min(h.cursor_x, h.cols -| 1),
             .y = @min(h.cursor_y, h.rows -| 1),

@@ -192,6 +192,10 @@ here knows what a terminal is: any plugin's entries can be listed so.
 
 ## 5. Keys: capture
 
+Capture is what a terminal does while its program owns the keys — always,
+without shell integration; with it, whenever the program declares so (§8).
+At a shell's prompt the grammar has the keys instead.
+
 The terminal's entry declares the capture posture
 (`wl_declare_capture("terminal.input")`,
 contextual-workspace-architecture.md §10.4). This is capture's first
@@ -373,7 +377,94 @@ the word and every other entry's key keeps its meaning: vim and helix `[[` /
 `]]` and `SPC t o`, ide C-Up / C-Down (as VS Code's terminal), emacs
 `C-c C-p` / `C-c C-n` / `C-c C-o` (as comint).
 
-## 8. What stayed
+## 8. Who has the keys: routed by what the program declared
+
+A terminal cannot know whether a program "uses" a key: a byte stream says
+nothing of the sort. What it can know is what the program DECLARED, so
+that is all keys are routed by.
+
+**The state machine.** The terminal plugin declares, in every publish that
+changes it, an `input` section (`membrane/grid.zig` `InputHead`); core keeps
+it (`Grid.input`) and routes by it. The user's own break-out overrides it.
+
+```
+                        program declares                  user
+  OWNS_KEYS  ─ no integration that syncs its line   ─┐
+             ─ a command running (OSC 133 C..D)      │   C-\ (break-out)
+             ─ alternate screen / kitty keyboard /   ├──────────────────► BROKEN OUT
+               mouse tracking                        │   ◄──────────────── i, a, click, C-`
+  PROMPT     ─ at a prompt (after OSC 133 B), its    │   (resume)
+               line known, none of the above        ─┘
+
+  OWNS_KEYS   → capture: every key raw to the program but the break-out chord
+  PROMPT      → the grammar has the keys and edits the command line as a field
+                of the entry's text, with undo; the keys the program CLAIMS
+                (Tab, S-Tab, Return, KP_Enter) and the keys the grammar binds
+                to nothing go to the program, each after the line
+  BROKEN OUT  → terminal-normal (§6): read-only text; the program's state is
+                not followed until resumed
+```
+
+- **Declared, never guessed.** The plugin computes OWNS_KEYS from ghostty's
+  modes (`altScreen`, `kittyFlags`, `mouseTracking`) and the OSC 133 marks
+  it watches on the byte stream (`prompt.Scanner`); nothing else.
+- **Capture follows the program** (`Buffer.followProgram`, run on every
+  publish): OWNS_KEYS declares capture, PROMPT releases it, BROKEN OUT
+  (`Buffer.broken_out`) holds both off. `wl_declare_capture` sets the
+  endpoint and takes the entry back from a break-out; resuming at a prompt
+  leaves the grammar the keys and puts the caret in the command line.
+- **The head rests** where the grammar declares for what the entry now is
+  (`restingModeFor`): capture's mode when a program takes the keys, the text
+  mode at a new prompt (vim and helix normal: `i`, `a` start typing as in any
+  text; ide and emacs type directly).
+- **Without integration** — a whole command line as `shell`, `integration`
+  off, fish (which does not sync its line) — nothing is ever declared, and
+  the program owns every key: capture, as before.
+
+**The command line is a field** (`core/grid_mirror.zig`). At a PROMPT the
+declaration carries where the line starts (the cursor at OSC 133 B: screen
+row and cell) and, when it is the program's word — a new prompt, or a change
+the shell made itself (completion, history) — the line and its cursor.
+
+- The field is that row's line in the entry's document, from the prompt's
+  last cell to its end (`fieldRange`). `writeRefusal` is the one edit gate
+  for a grid entry: only the field takes edits, on its one line — typing,
+  vim operators, undo alike (`Context.edit`, `editEach`, `admitUndo`). An
+  undo that would reach a line long since run is refused.
+- Edits are the user's, so undo is the grammar's own. The mirror keeps the
+  field row as the editor holds it (`Grid.field_text`: the prompt from the
+  cells, blanks kept, then the field), whatever the shell echoes meanwhile.
+- After every key (`app/dispatch.flushField`), a changed line reaches the
+  program: the endpoint runs with an empty key, the line and the caret's
+  byte in it; the plugin sets the shell's line only when it differs from
+  what it last set. A claimed or unbound key runs the endpoint with the key
+  after the same line (`toProgram`).
+
+**The line protocol** (`src/plugins/terminal/prompt.zig`, the integration
+scripts):
+
+| direction | bytes | meaning |
+|---|---|---|
+| shell → weft | `OSC 7780;hello;1` | this integration syncs its line |
+| shell → weft | `OSC 7780;line;SEQ;CURSOR;HEX` | the line buffer (hex of its bytes), the cursor in bytes, the last set it applied |
+| weft → shell | `ESC [ 7780 ~ SEQ;CURSOR;HEX BEL` | set the buffer and the cursor |
+| weft → shell | `ESC [ 7781 ~` | report now |
+
+The two keys are bound in EVERY keymap — zsh's `emacs`, `viins` and `vicmd`
+widgets (`_weft_set_line` reads the payload with `read -k`, which reads
+through zle), bash's `emacs`, `vi-insert` and `vi-command` (`bind -x`,
+`READLINE_LINE`/`READLINE_POINT`) — so a line lands whatever keymap the
+shell is in; zsh in vi mode is tested. zsh reports on every redraw
+(`zle-line-pre-redraw`); bash has no redraw hook, so it reports when asked,
+after each key weft sends that does not end the line. A report older than
+weft's last set (by SEQ) is a stale echo and ignored; one that differs from
+what weft set is the shell's own change, and is declared as the program's
+word. A prompt the line editor merely redraws (bash redisplays it after a
+set) is not a new prompt. A key typed raw at a prompt not yet declared
+makes the line unknown, and no prompt is declared until the shell reports
+it.
+
+## 9. What stayed
 
 - `terminal.session` is still published on the place the shell starts in.
 - `[process exited N]` is written onto the screen, and the next key or C-`
@@ -387,7 +478,7 @@ mode, its input line, and `TERM=dumb`/`--noediting`.
 person edits and searches, with output appended as a CRDT peer. That is a
 different thing from a screen, so moving them is not a rename.
 
-## 9. Not done
+## 10. Not done
 
 - **A remote pty.** A shell in a peer's or ssh's place needs the pty door
   answered by that place's authority (§1).
@@ -404,3 +495,16 @@ different thing from a screen, so moving them is not a rename.
 - **OSC 7's host is not checked.** A shell on another machine (over ssh)
   reporting its directory moves the entry's place to the local directory of
   that name, when there is one.
+- **The command line is one row.** A line longer than the row its prompt
+  starts on wraps in the shell's echo; the field is the first row's line,
+  so the continuation rows mirror the echo beside it. A right prompt
+  (zsh's `RPROMPT`) on the line's row reads as part of the field.
+- **Typeahead read at a new prompt.** Keys typed while a command ran, which
+  the shell then reads at the next prompt, are not seen until it reports:
+  zsh reports at once (a redraw), bash only when asked, so its field starts
+  empty and the first edit replaces what was typed ahead.
+- **fish does not sync its line** (no `hello`): at its prompt the program
+  keeps every key, as without integration.
+- **vim and helix rest in normal mode at a new prompt**, as in any text:
+  `i`/`a` type. No grammar declares a "typing" resting mode, and declaring
+  one for the field posture would change how every editable listing rests.
