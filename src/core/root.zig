@@ -168,4 +168,5 @@ test {
     _ = @import("weft_facts");
     _ = @import("container.zig");
     _ = @import("repl_session.zig");
+    _ = @import("pty.zig");
 }

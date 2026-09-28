@@ -1,7 +1,11 @@
 let
   npins = import ./npins;
 
-  mkPackages = pkgs: { weft = pkgs.callPackage ./nix/weft.nix { }; };
+  mkPackages = pkgs: {
+    weft = pkgs.callPackage ./nix/weft.nix { };
+    # The terminal plugin's VT emulator (doc/terminal.md).
+    libghostty-vt-wasm = pkgs.callPackage ./nix/libghostty-vt-wasm.nix { ghostty-src = npins.ghostty; };
+  };
 
   overlay = final: _prev: mkPackages final;
 in
@@ -22,5 +26,8 @@ in
 {
   packages = mkPackages finalPkgs;
   inherit overlay;
-  shell = import ./shell.nix { pkgs = finalPkgs; };
+  shell = import ./shell.nix {
+    pkgs = finalPkgs;
+    inherit (finalPkgs) libghostty-vt-wasm;
+  };
 }
