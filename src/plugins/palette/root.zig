@@ -45,7 +45,18 @@ var shown_buf: [256]u8 = undefined;
 ///     the summary. On by default; off is a plainer list.
 ///   commands = listed | all — whether the list leaves out the commands that
 ///     say they are keymap machinery (default), or is the whole registry.
+///   detail = full | brief — a row's secondary text: its id, shape and
+///     summary (default), or nothing (a row is its label and the key that
+///     runs it here — the look most editors' palettes have).
+///   recent = off | on — whether the commands last run from the palette are
+///     listed first, most recent at the top.
 var show_signature: bool = true;
+var brief: bool = false;
+var recent_first: bool = false;
+/// The plugin-kv key the recently run command ids live under, newline-joined,
+/// most recent first.
+const recent_key = "recent";
+const recent_max = 10;
 /// `commands = all` — whether an `internal` command gets a row too.
 var list_all: bool = false;
 
@@ -92,6 +103,8 @@ fn initExtra() void {
     asker.setAsk(!std.mem.eql(u8, weft.config("arguments"), "off"));
     show_signature = !std.mem.eql(u8, weft.config("signature"), "off");
     list_all = std.mem.eql(u8, weft.config("commands"), "all");
+    brief = std.mem.eql(u8, weft.config("detail"), "brief");
+    recent_first = std.mem.eql(u8, weft.config("recent"), "on");
 }
 
 /// What each row of the open palette runs, in the order the rows were added
@@ -136,6 +149,7 @@ fn palette() void {
     // silent cancel. It is also the escape hatch for machinery: typing an
     // internal command's exact id runs it though this list does not show it.
     weft.pickFreeText();
+    if (recent_first) recents();
     offers();
     commands();
     weft.pickEnd();
@@ -166,6 +180,7 @@ fn commands() void {
         const name = name_buf[0..name_view.len];
         const meta = weft.commandMeta(name) orelse weft.Presentation{};
         if (meta.internal and !list_all) continue;
+        if (recent_first and isRecent(name)) continue; // already listed first
         addRow(meta.shown(&shown_buf, name), rowDoc(i, name, meta.summary), name, false);
     }
 }
@@ -175,6 +190,7 @@ fn commands() void {
 /// turns "this row will do nothing" into "this row wants a port and an access
 /// grade" — before you commit to the row, not after.
 fn rowDoc(i: usize, name: []const u8, summary: []const u8) []const u8 {
+    if (brief) return "";
     const shape = if (show_signature) asker.params(&shape_buf, i) else "";
     return std.fmt.bufPrint(&doc_buf, "{s}{s}{s}{s}{s}", .{
         name,
@@ -202,8 +218,62 @@ fn offers() void {
             std.fmt.bufPrint(&doc_buf, "{s} · offered by {s} · {s}", .{ item.name, item.provider, item.reason }) catch continue
         else
             std.fmt.bufPrint(&doc_buf, "{s} · offered by {s}", .{ item.name, item.provider }) catch continue;
-        addRow(item.label, doc, item.name, true);
+        addRow(item.label, if (brief and item.enabled()) "" else doc, item.name, true);
     }
+}
+
+// ── Recently run ────────────────────────────────────────────────────
+
+/// The recently run ids, most recent first (borrowed from the kv read).
+fn recentList() []const u8 {
+    return weft.kvGet(recent_key) orelse "";
+}
+
+/// The recent list as read once when the palette opened (owned), so the
+/// per-row check below reads memory, not the host.
+var recent_snapshot: []u8 = &.{};
+
+fn isRecent(name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, recent_snapshot, '\n');
+    while (it.next()) |line| if (std.mem.eql(u8, line, name)) return true;
+    return false;
+}
+
+/// The recently run commands, first, that still exist and a person runs.
+fn recents() void {
+    if (recent_snapshot.len > 0) weft.allocator.free(recent_snapshot);
+    recent_snapshot = weft.allocator.dupe(u8, recentList()) catch &.{};
+    const n = weft.commandCount();
+    var it = std.mem.splitScalar(u8, recent_snapshot, '\n');
+    while (it.next()) |name| {
+        if (name.len == 0) continue;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const candidate = weft.commandName(i) orelse continue;
+            if (!std.mem.eql(u8, candidate, name)) continue;
+            const meta = weft.commandMeta(name) orelse weft.Presentation{};
+            if (!meta.internal) addRow(meta.shown(&shown_buf, name), rowDoc(i, name, meta.summary), name, false);
+            break;
+        }
+    }
+}
+
+/// Put `name` at the head of the recently run list, at most `recent_max`.
+fn remember(name: []const u8) void {
+    if (!recent_first) return;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(weft.allocator);
+    out.appendSlice(weft.allocator, name) catch return;
+    var kept: usize = 1;
+    var it = std.mem.splitScalar(u8, recentList(), '\n');
+    while (it.next()) |line| {
+        if (kept >= recent_max) break;
+        if (line.len == 0 or std.mem.eql(u8, line, name)) continue;
+        out.append(weft.allocator, '\n') catch return;
+        out.appendSlice(weft.allocator, line) catch return;
+        kept += 1;
+    }
+    weft.kvPut(recent_key, out.items);
 }
 
 /// Echo the active buffer's name + read-only state (the status line).
@@ -239,7 +309,10 @@ fn onPickAccept(pick_id: u32) void {
                 .invoked => {},
                 .refused => |why| weft.echo(why),
                 .unknown => asker.invokeName(name),
-            } else asker.invokeName(name);
+            } else {
+                remember(name);
+                asker.invokeName(name);
+            }
         },
         // TYPED text: a whole call, arguments and all.
         .input => |input| asker.invokeLine(input),

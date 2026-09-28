@@ -1153,3 +1153,35 @@ test "e2e/ide: a one-row verb on several marked rows is refused — Rename, inse
     try t.expectEqual(rows_before, ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
 }
+
+test "e2e/ide: the palette is an IDE's — rows are labels without ids, and what ran last is listed first" {
+    var app: IdeApp = undefined;
+    try app.init(t.allocator);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.press("C-S-p", "");
+    ed.settle(2);
+    try t.expect(ed.head.pick.active);
+    // `detail = brief`: a command row is its label; the id, shape and summary
+    // are not its secondary text (the key that runs it is the annotator's).
+    var commands_seen: usize = 0;
+    for (ed.head.pick.keys.items, ed.head.pick.docs.items) |key, doc| {
+        if (std.mem.startsWith(u8, key, "std.") or std.mem.startsWith(u8, key, "plugin.")) continue;
+        commands_seen += 1;
+        try t.expectEqualStrings("", doc);
+    }
+    try t.expect(commands_seen > 0);
+    app.proj.shot(ed, "ide-palette-top");
+
+    // Run a command from it: Split Editor Right.
+    ed.typeText("Split Editor Right");
+    ed.press("Return", "");
+    try t.expect(!ed.head.pick.active);
+
+    // `recent = on`: opened again, it is the first row.
+    ed.press("C-S-p", "");
+    ed.settle(2);
+    try t.expect(ed.head.pick.active);
+    try t.expectEqualStrings("window.split-right", ed.head.pick.keys.items[0]);
+}

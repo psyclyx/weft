@@ -357,6 +357,30 @@ pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), 
     }
 }
 
+/// A `top` surface: a panel floating at the top centre of the frame — where a
+/// command palette sits in most editors — with the dock's rows (query line
+/// first). Wide enough to read a label and its key, never the whole window.
+fn drawTopSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), surf: *const core.surface.Surface, area: region.Rect, max_rows: usize) !void {
+    const nrows = @min(surf.rows.items.len, max_rows);
+    if (nrows == 0) return;
+    const pad_y = v.line_h * 0.25;
+    const w = @min(@max(0, area.w - 4 * v.cell_w), @max(60 * v.cell_w, area.w * 0.55));
+    const inner: region.Rect = .{
+        .x = area.x + (area.w - w) / 2,
+        .y = area.y + v.line_h * 0.5 + pad_y,
+        .w = w,
+        .h = @as(f32, @floatFromInt(nrows)) * v.line_h,
+    };
+    const dl = (try layoutDockSurface(v, scratch, surf, inner)) orelse return;
+    const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+    try chrome.paintPanel(sink, .{ .x = dl.x, .y = dl.y - pad_y, .w = dl.w, .h = dl.h + 2 * pad_y }, v.theme.selection, v.theme.accent, .popup);
+    for (dl.rows[0..nrows]) |row| {
+        if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.accent);
+        const color = if (row.selected) v.theme.background else spanRoleColor(v, row.role);
+        try propLine(v, scratch, runs, row.text, dl.x + v.cell_w, row.y + v.ascent, color);
+    }
+}
+
 /// A filled box with a 1px outline: the border rect (1px larger all round)
 /// drawn first, the fill on top, so the border reads as a thin frame.
 pub fn outlinedBox(scratch: Allocator, rects: *std.ArrayList(Rect), x: f32, y: f32, w: f32, h: f32, fill: [4]f32, border: [4]f32) !void {
@@ -411,6 +435,10 @@ pub fn drawSurfaces(
             try drawDockSurface(v, scratch, runs, rects, surf, dock);
             continue;
         }
+        if (surf.placement == .top) {
+            try drawTopSurface(v, scratch, runs, rects, surf, area, max_rows);
+            continue;
+        }
 
         // When the rows don't all fit, the LAST row still shows: a surface
         // ends with its footer (which-key's page and paging keys), and a
@@ -451,7 +479,7 @@ pub fn drawSurfaces(
                 if (corner_top) area.y + pad_x else area.y + area.h - box_h - pad_x,
             },
             .center => .{ area.x + (area.w - box_w) / 2, area.y + (area.h - box_h) / 2 },
-            .bottom, .caret => unreachable, // skipped above
+            .bottom, .caret, .top => unreachable, // skipped above
         };
         const box_x = std.math.clamp(raw_x, area.x, @max(area.x, area.x + area.w - box_w));
         const box_y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));

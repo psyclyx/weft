@@ -6,7 +6,7 @@
 //! triple into draw items. A producer never picks a look: it says a node is a
 //! button, or a separator, and the style decides — so the same toolbar is a
 //! row of padded cells under `text`, cells with small icons under
-//! `text-icons`, and rounded pills under `widget`, with no producer knowing.
+//! `text-icons`, and flat buttons (a rounded face on hover) under `widget`, with no producer knowing.
 //!
 //! The style is a theme value (`theme/chrome`), resolved into `View.chrome`
 //! and read here at draw time, so switching it is one binding and the next
@@ -238,11 +238,15 @@ fn paintButton(s: Sink, state: State, content: Content, box: region.Rect) !void 
             try s.fill(box, fill);
         },
         .widget => {
-            const pill: region.Rect = .{ .x = box.x + 1, .y = box.y + 2, .w = @max(0, box.w - 2), .h = @max(0, box.h - 4) };
-            if (state.disabled) {
-                try s.rounded(pill, mix(v.theme.background, v.theme.status, 0.35), .{ .radius = pill.h / 2, .stroke_width = 1 });
-            } else {
-                try s.rounded(pill, surfaceFill(v, state, 0.32), .{ .radius = pill.h / 2 });
+            // FLAT: a toolbar button is its icon and label until the pointer
+            // is on it; hover and press show a rounded rectangle (a small
+            // radius, never a pill), inset from the cell box so neighbours
+            // never touch. A disabled button draws no surface at all — its
+            // dimmed text says it (it stays clickable, to say why).
+            if (!state.disabled and (state.hover or state.pressed or state.focused)) {
+                const inset: f32 = 3;
+                const face: region.Rect = .{ .x = box.x + 1, .y = box.y + inset, .w = @max(0, box.w - 2), .h = @max(0, box.h - 2 * inset) };
+                try s.rounded(face, surfaceFill(v, state, 0.5), .{ .radius = 4 });
             }
         },
     }

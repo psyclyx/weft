@@ -21,7 +21,9 @@ const Allocator = std.mem.Allocator;
 /// and never reflow it. `caret` anchors at a document offset (`anchor`)
 /// instead — the completion popup and hover box, which track the caret
 /// rather than a fixed region.
-pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2, caret = 3 };
+/// `top` floats a panel at the top centre of the frame (a command palette's
+/// place in most editors); `bottom` docks along the window's bottom.
+pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2, caret = 3, top = 4 };
 
 /// A span's semantic color role; the view maps each to a Theme field. Keeping
 /// this an enum (not a raw color) is what lets a theme recolor every surface.

@@ -904,6 +904,8 @@ pub fn withEntry(
     const home = self.active_id;
     const home_prev = self.prev_id;
     const borrowed = (self.get(id) orelse return @call(.auto, f, args)).ref();
+    var kept = keepMode(gpa, self, head);
+    defer kept.restore(gpa, self, head);
     try self.switchQuietly(gpa, id, head, keymap);
     defer if (self.active_id == id or self.resolve(borrowed) == null) {
         if (self.get(home) != null) self.switchQuietly(gpa, home, head, keymap) catch {};
@@ -912,12 +914,37 @@ pub fn withEntry(
     return @call(.auto, f, args);
 }
 
+/// The head's mode as a borrow found it. A borrow (a presentation into another
+/// viewport, closing a background entry) that comes back to the entry it left
+/// hands the head back EXACTLY as it was — a picker's `pick`, a menu, a
+/// pending operator — not the resting mode switching back to that entry would
+/// restore: the toolbar presenting its strip must not close the palette
+/// someone is typing into. A borrow that ends somewhere else leaves the mode
+/// that entry's switch set.
+const KeptMode = struct {
+    home: Id,
+    mode: ?[]u8,
+
+    fn restore(self: *KeptMode, gpa: Allocator, buffers: *Buffers, head: *Head) void {
+        const mode = self.mode orelse return;
+        defer gpa.free(mode);
+        if (buffers.active_id != self.home or std.mem.eql(u8, head.mode, mode)) return;
+        head.setModeRaw(gpa, mode) catch {};
+    }
+};
+
+fn keepMode(gpa: Allocator, buffers: *const Buffers, head: *const Head) KeptMode {
+    return .{ .home = buffers.active_id, .mode = gpa.dupe(u8, head.mode) catch null };
+}
+
 /// Run `f(args)` with `head`'s jump recording muted: whatever entry switches
 /// it makes are not navigation (a presentation into another viewport that
 /// puts the head back).
-pub fn quietly(head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+pub fn quietly(gpa: Allocator, buffers: *Buffers, head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
     head.jumps.muted += 1;
     defer head.jumps.muted -= 1;
+    var kept = keepMode(gpa, buffers, head);
+    defer kept.restore(gpa, buffers, head);
     return @call(.auto, f, args);
 }
 

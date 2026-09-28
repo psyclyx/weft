@@ -752,11 +752,9 @@ fn initExtra() void {
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
-    // Up a level in a listing: Alt+Up (Explorer, Finder's Cmd+Up) and
-    // Backspace (Explorer). Only where nothing takes text, so Backspace in a
-    // file still deletes; a listing with no container simply isn't offered it.
+    // Up a level in a listing: Alt+Up (Explorer, VS Code; Finder's Cmd+Up).
+    // Not Backspace: it must keep deleting while a name is being edited.
     weft.bindKeys("ide-structural", "M-Up", &.{"std.hierarchy.step-out"});
-    weft.bindKeys("ide-structural", "BackSpace", &.{ "std.hierarchy.step-out", "edit.delete-backward" });
     // Over text, THESE are what the transfer words mean: core offers
     // std.transfer.* where a grammar provides the matching action, so the
     // context menu over text has Cut, Copy and Paste, and the keys above

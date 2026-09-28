@@ -796,7 +796,7 @@ pub fn build(
     // popup-layout gate's own scenarios) — this view never special-cases
     // "completion" or "hover" itself, only "a caret/dock surface".
     if (hud.pick) |p| {
-        if (p.buildSurface(scratch, Hud.max_pick_rows)) |surf| {
+        if (p.buildSurface(scratch, Hud.max_pick_rows, .dock)) |surf| {
             if (surf.placement == .caret)
                 try popup.drawCaretSurface(self, scratch, &runs, &rects, &surf, body_rect)
             else

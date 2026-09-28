@@ -927,7 +927,8 @@ pub const FrameBuilder = struct {
         // through this frame's draw.
         const pick_surface: ?*const core.surface.Surface = if (fx.head.pick.active) blk: {
             const s = try arena.create(core.surface.Surface);
-            s.* = fx.head.pick.buildSurface(arena, view_mod.Hud.max_pick_rows) orelse break :blk null;
+            const place: core.pick.Pick.Place = if (configIs(fx.config, "editor", "picker", "top")) .top else .dock;
+            s.* = fx.head.pick.buildSurface(arena, view_mod.Hud.max_pick_rows, place) orelse break :blk null;
             break :blk s;
         } else null;
 
@@ -1043,7 +1044,10 @@ pub const FrameBuilder = struct {
         // a find bar) is a real region, not an overlay, and cannot overlap a
         // pane or status line (region.zig's contract). Zero-height when
         // neither is showing ⇒ panes fill the window.
-        const dock_cut = window_rect.cutBottom(self.view.dockHeight(if (fx.head.pick.active) &fx.head.pick else null, hud.surfaces));
+        // A picker floating at the top (`editor/picker = top`) is no part of
+        // the dock: only a docked one sizes it.
+        const docked_pick = fx.head.pick.active and !configIs(fx.config, "editor", "picker", "top");
+        const dock_cut = window_rect.cutBottom(self.view.dockHeight(if (docked_pick) &fx.head.pick else null, hud.surfaces));
         const pick_dock = dock_cut.strip;
         const frame_rect = dock_cut.rest;
         fx.last_frame_rect.* = frame_rect;
