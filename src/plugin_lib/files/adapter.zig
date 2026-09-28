@@ -404,6 +404,14 @@ pub const Session = struct {
         self.* = undefined;
     }
 
+    /// Open what contains this listing's target: `open_container`, and `..`.
+    fn openContainer(self: *const Session) semantic.action.Outcome {
+        return .{ .open_relation = .{
+            .source = .{ .target = self.target, .revision = self.target_revision },
+            .name = "container",
+        } };
+    }
+
     fn invoke(self: *Session, request: semantic.action.Request) !semantic.action.Outcome {
         try self.validateTarget();
         if (std.mem.eql(u8, request.action, semantic.action.standard.apply)) {
@@ -417,17 +425,14 @@ pub const Session = struct {
             return if (try self.applyConfirmed()) .handled else .declined;
         if (std.mem.eql(u8, request.action, semantic.action.standard.cancel)) return .handled;
         if (std.mem.eql(u8, request.action, semantic.action.standard.open)) {
+            // `..` opens the listing's container, as its root action does.
+            if (files.isParentRow(request.subject)) return self.openContainer();
             const id = files.modelRowId(request.subject) catch return .declined;
             const row = self.draft.row(id) orelse return .declined;
             if (row.draft.kind != .directory) return .declined;
             return .{ .open_target = self.rowTarget(id) orelse return .declined };
         }
-        if (std.mem.eql(u8, request.action, semantic.action.standard.open_container)) return .{
-            .open_relation = .{
-                .source = .{ .target = self.target, .revision = self.target_revision },
-                .name = "container",
-            },
-        };
+        if (std.mem.eql(u8, request.action, semantic.action.standard.open_container)) return self.openContainer();
         if (std.mem.eql(u8, request.action, semantic.action.standard.toggle_expanded)) {
             const row = files.modelRowId(request.subject) catch return .declined;
             try self.toggleExpanded(row);

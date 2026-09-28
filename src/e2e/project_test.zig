@@ -236,23 +236,19 @@ test "e2e/dashboard: configured candidate section is a semantic view, not docume
     ed.run("dashboard.open");
 
     try t.expectEqualStrings("*dashboard*", ed.bufferName());
-    // Dashboard has a local mode so it can own j/k/Return/o/n/q, but it is
-    // not an input island: unclaimed workspace chords inherit from normal.
-    try t.expectEqualStrings("files.find", ed.keymap.lookup("dashboard", "space f f").?);
-    try t.expectEqualStrings("files.find", ed.keymap.lookup("dashboard", "o").?);
+    // The dashboard has no mode of its own: it rests where the grammar rests
+    // on a scene view, so the grammar's keys and pointer are what work in it.
+    const rest = try gpa.dupe(u8, ed.head.currentMode());
+    defer gpa.free(rest);
+    try t.expect(!std.mem.eql(u8, rest, "dashboard"));
+    try t.expect(ed.keymap.lookup("dashboard", "o") == null);
     ed.chord("SPC f f");
     try t.expect(ed.pick.active);
     try t.expectEqualStrings("pick", ed.head.currentMode());
     ed.run("pick.cancel");
-    try t.expectEqualStrings("dashboard", ed.head.currentMode());
-    // Vim's old leader/window wrappers and capture exits must not smuggle
-    // their historical `normal` return target into a tool that inherits them.
+    try t.expectEqualStrings(rest, ed.head.currentMode());
     ed.chord("C-w h");
-    try t.expectEqualStrings("dashboard", ed.head.currentMode());
-    ed.press("f", "f");
-    try t.expectEqualStrings("find-f", ed.head.currentMode());
-    ed.press("Escape", "");
-    try t.expectEqualStrings("dashboard", ed.head.currentMode());
+    try t.expectEqualStrings(rest, ed.head.currentMode());
     const backing = try ed.textAlloc();
     defer gpa.free(backing);
     try t.expectEqualStrings("", backing);

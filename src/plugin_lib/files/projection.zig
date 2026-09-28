@@ -68,6 +68,9 @@ const root_id: scene.NodeId = @enumFromInt((7 << 61) | 1);
 /// `root_id` in the same reserved (domain 7) namespace of fixed structural
 /// ids — a different payload, so it never collides with the root itself.
 const parent_row_id: scene.NodeId = @enumFromInt((7 << 61) | 2);
+/// Its two cells, in the same reserved namespace.
+const parent_glyph_id: scene.NodeId = @enumFromInt((7 << 61) | 3);
+const parent_name_id: scene.NodeId = @enumFromInt((7 << 61) | 4);
 const id_payload_mask: u64 = (@as(u64, 1) << 61) - 1;
 
 /// Validate all external bindings before allocating any published scene.
@@ -94,15 +97,7 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     const children = try arena.alloc(scene.Node, visible + parent_row);
     var index: usize = 0;
     if (options.has_container) {
-        children[0] = .{
-            .id = parent_row_id,
-            // An action node read as a row (its role's leaf is `row`).
-            .role = "files.row",
-            .layout = .{ .column = name_column },
-            .focusable = true,
-            .facts = &.{.{ .name = "tone", .value = "muted" }},
-            .content = .{ .action = .{ .action = standard.open_container, .label = ".." } },
-        };
+        children[0] = try parentRow(arena);
         index = 1;
     }
     for (rows) |row| {
@@ -185,6 +180,51 @@ fn validateInputs(rows: []const model.Row, bindings: []const FieldBinding) !void
     }
     if (rows.len != bindings.len) return error.MissingBinding;
     for (rows) |row| if (findBinding(bindings, row.id) == null) return error.MissingBinding;
+}
+
+/// `..`: a row like the others — the same columns, focused by a click or a
+/// step like any row, opened by whatever opens a row (Enter, a double click,
+/// one click where rows open on click). What makes it special is only what
+/// it does NOT declare: its name is a label, not a field, and its one action
+/// is Open, so nothing can rename, copy, cut or delete it. The adapter
+/// answers that Open as the listing's own `open_container`.
+fn parentRow(arena: std.mem.Allocator) !scene.Node {
+    const children = try arena.alloc(scene.Node, 2);
+    children[0] = .{
+        .id = parent_glyph_id,
+        .role = "files.metadata",
+        .layout = .{ .column = metadata_column },
+        .facts = &.{.{ .name = "tone", .value = "muted" }},
+        .content = .{ .label = "↰" },
+    };
+    children[1] = .{
+        .id = parent_name_id,
+        .role = "files.name",
+        .layout = .{ .column = name_column },
+        // Focus lands on the name cell, as on every row. A shortcut, not an
+        // entry: a listing opens on its first entry, type-ahead and marking
+        // pass it by.
+        .focusable = true,
+        .facts = try arena.dupe(scene.Fact, &.{
+            .{ .name = "tone", .value = "muted" },
+            // Where a narrow pane puts every name (`nameFacts`, depth 0).
+            .{ .name = "compact-column", .value = "2" },
+            .{ .name = "compact-below", .value = "60" },
+            scene.shortcut,
+        }),
+        .content = .{ .label = ".." },
+    };
+    return .{
+        .id = parent_row_id,
+        .role = "files.row",
+        .actions = try arena.dupe(scene.Action, &.{.{ .id = standard.open, .label = "Open" }}),
+        .content = .{ .container = .{ .axis = .horizontal, .children = children } },
+    };
+}
+
+/// Whether `node` is the `..` row, whose Open means the listing's container.
+pub fn isParentRow(node: scene.NodeId) bool {
+    return node == parent_row_id;
 }
 
 fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, depth: u16) !scene.Node {

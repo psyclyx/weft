@@ -234,24 +234,33 @@ test "e2e/sidebar: a file under a folded-open directory opens from the tree" {
     try expectPrimaryText(ed, "INNER\n");
 }
 
-/// Click each drawn row of `pane` until the focused row is `want`; the point
-/// clicked, for a second click there.
-fn clickRow(ed: *Editor, pane: *window_layout.Node, want: []const u8) ![2]f32 {
-    var index: usize = 0;
-    while (true) : (index += 1) {
-        ed.applyWindow();
-        const view = try ed.ensureView();
-        const map = for (view.pane_maps[0..view.pane_map_count]) |m| {
-            if (m.pane == pane.pane().id) break m;
-        } else return error.PaneNotDrawn;
-        if (index >= map.hits.len) return error.RowNotDrawn;
-        const hit = map.hits[index];
-        const at: [2]f32 = .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
-        ed.click(at);
-        if (onRow(ed, want)) return at;
+/// The point on `pane`'s row named `want`, in the last frame — found by its
+/// name, not by clicking rows until one is (in ide, a click opens a row).
+fn pointAtRow(ed: *Editor, pane: *window_layout.Node, want: []const u8) ![2]f32 {
+    ed.applyWindow();
+    _ = try ed.ensureView();
+    const entry = ed.buffers.get(pane.pane().buffer_id) orelse return error.PaneNotDrawn;
+    const view_ref = (if (entry.id == ed.buffers.active_id) ed.head.scene_selection.view else entry.scene_selection.view) orelse entry.tool_view orelse return error.NoListing;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.NoListing;
+    for (instance.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
+            defer snap.deinit();
+            if (std.mem.eql(u8, snap.value.bytes, want))
+                return ed.pointAtNodeIn(pane.pane().id, node.id) orelse error.RowNotDrawn;
+        }
     }
+    return error.RowNotDrawn;
 }
 
+/// Click `pane`'s row named `want`; the point clicked, for a second click there.
+fn clickRow(ed: *Editor, pane: *window_layout.Node, want: []const u8) ![2]f32 {
+    const at = try pointAtRow(ed, pane, want);
+    ed.click(at);
+    return at;
+}
 test "e2e/sidebar: ide.js — a double click opens a sidebar row: a file in the primary pane, a directory in place" {
     var app: ConfigApp = undefined;
     try app.init(t.allocator, "ide.js");

@@ -115,10 +115,11 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
             .disabled = if (action.enabled) null else provider_disabled,
         };
         count += 1;
-    } else if (nearestTarget(instance, focus.path) != null) {
+    } else if (nearestTarget(instance, focus.path) != null or opensHere(instance, focus.path)) {
         // Activation follows the same nearest-target walk the target-open
         // route performs, so an offer can never name a subject the route
-        // would not.
+        // would not — or a row that declares an enabled Open with no link
+        // (a listing's `..`), which the route asks the view to run first.
         out[count] = .{
             .intent = .activate,
             .disabled = actionState(instance, focus.path, standard.open),
@@ -208,6 +209,12 @@ pub fn find(items: []const Item, intent: Intent) ?Item {
 fn actionState(instance: *const view.Instance, path: semantic.focus.Path, id: []const u8) ?[]const u8 {
     const action = advertiser(instance, path, id) orelse return null;
     return if (action.enabled) null else provider_disabled;
+}
+
+/// Whether the path declares an ENABLED Open of its own.
+fn opensHere(instance: *const view.Instance, path: semantic.focus.Path) bool {
+    const action = advertiser(instance, path, standard.open) orelse return false;
+    return action.enabled;
 }
 
 /// The action as advertised by the deepest node on the path that names it.

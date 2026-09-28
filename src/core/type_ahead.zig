@@ -210,17 +210,14 @@ fn startsWith(
         return std.ascii.startsWithIgnoreCase(snapshot.value.bytes, needle);
     }
     const shown = instance.node(node) orelse return false;
+    // A shortcut (a listing's `..`) is not an entry anyone hunts for by
+    // name: it never competes with a dotfile for a typed `.`.
+    if (semantic.scene.isShortcut(shown.*)) return false;
     const label = switch (shown.content) {
         .label => |text| text,
         // An action row's own label is what a menu of actions (symbols,
-        // problems, a picker) searches by — except stepping OUT to a
-        // container: that names a place already on the path above, not a
-        // row a person is hunting for by name, so it never competes with a
-        // sibling entry whose name happens to share the typed prefix (a
-        // listing's `..` beside a dotfile).
-        .action => |action| if (std.mem.eql(u8, action.action, semantic.action.standard.open_container))
-            return false
-        else if (action.label.len != 0) action.label else action.action,
+        // problems, a picker) searches by.
+        .action => |action| if (action.label.len != 0) action.label else action.action,
         .field, .container => return false,
     };
     return std.ascii.startsWithIgnoreCase(std.mem.trimStart(u8, label, " "), needle);

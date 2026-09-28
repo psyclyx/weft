@@ -452,3 +452,42 @@ test "e2e/panels: closing and cycling documents never hands a pane a viewport's 
     chromeEntries(ed, &after);
     for (chrome, after, 0..) |was, now, i| if (i != 0) try t.expectEqual(was, now);
 }
+
+/// The dashboard item labeled `label`.
+fn dashboardItem(ed: *Editor, label: []const u8) ?h.semantic_model.scene.NodeId {
+    const view_ref = ed.toolView() orelse return null;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return null;
+    for (instance.focus_order) |id| {
+        const node = instance.node(id) orelse continue;
+        if (node.content == .action and std.mem.eql(u8, node.content.action.label, label)) return id;
+    }
+    return null;
+}
+
+test "e2e/panels: ide.js — the dashboard's items are clicked, or Enter'd, with no key or mode of the dashboard's own" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.run("dashboard.open");
+    ed.applyWindow();
+    try t.expectEqualStrings("*dashboard*", ed.buffers.active().name);
+    try t.expect(!std.mem.eql(u8, ed.head.currentMode(), "dashboard"));
+
+    // A click on "New buffer" runs it.
+    try frame(ed);
+    const new_buffer = dashboardItem(ed, "New buffer") orelse return error.NoItem;
+    const here = window_layout.headFocus(ed.win_layout, ed.head).pane().id;
+    ed.click(ed.pointAtNodeIn(here, new_buffer) orelse return error.ItemNotShown);
+    ed.applyWindow();
+    try t.expect(!std.mem.eql(u8, ed.buffers.active().name, "*dashboard*"));
+
+    // Enter on "Open file" — ide's own activate key — opens the file picker.
+    ed.run("dashboard.open");
+    ed.applyWindow();
+    const open_file = dashboardItem(ed, "Open file") orelse return error.NoItem;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, ed.toolView().?, open_file);
+    ed.press("Return", "");
+    try t.expect(ed.pick.active);
+}

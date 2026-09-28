@@ -607,10 +607,28 @@ pub const Editor = struct {
         return .{ caret.x + 1, caret.y_top + caret.height / 2 };
     }
 
-    /// The centre of a scene node's hit region in the last frame.
+    /// The centre of a scene node's hit region in the last frame. Node ids are
+    /// per VIEW, so an id drawn in more than one pane (a toolbar button and a
+    /// row can share one) is ambiguous: null, never whichever came first —
+    /// name the pane (`pointAtNodeIn`) instead.
     pub fn pointAtNode(self: *Editor, node: semantic_model.scene.NodeId) ?[2]f32 {
         const v = self.ensureView() catch return null;
+        var found: ?[2]f32 = null;
         for (v.pane_maps[0..v.pane_map_count]) |m| {
+            for (m.hits) |hit| if (hit.node == node) {
+                if (found != null) return null;
+                found = .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
+                break;
+            };
+        }
+        return found;
+    }
+
+    /// `pointAtNode` in the pane `pane` alone.
+    pub fn pointAtNodeIn(self: *Editor, pane: u32, node: semantic_model.scene.NodeId) ?[2]f32 {
+        const v = self.ensureView() catch return null;
+        for (v.pane_maps[0..v.pane_map_count]) |m| {
+            if (m.pane != pane) continue;
             for (m.hits) |hit| if (hit.node == node)
                 return .{ hit.rect.x + hit.rect.w / 2, hit.rect.y + hit.rect.h / 2 };
         }
