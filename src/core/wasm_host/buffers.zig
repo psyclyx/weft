@@ -219,8 +219,9 @@ test "buffer introspection answers about a buffer that is NOT the active one" {
     try t.expectEqualStrings("other.zig", nameOf(&id, b).?);
     try t.expectEqualStrings("zig", langOf(&id, b).?);
     try t.expectEqual(@as(i32, "fn main() void {}".len), byteLenOf(&id, b));
-    // Never saved, so its edits are edits no file received.
-    try t.expectEqual(@as(i32, 1), dirtyOf(&id, b));
+    // No file is behind it, so nothing of it is unsaved: a file's edits are
+    // what closing could lose (`Buffer.hasUnsavedFile`).
+    try t.expectEqual(@as(i32, 0), dirtyOf(&id, b));
     // No file backs it and it is not a projection.
     try t.expect(pathOf(&id, b) == null);
     try t.expectEqualStrings("", toolOf(&id, b).?);
