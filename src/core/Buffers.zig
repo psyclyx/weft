@@ -303,6 +303,12 @@ pub const Buffer = struct {
     pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
         if (self.read_only != null or self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
+        // Edits a FILE never received: an entry with no file behind it (a
+        // REPL, a command's output, a scratch) has never been saved, so it
+        // always differs from "the last save" — which is no reason to refuse
+        // closing it. A bare document with text is parked on close anyway
+        // (`keepsDocument`); quitting asks about it separately.
+        if (ed.backingPath() == null) return false;
         return ed.isDirty(gpa);
     }
 

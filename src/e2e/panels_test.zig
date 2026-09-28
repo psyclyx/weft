@@ -491,3 +491,32 @@ test "e2e/panels: ide.js — the dashboard's items are clicked, or Enter'd, with
     ed.press("Return", "");
     try t.expect(ed.pick.active);
 }
+
+test "e2e/panels: only a FILE's edits are unsaved work — a scratch or a REPL closes; quit names what it would lose, and quit-force quits" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // An entry with no file behind it — a REPL's transcript, a command's
+    // output — has never been saved, and that is no reason to refuse closing.
+    const out = try ed.buffers.create(gpa, "*output*");
+    try ed.buffers.switchTo(gpa, out, ed.head, ed.keymap);
+    try ed.buffers.active().textEditor().?.doc.insert(gpa, 0, "transcript\n");
+    ed.run("buffer.close-unmodified");
+    try t.expect(ed.buffers.get(out) == null);
+
+    // A file's unsaved edits refuse the close, and the quit.
+    try ide.openFile(ed, "a.txt", "alpha\n");
+    ed.typeText("x");
+    try t.expect(try ed.buffers.active().hasUnsavedFile(gpa));
+    const a = ed.buffers.active_id;
+    ed.run("buffer.close-unmodified");
+    try t.expect(ed.buffers.get(a) != null);
+    ed.run("app.quit");
+    try t.expect(!ed.session.system.quit);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "a.txt") != null);
+    ed.run("app.quit-force");
+    try t.expect(ed.session.system.quit);
+}

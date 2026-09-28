@@ -593,7 +593,37 @@ fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Quit — refused while anything would be lost: a file's unsaved edits, a
+/// listing's unapplied draft, or text with no file behind it (a scratch, a
+/// parked one), which closing keeps but quitting cannot. The refusal names
+/// them; `app.quit-force` quits anyway.
 fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    var names: std.ArrayList(u8) = .empty;
+    defer names.deinit(ctx.gpa);
+    var count: usize = 0;
+    var it = ctx.buffers.iterator();
+    while (it.next()) |b| {
+        if (!holdsUnsavedWork(ctx, b) and !b.keepsDocument()) continue;
+        count += 1;
+        if (count > 4) continue;
+        const shown = if (b.textEditor()) |ed| std.fs.path.basename(ed.backingPath() orelse b.name) else b.name;
+        try names.appendSlice(ctx.gpa, if (count == 1) "" else ", ");
+        try names.appendSlice(ctx.gpa, shown);
+    }
+    count += ctx.buffers.parked.items.len;
+    if (count == 0) {
+        ctx.quit.* = true;
+        return ok;
+    }
+    const more = if (count > 4 or ctx.buffers.parked.items.len > 0) " and more" else "";
+    const msg = try std.fmt.allocPrint(ctx.gpa, "{d} unsaved ({s}{s}): save, or Quit Without Saving (app.quit-force)", .{ count, names.items, more });
+    defer ctx.gpa.free(msg);
+    try ctx.head.echo.say(ctx.gpa, msg);
+    return .{ .string = "unsaved" };
+}
+
+fn cQuitForce(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     ctx.quit.* = true;
     return ok;
@@ -1004,7 +1034,8 @@ const table = [_]command.Command{
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
     command.define("mode.resume-capture", "Take raw input again after a break-out.", cPostureResume).present(.{ .internal = true }),
-    command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
+    command.define("app.quit", "Quit the editor, refusing while anything unsaved would be lost.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
+    command.define("app.quit-force", "Quit the editor, discarding anything unsaved.", cQuitForce).present(.{ .label = "Quit Without Saving" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
     command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),
 };

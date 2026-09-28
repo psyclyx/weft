@@ -546,6 +546,7 @@ weft.bind("normal", "SPC w L", "window.move-right");
 
 // SPC q — quit
 weft.bind("normal", "SPC q q", "app.quit");
+weft.bind("normal", "SPC q Q", "app.quit-force");
 
 // SPC h — help. The palette lists commands AND the live offers the focused
 // entry publishes, each attributed to its provider, so it doubles as "what
