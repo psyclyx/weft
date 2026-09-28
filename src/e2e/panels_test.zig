@@ -336,6 +336,9 @@ test "e2e/panels: the panel's header lists Problems and Terminal from their meta
     ed.click(close_tab);
     ed.applyWindow();
     try t.expect(ed.viewportPane("panel") == null);
+    // Focus left with the pane: the active entry is one a pane shows, so
+    // keys stop going to the hidden terminal.
+    try t.expect(!std.mem.eql(u8, "*terminal*", ed.ctx.buffers.active().name));
 
     // C-j brings it back, header included, showing what it held (terminal).
     ed.press("C-j", "");
