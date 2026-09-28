@@ -11,6 +11,7 @@ const std = @import("std");
 const t = std.testing;
 const h = @import("harness.zig");
 const ide = @import("ide_test.zig");
+const chrome = @import("chrome_test.zig");
 
 const core = h.core;
 const Editor = h.Editor;
@@ -361,4 +362,56 @@ test "bench/terminal: a frame with a full terminal in the panel, against one wit
     try waitFor(ed, "full-screen");
     const grid_us = try medianFrameUs(ed, 32);
     std.debug.print("[bench/terminal] frame median: text panel {d} us, full terminal panel {d} us\n", .{ text_us, grid_us });
+}
+
+test "e2e/terminal: after the break-out chord, a click in the terminal (ide) or vim's `i` takes the keys back" {
+    const gpa = t.allocator;
+    {
+        var app: IdeApp = undefined;
+        try app.init(gpa);
+        defer app.deinit();
+        const ed = &app.ed;
+        try openShell(&app, test_shell);
+        ed.press("C-backslash", "");
+        try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+        // A click in the pane body is "type here", as in any IDE's terminal.
+        const pixels = try ed.renderComposite();
+        gpa.free(pixels);
+        const pane = ed.viewportPane("panel") orelse return error.PanelNotShown;
+        const r = ed.win_layout.focusedRect(pane, ed.application.last_frame_rect);
+        ed.click(.{ r.x + r.w / 2, r.y + r.h / 2 });
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+        enter(ed, "echo clicked");
+        try waitFor(ed, "\nclicked\n");
+    }
+    {
+        var app: chrome.GrammarApp = undefined;
+        try app.init(gpa, "config.js", null);
+        defer app.deinit();
+        const ed = &app.ed;
+        try app.open("x.txt", "x\n");
+        try ed.setConfig("terminal", "shell", test_shell);
+        ed.runStr("terminal.open", "");
+        ed.applyWindow();
+        if (!h.drainToolContains(ed, term, "$")) return screenFailed(ed, error.PromptNeverShown);
+        // Out, to normal mode in the terminal's pane — then `i` goes back in,
+        // as in vim's :terminal, rather than inserting into nothing.
+        ed.press("C-backslash", "");
+        try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+        try t.expectEqualStrings(term, ed.buffers.active().name);
+        ed.press("i", "i");
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+        enter(ed, "echo again");
+        try waitFor(ed, "\nagain\n");
+    }
+    {
+        // Where there is nothing to resume, `i` is vim's insert as ever.
+        var app: chrome.GrammarApp = undefined;
+        try app.init(gpa, "config.js", null);
+        defer app.deinit();
+        const ed = &app.ed;
+        try app.open("y.txt", "y\n");
+        ed.press("i", "i");
+        try t.expectEqualStrings("insert", ed.head.currentMode());
+    }
 }

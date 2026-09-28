@@ -180,6 +180,9 @@ const CoreOffer = struct {
         /// ABSENT unless the row's command — an action's name — has an
         /// eligible provider here (`Shape.provided`), which the row runs.
         provided,
+        /// ABSENT unless the entry broke out of a capture it can resume
+        /// (`Buffer.canResumeCapture`).
+        resumable,
     };
 };
 
@@ -192,6 +195,9 @@ const core_offers = [_]CoreOffer{
     .{ .intention = "std.persistence.save", .command = "file.save", .needs_text = false, .gate = .persists },
     .{ .intention = "std.editing.insert-line-break", .command = "edit.insert-newline" },
     .{ .intention = "std.input.break-out", .command = "mode.break-out", .needs_text = false },
+    // Its inverse: absent unless the entry broke out of a capture it can
+    // resume, so a grammar can put it ahead of its own insert on one key.
+    .{ .intention = "std.input.resume", .command = "mode.resume-capture", .needs_text = false, .gate = .resumable },
     // Transfer over TEXT is the grammar's to mean — a caret copies its line in
     // one, a register takes it in another — so core offers the standard words
     // only where a grammar provides the matching action here, and runs it: a
@@ -204,7 +210,7 @@ const core_offers = [_]CoreOffer{
 };
 
 comptime {
-    if (core_offers.len > 8) @compileError("Shape.provided holds one bit per core row");
+    if (core_offers.len > 16) @compileError("Shape.provided holds one bit per core row");
 }
 
 /// The facts about the focused ENTRY core's table is computed from. A value,
@@ -220,7 +226,9 @@ pub const Shape = struct {
     persists: bool = true,
     /// Which `.provided` rows, by index in `core_offers`, have an eligible
     /// provider of their action here. None where no action plane is attached.
-    provided: u8 = 0,
+    provided: u16 = 0,
+    /// The entry broke out of a capture it can resume.
+    resumable: bool = false,
 };
 
 /// A text-needing core offer on an editor-less entry gets `disabled` rather
@@ -242,12 +250,13 @@ const nothing_to_redo: catalog_mod.Availability = .{ .disabled = .{
 /// A core row's availability for `shape`, or null when the row is absent.
 fn coreAvailability(offer: CoreOffer, row: usize, shape: Shape) ?catalog_mod.Availability {
     if (offer.gate == .persists and !shape.persists) return null;
-    if (offer.gate == .provided and shape.provided & (@as(u8, 1) << @intCast(row)) == 0) return null;
+    if (offer.gate == .provided and shape.provided & (@as(u16, 1) << @intCast(row)) == 0) return null;
+    if (offer.gate == .resumable and !shape.resumable) return null;
     if (offer.needs_text and !shape.has_text) return no_text;
     return switch (offer.gate) {
         .undo => if (shape.can_undo) .enabled else nothing_to_undo,
         .redo => if (shape.can_redo) .enabled else nothing_to_redo,
-        .none, .persists, .provided => .enabled,
+        .none, .persists, .provided, .resumable => .enabled,
     };
 }
 
@@ -395,14 +404,15 @@ pub const Plane = struct {
             self.derived.actions.resolveFacts("file.save", factsIn(scope)) != null
         else
             true;
-        var provided: u8 = 0;
+        var provided: u16 = 0;
         if (self.derived_attached) for (core_offers, 0..) |offer, row| {
             if (offer.gate == .provided and self.derived.actions.resolveFacts(offer.command, factsIn(scope)) != null)
-                provided |= @as(u8, 1) << @intCast(row);
+                provided |= @as(u16, 1) << @intCast(row);
         };
+        const resumable = scope.entry.canResumeCapture();
         const ed = scope.entry.textEditor() orelse
-            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided };
-        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided };
+            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided, .resumable = resumable };
+        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided, .resumable = resumable };
     }
 
     fn publishCore(self: *Plane) Allocator.Error!void {

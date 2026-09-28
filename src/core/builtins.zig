@@ -581,6 +581,18 @@ fn cPostureBreakOut(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// The inverse of `mode.break-out`: an entry that broke out of a capture
+/// takes its raw input again, and the head rests where capture says. What a
+/// grammar's "start typing here" runs (vim's `i`, a click in the pane body);
+/// on an entry with no capture to resume it does nothing.
+fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!ctx.buffer().resumeCapture()) return ok;
+    const resting = ctx.buffers.restingModeFor(ctx.posture());
+    if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
+    return ok;
+}
+
 fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     ctx.quit.* = true;
@@ -979,6 +991,7 @@ const table = [_]command.Command{
     command.define("edit.seal-undo", "Close the current undo step so the next edit starts a new one.", cUndoBarrier).present(.{ .internal = true }),
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
+    command.define("mode.resume-capture", "Take raw input again after a break-out.", cPostureResume).present(.{ .internal = true }),
     command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
     command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),

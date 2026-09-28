@@ -19,7 +19,8 @@
 //! set (application cursor keys, the kitty keyboard protocol). The one
 //! sequence it never sees is the grammar's break-out chord (C-\ under vim,
 //! helix and ide; C-c C-\ under emacs), which hands keys back to the editor;
-//! focusing the terminal again, or C-`, captures them again. Of the keys, the
+//! a click in its pane, vim/helix `i` (`std.input.resume`), or C-` captures
+//! them again. Of the keys, the
 //! terminal keeps three for itself, as terminals do: S-Prior/S-Next page
 //! through the scrollback, and C-S-v / S-Insert paste the clipboard
 //! (bracketed when the child asked). The wheel scrolls the scrollback — or,

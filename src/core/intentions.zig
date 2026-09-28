@@ -66,6 +66,7 @@ pub const std_intentions = [_]Intention{
     // `capture` presentation takes raw input, so the way back cannot be the
     // presentation's to grant.
     .{ .name = "std.input.break-out", .doc = "Leave a capture posture for the one it displaced.", .label = "Break Out" },
+    .{ .name = "std.input.resume", .doc = "Take raw input again after breaking out of a capture.", .label = "Resume Input" },
 
     // Abstract gesture roles (§10.2): input grammars may bind these directly
     // where no domain-specific intention applies.

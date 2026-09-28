@@ -526,12 +526,12 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
 
 /// A config booted for a context-menu test: a shipped one by name, or a
 /// fixture's source.
-const GrammarApp = struct {
+pub const GrammarApp = struct {
     proj: h.Project = undefined,
     ed: Editor = undefined,
     loader: h.ConfigLoader = undefined,
 
-    fn init(self: *GrammarApp, gpa: std.mem.Allocator, config: []const u8, source: ?[]const u8) !void {
+    pub fn init(self: *GrammarApp, gpa: std.mem.Allocator, config: []const u8, source: ?[]const u8) !void {
         try self.proj.init(gpa);
         errdefer self.proj.deinit();
         try Editor.init(gpa, &self.ed);
@@ -548,13 +548,13 @@ const GrammarApp = struct {
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
     }
 
-    fn open(self: *GrammarApp, name: []const u8, text: []const u8) !void {
+    pub fn open(self: *GrammarApp, name: []const u8, text: []const u8) !void {
         try core.file.writeBytes(self.ed.gpa, name, text);
         self.ed.runStr("file.open", name);
         self.ed.applyWindow();
     }
 
-    fn deinit(self: *GrammarApp) void {
+    pub fn deinit(self: *GrammarApp) void {
         self.loader.deinit();
         self.ed.deinit();
         self.proj.deinit();
