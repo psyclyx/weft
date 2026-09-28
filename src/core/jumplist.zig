@@ -489,11 +489,11 @@ fn goToLine(ctx: *Context, ed: *@import("Editor.zig"), n: usize) !void {
 const count_arg: []const command.ArgSpec = &.{.{ .name = "count", .type = .nil, .optional = true }};
 
 const table = [_]command.Command{
-    .{ .name = "jump.back", .summary = "Go back to where you were before the last jump.", .args = count_arg, .handler = travelCmd(.back), .meta = .{ .label = "Back", .menu = "Go", .group = "history", .order = 10, .icon = "arrow-left" } },
-    .{ .name = "jump.forward", .summary = "Go forward again along the jumps you went back through.", .args = count_arg, .handler = travelCmd(.forward), .meta = .{ .label = "Forward", .menu = "Go", .group = "history", .order = 20, .icon = "arrow-right" } },
+    .{ .name = "jump.back", .summary = "Go back to where you were before the last jump.", .args = count_arg, .handler = travelCmd(.back), .meta = .{ .label = "Back", .icon = "arrow-left" } },
+    .{ .name = "jump.forward", .summary = "Go forward again along the jumps you went back through.", .args = count_arg, .handler = travelCmd(.forward), .meta = .{ .label = "Forward", .icon = "arrow-right" } },
     .{ .name = "jump.push", .summary = "Remember the caret's position as a jump.", .args = &.{}, .handler = cJumpPush, .meta = .{ .label = "Remember Position" } },
-    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist and go there.", .args = &.{}, .handler = cJumplistPick, .meta = .{ .label = "Jump to Position", .menu = "Go", .group = "history", .order = 30, .icon = "history", .prompts = true } },
-    .{ .name = "jump.line", .summary = "Go to a line by its number.", .args = &.{.{ .name = "line", .type = .nil, .optional = true }}, .handler = cJumpLine, .meta = .{ .label = "Go to Line", .menu = "Go", .group = "line", .order = 1, .prompts = true } },
+    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist and go there.", .args = &.{}, .handler = cJumplistPick, .meta = .{ .label = "Jump to Position", .icon = "history", .prompts = true } },
+    .{ .name = "jump.line", .summary = "Go to a line by its number.", .args = &.{.{ .name = "line", .type = .nil, .optional = true }}, .handler = cJumpLine, .meta = .{ .label = "Go to Line", .prompts = true } },
 };
 
 pub fn install(gpa: Allocator, commands: *command.Commands) !void {

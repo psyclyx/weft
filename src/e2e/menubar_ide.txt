@@ -1,0 +1,160 @@
+Edit	clipboard	1	Cut	ide.cut
+Edit	clipboard	10	Cut	selection.cut
+Edit	clipboard	2	Copy	ide.copy
+Edit	clipboard	20	Copy	selection.copy
+Edit	clipboard	3	Paste	ide.paste
+Edit	clipboard	30	Paste	selection.paste-after
+Edit	clipboard	50	Delete	selection.delete
+Edit	comment	1	Toggle Line Comment	comment.toggle-line
+Edit	comment	2	Toggle Selection Comment	comment.toggle-selection
+Edit	find	1	Find	find.open
+Edit	find	2	Replace	find.replace
+Edit	find	3	Find Next	find.next
+Edit	find	4	Find Previous	find.prev
+Edit	find	5	Replace All	find.replace-all
+Edit	format	1	Format Document	fmt.format-buffer
+Edit	format	1	Format Document	plugin.code.format
+Edit	format	2	Format with Language Server	lsp.format
+Edit	history	10	Undo	edit.undo
+Edit	history	20	Redo	edit.redo
+Edit	history	30	Repeat Last Change	edit.repeat
+Edit	refactor	1	Rename Symbol…	lsp.rename
+Edit	refactor	1	Rename Symbol…	plugin.code.rename
+Edit	refactor	2	Code Actions…	lsp.code-actions
+Edit	search	1	Find in Files…	grep.search
+Edit	search	2	Find Word in Files	grep.search-word
+Edit/Insert	insert	1	Insert Snippet…	snippets.expand
+Edit/Insert	insert	2	Insert Command Output…	shell.insert-output
+Edit/Lines	case	1	Uppercase Line	edit.upcase-line
+Edit/Lines	delete	1	Delete Line	ide.delete-line
+Edit/Lines	indent	1	Indent	ide.indent
+Edit/Lines	indent	2	Dedent	ide.dedent
+Edit/Lines	lines	1	Duplicate Line	edit.duplicate-line
+Edit/Lines	move	1	Move Line Up	ide.move-line-up
+Edit/Lines	move	2	Move Line Down	ide.move-line-down
+Edit/Lines	whitespace	1	Trim Line Whitespace	whitespace.trim-line
+Edit/Lines	whitespace	2	Trim Trailing Whitespace	whitespace.trim-buffer
+Edit/Macros	play	10	Play Macro	macro.play
+Edit/Macros	record	10	Record Macro…	macro.record-start
+Edit/Macros	record	20	Stop Recording	macro.record-stop
+Edit/Macros	record	30	Toggle Macro Recording	macro.record-toggle
+Edit/Transform	format	2	Filter Through Command…	fmt.filter
+Edit/Transform	numbers	1	Increment Number	numbers.increment
+Edit/Transform	numbers	2	Decrement Number	numbers.decrement
+File	close	10	Close Editor	buffer.close
+File	close	20	Close Without Saving	buffer.close-force
+File	exit	10	Quit	app.quit
+File	new	1	New File	buffer.scratch
+File	open	1	Open File…	files.find
+File	open	5	Open…	file.open
+File	open	6	Open Recent…	project.open-recent
+File	open	60	Browse Remote Files…	file.browse-remote
+File	save	10	Save	file.save
+File	save	20	Save As…	file.save-as
+File/Notes	embeds	1	Show Note Embeds	notes.show-embeds
+File/Notes	embeds	2	Hide Note Embeds	notes.hide-embeds
+File/Notes	notes	1	Capture Note…	notes.capture
+File/Notes	notes	2	Open Notes	notes.open
+File/Notes	notes	3	Capture Location	notes.capture-here
+File/Share	files	10	Browse Shared Files	collab.peer-files
+File/Share	files	20	Open Shared Buffer…	collab.open-shared
+File/Share	files	30	Download All Shared Files	collab.realize-all
+File/Share	peers	10	Show Peers	collab.peers
+File/Share	peers	20	Verify Peer…	collab.verify-peer
+File/Share	peers	30	Forget Peer…	collab.forget-peer
+File/Share	peers	40	Set Peer Access…	collab.grant
+File/Share	session	10	Join Session…	collab.connect
+File/Share	session	15	Cancel Connecting	collab.cancel
+File/Share	session	20	Host Session…	collab.listen
+File/Share	session	25	Stop Hosting	collab.stop-listening
+File/Share	session	30	Leave Session	collab.disconnect
+File/Share	share	10	Share Buffer	collab.share
+File/Share	share	20	Share Cursor…	collab.share-presence
+File/Share	share	30	Share Files…	collab.share-fs
+Go	buffers	1	Switch Editor…	buffer.pick
+Go	buffers	10	Next Buffer	buffer.next
+Go	buffers	20	Previous Buffer	buffer.prev
+Go	buffers	30	Last Buffer	buffer.back
+Go	history	10	Back	jump.back
+Go	history	20	Forward	jump.forward
+Go	history	30	Jump to Position…	jump.pick
+Go	line	1	Go to Line…	jump.line
+Go	line	2	Go to Line by Search…	consult.line
+Go	problems	1	Next Problem	lsp.next-diagnostic
+Go	problems	2	Previous Problem	lsp.prev-diagnostic
+Go	problems	3	Go to Problem…	lsp.pick-diagnostic
+Go	symbol	1	Go to Definition	lsp.goto-definition
+Go	symbol	2	Go to Type Definition	lsp.goto-type-definition
+Go	symbol	3	Go to Implementation	lsp.goto-implementation
+Go	symbol	4	Find References…	lsp.references
+Go	symbol	5	Go to Symbol…	lsp.pick-symbol
+Go	symbol	6	Go to Symbol in Buffer…	consult.imenu
+Help	keys	10	Show Key Hints	which-key.show
+Help	keys	20	Explain Binding…	action.explain
+Run	breakpoints	1	Toggle Breakpoint	debug.toggle-breakpoint
+Run	breakpoints	2	Clear All Breakpoints	debug.clear-breakpoints
+Run	breakpoints	3	List Breakpoints	debug.list-breakpoints
+Run	debug	1	Start Debugging	debug.start
+Run	debug	1	Start Debugging	plugin.code.debug
+Run	debug	2	Stop Debugging	debug.stop
+Run	run	1	Run	plugin.code.run
+Run	run	1	Run File	modes.run
+Run	run	2	Run Line	run.line
+Run	run	2	Test	plugin.code.test
+Run	step	1	Continue	debug.continue
+Run	step	2	Step Over	debug.step-over
+Run	step	3	Step Into	debug.step-into
+Run	step	4	Step Out	debug.step-out
+Run/Agents	agents	1	Start Agent	agent.start
+Run/Agents	agents	2	Send to Agent	agent.send
+Run/Agents	agents	3	Focus Agent Conversation…	agent.focus
+Run/REPL	repl	1	Start REPL	repl.start
+Run/REPL	repl	2	Send Line to REPL	repl.send-line
+Run/REPL	repl	3	Stop REPL	repl.quit
+Run/Tools	llm	1	Ask LLM…	llm.ask
+Run/Tools	llm	2	Ask LLM with Line	llm.ask-line
+Selection	cursors	1	Add Next Occurrence	ide.add-next-match
+Selection	cursors	2	Select All Occurrences	ide.select-all-matches
+Selection	cursors	3	Select All Matches	find.select-all
+Selection	expand	1	Expand Selection	ts.expand-selection
+Selection	expand	2	Select Child Node	ts.select-child
+Selection	select	1	Select All	ide.select-all
+Selection	syntax	1	Select Syntax Node	ts.select-node
+Selection	syntax	2	Select Function	ts.select-function
+Selection	syntax	3	Select Class	ts.select-class
+Selection	syntax	4	Select Call	ts.select-call
+Selection	syntax	5	Select Block	ts.select-block
+Selection	syntax	6	Select Comment	ts.select-comment
+Terminal	new	1	New Terminal	terminal.open
+Terminal	new	2	New Console	console.open
+Terminal	run	1	Run Command…	run.command
+Terminal	tasks	1	Build Project	make.build
+Terminal	tasks	2	Run Tests	make.test
+Terminal	tasks	3	Run Project	make.run
+Terminal	terminal	1	Stop Terminal	terminal.quit
+Terminal/Direnv	direnv	1	Show Direnv Status	direnv.status
+Terminal/Direnv	direnv	2	Allow Direnv	direnv.allow
+Terminal/Direnv	direnv	3	Reload Direnv Environment	direnv.reload
+Terminal/Direnv	direnv	4	Apply Direnv Environment	direnv.apply
+View	palette	1	Command Palette…	palette.open
+View	panels	1	Sidebar	ide.toggle-sidebar
+View	panels	2	Panel	panel.toggle
+View	panels	20	Source Control	git.status
+View	panels	3	Problems	problems.open
+View/Appearance	chrome	10	Next Chrome Style	theme.cycle-chrome
+View/Appearance	chrome	20	Set Chrome Style…	theme.set-chrome
+View/Appearance/Chrome Style	style	1	Text	theme.chrome-text
+View/Appearance/Chrome Style	style	2	Text with Icons	theme.chrome-text-icons
+View/Appearance/Chrome Style	style	3	Widgets	theme.chrome-widget
+View/Editor Layout	focus	10	Focus Left Window	window.focus-left
+View/Editor Layout	focus	20	Focus Right Window	window.focus-right
+View/Editor Layout	focus	30	Focus Window Above	window.focus-up
+View/Editor Layout	focus	40	Focus Window Below	window.focus-down
+View/Editor Layout	focus	50	Focus Next Window	window.focus-next
+View/Editor Layout	move	10	Move Window Left	window.move-left
+View/Editor Layout	move	20	Move Window Right	window.move-right
+View/Editor Layout	move	30	Move Window Up	window.move-up
+View/Editor Layout	move	40	Move Window Down	window.move-down
+View/Editor Layout	split	10	Split Editor Right	window.split-right
+View/Editor Layout	split	20	Split Editor Down	window.split-below
+View/Editor Layout	split	30	Close Window	window.close

@@ -89,7 +89,7 @@ pub fn register(gpa: std.mem.Allocator, commands: *core.command.Commands) !void 
             .args = &.{},
             .handler = chooseHandler,
             .data = @ptrCast(@constCast(&choice_styles[i])),
-            .meta = .{ .label = c.label, .menu = "View/Appearance/Chrome Style", .group = "style", .order = @intCast(i + 1), .toggle = c.toggle },
+            .meta = .{ .label = c.label, .toggle = c.toggle },
         });
     }
     _ = try commands.bind(gpa, "theme.set-chrome", .{
@@ -97,13 +97,13 @@ pub fn register(gpa: std.mem.Allocator, commands: *core.command.Commands) !void 
         .summary = "Switch how the editor's chrome looks, live: text, text with icons, or widgets.",
         .args = &.{.{ .name = "style", .type = .string }},
         .handler = setChromeHandler,
-        .meta = .{ .label = "Set Chrome Style", .menu = "View/Appearance", .group = "chrome", .order = 20, .icon = "palette", .prompts = true },
+        .meta = .{ .label = "Set Chrome Style", .icon = "palette", .prompts = true },
     });
     _ = try commands.bind(gpa, "theme.cycle-chrome", .{
         .name = "theme.cycle-chrome",
         .summary = "Switch the editor's chrome to the next style: text, text with icons, then widgets.",
         .args = &.{},
         .handler = cycleChromeHandler,
-        .meta = .{ .label = "Next Chrome Style", .menu = "View/Appearance", .group = "chrome", .order = 10, .icon = "palette" },
+        .meta = .{ .label = "Next Chrome Style", .icon = "palette" },
     });
 }

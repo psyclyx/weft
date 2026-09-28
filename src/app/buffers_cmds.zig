@@ -393,6 +393,6 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         },
         .handler = browseRemoteHandler,
         .data = context,
-        .meta = .{ .label = "Browse Remote Files", .menu = "File", .group = "open", .order = 60, .icon = "globe", .prompts = true },
+        .meta = .{ .label = "Browse Remote Files", .icon = "globe", .prompts = true },
     });
 }

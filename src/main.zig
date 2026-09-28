@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
         .args = &.{},
         .handler = identityHandler,
         .data = &my_identity,
-        .meta = .{ .label = "Show My Identity", .menu = "Help", .group = "permissions", .order = 30 },
+        .meta = .{ .label = "Show My Identity" },
     });
 
     // ── Plugins: external .wasm, sandboxed under wasmtime (no in-process
@@ -297,7 +297,7 @@ pub fn main(init: std.process.Init) !void {
             .args = &.{},
             .handler = config_load.configReloadHandler,
             .data = cs,
-            .meta = .{ .label = "Reload Config", .menu = "File", .group = "preferences", .order = 10, .icon = "refresh" },
+            .meta = .{ .label = "Reload Config", .icon = "refresh" },
         });
     }
     // The config's editor plugin (vim/helix) has set the base editing mode by

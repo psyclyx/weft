@@ -670,3 +670,78 @@ test "e2e/menubar: the context menu is the menu widget — keys, icons, rules, t
     shot(&app, "menubar-context-text");
     ed.press("Escape", "");
 }
+
+// ── What the bar holds ──────────────────────────────────────────────
+
+/// Every row the main menu is built from under `ed`'s config — what the
+/// `menu` plugin reads (`wl_command_meta`, the config tier's placements
+/// merged in): a line per placed command a person runs, `path group order
+/// label id`, sorted.
+fn placements(gpa: std.mem.Allocator, ed: *Editor) ![]u8 {
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    for (ed.commands.map.keys(), ed.commands.map.values()) |name, value| {
+        if (value == null) continue;
+        const shown = core.presentations.of(ed.ctx, name) orelse continue;
+        if (shown.internal or shown.menu.len == 0) continue;
+        var label: [256]u8 = undefined;
+        const order: i64 = shown.order orelse -1;
+        try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\t{s}\t{d}\t{s}\t{s}\n", .{ shown.menu, shown.group, order, shown.shown(&label, name), name }));
+    }
+    std.mem.sort([]u8, lines.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    for (lines.items) |l| try out.appendSlice(gpa, l);
+    return out.toOwnedSlice(gpa);
+}
+
+test "e2e/menubar: core places none of its commands — where a core command sits in a menu is config's say" {
+    // A core command that named its own menu path was a menu a config could
+    // not reshape: `weft.set("menu", "menus", [...])` with other titles
+    // dropped every core row, and moving them meant overriding each one. Core
+    // keeps what a command IS (label, summary, icon, prompts, toggle); where
+    // it sits is `config/menus.js`.
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.enableCollabCommands();
+    var scroll_ctx: h.app.scroll.ScrollCtx = .{ .view = undefined, .fb = undefined };
+    var scroll: core.command.Commands = .empty;
+    defer scroll.deinit(gpa);
+    try h.app.scroll.registerCommands(gpa, &scroll, &scroll_ctx);
+    var placed: usize = 0;
+    for ([_]*const core.command.Commands{ ed.commands, &scroll }) |table| {
+        for (table.map.keys(), table.map.values()) |name, value| {
+            const cmd = value orelse continue;
+            if (!std.mem.eql(u8, cmd.owner, "core")) continue;
+            if (cmd.meta.menu.len == 0 and cmd.meta.group.len == 0 and cmd.meta.order == null) continue;
+            std.debug.print("[e2e/menubar] core's '{s}' places itself: '{s}' '{s}'\n", .{ name, cmd.meta.menu, cmd.meta.group });
+            placed += 1;
+        }
+    }
+    try t.expectEqual(@as(usize, 0), placed);
+}
+
+test "e2e/menubar: ide.js's menubar holds exactly the rows it always has — core's placements are config (menus.js), not the commands'" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.enableCollabCommands();
+    const got = try placements(gpa, ed);
+    defer gpa.free(got);
+    const want = @embedFile("menubar_ide.txt");
+    if (!std.mem.eql(u8, want, got)) {
+        std.debug.print("[e2e/menubar] placements under ide.js:\n{s}<<<END\n", .{got});
+        return error.TestUnexpectedMenubar;
+    }
+}

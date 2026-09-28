@@ -897,28 +897,28 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
 }
 
 const table = [_]command.Command{
-    command.define("action.explain", "Explain which binding wins an action slot for the active buffer, and why.", cExplainBinding).present(.{ .label = "Explain Binding", .menu = "Help", .group = "keys", .order = 20, .prompts = true }),
+    command.define("action.explain", "Explain which binding wins an action slot for the active buffer, and why.", cExplainBinding).present(.{ .label = "Explain Binding", .prompts = true }),
     command.define("edit.insert-text", "Insert text at the cursor, replacing the selection.", cInsertText).present(.{ .internal = true }),
-    command.define("buffer.next", "Switch to the next buffer, wrapping around at the end.", cBufferNext).present(.{ .label = "Next Buffer", .menu = "Go", .group = "buffers", .order = 10, .icon = "chevron-right" }),
-    command.define("buffer.prev", "Switch to the previous buffer, wrapping around at the start.", cBufferPrevious).present(.{ .label = "Previous Buffer", .menu = "Go", .group = "buffers", .order = 20, .icon = "chevron-left" }),
-    command.define("buffer.back", "Return to the buffer that was active before this one.", cBufferBack).present(.{ .label = "Last Buffer", .menu = "Go", .group = "buffers", .order = 30 }),
+    command.define("buffer.next", "Switch to the next buffer, wrapping around at the end.", cBufferNext).present(.{ .label = "Next Buffer", .icon = "chevron-right" }),
+    command.define("buffer.prev", "Switch to the previous buffer, wrapping around at the start.", cBufferPrevious).present(.{ .label = "Previous Buffer", .icon = "chevron-left" }),
+    command.define("buffer.back", "Return to the buffer that was active before this one.", cBufferBack).present(.{ .label = "Last Buffer" }),
     command.define("buffer.switch", "Switch to the buffer with the given id.", cBufferSwitch).present(.{ .internal = true }),
     command.define("buffer.create", "Create a named scratch buffer and switch to it.", cBufferCreate).present(.{ .label = "New Named Buffer", .prompts = true }),
     command.define("buffer.close-unmodified", "Close the active buffer, refusing when it has unsaved edits.", cBufferClose).present(.{ .internal = true }),
-    command.define("buffer.close-force", "Close the active buffer, discarding its unsaved edits.", cBufferCloseForce).present(.{ .label = "Close Without Saving", .menu = "File", .group = "close", .order = 20 }),
+    command.define("buffer.close-force", "Close the active buffer, discarding its unsaved edits.", cBufferCloseForce).present(.{ .label = "Close Without Saving" }),
     command.define("buffer.set-read-only", "Make the active buffer read-only, or writable again.", cBufferReadOnly).present(.{ .internal = true }),
-    command.define("file.open", "Open a file in a buffer, reusing the buffer that already shows it.", cOpen).present(.{ .label = "Open", .menu = "File", .group = "open", .order = 5, .icon = "folder-open", .prompts = true }),
+    command.define("file.open", "Open a file in a buffer, reusing the buffer that already shows it.", cOpen).present(.{ .label = "Open", .icon = "folder-open", .prompts = true }),
     command.define("target.open-published", "Open and focus a published semantic target.", cOpenTarget).present(.{ .internal = true }),
     command.define("target.open-relative", "Open a name relative to the current working target.", cOpenRelative).present(.{ .internal = true }),
     // A transfer is ONE value: copy and cut send every selected row as one
     // request and get one transfer (a set) back — per extent, each run would
     // overwrite the last. Paste reads the whole selection the same way (a
     // provider refuses a paste beside several rows as ambiguous).
-    command.define("selection.copy", "Copy the selection.", cSelectionCopy).maps(.whole).present(.{ .label = "Copy", .menu = "Edit", .group = "clipboard", .order = 20, .icon = "copy" }),
-    command.define("selection.cut", "Cut the selection.", cSelectionCut).maps(.whole).present(.{ .label = "Cut", .menu = "Edit", .group = "clipboard", .order = 10, .icon = "scissors" }),
-    command.define("selection.delete", "Delete the selection.", cSelectionDelete).maps(.each_extent).present(.{ .label = "Delete", .menu = "Edit", .group = "clipboard", .order = 50 }),
+    command.define("selection.copy", "Copy the selection.", cSelectionCopy).maps(.whole).present(.{ .label = "Copy", .icon = "copy" }),
+    command.define("selection.cut", "Cut the selection.", cSelectionCut).maps(.whole).present(.{ .label = "Cut", .icon = "scissors" }),
+    command.define("selection.delete", "Delete the selection.", cSelectionDelete).maps(.each_extent).present(.{ .label = "Delete" }),
     command.define("selection.paste-before", "Paste before the selection.", cSelectionPasteBefore).maps(.whole).present(.{ .label = "Paste Before" }),
-    command.define("selection.paste-after", "Paste after the selection.", cSelectionPasteAfter).maps(.whole).present(.{ .label = "Paste", .menu = "Edit", .group = "clipboard", .order = 30, .icon = "clipboard-paste" }),
+    command.define("selection.paste-after", "Paste after the selection.", cSelectionPasteAfter).maps(.whole).present(.{ .label = "Paste", .icon = "clipboard-paste" }),
     command.define("target.open", "Open what the focused row or selection points at.", cTargetOpenFocused).maps(.each_extent).present(.{ .label = "Open" }),
     command.define("hierarchy.toggle-expanded", "Expand the focused row, or collapse it when it is open.", cHierarchyToggleExpanded).maps(.each_extent).present(.{ .label = "Expand/Collapse" }),
     // One row's verbs: a name edited, a row inserted beside it, its container
@@ -938,11 +938,11 @@ const table = [_]command.Command{
     command.define("app.echo", "Show a message on the status line.", cEcho).present(.{ .internal = true }),
     command.define("viewport.toggle", "Show or hide a named viewport.", cViewportToggle).present(.{ .label = "Toggle Viewport", .prompts = true }),
     command.define("viewport.take", "Show the active entry in a named viewport and focus it there.", cViewportTake).present(.{ .label = "Move to Viewport", .prompts = true }),
-    command.define("file.save-as", "Save the buffer to a new path, refusing to overwrite an existing file.", cSaveAs).present(.{ .label = "Save As", .menu = "File", .group = "save", .order = 20, .prompts = true }),
+    command.define("file.save-as", "Save the buffer to a new path, refusing to overwrite an existing file.", cSaveAs).present(.{ .label = "Save As", .prompts = true }),
     command.define("edit.delete-before", "Delete the selection, or the character before the cursor.", cDeleteBackward).present(.{ .label = "Delete Backward" }),
     command.define("edit.delete-after", "Delete the selection, or the character after the cursor.", cDeleteForward).present(.{ .label = "Delete Forward" }),
-    command.define("edit.undo", "Undo your most recent edit.", cUndo).present(.{ .label = "Undo", .menu = "Edit", .group = "history", .order = 10, .icon = "undo" }),
-    command.define("edit.redo", "Redo the edit you most recently undid.", cRedo).present(.{ .label = "Redo", .menu = "Edit", .group = "history", .order = 20, .icon = "redo" }),
+    command.define("edit.undo", "Undo your most recent edit.", cUndo).present(.{ .label = "Undo", .icon = "undo" }),
+    command.define("edit.redo", "Redo the edit you most recently undid.", cRedo).present(.{ .label = "Redo", .icon = "redo" }),
     command.define("file.write", "Write the buffer to its file.", cSaveFile).present(.{ .internal = true }),
     command.define("field.word-prev", "Move the field cursor to the start of the previous word.", fieldMotion(.word_previous)).present(.{ .internal = true }),
     command.define("field.word-next", "Move the field cursor to the start of the next word.", fieldMotion(.word_next)).present(.{ .internal = true }),
@@ -965,7 +965,7 @@ const table = [_]command.Command{
     command.define("edit.seal-undo", "Close the current undo step so the next edit starts a new one.", cUndoBarrier).present(.{ .internal = true }),
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
-    command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .menu = "File", .group = "exit", .order = 10, .icon = "log-out" }),
+    command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
     command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),
 };
@@ -997,9 +997,6 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // collide at bind) with every projection's own one-conjunct `tool` save.
     try command.registerAction(gpa, commands, actions, "file.save", .pick, "Save the focused entry: write a file, apply a listing's draft, send a commit message.", .{
         .label = "Save",
-        .menu = "File",
-        .group = "save",
-        .order = 10,
         .icon = "save",
     });
     try actions.provide(.{ .action = "file.save", .predicate = .{ .not = &not_a_projection }, .command = "file.write", .priority = -1, .owner = "core" });
@@ -1010,9 +1007,6 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // a commit draft — provides its own and asks first.
     try command.registerAction(gpa, commands, actions, "buffer.close", .pick, "Close the focused entry, letting its provider refuse when it holds unsaved work.", .{
         .label = "Close Editor",
-        .menu = "File",
-        .group = "close",
-        .order = 10,
         .icon = "close",
     });
     try actions.provide(.{ .action = "buffer.close", .command = "buffer.close-unmodified", .owner = "core" });

@@ -7,7 +7,9 @@
 // command that says where it lives (its `menu` presentation: `View/Appearance`),
 // in the conventional File, Edit, Selection, View, Go, Run, Terminal, Help —
 // so a plugin loaded later files its commands into the same bar, and a config
-// moves any of them with `weft.command(id, {menu, group, order})`. Each row
+// moves any of them with `weft.command(id, {menu, group, order})`. Core's own
+// commands say no such thing: where they sit is config/menus.js, used here, so
+// a config that reshapes the menus edits that file's lines. Each row
 // shows the key that runs it in the editor, greys what cannot run there (its
 // tooltip says why), and checks what it toggles. A chosen row runs in the
 // PRIMARY context — the editor, even while a sidebar has the keys.
@@ -21,6 +23,7 @@
 // Declared ABOVE whatever else docks along the top: a fragment used after
 // this one (a toolbar) sits beneath it.
 weft.plugin("menu");
+weft.use("menus");
 
 weft.viewport("menubar", {
   edge: "top",

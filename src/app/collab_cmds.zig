@@ -673,7 +673,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "hostport", .type = .string }},
         .handler = connectHandler,
         .data = sc,
-        .meta = .{ .label = "Join Session", .menu = "File/Share", .group = "session", .order = 10, .icon = "link", .prompts = true },
+        .meta = .{ .label = "Join Session", .icon = "link", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.disconnect", .{
         .name = "collab.disconnect",
@@ -681,7 +681,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = disconnectHandler,
         .data = sc,
-        .meta = .{ .label = "Leave Session", .menu = "File/Share", .group = "session", .order = 30, .icon = "unplug" },
+        .meta = .{ .label = "Leave Session", .icon = "unplug" },
     });
     _ = try commands.bind(gpa, "collab.realize-all", .{
         .name = "collab.realize-all",
@@ -689,7 +689,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = realizeAllHandler,
         .data = sc,
-        .meta = .{ .label = "Download All Shared Files", .menu = "File/Share", .group = "files", .order = 30, .icon = "download" },
+        .meta = .{ .label = "Download All Shared Files", .icon = "download" },
     });
     _ = try commands.bind(gpa, "collab.peer-files", .{
         .name = "collab.peer-files",
@@ -697,7 +697,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = peerFilesHandler,
         .data = sc,
-        .meta = .{ .label = "Browse Shared Files", .menu = "File/Share", .group = "files", .order = 10, .icon = "folder-tree" },
+        .meta = .{ .label = "Browse Shared Files", .icon = "folder-tree" },
     });
     _ = try commands.bind(gpa, "collab.share", .{
         .name = "collab.share",
@@ -705,7 +705,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
         .handler = shareHandler,
         .data = sc,
-        .meta = .{ .label = "Share Buffer", .menu = "File/Share", .group = "share", .order = 10, .icon = "share-2" },
+        .meta = .{ .label = "Share Buffer", .icon = "share-2" },
     });
     _ = try commands.bind(gpa, "collab.share-presence", .{
         .name = "collab.share-presence",
@@ -713,7 +713,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "state", .type = .string }},
         .handler = sharePresenceHandler,
         .data = sc,
-        .meta = .{ .label = "Share Cursor", .menu = "File/Share", .group = "share", .order = 20, .icon = "eye", .prompts = true },
+        .meta = .{ .label = "Share Cursor", .icon = "eye", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.share-fs", .{
         .name = "collab.share-fs",
@@ -721,7 +721,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "surfaces", .type = .string }},
         .handler = shareFsHandler,
         .data = sc,
-        .meta = .{ .label = "Share Files", .menu = "File/Share", .group = "share", .order = 30, .icon = "folder-open", .prompts = true },
+        .meta = .{ .label = "Share Files", .icon = "folder-open", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.open-shared", .{
         .name = "collab.open-shared",
@@ -729,7 +729,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = openSharedHandler,
         .data = sc,
-        .meta = .{ .label = "Open Shared Buffer", .menu = "File/Share", .group = "files", .order = 20, .icon = "file-text", .prompts = true },
+        .meta = .{ .label = "Open Shared Buffer", .icon = "file-text", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.listen", .{
         .name = "collab.listen",
@@ -737,7 +737,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
         .handler = listenHandler,
         .data = sc,
-        .meta = .{ .label = "Host Session", .menu = "File/Share", .group = "session", .order = 20, .icon = "users", .prompts = true },
+        .meta = .{ .label = "Host Session", .icon = "users", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.stop-listening", .{
         .name = "collab.stop-listening",
@@ -745,7 +745,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = stopListeningHandler,
         .data = sc,
-        .meta = .{ .label = "Stop Hosting", .menu = "File/Share", .group = "session", .order = 25, .icon = "stop" },
+        .meta = .{ .label = "Stop Hosting", .icon = "stop" },
     });
     _ = try commands.bind(gpa, "collab.verify-peer", .{
         .name = "collab.verify-peer",
@@ -753,7 +753,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = verifyPeerHandler,
         .data = known,
-        .meta = .{ .label = "Verify Peer", .menu = "File/Share", .group = "peers", .order = 20, .icon = "shield-check", .prompts = true },
+        .meta = .{ .label = "Verify Peer", .icon = "shield-check", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.forget-peer", .{
         .name = "collab.forget-peer",
@@ -761,7 +761,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = forgetPeerHandler,
         .data = known,
-        .meta = .{ .label = "Forget Peer", .menu = "File/Share", .group = "peers", .order = 30, .prompts = true },
+        .meta = .{ .label = "Forget Peer", .prompts = true },
     });
     _ = try commands.bind(gpa, "collab.peers", .{
         .name = "collab.peers",
@@ -769,7 +769,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = peersHandler,
         .data = sc,
-        .meta = .{ .label = "Show Peers", .menu = "File/Share", .group = "peers", .order = 10, .icon = "users" },
+        .meta = .{ .label = "Show Peers", .icon = "users" },
     });
     _ = try commands.bind(gpa, "collab.cancel", .{
         .name = "collab.cancel",
@@ -777,7 +777,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{},
         .handler = cancelHandler,
         .data = sc,
-        .meta = .{ .label = "Cancel Connecting", .menu = "File/Share", .group = "session", .order = 15 },
+        .meta = .{ .label = "Cancel Connecting" },
     });
     _ = try commands.bind(gpa, "collab.grant", .{
         .name = "collab.grant",
@@ -785,7 +785,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
         .handler = grantHandler,
         .data = sc,
-        .meta = .{ .label = "Set Peer Access", .menu = "File/Share", .group = "peers", .order = 40, .prompts = true },
+        .meta = .{ .label = "Set Peer Access", .prompts = true },
     });
 }
 

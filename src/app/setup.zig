@@ -32,10 +32,10 @@ pub fn registerCapabilityConsumers(
 const reg_arg: core.command.ArgSpec = .{ .name = "register", .type = .string, .optional = true };
 const count_arg: core.command.ArgSpec = .{ .name = "count", .type = .nil, .optional = true };
 const macro_cmds = [_]core.command.Command{
-    .{ .name = "macro.record-start", .summary = "Start recording your keystrokes into a named macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler, .meta = .{ .label = "Record Macro", .menu = "Edit/Macros", .group = "record", .order = 10, .icon = "circle-dot", .prompts = true } },
-    .{ .name = "macro.record-stop", .summary = "Stop recording and file the macro under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler, .meta = .{ .label = "Stop Recording", .menu = "Edit/Macros", .group = "record", .order = 20, .icon = "stop" } },
-    .{ .name = "macro.record-toggle", .summary = "Start recording a macro, into register @ unless one is given, or stop recording.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler, .meta = .{ .label = "Toggle Macro Recording", .menu = "Edit/Macros", .group = "record", .order = 30 } },
-    .{ .name = "macro.play", .summary = "Replay a macro, the last one played unless a register is given, a count of times.", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler, .meta = .{ .label = "Play Macro", .menu = "Edit/Macros", .group = "play", .order = 10, .icon = "play" } },
+    .{ .name = "macro.record-start", .summary = "Start recording your keystrokes into a named macro register.", .args = &.{.{ .name = "register", .type = .string }}, .handler = dispatch.macroRecordStartHandler, .meta = .{ .label = "Record Macro", .icon = "circle-dot", .prompts = true } },
+    .{ .name = "macro.record-stop", .summary = "Stop recording and file the macro under its register.", .args = &.{}, .handler = dispatch.macroRecordStopHandler, .meta = .{ .label = "Stop Recording", .icon = "stop" } },
+    .{ .name = "macro.record-toggle", .summary = "Start recording a macro, into register @ unless one is given, or stop recording.", .args = &.{reg_arg}, .handler = dispatch.macroRecordToggleHandler, .meta = .{ .label = "Toggle Macro Recording" } },
+    .{ .name = "macro.play", .summary = "Replay a macro, the last one played unless a register is given, a count of times.", .args = &.{ reg_arg, count_arg }, .handler = dispatch.macroPlayHandler, .meta = .{ .label = "Play Macro", .icon = "play" } },
 };
 
 /// Bind the caret/which-key/menu commands, registered before the config runs
@@ -66,7 +66,7 @@ pub fn registerCursorCommands(
         .args = &.{},
         .handler = dispatch.repeatChangeHandler,
         .data = null,
-        .meta = .{ .label = "Repeat Last Change", .menu = "Edit", .group = "history", .order = 30, .icon = "history" },
+        .meta = .{ .label = "Repeat Last Change", .icon = "history" },
     });
     // Macros: record the keystroke stream into a named register and replay
     // it, through the same dispatch (`dispatch.zig`'s macro section). Which
@@ -81,7 +81,7 @@ pub fn registerCursorCommands(
         .args = &.{},
         .handler = dispatch.whichKeyNowHandler,
         .data = which_key_now,
-        .meta = .{ .label = "Show Key Hints", .menu = "Help", .group = "keys", .order = 10, .icon = "keyboard" },
+        .meta = .{ .label = "Show Key Hints", .icon = "keyboard" },
     });
     _ = try commands.bind(gpa, "cursor.set-style", .{
         .name = "cursor.set-style",

@@ -726,7 +726,7 @@ pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system
         .args = &.{ .{ .name = "principal", .type = .string }, .{ .name = "capability", .type = .string } },
         .handler = revokeHandler,
         .data = system,
-        .meta = .{ .label = "Revoke Permission", .menu = "Help", .group = "permissions", .order = 20, .icon = "shield-check", .prompts = true },
+        .meta = .{ .label = "Revoke Permission", .icon = "shield-check", .prompts = true },
     });
 }
 
@@ -791,7 +791,7 @@ pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, sy
         .args = &.{},
         .handler = grantsShowHandler,
         .data = system,
-        .meta = .{ .label = "Show Permissions", .menu = "Help", .group = "permissions", .order = 10, .icon = "shield-check" },
+        .meta = .{ .label = "Show Permissions", .icon = "shield-check" },
     });
 }
 

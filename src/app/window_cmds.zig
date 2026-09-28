@@ -47,18 +47,18 @@ pub const WindowActionCtx = struct { win: *WindowCtx, action: WindowAction };
 /// `WindowAction`. One name per operation: the `windows` plugin that
 /// re-registered these under its own names is gone, and so is every alias.
 pub const cmd_table = [_]struct { name: []const u8, action: WindowAction, summary: []const u8, meta: core.command.Presentation }{
-    .{ .name = "window.split-below", .action = .split, .summary = "Split the focused window, opening a pane below.", .meta = .{ .label = "Split Editor Down", .menu = "View/Editor Layout", .group = "split", .order = 20, .icon = "split-down" } },
-    .{ .name = "window.split-right", .action = .vsplit, .summary = "Split the focused window, opening a pane to the right.", .meta = .{ .label = "Split Editor Right", .menu = "View/Editor Layout", .group = "split", .order = 10, .icon = "split-right" } },
-    .{ .name = "window.close", .action = .close, .summary = "Close the focused window, collapsing its split.", .meta = .{ .label = "Close Window", .menu = "View/Editor Layout", .group = "split", .order = 30, .icon = "close" } },
-    .{ .name = "window.focus-left", .action = .focus_left, .summary = "Focus the window to the left.", .meta = .{ .label = "Focus Left Window", .menu = "View/Editor Layout", .group = "focus", .order = 10 } },
-    .{ .name = "window.focus-right", .action = .focus_right, .summary = "Focus the window to the right.", .meta = .{ .label = "Focus Right Window", .menu = "View/Editor Layout", .group = "focus", .order = 20 } },
-    .{ .name = "window.focus-up", .action = .focus_up, .summary = "Focus the window above.", .meta = .{ .label = "Focus Window Above", .menu = "View/Editor Layout", .group = "focus", .order = 30 } },
-    .{ .name = "window.focus-down", .action = .focus_down, .summary = "Focus the window below.", .meta = .{ .label = "Focus Window Below", .menu = "View/Editor Layout", .group = "focus", .order = 40 } },
-    .{ .name = "window.move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbour.", .meta = .{ .label = "Move Window Left", .menu = "View/Editor Layout", .group = "move", .order = 10 } },
-    .{ .name = "window.move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbour.", .meta = .{ .label = "Move Window Right", .menu = "View/Editor Layout", .group = "move", .order = 20 } },
-    .{ .name = "window.move-up", .action = .move_up, .summary = "Swap the focused window with the one above.", .meta = .{ .label = "Move Window Up", .menu = "View/Editor Layout", .group = "move", .order = 30 } },
-    .{ .name = "window.move-down", .action = .move_down, .summary = "Swap the focused window with the one below.", .meta = .{ .label = "Move Window Down", .menu = "View/Editor Layout", .group = "move", .order = 40 } },
-    .{ .name = "window.focus-next", .action = .focus_next, .summary = "Focus the next window.", .meta = .{ .label = "Focus Next Window", .menu = "View/Editor Layout", .group = "focus", .order = 50 } },
+    .{ .name = "window.split-below", .action = .split, .summary = "Split the focused window, opening a pane below.", .meta = .{ .label = "Split Editor Down", .icon = "split-down" } },
+    .{ .name = "window.split-right", .action = .vsplit, .summary = "Split the focused window, opening a pane to the right.", .meta = .{ .label = "Split Editor Right", .icon = "split-right" } },
+    .{ .name = "window.close", .action = .close, .summary = "Close the focused window, collapsing its split.", .meta = .{ .label = "Close Window", .icon = "close" } },
+    .{ .name = "window.focus-left", .action = .focus_left, .summary = "Focus the window to the left.", .meta = .{ .label = "Focus Left Window" } },
+    .{ .name = "window.focus-right", .action = .focus_right, .summary = "Focus the window to the right.", .meta = .{ .label = "Focus Right Window" } },
+    .{ .name = "window.focus-up", .action = .focus_up, .summary = "Focus the window above.", .meta = .{ .label = "Focus Window Above" } },
+    .{ .name = "window.focus-down", .action = .focus_down, .summary = "Focus the window below.", .meta = .{ .label = "Focus Window Below" } },
+    .{ .name = "window.move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbour.", .meta = .{ .label = "Move Window Left" } },
+    .{ .name = "window.move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbour.", .meta = .{ .label = "Move Window Right" } },
+    .{ .name = "window.move-up", .action = .move_up, .summary = "Swap the focused window with the one above.", .meta = .{ .label = "Move Window Up" } },
+    .{ .name = "window.move-down", .action = .move_down, .summary = "Swap the focused window with the one below.", .meta = .{ .label = "Move Window Down" } },
+    .{ .name = "window.focus-next", .action = .focus_next, .summary = "Focus the next window.", .meta = .{ .label = "Focus Next Window" } },
 };
 
 /// Count of window commands; `main()` sizes the stable `WindowActionCtx`
