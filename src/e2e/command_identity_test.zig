@@ -127,19 +127,38 @@ test "e2e/identity: every command the shipped configs register is one id in the 
         try t.expect(labelled > 100);
 
         // And every key names something that answers, in the grammar too: a
-        // bound arm is a registered command, an intention, or a menu mode.
+        // bound arm is a command (or action) REGISTERED here, a standard
+        // intention in the vocabulary, a plugin intention, or a menu mode.
+        // Well-formed is not enough — an id bound under a name it lost in a
+        // rename is well-formed and runs nothing.
+        var shell_ctx: h.app.scroll.ScrollCtx = .{ .view = undefined, .fb = undefined };
+        var shell: core.command.Commands = .empty;
+        defer shell.deinit(gpa);
+        try h.app.scroll.registerCommands(gpa, &shell, &shell_ctx);
+        var unanswered: usize = 0;
         var modes = b.ed.keymap.modes.iterator();
         while (modes.next()) |mode| {
             var keys = mode.value_ptr.iterator();
             while (keys.next()) |key| for (key.value_ptr.commands) |arm| {
-                if (core.catalog.isIntentionName(arm) or b.ed.keymap.modeHasTag(arm, "menu")) continue;
-                if (std.mem.startsWith(u8, arm, "scroll.") or std.mem.eql(u8, arm, "grants.show")) continue; // the windowed shell's
+                if (b.ed.keymap.modeHasTag(arm, "menu")) continue;
                 if (command_id.check(arm)) |why| {
                     std.debug.print("[e2e/identity] {s}: {s} {s} -> '{s}' {s}\n", .{ config, mode.key_ptr.*, key.key_ptr.*, arm, why.describe() });
                     return error.BoundIdOutsideGrammar;
                 }
+                if (std.mem.startsWith(u8, arm, "std.")) {
+                    if (core.intentions.find(arm) != null) continue;
+                } else if (core.catalog.isIntentionName(arm)) {
+                    continue; // a plugin's word, offered when its plugin says so
+                } else if (commands.resolve(arm) != null or shell.resolve(arm) != null) {
+                    continue;
+                } else if (std.mem.eql(u8, arm, "grants.show")) {
+                    continue; // the windowed shell's, over its live System
+                }
+                std.debug.print("[e2e/identity] {s}: {s} {s} -> '{s}' is registered by nothing\n", .{ config, mode.key_ptr.*, key.key_ptr.*, arm });
+                unanswered += 1;
             };
         }
+        if (unanswered != 0) return error.BoundIdUnregistered;
     }
 }
 

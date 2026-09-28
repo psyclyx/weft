@@ -97,6 +97,8 @@ pub const designation = @import("designation.zig");
 pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
+/// The standard intention vocabulary (`std.<domain>.<verb>`).
+pub const intentions = @import("intentions.zig");
 /// The one selection model: extents of text or rows, and how a command maps
 /// over them (doc/model.md §2.6).
 pub const selection = @import("selection.zig");
