@@ -6,7 +6,7 @@
 //! triple into draw items. A producer never picks a look: it says a node is a
 //! button, or a separator, and the style decides — so the same toolbar is a
 //! row of padded cells under `text`, cells with small icons under
-//! `text-icons`, and rounded pills under `widget`, with no producer knowing.
+//! `text-icons`, and flat buttons (a rounded face on hover) under `widget`, with no producer knowing.
 //!
 //! The style is a theme value (`theme/chrome`), resolved into `View.chrome`
 //! and read here at draw time, so switching it is one binding and the next
@@ -238,11 +238,15 @@ fn paintButton(s: Sink, state: State, content: Content, box: region.Rect) !void 
             try s.fill(box, fill);
         },
         .widget => {
-            const pill: region.Rect = .{ .x = box.x + 1, .y = box.y + 2, .w = @max(0, box.w - 2), .h = @max(0, box.h - 4) };
-            if (state.disabled) {
-                try s.rounded(pill, mix(v.theme.background, v.theme.status, 0.35), .{ .radius = pill.h / 2, .stroke_width = 1 });
-            } else {
-                try s.rounded(pill, surfaceFill(v, state, 0.32), .{ .radius = pill.h / 2 });
+            // FLAT: a toolbar button is its icon and label until the pointer
+            // is on it; hover and press show a rounded rectangle (a small
+            // radius, never a pill), inset from the cell box so neighbours
+            // never touch. A disabled button draws no surface at all — its
+            // dimmed text says it (it stays clickable, to say why).
+            if (!state.disabled and (state.hover or state.pressed or state.focused)) {
+                const inset: f32 = 3;
+                const face: region.Rect = .{ .x = box.x + 1, .y = box.y + inset, .w = @max(0, box.w - 2), .h = @max(0, box.h - 2 * inset) };
+                try s.rounded(face, surfaceFill(v, state, 0.5), .{ .radius = 4 });
             }
         },
     }
@@ -428,22 +432,34 @@ pub fn paintSeparator(s: Sink, box: region.Rect, axis: Axis) !void {
 /// Where one tab of a strip landed: its whole box and its close glyph.
 pub const TabBox = struct { index: usize, box: region.Rect, close: region.Rect };
 
+/// The icon a tab paints, or null for none: an ordinary buffer tab always
+/// shows "file"; a COMMAND tab (`tab.command` set — a docked pane's header)
+/// shows its own icon from its presentation, or none (the trailing close
+/// affordance, whose glyph IS its label — see `Hud.Tab`'s doc).
+pub fn tabIconName(tab: hud_mod.Tab) ?[]const u8 {
+    if (tab.command.len == 0) return "file";
+    return if (tab.icon.len > 0) tab.icon else null;
+}
+
 /// Lay a tab strip out in `strip`, as many tabs as start inside it (the last
 /// may be cut off, and is clipped when painted). Text styles: one cell of
 /// padding, the label, a cell of padding, the close glyph, a cell, and a
 /// one-cell gap between tabs. `widget`: the same parts in pixels, with an
-/// icon before the label.
+/// icon before the label. A COMMAND tab reserves no close-glyph width — its
+/// whole body is the click target, and it carries its own trailing close
+/// affordance as another tab, not a sub-region of this one.
 pub fn layoutTabs(v: *const View, scratch: Allocator, tabs: []const hud_mod.Tab, strip: region.Rect) ![]TabBox {
     var out: std.ArrayList(TabBox) = .empty;
     var x = strip.x;
     const right = strip.x + strip.w;
-    const has_icon = v.icon("file") != null;
     for (tabs, 0..) |tab, i| {
         if (x >= right) break;
+        const is_command = tab.command.len > 0;
+        const has_icon = if (tabIconName(tab)) |name| v.icon(name) != null else false;
         const label_w = colsW(v, cols(tab.name));
         var w: f32 = undefined;
         var close_x: f32 = undefined;
-        const close_w: f32 = if (v.chrome == .widget) v.line_h else v.cell_w;
+        const close_w: f32 = if (is_command) 0 else if (v.chrome == .widget) v.line_h else v.cell_w;
         switch (v.chrome) {
             .text, .text_icons => {
                 const icon_w: f32 = if (v.chrome == .text_icons and has_icon) 2 * v.cell_w else 0;

@@ -311,9 +311,9 @@ their identifiers and payload schemas as opaque. Standard packages can define:
   whose subscription renders like any resource (§11.8); and
 - interactions, tasks, progress, and cancellation.
 
-A PTY/terminal-grid package is named future work: §1 lists terminals as in
-scope, and nothing here forecloses them — capture posture (§10.4) is the
-input half.
+The PTY/terminal-grid package exists (doc/terminal.md): core's pty doors and
+grid entries, the `terminal` plugin's emulator, and capture posture (§10.4)
+as the input half, with the terminal as its first consumer.
 
 Novel plugin-specific protocols remain valid. They simply lack automatic key
 placement until an input or UI plugin understands them; generic catalog UI still
@@ -1620,7 +1620,8 @@ Remaining open, in rough order of urgency:
 2. The scene-stream export contract for thin heads (§13.4).
 3. Query-as-resource: a reified query as a durable, designatable embed
    target (§5.3, §11.8) — named, not yet exercised by a real embed.
-4. A terminal/PTY package (§5.3), unbuilt.
+4. A terminal/PTY package (§5.3) — built locally (doc/terminal.md); a pty in
+   a remote place is still open.
 
 The substrate and configuration companions exist (`substrate.md`,
 `configuration.md`); their own open questions are listed there.

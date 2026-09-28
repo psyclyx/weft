@@ -2010,8 +2010,12 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .{ .rows = std.math.cast(u16, args[5]) orelse 1 }
     else
         .{ .fraction = @as(f32, @floatFromInt(args[5])) / 1000.0 };
+    // `opts.tabs`, joined with '\n' by the shim — a docked pane's header
+    // strip, one tab per command id, in order (doc/rendering.md).
+    const tabs = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(tabs);
     if (br.manifest) |m| {
-        m.addViewport(name, attrs, extent, flags & vp_hidden != 0) catch {};
+        m.addViewport(name, attrs, extent, flags & vp_hidden != 0, tabs) catch {};
         return;
     }
     std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});

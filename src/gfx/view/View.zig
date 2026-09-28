@@ -37,6 +37,7 @@ const popup = @import("popup.zig");
 const semantic = @import("semantic.zig");
 const decoration = @import("decoration.zig");
 const linelayout = @import("linelayout.zig");
+const grid_draw = @import("grid.zig");
 const render = @import("render.zig");
 
 const Theme = @import("Theme.zig");
@@ -576,6 +577,20 @@ pub fn bodyRowsIn(self: *const View, hud: Hud, frame: region.Rect) usize {
     return self.bodyRowsOf(self.carve(frame, hud).body);
 }
 
+/// The room a pane's body has in `frame` under `hud`, in whole cells, and
+/// the cell's size in pixels — what an entry sized to its pane (a
+/// terminal's grid) is told (`Buffer.extent`).
+pub fn extentIn(self: *const View, hud: Hud, frame: region.Rect) core.grid.Extent {
+    const body = self.carve(frame, hud).body;
+    const cols: usize = @intFromFloat(@max(1, @floor(body.w / self.cell_w)));
+    return .{
+        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
+        .rows = @intCast(@min(self.bodyRowsOf(body), std.math.maxInt(u16))),
+        .cell_w = @intFromFloat(@min(@round(self.cell_w), std.math.maxInt(u16))),
+        .cell_h = @intFromFloat(@min(@round(self.line_h), std.math.maxInt(u16))),
+    };
+}
+
 // ── Frame assembly ───────────────────────────────────────────────
 
 /// Build the visible picture: lay out each body row into runs + the
@@ -650,6 +665,11 @@ pub fn build(
             self.semantic_active = true;
             self.semantic_hits = hits;
         }
+    } else if (hud.grid) |*g| {
+        // A grid entry (a terminal): cells, not text — no rope, no geometry
+        // map, and the cursor is the grid's own.
+        self.frame_layout = .{ .lines = &.{} };
+        try grid_draw.draw(self, scratch, &runs, &rects, g, body_rect, hud.cursor_on);
     } else if (editor) |ed| {
         const rope = ed.text();
         const total_rows = rope.lineCount();
@@ -744,12 +764,15 @@ pub fn build(
                 .hover = on_close or hud.pointer.onChrome(.tab, tb.index, .body),
                 .pressed = hud.pointer.pressed and hud.pointer.onChrome(.tab, tb.index, .body),
             };
-            try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = "file" }, box, if (close.w > 0) close else null, on_close);
-            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else tab.path };
+            try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = chrome_mod.tabIconName(tab) }, box, if (close.w > 0) close else null, on_close);
+            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else if (tab.path.len > 0) tab.path else tab.name };
             if (box.w <= 0) continue;
             // The body is the tab less its close glyph, so the two parts'
-            // hit regions never overlap.
-            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id });
+            // hit regions never overlap. A COMMAND tab carries its command
+            // here, the same door a status segment's click runs through
+            // (`core.pointer.clickChrome`); it has no close sub-region (see
+            // `layoutTabs`), so only the body hit is ever recorded for one.
+            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id, .command = tab.command });
             if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id });
         }
     }
@@ -796,7 +819,7 @@ pub fn build(
     // popup-layout gate's own scenarios) — this view never special-cases
     // "completion" or "hover" itself, only "a caret/dock surface".
     if (hud.pick) |p| {
-        if (p.buildSurface(scratch, Hud.max_pick_rows)) |surf| {
+        if (p.buildSurface(scratch, Hud.max_pick_rows, .dock)) |surf| {
             if (surf.placement == .caret)
                 try popup.drawCaretSurface(self, scratch, &runs, &rects, &surf, body_rect)
             else

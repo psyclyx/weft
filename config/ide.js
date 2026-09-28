@@ -74,6 +74,8 @@ weft.grant("files", "fs_write", { root: "/" });
 // which only config can grant — and which register mirrors it is the
 // grammar's setting (vim keeps `"+` apart instead).
 weft.grant("ide", "clipboard");
+// The terminal pastes the clipboard into its shell (C-S-v, S-Insert).
+weft.grant("terminal", "clipboard");
 weft.set("ide", "clipboard", "unnamed");
 weft.grant("dap", "proc");
 weft.plugin("dap.js");         // DAP client: F5/F10/F11
@@ -117,8 +119,15 @@ weft.set("editor", "flash-ms", "150");
 weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
 weft.set("linenumbers", "style", "absolute"); // the conventional gutter
 weft.set("palette", "arguments", "ask");
-// Chrome as widgets: rounded buttons, real tabs whose close glyph shows on
-// hover, icons, shadowed menus (doc/chrome.md §3.2).
+// The palette as an IDE's: it floats at the top of the window, each row is a
+// label and the key that runs it (no ids, no summaries), and what you ran
+// last is listed first. Every picker floats there too, so C-p's file list
+// matches. Only values: the palette plugin and the picker stay as they are.
+weft.set("editor", "picker", "top");
+weft.set("palette", "detail", "brief");
+weft.set("palette", "recent", "on");
+// Chrome as widgets: flat buttons that show a face on hover, real tabs whose
+// close glyph shows on hover, icons, shadowed menus (doc/chrome.md §3.2).
 weft.set("theme", "chrome", "widget");
 // Which declared viewport C-b toggles — the fragment above calls it this.
 weft.set("ide", "sidebar", "sidebar");
@@ -289,7 +298,7 @@ weft.bind("ide", "bracketright", "autopair.close-bracket");
 weft.use("panel");
 weft.plugin("panel");        // panel.toggle: show or hide the panel
 weft.plugin("problems");     // every diagnostic, grouped by file; Return jumps
-weft.plugin("terminal");     // a LINE-MODE shell (no terminal emulation)
+weft.plugin("terminal");     // a shell on a real terminal; C-\ hands the keys back
 weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
 bindWorkspace("C-j", "panel.toggle");
 bindWorkspace("C-grave", "terminal.open");

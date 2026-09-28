@@ -926,6 +926,10 @@ fn initExtra() void {
     weft.bindKey("visual", "o", "vim.visual-swap-ends");
     weft.bindKey("visual", "O", "vim.visual-swap-ends");
     weft.bindKey("normal", "g v", "vim.visual-reselect");
+    // vim's tab cycling; a buffer is what the tab strip shows, so gt/gT walk
+    // the buffers the way `:tabnext`/`:tabprev` walk tab pages.
+    weft.bindKey("normal", "g t", "buffer.next");
+    weft.bindKey("normal", "g T", "buffer.prev");
     weft.bindKey("insert", "Escape", "vim.normal");
 
     // No leader/window/goto/zed MODES: those trees are key sequences now (below).

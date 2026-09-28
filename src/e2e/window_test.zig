@@ -474,11 +474,13 @@ test "e2e/files: semantic rows scroll beyond one screen without a text document"
     ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
     const instance = ed.session.system.semantic.views.get(view_ref).?;
-    try t.expectEqual(@as(usize, 80), instance.focus_order.len);
+    // 80 entries, plus the listing's own leading `..` row: 81 rows, the
+    // topmost of which is `..` itself.
+    try t.expectEqual(@as(usize, 81), instance.focus_order.len);
     const first = instance.focus_order[0];
-    const last = instance.focus_order[79];
+    const last = instance.focus_order[80];
     _ = try ed.session.system.semantic.focusView(ed.head, gpa, view_ref, first);
-    for (0..79) |_| ed.press("j", "");
+    for (0..80) |_| ed.press("j", "");
     try t.expectEqual(last, ed.subjectHere().?);
     const pixels = try ed.renderComposite();
     defer gpa.free(pixels);
@@ -486,7 +488,7 @@ test "e2e/files: semantic rows scroll beyond one screen without a text document"
     try t.expect(presenter.top_row > 0);
     try t.expect(ed.buffers.active().editor == null);
     app.proj.shot(ed, "files-scrolled");
-    for (0..79) |_| ed.press("k", "");
+    for (0..80) |_| ed.press("k", "");
     const back = try ed.renderComposite();
     defer gpa.free(back);
     try t.expectEqual(first, ed.subjectHere().?);

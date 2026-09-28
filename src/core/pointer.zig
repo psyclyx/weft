@@ -322,6 +322,10 @@ fn cPointerAddSelection(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return ok;
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
+        // An action node (a listing's `..`, a menu item read as a row) is a
+        // shortcut, not an entry: it names nothing a bulk transfer could
+        // act on, so C-click leaves the mark set exactly as it was.
+        if (isActionNode(ctx, node)) return ok;
         const scene = &ctx.head.scene_selection;
         const same_view = if (scene.view) |v| v.eql(node.view) else false;
         const kept = if (same_view) scene.primaryRows() else null;
@@ -390,6 +394,13 @@ fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
     } else _ = focusHitPane(ctx);
     switch (chrome.kind) {
         .tab => {
+            // A COMMAND tab (a docked pane's header — `weft.viewport`'s
+            // `tabs`) runs its command instead of switching to an entry by
+            // id: it names no entry at all (`Hud.Tab`'s doc).
+            if (chrome.command().len > 0) {
+                try runLine(ctx, chrome.command());
+                return ok;
+            }
             const entry = chrome.entry orelse return ok;
             if (chrome.part == .close) return closeEntry(ctx, entry);
             _ = try command.run(ctx.commands, ctx, "buffer.switch", &.{.{ .integer = entry }});
@@ -428,6 +439,10 @@ fn cPointerCloseTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const chrome = ctx.head.pointer.hit.chrome orelse return ok;
     if (chrome.kind != .tab) return ok;
+    // A COMMAND tab (a docked pane's header) names no entry to close —
+    // middle-click on it does nothing, never `chrome.entry`'s default 0,
+    // which could otherwise misname a real buffer.
+    if (chrome.command().len > 0) return ok;
     _ = focusHitPane(ctx);
     return closeEntry(ctx, chrome.entry orelse return ok);
 }
@@ -546,6 +561,65 @@ fn onEditedField(ctx: *Context, node: NodeRef) bool {
     return view.eql(node.view) and selection.head() == node.node;
 }
 
+/// `pointer.open-row` — the single-click list/tree convention (an IDE's
+/// explorer): the row under the pointer takes the focus and acts at once. A
+/// row that folds (it says `toggle-expanded` itself) opens or closes in
+/// place, as a tree does, rather than descending; an action row runs; any
+/// other row opens its target. Only a gesture's first click acts, so a double
+/// click is one activation, not a fold and an unfold. A grammar binds it to
+/// the click it wants (ide: `mouse-1` over its listings); the floor's
+/// `pointer.click` only focuses.
+fn cPointerOpenRow(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const hit = ctx.head.pointer.hit;
+    // Chrome and text are an ordinary click's.
+    const node = hit.node orelse return cPointerClick(ctx, .{});
+    if (hit.chrome != null) return cPointerClick(ctx, .{});
+    // The FIRST click opened or folded the row; a double click's later
+    // clicks add nothing (a folder toggled open must not then be descended
+    // into), except inside a name being edited, where they select a word.
+    if (ctx.head.pointer.clicks > 1) {
+        if (onEditedField(ctx, node)) return cPointerActivate(ctx, .{});
+        return ok;
+    }
+    if (ctx.semantic) |services| if (scene_edit.begun(services, ctx.head)) {
+        // A click inside the name being edited belongs to the field.
+        if (onEditedField(ctx, node)) return cPointerClick(ctx, .{});
+        _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    };
+    // A slow second click on the focused row still renames it.
+    if (slowClickOnFocus(ctx, node)) return cPointerClick(ctx, .{});
+    if (!focusHitPane(ctx)) return activateInPlace(ctx);
+    ctx.head.scene_selection.collapse();
+    try focusNode(ctx, node);
+    if (!actsThisClick(ctx)) return ok;
+    if (isActionNode(ctx, node)) return activateFocusedAction(ctx);
+    if (rowFolds(ctx)) {
+        _ = try command.run(ctx.commands, ctx, "hierarchy.toggle-expanded", &.{});
+        return ok;
+    }
+    _ = try command.run(ctx.commands, ctx, "target.open", &.{});
+    return ok;
+}
+
+/// Whether the focused ROW itself folds: the nearest node on the focus path
+/// that declares actions is the row, and only its own `toggle-expanded`
+/// counts — a file inside an open folder must not fold its parent.
+fn rowFolds(ctx: *Context) bool {
+    const services = ctx.semantic orelse return false;
+    const path = ctx.head.scene_selection.path() orelse return false;
+    const instance = services.views.get(path.view) orelse return false;
+    var index = path.nodes.len;
+    while (index > 0) {
+        index -= 1;
+        const n = instance.node(path.nodes[index]) orelse continue;
+        if (n.actions.len == 0) continue;
+        for (n.actions) |action| if (std.mem.eql(u8, action.id, semantic_model.action.standard.toggle_expanded)) return action.enabled;
+        return false;
+    }
+    return false;
+}
+
 fn isActionNode(ctx: *Context, node: NodeRef) bool {
     const services = ctx.semantic orelse return false;
     const instance = services.views.get(node.view) orelse return false;
@@ -580,6 +654,7 @@ pub const table = [_]command.Command{
     command.define("pointer.add-selection", "Add a caret in text, or the row in a scene, under the pointer to the selection.", cPointerAddSelection).present(.{ .internal = true }),
     command.define("pointer.drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect).present(.{ .internal = true }),
     command.define("pointer.extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection).present(.{ .internal = true }),
+    command.define("pointer.open-row", "Open the row under the pointer on one click: a row that folds opens or closes in place, an action row runs, anything else opens.", cPointerOpenRow).present(.{ .internal = true }),
     command.define("pointer.activate", "Activate the node under the pointer, running its action or opening its target.", cPointerActivate).present(.{ .internal = true }),
     command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab).present(.{ .internal = true }),
     command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp).present(.{ .internal = true }),

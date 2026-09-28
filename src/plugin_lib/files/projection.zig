@@ -63,6 +63,11 @@ const original_domain: u64 = 4;
 const mode_domain: u64 = 5;
 const size_domain: u64 = 6;
 const root_id: scene.NodeId = @enumFromInt((7 << 61) | 1);
+/// The `..` row: the one node that is not a model row, so it carries no
+/// `model.NodeId` to derive a domain-1..6 identity from. It lives beside
+/// `root_id` in the same reserved (domain 7) namespace of fixed structural
+/// ids — a different payload, so it never collides with the root itself.
+const parent_row_id: scene.NodeId = @enumFromInt((7 << 61) | 2);
 const id_payload_mask: u64 = (@as(u64, 1) << 61) - 1;
 
 /// Validate all external bindings before allocating any published scene.
@@ -80,8 +85,26 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     // surface, so a draft made below one survives being folded away.
     var visible: usize = 0;
     for (rows) |row| visible += @intFromBool(model.rowVisible(rows, row));
-    const children = try arena.alloc(scene.Node, visible);
+    // A listing whose locus has a container leads with `..`: going up is a
+    // row like any other, so a mouse double-clicks it and any grammar's
+    // activate (Enter, `o`, a click in row mode) runs it — nobody has to
+    // know a key for it. It names the root's own `open_container`, the
+    // action the adapter already answers.
+    const parent_row = @intFromBool(options.has_container);
+    const children = try arena.alloc(scene.Node, visible + parent_row);
     var index: usize = 0;
+    if (options.has_container) {
+        children[0] = .{
+            .id = parent_row_id,
+            // An action node read as a row (its role's leaf is `row`).
+            .role = "files.row",
+            .layout = .{ .column = name_column },
+            .focusable = true,
+            .facts = &.{.{ .name = "tone", .value = "muted" }},
+            .content = .{ .action = .{ .action = standard.open_container, .label = ".." } },
+        };
+        index = 1;
+    }
     for (rows) |row| {
         if (!model.rowVisible(rows, row)) continue;
         const binding = findBinding(bindings, row.id).?;

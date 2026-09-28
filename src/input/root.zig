@@ -47,9 +47,9 @@ pub const TextCommit = struct {
 ///   takes commits through the grammar's insert-like states, scoped to the
 ///   field. It rests where `structural` rests.
 /// - `capture` — physical input is delivered raw to the presentation's
-///   endpoint (terminals, games). No capture consumer exists in-tree yet, so
-///   nothing routes raw input today; what IS wired is the declaration, its
-///   round trip, and the break-out that pairs with it. Capture is never a
+///   endpoint (terminals, games): every key but the break-out runs the
+///   command the presentation declared (`wl_declare_capture`,
+///   `app/dispatch.zig` `captureKey`; the terminal is the first). Capture is never a
 ///   one-way door: the grammar always retains a break-out chord
 ///   (`std.input.break-out` / the `mode.break-out` command), and breaking
 ///   out restores the declaration capture displaced.

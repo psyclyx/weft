@@ -55,6 +55,7 @@ weft.grant("files", "fs_write", { root: "/" });
 // The system clipboard (`SPC y` / `SPC p`): config-only, like every read of
 // what you copied elsewhere.
 weft.grant("helix", "clipboard");
+weft.grant("terminal", "clipboard"); // C-S-v / S-Insert paste into the shell
 weft.grant("dap", "proc");
 weft.plugin("dap.js");
 weft.grant("acp", "proc");

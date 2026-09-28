@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const projection_mod = @import("projection.zig");
+const grid_mod = @import("grid.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -210,6 +211,22 @@ pub const Buffer = struct {
     /// restores. Meaningless unless `declared_posture == .capture`, which is
     /// why capture can never be a one-way door.
     pre_capture: ?Posture = null,
+    /// The command a capturing entry's raw input is delivered to — every
+    /// key but the grammar's break-out chord (§10.4, `app/dispatch.zig`).
+    /// Owned; empty until the entry's maker declares one
+    /// (`wl_declare_capture`). Kept across a break-out, so capture can be
+    /// declared again without naming it twice.
+    capture_endpoint: []u8 = &.{},
+    /// The cell grid this entry IS, when its maker publishes one
+    /// (`core/grid.zig`, `wl_grid_publish`) — an entry with no text, drawn
+    /// cell by cell. Owned here for the same reason `projection` is.
+    grid: ?*grid_mod.Grid = null,
+    /// The cells the pane showing this entry had room for in the last frame
+    /// (`grid.Extent`), written by the frame. Null until one showed it.
+    extent: ?grid_mod.Extent = null,
+    /// `extent` moved since the entry's maker last heard: the frame sets it,
+    /// and delivering `on_poll` to the maker clears it.
+    extent_moved: bool = false,
 
     pub fn rememberViewCursor(self: *Buffer, gpa: Allocator, focus: *const Head.SceneSelection) Allocator.Error!void {
         const path = focus.path() orelse return;
@@ -477,6 +494,11 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         view.deinit();
         gpa.destroy(view);
     }
+    if (b.grid) |g| {
+        g.deinit(gpa);
+        gpa.destroy(g);
+    }
+    gpa.free(b.capture_endpoint);
     b.scene_selection.deinit(gpa);
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
@@ -904,6 +926,8 @@ pub fn withEntry(
     const home = self.active_id;
     const home_prev = self.prev_id;
     const borrowed = (self.get(id) orelse return @call(.auto, f, args)).ref();
+    var kept = keepMode(gpa, self, head);
+    defer kept.restore(gpa, self, head);
     try self.switchQuietly(gpa, id, head, keymap);
     defer if (self.active_id == id or self.resolve(borrowed) == null) {
         if (self.get(home) != null) self.switchQuietly(gpa, home, head, keymap) catch {};
@@ -912,12 +936,37 @@ pub fn withEntry(
     return @call(.auto, f, args);
 }
 
+/// The head's mode as a borrow found it. A borrow (a presentation into another
+/// viewport, closing a background entry) that comes back to the entry it left
+/// hands the head back EXACTLY as it was — a picker's `pick`, a menu, a
+/// pending operator — not the resting mode switching back to that entry would
+/// restore: the toolbar presenting its strip must not close the palette
+/// someone is typing into. A borrow that ends somewhere else leaves the mode
+/// that entry's switch set.
+const KeptMode = struct {
+    home: Id,
+    mode: ?[]u8,
+
+    fn restore(self: *KeptMode, gpa: Allocator, buffers: *Buffers, head: *Head) void {
+        const mode = self.mode orelse return;
+        defer gpa.free(mode);
+        if (buffers.active_id != self.home or std.mem.eql(u8, head.mode, mode)) return;
+        head.setModeRaw(gpa, mode) catch {};
+    }
+};
+
+fn keepMode(gpa: Allocator, buffers: *const Buffers, head: *const Head) KeptMode {
+    return .{ .home = buffers.active_id, .mode = gpa.dupe(u8, head.mode) catch null };
+}
+
 /// Run `f(args)` with `head`'s jump recording muted: whatever entry switches
 /// it makes are not navigation (a presentation into another viewport that
 /// puts the head back).
-pub fn quietly(head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+pub fn quietly(gpa: Allocator, buffers: *Buffers, head: *Head, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
     head.jumps.muted += 1;
     defer head.jumps.muted -= 1;
+    var kept = keepMode(gpa, buffers, head);
+    defer kept.restore(gpa, buffers, head);
     return @call(.auto, f, args);
 }
 

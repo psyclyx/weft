@@ -949,6 +949,7 @@ fn filesNameNode(ed: *Editor, name: []const u8) !h.semantic_model.scene.NodeId {
     const view_ref = ed.toolView() orelse return error.NoFilesView;
     const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
     for (instance.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         for (row.content.container.children) |node| {
             if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
@@ -1068,7 +1069,9 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
-    try t.expect(!fileOpen(ed, "a.txt") and !fileOpen(ed, "c.txt"));
+    // (ide opens a row on one click, so a.txt is open already; the C-click
+    // only MARKS c.txt.)
+    try t.expect(!fileOpen(ed, "c.txt"));
 
     // `target.open` is `target.open` by name, and maps as it does:
     // each marked row opens. A table-wide `.whole` ran it once, on the
@@ -1152,4 +1155,36 @@ test "e2e/ide: a one-row verb on several marked rows is refused — Rename, inse
     try t.expect(view_ref.eql(ed.toolView().?));
     try t.expectEqual(rows_before, ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
+}
+
+test "e2e/ide: the palette is an IDE's — rows are labels without ids, and what ran last is listed first" {
+    var app: IdeApp = undefined;
+    try app.init(t.allocator);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.press("C-S-p", "");
+    ed.settle(2);
+    try t.expect(ed.head.pick.active);
+    // `detail = brief`: a command row is its label; the id, shape and summary
+    // are not its secondary text (the key that runs it is the annotator's).
+    var commands_seen: usize = 0;
+    for (ed.head.pick.keys.items, ed.head.pick.docs.items) |key, doc| {
+        if (std.mem.startsWith(u8, key, "std.") or std.mem.startsWith(u8, key, "plugin.")) continue;
+        commands_seen += 1;
+        try t.expectEqualStrings("", doc);
+    }
+    try t.expect(commands_seen > 0);
+    app.proj.shot(ed, "ide-palette-top");
+
+    // Run a command from it: Split Editor Right.
+    ed.typeText("Split Editor Right");
+    ed.press("Return", "");
+    try t.expect(!ed.head.pick.active);
+
+    // `recent = on`: opened again, it is the first row.
+    ed.press("C-S-p", "");
+    ed.settle(2);
+    try t.expect(ed.head.pick.active);
+    try t.expectEqualStrings("window.split-right", ed.head.pick.keys.items[0]);
 }

@@ -445,6 +445,44 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
     return null;
 }
 
+/// The header strip for a DOCKED pane whose viewport declaration named tabs
+/// (`weft.viewport(..., {tabs: [...]})`, doc/rendering.md): one COMMAND tab
+/// per id, in the order declared, labeled and iconed from its presentation
+/// (`core.presentations.of` — the same table the palette and which-key
+/// read), the active one whichever command's NAMESPACE (the part before its
+/// first '.') matches what `pane` shows now — its entry's `creator`, the
+/// plugin that made it (problems' entry is made by "problems", the
+/// terminal's by "terminal") — plus a trailing close affordance that hides
+/// the viewport. Null for an ordinary pane, and for a docked one that named
+/// no tabs (the sidebar): both draw no strip.
+fn dockedTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: u32, shown: *const core.Buffers.Buffer) ?[]view_mod.Tab {
+    const decl = fx.viewports.findByPane(pane) orelse return null;
+    if (decl.tabs.len == 0) return null;
+    var list: std.ArrayList(view_mod.Tab) = .empty;
+    var it = std.mem.splitScalar(u8, decl.tabs, '\n');
+    while (it.next()) |cmd_id| {
+        if (cmd_id.len == 0) continue;
+        const ns = cmd_id[0..(std.mem.indexOfScalar(u8, cmd_id, '.') orelse cmd_id.len)];
+        const pres = core.presentations.of(fx.cmd_ctx, cmd_id);
+        const label = if (pres) |p| (if (p.label.len > 0) p.label else cmd_id) else cmd_id;
+        const icon = if (pres) |p| p.icon else "";
+        list.append(arena, .{
+            .name = label,
+            .active = std.mem.eql(u8, ns, shown.creator),
+            .command = cmd_id,
+            .icon = icon,
+        }) catch {};
+    }
+    // The trailing close affordance: its own glyph is its label (never an
+    // icon — `Hud.Tab`'s doc), so it reads the same under every chrome style.
+    // Its command borrows `decl.close_command` — owned by the DECLARATION,
+    // not this frame's arena, because a chrome hit built from it is read
+    // back after this frame's arena is gone (`Declaration.close_command`'s
+    // doc: the bug a frame-local `allocPrint` here would reintroduce).
+    list.append(arena, .{ .name = view_mod.tab_close_glyph, .active = false, .command = decl.close_command }) catch {};
+    return list.items;
+}
+
 /// Whether the entry's focus is a ROW of its text: a produced projection (a
 /// status listing) whose rows take the keys (`type_ahead.rowsTakeKeys`, the
 /// predicate dispatch asks before type-ahead — doc/chrome.md §5.2). Such a
@@ -554,6 +592,8 @@ pub const PaneInput = struct {
     text: ?core.TextSnapshot,
     hud: view_mod.Hud,
     focused: bool,
+    /// The room the pane's body has, in cells (`Buffer.extent`).
+    extent: core.grid.Extent = .{ .cols = 0, .rows = 0 },
 };
 
 /// A frame's input: every pane's `PaneInput`, in draw order (the focused
@@ -627,9 +667,14 @@ pub const FrameBuilder = struct {
 
     /// Ask the plugins what the last frame had no answer to
     /// (`answerRequestsFor`). The loop calls this after every build; true
-    /// means answers landed and the next frame should draw them.
+    /// means answers landed and the next frame should draw them. The owners
+    /// of entries whose pane the frame resized hear it here too (a terminal
+    /// re-sizes its grid and its pty), for the same reason: after the frame,
+    /// never inside it.
     pub fn answerRequests(self: *FrameBuilder, fx: *const FrameCtx) !bool {
-        return answerRequestsFor(fx, &self.answers);
+        const answered = try answerRequestsFor(fx, &self.answers);
+        const resized = core.wasm_host.notifyExtents(fx.plugins.items);
+        return answered or resized;
     }
 
     /// True when a partial checkout can't be read yet: content rendering is
@@ -774,6 +819,8 @@ pub const FrameBuilder = struct {
                 publishHighlight(fx, spec.buffer, e, window) catch |err| if (spec.focused) return err;
             }
         }
+        // A grid entry (a terminal's screen) is drawn from its snapshot.
+        if (spec.buffer.grid) |g| hud.grid = try g.snapshot(arena);
         const t0 = stats_mod.nowNs();
         const layers = try PaneLayers.take(arena, live, window);
         input.snapshot_ns += stats_mod.nowNs() - t0;
@@ -803,6 +850,7 @@ pub const FrameBuilder = struct {
             .text = text,
             .hud = hud,
             .focused = spec.focused,
+            .extent = self.view.extentIn(hud, spec.rect),
         });
         text = null; // the input owns it now
     }
@@ -832,6 +880,15 @@ pub const FrameBuilder = struct {
         for (input.panes.items, tops[0..input.panes.items.len], 0..) |p, top, i| {
             p.top_row_at.* = top;
             live[i] = p.pane;
+            // The room the entry had, for an owner that sizes to it (a
+            // terminal); told after the frame when it moved. Panes draw
+            // focused-last, so a split showing one entry twice leaves it
+            // the focused pane's.
+            if (fx.buffers.resolve(p.entry)) |b| {
+                const was = b.extent;
+                b.extent = p.extent;
+                if (was == null or !was.?.eql(p.extent)) b.extent_moved = true;
+            }
             const gf = p.hud.gutter orelse continue;
             const batch = gf.batch orelse continue;
             const first = batch.wanted orelse continue;
@@ -927,7 +984,8 @@ pub const FrameBuilder = struct {
         // through this frame's draw.
         const pick_surface: ?*const core.surface.Surface = if (fx.head.pick.active) blk: {
             const s = try arena.create(core.surface.Surface);
-            s.* = fx.head.pick.buildSurface(arena, view_mod.Hud.max_pick_rows) orelse break :blk null;
+            const place: core.pick.Pick.Place = if (configIs(fx.config, "editor", "picker", "top")) .top else .dock;
+            s.* = fx.head.pick.buildSurface(arena, view_mod.Hud.max_pick_rows, place) orelse break :blk null;
             break :blk s;
         } else null;
 
@@ -1043,7 +1101,10 @@ pub const FrameBuilder = struct {
         // a find bar) is a real region, not an overlay, and cannot overlap a
         // pane or status line (region.zig's contract). Zero-height when
         // neither is showing ⇒ panes fill the window.
-        const dock_cut = window_rect.cutBottom(self.view.dockHeight(if (fx.head.pick.active) &fx.head.pick else null, hud.surfaces));
+        // A picker floating at the top (`editor/picker = top`) is no part of
+        // the dock: only a docked one sizes it.
+        const docked_pick = fx.head.pick.active and !configIs(fx.config, "editor", "picker", "top");
+        const dock_cut = window_rect.cutBottom(self.view.dockHeight(if (docked_pick) &fx.head.pick else null, hud.surfaces));
         const pick_dock = dock_cut.strip;
         const frame_rect = dock_cut.rest;
         fx.last_frame_rect.* = frame_rect;
@@ -1100,7 +1161,7 @@ pub const FrameBuilder = struct {
                 .facts = other_facts,
                 .hud = .{
                     .mode = other_facts.mode,
-                    .tabs = if (tabs_pane == slot.pane.id) hud.tabs else null,
+                    .tabs = if (tabs_pane == slot.pane.id) hud.tabs else dockedTabs(arena, fx, slot.pane.id, ob),
                     .status_line = rows.statusLine(slot.pane.attrs),
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
@@ -1116,7 +1177,7 @@ pub const FrameBuilder = struct {
         var fhud = hud;
         fhud.pane_border = foc_border;
         fhud.float_bounds = frame_rect;
-        if (tabs_pane != focused.pane().id) fhud.tabs = null;
+        if (tabs_pane != focused.pane().id) fhud.tabs = dockedTabs(arena, fx, focused.pane().id, abuf);
         fhud.status_line = rows.statusLine(focused.pane().attrs);
         try self.capturePane(fx, input, .{
             .buffer = abuf,

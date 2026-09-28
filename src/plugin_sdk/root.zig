@@ -2845,6 +2845,80 @@ pub fn replExited(handle: u32) ?u8 {
     return if (code < 0) null else @intCast(code);
 }
 
+// ── Terminals (doc/terminal.md) ──────────────────────────────────────
+// A child on a pseudo-terminal, a cell-grid entry, the room its pane has,
+// and capturing raw input. Mechanism only: what runs and how its bytes
+// become a screen are the calling plugin's.
+
+/// Run `cmd` under `/bin/sh -c` on a new pty `cols`×`rows`, where the
+/// dispatch is (its place's directory and environment). Its output comes
+/// back raw through `ptyRead`, after `on_poll` says there is some. Returns a
+/// handle, or null. Perm: proc.
+pub fn ptySpawn(cmd: []const u8, cols: u16, rows: u16) ?u32 {
+    const h = e.wl_pty_spawn(p(cmd.ptr), @intCast(cmd.len), cols, rows);
+    return if (h < 0) null else @intCast(h);
+}
+/// Queue `bytes` for the child to read, as typed.
+pub fn ptyWrite(handle: u32, bytes: []const u8) void {
+    e.wl_pty_write(handle, p(bytes.ptr), @intCast(bytes.len));
+}
+/// Move up to `out.len` bytes of output into `out`; the slice read (empty
+/// when there is none), or null for a handle that names no pty.
+pub fn ptyRead(handle: u32, out: []u8) ?[]u8 {
+    const n = e.wl_pty_read(handle, p(out.ptr), @intCast(out.len));
+    return if (n < 0) null else out[0..@intCast(n)];
+}
+/// The terminal is now `cols`×`rows` cells of `px_w`×`px_h` pixels.
+pub fn ptyResize(handle: u32, cols: u16, rows: u16, px_w: u16, px_h: u16) void {
+    e.wl_pty_resize(handle, cols, rows, px_w, px_h);
+}
+/// How the child ended — exit code, or 128 + the signal that killed it —
+/// once everything it printed has been read; null while it runs.
+pub fn ptyExited(handle: u32) ?u8 {
+    const code = e.wl_pty_exited(handle);
+    return if (code < 0) null else @intCast(code);
+}
+/// Hang the child up and reap it; the handle stays dead.
+pub fn ptyClose(handle: u32) void {
+    e.wl_pty_close(handle);
+}
+
+/// The cell-grid wire (`wl_grid_publish`): `Cell`, `Header`, the layout.
+pub const grid = @import("weft_membrane").grid;
+
+/// Apply a grid publish (`grid.Header` + changed rows, as `msg`) to this
+/// plugin's text-less entry `name`, making the entry if it does not exist.
+/// False when refused: the name is someone else's, or `msg` is malformed.
+pub fn gridPublish(name: []const u8, msg: []const u8) bool {
+    return e.wl_grid_publish(p(name.ptr), @intCast(name.len), p(msg.ptr), @intCast(msg.len)) == 0;
+}
+
+/// Room, in cells, of the pane showing an entry — and its cells' size in
+/// pixels — as the last frame laid it out.
+pub const Extent = struct { cols: u16, rows: u16, cell_w: u16, cell_h: u16 };
+
+/// The room the pane showing entry `name` had in the last frame, or null
+/// when no pane has shown it. `on_poll` fires when it moves.
+pub fn entryExtent(name: []const u8) ?Extent {
+    var out: [8]u8 = undefined;
+    if (e.wl_entry_extent(p(name.ptr), @intCast(name.len), p(&out)) != 1) return null;
+    return .{
+        .cols = std.mem.readInt(u16, out[0..2], .little),
+        .rows = std.mem.readInt(u16, out[2..4], .little),
+        .cell_w = std.mem.readInt(u16, out[4..6], .little),
+        .cell_h = std.mem.readInt(u16, out[6..8], .little),
+    };
+}
+
+/// The addressed entry — this plugin's own — CAPTURES input (§10.4): every
+/// key but the grammar's break-out chord runs `cmd` with two string
+/// arguments, the key's spec (`C-c`, `S-Tab`, `wheel-up`) and the text it
+/// committed (empty for none). Breaking out restores the posture capture
+/// displaced; declaring again re-enters.
+pub fn declareCapture(cmd: []const u8) void {
+    e.wl_declare_capture(p(cmd.ptr), @intCast(cmd.len));
+}
+
 /// Spawn a persistent subprocess whose stdout comes BACK to the guest (via
 /// `procRead`), for an in-guest protocol client. Returns a handle, or null.
 pub fn procSpawn(cmd: []const u8) ?u32 {

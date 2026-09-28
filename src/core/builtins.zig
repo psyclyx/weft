@@ -522,7 +522,14 @@ fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
 fn cMarkRows(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const scene = sceneRows(ctx) orelse return ok;
-    scene.anchor = scene.head();
+    // An action row (a listing's `..`) names nothing a bulk transfer could
+    // act on; starting a row range there is the same no-op C-click makes of
+    // it (§ the pointer's own rule, `isActionNode`).
+    const head_id = scene.head() orelse return ok;
+    if (scene.view) |view_ref| if (ctx.semantic) |services| if (services.views.get(view_ref)) |instance| {
+        if (instance.node(head_id)) |node| if (node.content == .action) return ok;
+    };
+    scene.anchor = head_id;
     return ok;
 }
 

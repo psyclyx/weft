@@ -15,6 +15,7 @@ pub fn hSurfaceBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     const placement: surface_mod.Placement = switch (@as(u32, @bitCast(args[0]))) {
         1 => .corner,
         2 => .center,
+        4 => .top,
         else => .bottom,
     };
     p.surface.begin(p.gpa, placement);

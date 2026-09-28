@@ -27,6 +27,11 @@ const Guest = struct {
     /// Plugin libraries this guest may import, by name. Anything not listed
     /// is not on its import path at all.
     libraries: []const Library = &.{},
+    /// Links ghostty's VT emulator (libghostty-vt, built for wasm32 by
+    /// nix/libghostty-vt-wasm.nix) INTO this guest: the archive and the C
+    /// headers under `WEFT_GHOSTTY_VT_WASM`. Only the terminal plugin does —
+    /// the emulator is the plugin's, not core's (doc/terminal.md §2).
+    ghostty_vt: bool = false,
 
     /// Where this guest's root source lives. Plugins own a directory;
     /// fixtures are single files (they exist to be minimal).
@@ -512,7 +517,9 @@ const guests = [_]Guest{
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
     .{ .name = "problems", .import = "guest_problems_wasm", .install = true, .libraries = &.{.statusline} },
-    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true },
+    // The terminal: a shell on a pty, emulated by libghostty-vt linked into
+    // the plugin itself (doc/terminal.md).
+    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true, .ghostty_vt = true },
     .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
 
@@ -1608,7 +1615,18 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
     });
     guest.entry = .disabled; // reactor: called through exports, not _start
     guest.rdynamic = true; // export the `export fn`s + memory
+    if (guest_spec.ghostty_vt) linkGhosttyVt(b, guest);
     return guest;
+}
+
+/// libghostty-vt for a wasm32 guest: its headers on the guest's include path
+/// (the plugin `@cImport`s `ghostty/vt.h`) and its static archive in the
+/// guest's link, so the emulator lives inside the plugin's own sandbox.
+fn linkGhosttyVt(b: *std.Build, guest: *std.Build.Step.Compile) void {
+    const prefix = b.graph.environ_map.get("WEFT_GHOSTTY_VT_WASM") orelse
+        @panic("WEFT_GHOSTTY_VT_WASM not set — build inside the nix shell");
+    guest.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+    guest.root_module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", "libghostty-vt.a" }) });
 }
 
 /// Embed every guest's `.wasm` bytes into a module. Used only by the test

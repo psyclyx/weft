@@ -1681,6 +1681,29 @@ test "e2e/config: every shipped config keeps its fragments' values through every
     }
 }
 
+// The tabbed header (doc/rendering.md) applies wherever `config/panel.js`
+// does — not just ide.js's C-S-m/C-`/C-j: config.js's own SPC o p / SPC o t
+// bring the same panel, with the same header, up.
+test "e2e/config: SPC o t opens the panel with its header, same as ide.js's C-`" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.chord("SPC o t");
+    ed.applyWindow();
+    const pixels = try ed.renderComposite();
+    gpa.free(pixels);
+
+    const node = ed.viewportPane("panel") orelse return error.PanelNotShown;
+    const shown = ed.buffers.get(node.pane().buffer_id) orelse return error.NoPanelEntry;
+    try t.expectEqualStrings("*terminal*", shown.name);
+    try t.expect(ed.pointAtTabCommand("problems.open") != null);
+    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
+    try t.expect(ed.pointAtTabCommand("viewport.toggle panel") != null);
+}
+
 test "e2e/config: the shipped config annotates palette rows — the whole chain, in the real editor" {
     // Everything doc/marginalia.md builds, exercised the way a user meets it:
     // boot the REAL config/config.js, open the palette the way `SPC :` does,

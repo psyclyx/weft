@@ -1,5 +1,11 @@
 {
   pkgs ? import (import ./npins).nixpkgs { },
+  # The terminal plugin's VT emulator: ghostty's libghostty-vt, built for
+  # wasm32 and linked INTO the plugin (doc/terminal.md). default.nix's overlay
+  # supplies the same derivation; standalone `nix-shell` builds it here.
+  libghostty-vt-wasm ? pkgs.callPackage ./nix/libghostty-vt-wasm.nix {
+    ghostty-src = (import ./npins).ghostty;
+  },
 }:
 let
   # The grammar tree weft searches at runtime: one directory per grammar
@@ -103,6 +109,10 @@ pkgs.mkShell {
   # `zig cc` from this unpacked source (srcOnly → the .c/.h tree), then embeds
   # the module. Pinned store path, same env-var idiom as the grammars.
   WEFT_QUICKJS_NG_SRC = "${pkgs.srcOnly pkgs.quickjs-ng}";
+
+  # libghostty-vt for wasm32: the archive build.zig links into the terminal
+  # plugin, and the C headers it is compiled against.
+  WEFT_GHOSTTY_VT_WASM = "${libghostty-vt-wasm}";
 
   # Where weft looks up a grammar BY NAME (colon-separated, like PATH). One
   # variable, not one per language: weft ships no list of languages, so the

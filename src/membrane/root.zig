@@ -39,6 +39,9 @@ pub const presentation = @import("presentation.zig");
 /// The command id grammar (doc/chrome.md §1.1), checked by guests at comptime
 /// and by the host's registry gate alike.
 pub const command_id = @import("command_id.zig");
+/// The cell-grid publish (`wl_grid_publish`): cells, cursor, rows sent
+/// (doc/terminal.md §3).
+pub const grid = @import("grid.zig");
 
 /// The wasm-level value crossing the membrane, carrying GUEST-SOURCE
 /// signedness. Every `wl_*` import is a scalar i32/u32 (or a `(ptr,len)`
@@ -480,6 +483,17 @@ pub const imports = [_]Entry{
     .{ .name = "wl_net_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "write bytes to a connected net session" },
     .{ .name = "wl_net_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "close a net session" },
 
+    // ── pty.zig — a child on a pseudo-terminal, a cell grid, capture ────
+    .{ .name = "wl_pty_spawn", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .perm = .proc, .doc = "run `<cmd>` under /bin/sh on a new cols×rows pty, in the dispatching place; its raw output is read with `wl_pty_read`" },
+    .{ .name = "wl_pty_write", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "queue bytes for a pty's child to read, as typed" },
+    .{ .name = "wl_pty_read", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .sessions, .doc = "move up to `cap` bytes of a pty's raw output into the guest; -1 for a dead handle" },
+    .{ .name = "wl_pty_resize", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "give a pty a new size (cols, rows, pixels); the kernel tells its foreground job" },
+    .{ .name = "wl_pty_exited", .params = &.{.u32}, .results = &.{.i32}, .group = .sessions, .doc = "how a pty's child ended (exit code, 128 + a killing signal) once its output is read, else -1" },
+    .{ .name = "wl_pty_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "hang up and reap a pty's child; the handle stays dead" },
+    .{ .name = "wl_grid_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "apply a cell-grid publish (header, cursor, changed rows) to this plugin's text-less entry of that name, making it if absent" },
+    .{ .name = "wl_entry_extent", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the cols, rows and cell pixels the pane showing a named entry had in the last frame; 0 before any pane showed it" },
+    .{ .name = "wl_declare_capture", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "the addressed entry (this plugin's own) captures input: every key but the grammar's break-out runs `<cmd>` with its spec and committed text" },
+
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
     .{ .name = "wl_fs_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "read a file into the guest, within the grant's bounds (the dispatching place by default)" },
     .{ .name = "wl_fs_exists", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "what a path is (absent/file/dir/other), without reading it; resolved against the grant's bounds — the dispatching place by default" },
@@ -576,7 +590,7 @@ pub const exports = [_]Export{
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
-    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
+    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_subject_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "a subject this plugin watches (wl_subject_watch) reads differently; bound to the subject's entry for the call, so the document doors read it; at the frame boundary, once per moved subject, never inside a dispatch" },
@@ -619,9 +633,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 265;
+const max_import_count: usize = 274;
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 286;
+const max_semantic_operation_count: usize = 295;
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -683,6 +697,7 @@ const t = std.testing;
 test {
     _ = presentation;
     _ = command_id;
+    _ = grid;
 }
 
 test "membrane contract data: every import entry is well-formed, documented, and unique" {
@@ -781,7 +796,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 265), census.imports);
+    try t.expectEqual(@as(usize, 274), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
-    try t.expectEqual(@as(usize, 286), census.semantic_operations);
+    try t.expectEqual(@as(usize, 295), census.semantic_operations);
 }

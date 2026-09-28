@@ -16,6 +16,7 @@
   wayland-scanner,
   libxkbcommon,
   quickjs-ng,
+  libghostty-vt-wasm,
   srcOnly,
   zig_0_16,
 }:
@@ -57,6 +58,7 @@ stdenv.mkDerivation (finalAttrs: {
   WEFT_WASMTIME_LIB = "${wasmtime.lib}";
   WEFT_DEFAULT_MONO = "${dejavu_fonts}/share/fonts/truetype/DejaVuSansMono.ttf";
   WEFT_QUICKJS_NG_SRC = "${srcOnly quickjs-ng}";
+  WEFT_GHOSTTY_VT_WASM = "${libghostty-vt-wasm}";
   # Grammar and query selection belong to config or trusted language plugins.
   # A packaged editor has no built-in language set.
   WEFT_GRAMMAR_PATH = "";

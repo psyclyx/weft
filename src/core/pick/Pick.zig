@@ -598,10 +598,15 @@ pub fn selectedInfo(self: *const Pick) []const u8 {
 /// used. Null when inactive, or (caret only) when there's nothing filtered
 /// — the dock still shows even empty (the query line always renders, the
 /// same behavior the old `drawPickInto` had).
-pub fn buildSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?surface.Surface {
+/// Where a picker that is not caret-anchored shows: docked along the window's
+/// bottom, or floating at the top centre. A presentation choice the shell
+/// reads from config (`editor/picker`); the rows are the same either way.
+pub const Place = enum { dock, top };
+
+pub fn buildSurface(self: *const Pick, scratch: Allocator, max_rows: usize, place: Place) ?surface.Surface {
     if (!self.active) return null;
     if (self.caret_anchor) |off| return self.buildCaretSurface(scratch, off, max_rows);
-    return self.buildDockSurface(scratch, max_rows);
+    return self.buildDockSurface(scratch, max_rows, place);
 }
 
 /// The caret-anchored completion list: column 0 = the candidate text,
@@ -647,12 +652,15 @@ fn buildCaretSurface(self: *const Pick, scratch: Allocator, off: usize, max_rows
 /// layout exactly — the dock never column-aligns the note like the caret
 /// popup does). `surf.selected` marks the highlighted item row (offset by
 /// the header), or null when nothing is shown.
-fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?surface.Surface {
+fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize, place: Place) ?surface.Surface {
     const total = self.filtered.items.len;
     const shown = @min(total, max_rows);
 
     var surf: surface.Surface = .{};
-    surf.begin(scratch, .bottom);
+    surf.begin(scratch, switch (place) {
+        .dock => .bottom,
+        .top => .top,
+    });
     surf.addRow(scratch);
     const narrow_chip = if (self.narrow.items.len > 0)
         std.fmt.allocPrint(scratch, "[{s}]", .{self.narrow.items}) catch ""
@@ -670,6 +678,18 @@ fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?sur
         const item = self.items.items[self.filtered.items[fi]];
         const doc = self.docOf(fi);
         const ann = self.annotationOf(fi);
+        // A TOP panel keeps the annotation (the key that runs the row) as a
+        // span of its own, which the panel right-aligns — a palette's look.
+        if (place == .top) {
+            const main = (if (doc.len > 0)
+                std.fmt.allocPrint(scratch, "{s}  · {s}", .{ item, doc })
+            else
+                std.fmt.allocPrint(scratch, "{s}", .{item})) catch continue;
+            surf.addRow(scratch);
+            surf.addSpan(scratch, main, .muted);
+            if (ann.len > 0) surf.addSpan(scratch, ann, .annotation);
+            continue;
+        }
         // The dock joins into one span (it never column-aligns), so the
         // annotation trails the producer's own note with the same separator.
         const l = (if (doc.len > 0 and ann.len > 0)

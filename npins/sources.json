@@ -1,5 +1,18 @@
 {
   "pins": {
+    "ghostty": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "ghostty-org",
+        "repo": "ghostty"
+      },
+      "branch": "main",
+      "submodules": false,
+      "revision": "4c725242b7dbe8c77c6e227ef1f9540c5ef17921",
+      "url": "https://github.com/ghostty-org/ghostty/archive/4c725242b7dbe8c77c6e227ef1f9540c5ef17921.tar.gz",
+      "hash": "sha256-DvPf4hVaD8iEeSfqhPCfAtD9kWkBAODqvxp9rmEBgPo="
+    },
     "nixpkgs": {
       "type": "Channel",
       "name": "nixpkgs-unstable",

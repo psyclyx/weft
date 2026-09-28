@@ -643,14 +643,12 @@ The plugins:
   `diagnostics` signal, which `lsp` raises when a publish lands or a set is released.
   Return or a click opens the file at the line and column. The open lands in the
   editor pane, and the panel keeps the list.
-- **`terminal`** (C-`) is a LINE-MODE shell. It is the REPL session with `$SHELL -i`
-  on the other end, plus a `terminal` mode that keeps the input line, echoes it, and
-  sends it on Return. It does no VT100 emulation: full-screen programs do not work, and
-  colors are stripped. Because it owns the line, a bare program in `shell` (or the
-  default `$SHELL`) starts with its own line editing off — bash `--noediting`, zsh
-  `+Z` — and `TERM=dumb`; a whole command line runs as written. A shell that exits is
-  noticed on the next C-` or keystroke through the `wl_repl_exited` door (SDK
-  `replExited`): the buffer says `[process exited N]` and a fresh shell starts.
+- **`terminal`** (C-`) is a shell on a real terminal (doc/terminal.md): a pty from
+  core's `wl_pty_*` doors, emulated by libghostty-vt linked into the plugin, drawn as
+  a grid entry. The entry captures input, so C-c, C-d, Tab, Escape and every M- chord
+  reach the shell; the grammar's break-out chord (C-\, emacs C-c C-\) hands the keys
+  back and C-` takes them again. A shell that exits says `[process exited N]` on its
+  screen, and the next key starts a fresh one.
 - **`breadcrumbs`** is a status-line provider for text entries. It shows ` › outer ›
   inner` after the path, from the outline items over the caret's byte only (the caret's
   path through the tree, not the file), cached against the snapshot witness and caret. A
@@ -659,8 +657,8 @@ The plugins:
   keys.
 
 Not done: breadcrumbs read the grammar outline only, not LSP document symbols. The
-problems list shows what `lsp` holds, which is one document per server. The terminal
-has no interrupt: C-c cannot reach a piped child as a signal.
+problems list shows what `lsp` holds, which is one document per server. (The
+terminal's own open items are in doc/terminal.md §6.)
 
 **Polish.** What screenshots of ide.js showed, and the fixes:
 
@@ -681,12 +679,8 @@ has no interrupt: C-c cannot reach a piped child as a signal.
 - The `weft.status` chip belongs to its system (`Buffers.status`), not the process. A
   debug session that ended in one editor used to leave "○ \*debug\* · done" in the next
   editor started in the same process.
-- The terminal stays line-mode. The shell's stderr was already merged, and partial lines
-  were already delivered as they were read; the prompt-less shots came from a test shell
-  that was not interactive. A carriage return not followed by a newline now starts the
-  line over, so zsh's end-of-output mark no longer runs into the prompt. bash with
-  readline echoes the input line a second time; `--noediting` avoids it, and the
-  terminal now passes it (zsh: `+Z`) to a shell it starts by name.
+- The terminal was line-mode at the time of these shots; it is a real terminal now
+  (doc/terminal.md), so the line-mode fixes that were here no longer apply to it.
 - Every block caret flips the glyph under it to `cursor_text`, a label's included, not
   only the primary's.
 

@@ -254,10 +254,14 @@ extern void host_grant(const char *plugin, int plugin_len,
 // (doc/configuration.md §5.2). `flags` is the attribute bundle as bits (see
 // WEFT_VP_* below) and `extent` is per-mille of the frame, because the host
 // import ABI carries i32s only — the pair is decoded once, host-side.
+// `tabs` is `opts.tabs` (an array of command ids), joined with '\n' — a
+// docked pane's header strip, one tab per command, in order. Empty when the
+// viewport declares no tabs.
 __attribute__((import_module("weft"), import_name("qjs_viewport")))
 extern void host_viewport(const char *name, int name_len,
                           const char *edge, int edge_len,
-                          int flags, int extent_permille);
+                          int flags, int extent_permille,
+                          const char *tabs, int tabs_len);
 // weft.present(viewport, opts): stage "show this subject in that viewport".
 // `flags` bit 0: the subject is a context key; bit 1: so is the reveal.
 __attribute__((import_module("weft"), import_name("qjs_present")))
@@ -789,6 +793,10 @@ static int opt_bool(JSContext *ctx, JSValueConst opts, const char *key, int dflt
 // frame (a number) or `{rows: n}` text rows, and cycles/persistent/
 // followFocus/takesFocus/statusLine are the remaining attributes.
 // "sidebar" is a fragment that sets these — never a kind this shim knows.
+// `opts.tabs`: a list of command ids — a docked pane's header strip, one tab
+// per command (doc/rendering.md). Lives on the declaration, like `edge`, not
+// in the attribute bits: it names things, it is not a flag.
+#define WEFT_VP_TABS_MAX_BYTES 2048
 static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "viewport(name[, opts])");
@@ -801,6 +809,8 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     double extent = 0.25;
     int flags = 0;
     int extent_arg = 0;
+    static char tabs_buf[WEFT_VP_TABS_MAX_BYTES];
+    size_t tabs_len = 0;
     JSValue jedge = JS_UNDEFINED, jextent = JS_UNDEFINED;
     if (JS_IsObject(opts)) {
         jedge = JS_GetPropertyStr(ctx, opts, "edge");
@@ -820,6 +830,30 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
         } else if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) {
             JS_ToFloat64(ctx, &extent, jextent);
         }
+        JSValue jtabs = JS_GetPropertyStr(ctx, opts, "tabs");
+        if (JS_IsArray(jtabs)) {
+            JSValue lenv = JS_GetPropertyStr(ctx, jtabs, "length");
+            uint32_t n = 0;
+            JS_ToUint32(ctx, &n, lenv);
+            JS_FreeValue(ctx, lenv);
+            for (uint32_t i = 0; i < n; i++) {
+                JSValue item = JS_GetPropertyUint32(ctx, jtabs, i);
+                if (JS_IsString(item)) {
+                    size_t il;
+                    const char *s = JS_ToCStringLen(ctx, &il, item);
+                    if (s) {
+                        if (tabs_len > 0 && tabs_len < sizeof tabs_buf) tabs_buf[tabs_len++] = '\n';
+                        size_t copy = il;
+                        if (tabs_len + copy > sizeof tabs_buf) copy = sizeof(tabs_buf) - tabs_len;
+                        memcpy(tabs_buf + tabs_len, s, copy);
+                        tabs_len += copy;
+                        JS_FreeCString(ctx, s);
+                    }
+                }
+                JS_FreeValue(ctx, item);
+            }
+        }
+        JS_FreeValue(ctx, jtabs);
     }
     if (!(flags & WEFT_VP_EXTENT_ROWS)) extent_arg = (int)(extent * 1000);
     if (opt_bool(ctx, opts, "cycles", 1)) flags |= WEFT_VP_CYCLES;
@@ -829,7 +863,8 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
     if (opt_bool(ctx, opts, "statusLine", 1)) flags |= WEFT_VP_STATUS_LINE;
     // `shown: false` starts it hidden: a panel opened on demand.
     if (!opt_bool(ctx, opts, "shown", 1)) flags |= WEFT_VP_HIDDEN;
-    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, extent_arg);
+    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, extent_arg,
+                 tabs_buf, (int)tabs_len);
     JS_FreeCString(ctx, name);
     if (edge) JS_FreeCString(ctx, edge);
     JS_FreeValue(ctx, jedge);

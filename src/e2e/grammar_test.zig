@@ -104,22 +104,30 @@ fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
         out.deinit(gpa);
     }
     const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| for (row.content.container.children) |node| {
-        if (std.mem.eql(u8, node.role, "files.name"))
-            try out.append(gpa, try fieldText(ed, gpa, node.content.field.ref));
-    };
+    for (view.scene.content.container.children) |row| {
+        // The listing's `..` row is an action leaf, not a row of columns —
+        // it names no `files.name` field to read.
+        if (row.content != .container) continue;
+        for (row.content.container.children) |node| {
+            if (std.mem.eql(u8, node.role, "files.name"))
+                try out.append(gpa, try fieldText(ed, gpa, node.content.field.ref));
+        }
+    }
     return out;
 }
 
 /// Nesting changes the name node's presentation column.
 fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
     const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    for (view.scene.content.container.children) |row| for (row.content.container.children) |node| {
-        if (!std.mem.eql(u8, node.role, "files.name")) continue;
-        const name = try fieldText(ed, gpa, node.content.field.ref);
-        defer gpa.free(name);
-        if (std.mem.eql(u8, name, want)) return node.layout.column;
-    };
+    for (view.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            const name = try fieldText(ed, gpa, node.content.field.ref);
+            defer gpa.free(name);
+            if (std.mem.eql(u8, name, want)) return node.layout.column;
+        }
+    }
     return null;
 }
 
@@ -472,14 +480,17 @@ fn countName(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !usize {
 fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: ?u16) !usize {
     const view = focusedView(ed) orelse return error.TestExpectedEqual;
     var n: usize = 0;
-    for (view.scene.content.container.children) |row| for (row.content.container.children) |node| {
-        if (!std.mem.eql(u8, node.role, "files.name")) continue;
-        const name = try fieldText(ed, gpa, node.content.field.ref);
-        defer gpa.free(name);
-        if (!std.mem.eql(u8, name, want)) continue;
-        if (column) |wanted| if (node.layout.column != wanted) continue;
-        n += 1;
-    };
+    for (view.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
+        for (row.content.container.children) |node| {
+            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            const name = try fieldText(ed, gpa, node.content.field.ref);
+            defer gpa.free(name);
+            if (!std.mem.eql(u8, name, want)) continue;
+            if (column) |wanted| if (node.layout.column != wanted) continue;
+            n += 1;
+        }
+    }
     return n;
 }
 
@@ -644,8 +655,8 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try h.loadGrammar(&ed, case.grammar);
         try h.loadHeadtest(&ed); // `head.capture`: a presentation owner, across the membrane
 
-        // No capture consumer exists in-tree (§10.4), so what is wired is the
-        // DECLARATION and its pairing: a presentation declares capture on its
+        // The DECLARATION and its pairing, for every grammar (the routing of
+        // raw keys is e2e/terminal's): a presentation declares capture on its
         // entry, the read reports it, and the grammar's always-retained
         // break-out chord returns the posture capture displaced.
         const view_id = try ed.buffers.createView(gpa, "*view*", "tool");

@@ -203,7 +203,14 @@ const Builder = struct {
             break :blk @as(usize, prior.column) + prior.cells() + 2;
         };
         const role: ?chrome_mod.Role = switch (node.content) {
-            .action => if (std.mem.eql(u8, leafOf(node.role), menu_mod.role_title)) .menu_title else .button,
+            // An action node is a button, unless its role says it is a
+            // menubar title or a ROW (a listing's `..` reads as a row).
+            .action => if (std.mem.eql(u8, leafOf(node.role), menu_mod.role_title))
+                .menu_title
+            else if (std.mem.eql(u8, leafOf(node.role), "row"))
+                null
+            else
+                .button,
             .label => if (std.mem.eql(u8, leafOf(node.role), "separator")) .separator else null,
             else => null,
         };

@@ -288,7 +288,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
 
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(!cl.flipped_above);
@@ -334,7 +334,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(cl.flipped_above);
@@ -362,7 +362,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         // Clamped flush to the body's right edge, never past it.
@@ -389,7 +389,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
@@ -422,7 +422,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
@@ -480,7 +480,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, 1), cl.col_x.len);
@@ -508,7 +508,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, view.Hud.max_pick_rows), cl.rows.len);
@@ -547,7 +547,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const v = try ed.ensureView();
         const dock_h = v.pickDockHeight(ed.pick);
         const dock: region.Rect = .{ .x = 0, .y = 600 - dock_h, .w = 800, .h = dock_h };
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         try t.expectEqual(core.surface.Placement.bottom, surf.placement);
         const dl = (try popup.layoutDockSurface(v, scratch, &surf, dock)) orelse return error.NoLayout;
 
@@ -574,7 +574,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const v = try ed.ensureView();
         const dock_h = v.pickDockHeight(ed.pick);
         const dock: region.Rect = .{ .x = 0, .y = 600 - dock_h, .w = 800, .h = dock_h };
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const dl = (try popup.layoutDockSurface(v, scratch, &surf, dock)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, 1), dl.rows.len); // header only, no item rows

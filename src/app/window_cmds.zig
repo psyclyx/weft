@@ -243,7 +243,7 @@ fn applyPlacement(
         // Opened, but given no viewport: put the acting pane's own entry back
         // in front so the mirror below does not show it anyway. Putting it
         // back is not navigation: no jump.
-        core.Buffers.quietly(head, core.Buffers.switchTo, .{ buffers, gpa, focused.pane().buffer_id, head, keymap }) catch {};
+        core.Buffers.quietly(gpa, buffers, head, core.Buffers.switchTo, .{ buffers, gpa, focused.pane().buffer_id, head, keymap }) catch {};
         return true;
     }
     const primary = win_layout.primaryPane() orelse return false;
@@ -295,7 +295,15 @@ pub fn materializeViewports(
             // recovers to. Its entry stays open, so showing it again
             // re-presents the same listing rather than a fresh one.
             if (decl.pane) |id| if (win_layout.paneById(id)) |node| {
-                _ = win_layout.closeFocused(node) catch continue;
+                const had_focus = window_layout.headFocus(win_layout, head) == node;
+                const nf = win_layout.closeFocused(node) catch continue;
+                // Focus left with it: the active entry follows the pane that
+                // has it now, as after any close — never an entry no pane
+                // shows (a hidden terminal would keep taking every key).
+                if (had_focus) {
+                    window_layout.setHeadFocus(head, nf, win_layout);
+                    applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
+                }
                 dirty = true;
             };
             decl.pane = null;
@@ -344,7 +352,7 @@ pub fn materializeViewports(
         if (docked and kept == null) if (decl.entry) |held| {
             const again = gpa.dupe(u8, held) catch continue;
             defer gpa.free(again);
-            if (core.Buffers.quietly(head, reopenInto, .{ ctx, buffers, gpa, head, keymap, node, again })) {
+            if (core.Buffers.quietly(gpa, buffers, head, reopenInto, .{ ctx, buffers, gpa, head, keymap, node, again })) {
                 decl.presented = true;
                 continue;
             }
@@ -706,7 +714,7 @@ pub fn presentBy(
     // The head goes and comes back: a presentation, not navigation, so
     // neither switch is a jump (nor is `buffer.back`'s entry disturbed).
     const here = window_layout.headFocus(win_layout, head) == node;
-    core.Buffers.quietly(head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject, here });
+    core.Buffers.quietly(gpa, buffers, head, presentRoundTrip, .{ ctx, buffers, gpa, head, keymap, node, command, subject, here });
 }
 
 fn presentRoundTrip(
