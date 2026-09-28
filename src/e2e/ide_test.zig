@@ -1068,7 +1068,9 @@ test "e2e/ide: files-enter over two marked rows opens both — a plugin's comman
     ed.clickWith(ed.pointAtNode(try filesNameNode(ed, "c.txt")) orelse return error.RowNotDrawn, 1, .{ .ctrl = true });
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.head.scene_selection.extentCount());
-    try t.expect(!fileOpen(ed, "a.txt") and !fileOpen(ed, "c.txt"));
+    // (ide opens a row on one click, so a.txt is open already; the C-click
+    // only MARKS c.txt.)
+    try t.expect(!fileOpen(ed, "c.txt"));
 
     // `target.open` is `target.open` by name, and maps as it does:
     // each marked row opens. A table-wide `.whole` ran it once, on the
