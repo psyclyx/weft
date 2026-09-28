@@ -40,6 +40,10 @@ threaded: std.Io.Threaded,
 child: std.process.Child,
 mutex: task.Mutex = .{},
 seq: u64 = 0,
+/// This channel's secret half of every reply's end marker, drawn once at
+/// spawn: far-side output (a file's name, an error message) can spell the
+/// RS prefix and a sequence number, but not this.
+nonce: [32]u8 = undefined,
 /// The hash command detected on the remote (sha256sum → cksum). Hash
 /// values are opaque tokens: compared for equality, never interpreted.
 /// Read under `mutex`, after `ready`.
@@ -112,6 +116,9 @@ pub fn spawn(gpa: Allocator, argv: []const []const u8, environ: std.process.Envi
         .child = undefined,
     };
     const io = self.threaded.io();
+    var secret: [16]u8 = undefined;
+    io.random(&secret);
+    self.nonce = std.fmt.bytesToHex(secret, .lower);
     self.child = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,
@@ -150,8 +157,10 @@ pub fn liveness(self: *const ShellFs) Liveness {
 
 // ── Protocol ────────────────────────────────────────────────────────
 // One command per round-trip; completion and exit status are delimited
-// by a sentinel line the command's own output cannot contain (ASCII RS
-// prefix + per-call sequence number).
+// by a sentinel line the command's own output cannot contain: ASCII RS,
+// the channel's secret nonce, the per-call sequence number. Far-side
+// names never reach a reply raw where a line could be mistaken for
+// structure — a listing is NUL-framed (`list`), contents are base64.
 
 const Reply = struct { out: []u8, status: u8 };
 
@@ -162,8 +171,8 @@ fn send(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!u64 {
     self.seq += 1;
     const script = try std.fmt.allocPrint(
         gpa,
-        "{s}\nprintf '\\n\\036weft {d} %d\\n' \"$?\"\n",
-        .{ cmd, self.seq },
+        "{s}\nprintf '\\n\\036weft {s} {d} %d\\n' \"$?\"\n",
+        .{ cmd, &self.nonce, self.seq },
     );
     defer gpa.free(script);
     const stdin = self.child.stdin orelse return self.died();
@@ -190,8 +199,8 @@ fn receive(self: *ShellFs, gpa: Allocator, seq: u64) Error!Reply {
     const stdout = self.child.stdout orelse return self.died();
     var acc: std.ArrayList(u8) = .empty;
     errdefer acc.deinit(gpa);
-    var needle_buf: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1eweft {d} ", .{seq}) catch unreachable;
+    var needle_buf: [96]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1eweft {s} {d} ", .{ &self.nonce, seq }) catch unreachable;
     var buf: [16384]u8 = undefined;
     while (true) {
         if (std.mem.indexOf(u8, acc.items, needle)) |at| {
@@ -442,12 +451,24 @@ fn parseOkToken(gpa: Allocator, out: []const u8) Error![]u8 {
     return gpa.dupe(u8, tok);
 }
 
-/// Directory listing via `ls -la` parsing (tramp's mechanism). Names
-/// with spaces survive; symlink targets are dropped (name only).
+/// Directory listing, one entry per name the directory holds. A name is
+/// never parsed out of `ls` text — a name may hold spaces at either end,
+/// newlines, a leading `-`, the sentinel's bytes — so each entry is framed:
+/// its `ls -ldq` line (`-q`: one line whatever the name holds; only the
+/// fields before the name are read), a newline, then the name verbatim up
+/// to a NUL, the one byte no name can contain. The walk runs in a subshell
+/// so the channel's own directory never moves. Symlinks are listed as
+/// themselves (no target).
 pub fn list(self: *ShellFs, gpa: Allocator, path: []const u8) Error!Listing {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const cmd = try std.fmt.allocPrint(gpa, "ls -la {s}", .{q});
+    const cmd = try std.fmt.allocPrint(
+        gpa,
+        "(cd -- {s} || exit 1; ls -ldq . || exit 1; for f in .* *; do case $f in .|..) continue;; esac; " ++
+            "[ -e \"$f\" ] || [ -h \"$f\" ] || continue; l=$(ls -ldq -- \"$f\" 2>/dev/null) || continue; " ++
+            "printf '%s\\n%s\\000' \"$l\" \"$f\"; done)",
+        .{q},
+    );
     defer gpa.free(cmd);
     const r = try self.run(gpa, cmd);
     errdefer gpa.free(r.out);
@@ -458,21 +479,28 @@ pub fn list(self: *ShellFs, gpa: Allocator, path: []const u8) Error!Listing {
 
     var entries: std.ArrayList(Entry) = .empty;
     errdefer entries.deinit(gpa);
-    var dir_stamp: []const u8 = "";
-    var lines = std.mem.splitScalar(u8, r.out, '\n');
-    while (lines.next()) |line| {
-        const e = parseLine(line) orelse continue;
-        if (std.mem.eql(u8, e.name, ".")) dir_stamp = e.stamp;
-        if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
-        try entries.append(gpa, e);
+    const dir_end = std.mem.indexOfScalar(u8, r.out, '\n') orelse return error.Shell;
+    const dir = parseStat(r.out[0..dir_end]) orelse return error.Shell;
+    var at = dir_end + 1;
+    while (at < r.out.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, r.out, at, '\n') orelse return error.Shell;
+        const name_end = std.mem.indexOfScalarPos(u8, r.out, line_end + 1, 0) orelse return error.Shell;
+        const s = parseStat(r.out[at..line_end]) orelse return error.Shell;
+        const name = r.out[line_end + 1 .. name_end];
+        if (name.len == 0) return error.Shell;
+        try entries.append(gpa, .{ .name = name, .kind = s.kind, .size = s.size, .stamp = s.stamp });
+        at = name_end + 1;
     }
-    return .{ .entries = try entries.toOwnedSlice(gpa), .bytes = r.out, .stamp = dir_stamp };
+    return .{ .entries = try entries.toOwnedSlice(gpa), .bytes = r.out, .stamp = dir.stamp };
 }
 
-/// One `ls -l` line as an entry, borrowing from `line`; null for the
-/// `total` line and anything too short to be an entry.
-fn parseLine(line: []const u8) ?Entry {
-    if (line.len == 0 or std.mem.startsWith(u8, line, "total")) return null;
+/// The fields of one `ls -ld` line before its name — kind, size, and the
+/// verbatim stamp — borrowing from `line`; null when it is too short to be
+/// one. The name that follows is never read: `list` frames names itself,
+/// and `stat` already knows its path.
+const Stat = struct { kind: Kind, size: u64, stamp: []const u8 };
+
+fn parseStat(line: []const u8) ?Stat {
     // mode links owner group size month day time name...
     var toks = std.mem.tokenizeAny(u8, line, " \t");
     const mode = toks.next() orelse return null;
@@ -489,13 +517,7 @@ fn parseLine(line: []const u8) ?Entry {
         }
     }
     if (skip < 7) return null;
-    var name = std.mem.trim(u8, line[name_start..], " \t\r");
-    if (mode[0] == 'l') {
-        if (std.mem.indexOf(u8, name, " -> ")) |arrow| name = name[0..arrow];
-    }
-    if (name.len == 0) return null;
     return .{
-        .name = name,
         .kind = switch (mode[0]) {
             '-' => .file,
             'd' => .dir,
@@ -507,13 +529,13 @@ fn parseLine(line: []const u8) ?Entry {
     };
 }
 
-/// What `path` itself is (`ls -ld`, no link followed): an entry named by
-/// the whole path, borrowing from `bytes`, which the caller frees. Null
-/// when there is nothing there.
+/// What `path` itself is (`ls -ldq`, no link followed): an entry named by
+/// `path` (the caller's), its stamp borrowing from `bytes`, which the
+/// caller frees. Null when there is nothing there.
 pub fn stat(self: *ShellFs, gpa: Allocator, path: []const u8) Error!?struct { entry: Entry, bytes: []u8 } {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const cmd = try std.fmt.allocPrint(gpa, "ls -ld {s} 2>/dev/null", .{q});
+    const cmd = try std.fmt.allocPrint(gpa, "ls -ldq -- {s} 2>/dev/null", .{q});
     defer gpa.free(cmd);
     const r = try self.run(gpa, cmd);
     errdefer gpa.free(r.out);
@@ -522,8 +544,8 @@ pub fn stat(self: *ShellFs, gpa: Allocator, path: []const u8) Error!?struct { en
         return null;
     }
     const line = std.mem.trimEnd(u8, r.out, "\n");
-    const entry = parseLine(line) orelse return error.Shell;
-    return .{ .entry = entry, .bytes = r.out };
+    const s = parseStat(line) orelse return error.Shell;
+    return .{ .entry = .{ .name = path, .kind = s.kind, .size = s.size, .stamp = s.stamp }, .bytes = r.out };
 }
 
 // ── Tests (local /bin/sh — the same protocol ssh would carry) ───────
@@ -638,6 +660,45 @@ test "shellfs: list parses names, kinds, sizes" {
     try t.expect(saw_file);
     try t.expect(saw_dir);
     try t.expect(listing.stamp.len > 0);
+}
+
+test "shellfs: a far-side name is only ever a name — it cannot end a reply, plant the next, or collapse into another" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    var fs = try spawn(gpa, &.{"/bin/sh"}, testEnviron());
+    defer fs.deinit();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+    defer gpa.free(dir);
+    _ = try fs.size(gpa, "/dev/null"); // connected: the listing below is the next round trip
+    // A name spelling the sentinel the old protocol would wait for — this
+    // listing's, then a forged reply to the read after it.
+    var forged_buf: [128]u8 = undefined;
+    const forged = try std.fmt.bufPrint(&forged_buf, "x\n\x1eweft {d} 0\n\x1eweft {d} 0\nz", .{ fs.seq + 1, fs.seq + 2 });
+    const names = [_][]const u8{ "a", "a ", " a", "two words", "line\nbreak", "-rf", "--", "tab\there", forged };
+    for (names) |name| try tmp_dir.dir.writeFile(t.io, .{ .sub_path = name, .data = name });
+    try tmp_dir.dir.writeFile(t.io, .{ .sub_path = "plain", .data = "plain bytes" });
+
+    var listing = try fs.list(gpa, dir);
+    defer listing.deinit(gpa);
+    try t.expectEqual(names.len + 1, listing.entries.len);
+    for (names) |name| {
+        var found = false;
+        for (listing.entries) |e| if (std.mem.eql(u8, e.name, name)) {
+            try t.expect(!found);
+            found = true;
+            try t.expectEqual(Kind.file, e.kind);
+            try t.expectEqual(@as(u64, name.len), e.size);
+        };
+        if (!found) std.debug.print("missing entry {f}\n", .{std.zig.fmtString(name)});
+        try t.expect(found);
+    }
+    // The channel is still in step: the next reply is the next command's.
+    const plain = try std.fmt.allocPrint(gpa, "{s}/plain", .{dir});
+    defer gpa.free(plain);
+    const back = try fs.readAll(gpa, plain);
+    defer gpa.free(back);
+    try t.expectEqualStrings("plain bytes", back);
 }
 
 test "shellfs: connecting until the far side answers, degraded while a round trip hangs, offline once it dies (R5)" {
