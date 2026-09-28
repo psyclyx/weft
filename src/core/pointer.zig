@@ -157,6 +157,11 @@ pub const Gesture = struct {
     /// Whether a drag has already anchored its selection at `origin`.
     /// Cleared by every press; set by `pointer.drag-select`.
     selecting: bool = false,
+    /// Whether this gesture's first click BEGAN an edit (a slow click on
+    /// the focused row). Its double click is then an activation that ends
+    /// the edit on the way, not a double click inside a name being edited.
+    /// Set by `pointer.click` on each first click.
+    began_edit: bool = false,
 };
 
 /// Layout operations a pointer command needs and core cannot perform:
@@ -359,10 +364,10 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
         ctx.head.scene_selection.collapse();
         try focusNode(ctx, node);
         if (isActionNode(ctx, node)) _ = try activateActionNode(ctx);
-        if (again) _ = scene_edit.begin(ctx.semantic.?, ctx.head, ctx.gpa) catch |err| switch (err) {
-            error.ActionRefused, error.ReadOnly => {},
+        ctx.head.pointer.began_edit = if (again) scene_edit.begin(ctx.semantic.?, ctx.head, ctx.gpa) catch |err| switch (err) {
+            error.ActionRefused, error.ReadOnly => false,
             else => return err,
-        };
+        } else false;
         return ok;
     }
     const off = hit.offset orelse return ok;
@@ -465,10 +470,21 @@ fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const node = ctx.head.pointer.hit.node orelse return ok;
-    // A double click whose first click was a slow one began an edit of this
-    // row's name on the way: the gesture was an activation, so the edit ends
-    // (nothing was typed into it, so nothing is applied).
-    if (ctx.semantic) |services| _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    if (ctx.semantic) |services| if (scene_edit.begun(services, ctx.head)) {
+        // A double click inside a name ALREADY being edited is the field's,
+        // as it is in any text field: it selects a word there, and neither
+        // commits the edit nor activates the row — whichever command a
+        // grammar bound the gesture to (ide's `double-mouse-1` comes here
+        // over a scene). One whose first click began the edit is not.
+        if (!ctx.head.pointer.began_edit and onEditedField(ctx, node)) {
+            _ = try scene_edit.selectWord(services, ctx.head, ctx.gpa);
+            return ok;
+        }
+        // Elsewhere the gesture is an activation, and the edit ends first:
+        // one begun on the way (a slow first click) or left untyped applies
+        // nothing; a typed one is committed, as leaving its row commits it.
+        _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    };
     try focusNode(ctx, node);
     if (isActionNode(ctx, node)) return activateActionNode(ctx);
     // Opening a row's target is what a double click on a listing is FOR.
@@ -517,6 +533,15 @@ fn slowClickOnFocus(ctx: *Context, node: NodeRef) bool {
     if (!prior.view.eql(node.view) or prior.node != node.node) return false;
     const selection = &ctx.head.scene_selection;
     if (selection.edit != null) return false;
+    const view = selection.view orelse return false;
+    return view.eql(node.view) and selection.head() == node.node;
+}
+
+/// Whether `node` is the field node being edited — the focus's leaf while
+/// an edit holds it.
+fn onEditedField(ctx: *Context, node: NodeRef) bool {
+    const selection = &ctx.head.scene_selection;
+    if (selection.edit == null) return false;
     const view = selection.view orelse return false;
     return view.eql(node.view) and selection.head() == node.node;
 }

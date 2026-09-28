@@ -114,7 +114,11 @@ pub fn handle(driver: *frame.Driver, ctx: *core.command.Context, ev: platform.Po
             // Where the PREVIOUS press went down, before this one replaces it:
             // a slow second click means something only on the same node.
             const prior = g.origin.node;
+            // What the gesture's first click did holds through its later
+            // clicks, and only through them.
+            const began_edit = ev.clicks > 1 and g.began_edit;
             g.* = .{
+                .began_edit = began_edit,
                 .kind = .press,
                 .button = ev.button,
                 .clicks = ev.clicks,

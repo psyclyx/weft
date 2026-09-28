@@ -490,6 +490,46 @@ test "e2e/focus: ide.js — over a focused row, a picker, a prompt and snipe's c
     try t.expect(!std.mem.eql(u8, ed.mode(), "snipe-char"));
 }
 
+test "e2e/focus: ide.js — a double click in the name being edited selects in it; it neither renames nor opens" {
+    var app: IdeApp = undefined;
+    try sidebarApp(&app);
+    defer app.deinit();
+    const ed = &app.ed;
+    const main_zig = try pointAtName(ed, "main.zig");
+    ed.click(main_zig);
+    ed.applyWindow();
+    ed.press("F2", "");
+    ed.typeText("foo");
+    try expectRow(ed, "foo");
+    // A double click inside the field is the field's: it selects the word,
+    // so what is typed next replaces it.
+    try frame(ed);
+    const in_field = try pointAtName(ed, "foo");
+    ed.click(in_field);
+    ed.clickAgain(in_field);
+    try t.expect(ed.head.scene_selection.edit != null);
+    try expectRow(ed, "foo");
+    try t.expect(!fileOpen(ed, "main.zig"));
+    try t.expect(!fileOpen(ed, "foo"));
+    const out = try app.proj.oracle("test -f main.zig && test ! -e foo && printf ok");
+    defer ed.gpa.free(out);
+    try t.expectEqualStrings("ok", out);
+    ed.typeText("bar");
+    try expectRow(ed, "bar");
+    ed.press("Escape", "");
+    try expectRow(ed, "main.zig");
+
+    // An edit begun but not typed into, then a double click on ANOTHER row:
+    // the edit ends with nothing to apply, and the row opens.
+    ed.press("F2", "");
+    try t.expect(ed.head.scene_selection.edit != null);
+    const zeta = try pointAtName(ed, "zeta.txt");
+    ed.click(zeta);
+    ed.clickAgain(zeta);
+    try t.expect(ed.head.scene_selection.edit == null);
+    try t.expect(!ed.session.system.semantic.holdsDraft(ed.toolView() orelse return));
+}
+
 test "e2e/focus: config.js with ide's plugin loaded too — each grammar's modes keep their own granularity" {
     var app: h.App = undefined;
     try configSidebar(&app, "config.js");

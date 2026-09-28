@@ -630,7 +630,13 @@ What the build settled:
   (`multi_click_ms`) but within `slow_click_ms` (3×). `pointer-click` under
   `row` begins an edit on a slow second click that lands on the focused row
   the previous press also hit, and activates on a double click; a double
-  click whose first half began an edit ends it first.
+  click whose first half began an edit ends it first. A double click
+  inside a name ALREADY being edited is the field's: `pointer.activate`
+  (where ide's `double-mouse-1` sends a scene) selects the word at the
+  field's caret and neither commits nor opens — it used to commit the
+  half-typed name (a rename on disk) and open the row. Scene hits carry no
+  byte offset inside a field yet, so the word is the caret's, not the
+  pointer's.
 - **The caret** is derived in `CursorConfig.styleFor(mode, inserts)`: where
   typing inserts, the declared shape or a bar; where it does not, a block
   (an `underline` a grammar keeps). ide no longer declares a shape for
