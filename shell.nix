@@ -39,6 +39,12 @@ pkgs.mkShell {
     # Build-time tools.
     pkg-config
     perl # Hermetic JSON::PP peer for the spine's LSP protocol gate.
+    # Shells and a pager the terminal e2e tests run on a real pty: the shell
+    # integration is injected into each (doc/terminal.md §7), so each is a
+    # test dependency, not whatever the host happens to have.
+    zsh
+    fish
+    less
     wayland-scanner
     # No renderer shader compiler is needed; Skia is the sole production
     # renderer.

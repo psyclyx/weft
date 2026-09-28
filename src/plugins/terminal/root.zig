@@ -106,12 +106,17 @@ const Term = struct {
     /// Whether the program owns every key, by what it DECLARED: no
     /// integration that syncs the command line (then nothing tells a prompt
     /// from a program), a command running (OSC 133 C..D), the alternate
-    /// screen, the kitty keyboard protocol, or mouse tracking. Never a guess
-    /// at what a key would do.
+    /// screen, kitty keyboard flags other than those the line editor set for
+    /// its prompt (at OSC 133 B), or mouse tracking. Never a guess at what a
+    /// key would do.
     fn ownsKeys(self: *Term) bool {
         const s = &self.shell;
-        if (!(s.line_sync and s.at_prompt and s.line_known) or s.running) return true;
-        return self.vt.altScreen() or self.vt.kittyFlags() != 0 or self.vt.mouseTracking();
+        if (!(s.line_sync and s.at_prompt and s.awaiting == 0) or s.running) return true;
+        const kitty = self.vt.kittyFlags();
+        // Flags set, and not the line editor's own: a program pushed them.
+        // (Flags dropped to none claim nothing — fish pops its own while it
+        // runs a binding.)
+        return self.vt.altScreen() or (kitty != 0 and kitty != s.prompt_kitty) or self.vt.mouseTracking();
     }
 
     /// The input section for this publish into `out`, when what the program
@@ -155,39 +160,44 @@ const Term = struct {
         for (bytes, 0..) |b, i| {
             const ev = s.scan.step(b) orelse continue;
             switch (ev) {
-                .prompt_start => {
-                    // The same prompt drawn again (the line editor redisplays
-                    // it after its line was set) is not a new one.
-                    s.redrawing = s.at_prompt;
-                    s.running = false;
-                },
+                .prompt_start => s.running = false,
                 .line_start => {
                     self.vt.write(bytes[from .. i + 1]);
                     from = i + 1;
                     const at = self.vt.cursorCell();
                     s.line_row = at.row;
                     s.line_col = at.col;
-                    if (s.redrawing) {
-                        s.redrawing = false;
-                        continue;
-                    }
+                    // A prompt drawn again before its line was accepted (the
+                    // line editor redisplays it after a set; fish marks it
+                    // twice, natively and ours) is the same prompt.
+                    if (s.at_prompt) continue;
                     s.running = false;
                     s.at_prompt = true;
                     s.fresh = true;
-                    // A new line editor starts empty — unless keys typed
-                    // ahead reach it, which only its report can tell.
                     s.line.clearRetainingCapacity();
                     s.line_cursor = 0;
                     s.pushed.clearRetainingCapacity();
                     s.pushed_cursor = 0;
-                    s.line_known = true;
+                    // A new line editor starts empty — unless keys were typed
+                    // ahead of it; then it is unknown until it reports, which
+                    // it is asked to (zsh reports on its own redraw anyway).
+                    s.awaiting = @intFromBool(s.typed_ahead);
+                    if (s.typed_ahead) if (self.pty) |h| weft.ptyWrite(h, s.reportRequest());
+                    s.typed_ahead = false;
+                    // The line editor's own keyboard modes, as it set them
+                    // to read this line (fish pushes kitty flags): the
+                    // prompt's, not a program's.
+                    s.prompt_kitty = self.vt.kittyFlags();
                 },
                 .command_start => {
                     s.running = true;
                     s.at_prompt = false;
                 },
                 .command_end => s.running = false,
-                .hello => s.line_sync = true,
+                .hello => |v| {
+                    s.line_sync = true;
+                    s.in_band = v >= 2;
+                },
                 .line => |payload| s.takeReport(payload),
             }
         }
@@ -202,9 +212,9 @@ const Term = struct {
         s.push_seq += 1;
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(weft.allocator);
-        buf.print(weft.allocator, "\x1b[7780~{d};{d};", .{ s.push_seq, cursor }) catch return;
+        buf.print(weft.allocator, "{s}{d};{d};", .{ if (s.in_band) in_band_begin else "\x1b[7780~", s.push_seq, cursor }) catch return;
         prompt.hexEncode(&buf, weft.allocator, line) catch return;
-        buf.append(weft.allocator, 0x07) catch return;
+        buf.appendSlice(weft.allocator, if (s.in_band) in_band_set else "\x07") catch return;
         weft.ptyWrite(h, buf.items);
         s.pushed.resize(weft.allocator, line.len) catch return;
         @memcpy(s.pushed.items, line);
@@ -217,16 +227,21 @@ const Shell = struct {
     scan: prompt.Scanner = .{},
     /// The integration syncs its command line (OSC 7780 hello).
     line_sync: bool = false,
+    /// It takes a set line in band (hello v2, fish).
+    in_band: bool = false,
     /// Between OSC 133 C and D.
     running: bool = false,
     /// After OSC 133 B, before C.
     at_prompt: bool = false,
-    /// An A arrived at a prompt already declared: its B is a redraw.
-    redrawing: bool = false,
-    /// What the line editor holds is known: empty at a new prompt, or as
-    /// it last reported. A key typed raw at the prompt before it was
-    /// declared makes it unknown until the next report.
-    line_known: bool = false,
+    /// The kitty keyboard flags as the line editor left them at B.
+    prompt_kitty: u8 = 0,
+    /// Reports asked for and not yet heard, for keys that went raw to the
+    /// line editor (typed ahead of it, or at a prompt not yet declared):
+    /// what it holds is known only when none is outstanding.
+    awaiting: u32 = 0,
+    /// Keys went raw to the shell since its last line ended, before its
+    /// next prompt: the next line editor reads them.
+    typed_ahead: bool = false,
     /// Where the command line starts (the cursor at B), on the screen.
     line_row: u16 = 0,
     line_col: u16 = 0,
@@ -247,6 +262,11 @@ const Shell = struct {
 
     const Declared = struct { flags: u32, row: u32, col: u32 };
 
+    /// The key that asks this shell's integration to report its line.
+    fn reportRequest(self: *const Shell) []const u8 {
+        return if (self.in_band) in_band_report else report_request;
+    }
+
     fn deinit(self: *Shell) void {
         self.scan.deinit();
         self.line.deinit(weft.allocator);
@@ -260,7 +280,7 @@ const Shell = struct {
         if (r.seq < self.push_seq) return;
         prompt.hexDecode(&self.line, weft.allocator, r.hex) catch return;
         self.line_cursor = @min(r.cursor, self.line.items.len);
-        self.line_known = true;
+        self.awaiting -|= 1;
         if (!std.mem.eql(u8, self.line.items, self.pushed.items) or self.line_cursor != self.pushed_cursor) {
             self.authoritative = true;
             self.pushed.resize(weft.allocator, self.line.items.len) catch return;
@@ -275,6 +295,12 @@ const Shell = struct {
 const claimed = "Tab\nS-Tab\nISO_Left_Tab\nS-ISO_Left_Tab\nReturn\nKP_Enter";
 /// What asks the integration to report its line (bash has no redraw hook).
 const report_request = "\x1b[7781~";
+/// The same three keys for an integration that takes its line in band
+/// (fish, hello v2): keys its reader can bind — ctrl-alt-shift-f10, -f12
+/// and -f11 — since it drops a CSI it has no name for.
+const in_band_begin = "\x1b[21;8~";
+const in_band_set = "\x1b[24;8~";
+const in_band_report = "\x1b[23;8~";
 
 /// Every terminal, heap-allocated so a `*Term` (and the emulator's
 /// userdata pointer into it) survives the list growing.
@@ -580,7 +606,7 @@ fn input(spec: []const u8, text: []const u8, line: ?[]const u8, cursor: ?[]const
         // A key that ends the line leaves the prompt: what comes next is a
         // command, or a new prompt — never this one redrawn. Otherwise ask
         // for the line back: the key may have changed it (completion).
-        if (endsLine(spec)) s.at_prompt = false else if (s.line_sync) weft.ptyWrite(h, report_request);
+        if (endsLine(spec)) s.at_prompt = false else if (s.line_sync) weft.ptyWrite(h, s.reportRequest());
         return;
     }
     const vt = &t.vt;
@@ -594,8 +620,16 @@ fn input(spec: []const u8, text: []const u8, line: ?[]const u8, cursor: ?[]const
     // for, unless the key ended the line (what follows may read the ask).
     const s = &t.shell;
     if (s.line_sync and s.at_prompt and !s.running) {
-        s.line_known = false;
-        if (!endsLine(spec)) weft.ptyWrite(h, report_request);
+        if (endsLine(spec)) {
+            s.at_prompt = false;
+        } else {
+            s.awaiting += 1;
+            weft.ptyWrite(h, s.reportRequest());
+        }
+    } else if (s.line_sync) {
+        // Typed ahead of the next prompt: its line editor will start with
+        // what it reads of this, which only its report can tell.
+        s.typed_ahead = !endsLine(spec);
     }
 }
 

@@ -101,7 +101,9 @@ reads it (§6).
   plugin's own grid entry, and creates the entry if it does not exist.
   The layout is in `membrane/grid.zig`: a 16-byte header (size, cursor
   position and shape, rows sent), then the changed rows only. Each row is an
-  index followed by 16-byte cells: codepoint, fg, bg, attributes, width, and
+  index — its top bit set when the row SOFT-WRAPS into the next
+  (`row_wraps`, ghostty's row wrap flag; a history row's cell count carries
+  the same bit) — followed by 16-byte cells: codepoint, fg, bg, attributes, width, and
   a mark (what the program said the cell is: prompt, typed input, or
   output — the shell integration marks it).
 - **Sections.** After the rows a publish may carry tagged sections, each
@@ -270,12 +272,25 @@ search, snipe, visual selection and yank (with its flash), the pointer's
 drag-select, ide's selection and C-c. Nothing of this knows what a
 terminal is; it is what a grid entry is.
 
-**The document is derived from the cells** (`core/grid_mirror.zig`). Row
-`i` of the grid — its history, then its screen — is line `i` of the
-document, and a cell's text is `grid.cellText` (its scalar, a space for an
-empty cell, nothing for the second half of a wide one), trailing blanks
-dropped. So an offset names a cell, and the one function both the document
-and the view read is the only place that could disagree.
+**The document is derived from the cells** (`core/grid_mirror.zig`). The
+grid's rows — its history, then its screen — are the document's text, one
+LOGICAL line a document line: a row that soft-wraps runs on into the next
+with no break, whole (its blanks are the line's own), so a yank has no
+break where the terminal wrapped and a search matches across the wrap. A
+cell's text is `grid.cellText` (its scalar, a space for an empty cell,
+nothing for the second half of a wide one); a row that ends a line drops
+its trailing blanks.
+
+**The row map** (`Grid.Map`, made by every sync) says where each row's
+text is: history rows by their byte counts (so cutting rows from the front
+shifts nothing stored), screen rows by their spans (`Grid.RowText`). One
+walk over a row (`grid.RowWalk`: its cells' text, then any flowing text by
+`scalarWidth`) gives every scalar its offset and its column, and both the
+view's geometry (`gfx/view/grid.layoutRows`) and the program's cursor
+(`offsetAtCell`) read it — so an offset names a cell exactly, wrapped or
+not. The frame chooses the rows a reading pane shows (`gridTopRow`): the
+document's scroll, moved to keep the caret's row in view, since a line may
+be several rows.
 
 - **Written only while read.** A publish on an entry that is not capturing
   brings the document up to date; so does leaving capture
@@ -347,7 +362,8 @@ overrides it at spawn). A bare shell program starts through `launch`:
   status) and `PS0`.
 - **fish**: weft's directory goes first on `XDG_DATA_DIRS`, so fish sources
   `fish/vendor_conf.d/weft.fish`, which puts `XDG_DATA_DIRS` back and wraps
-  `fish_prompt` at the first prompt.
+  `fish_prompt` at the first prompt (its `fish_title` too, unless the
+  user defined one).
 
 Each then sources `${XDG_CONFIG_HOME:-~/.config}/weft/shell/<shell>` when it
 exists: the user's own hook. `TERM_PROGRAM=weft` stays, for an rc file to
@@ -414,7 +430,10 @@ it (`Grid.input`) and routes by it. The user's own break-out overrides it.
 
 - **Declared, never guessed.** The plugin computes OWNS_KEYS from ghostty's
   modes (`altScreen`, `kittyFlags`, `mouseTracking`) and the OSC 133 marks
-  it watches on the byte stream (`prompt.Scanner`); nothing else.
+  it watches on the byte stream (`prompt.Scanner`); nothing else. Kitty
+  keyboard flags count only when set and not the ones the line editor had
+  at its B mark: fish pushes its own to read its line, and pops them while
+  it runs a binding — neither is a program claiming the keys.
 - **Capture follows the program** (`Buffer.followProgram`, run on every
   publish): OWNS_KEYS declares capture, PROMPT releases it, BROKEN OUT
   (`Buffer.broken_out`) holds both off. `wl_declare_capture` sets the
@@ -425,7 +444,7 @@ it (`Grid.input`) and routes by it. The user's own break-out overrides it.
   mode at a new prompt (vim and helix normal: `i`, `a` start typing as in any
   text; ide and emacs type directly).
 - **Without integration** — a whole command line as `shell`, `integration`
-  off, fish (which does not sync its line) — nothing is ever declared, and
+  off — nothing is ever declared, and
   the program owns every key: capture, as before.
 
 **The command line is a field** (`core/grid_mirror.zig`). At a PROMPT the
@@ -433,14 +452,29 @@ declaration carries where the line starts (the cursor at OSC 133 B: screen
 row and cell) and, when it is the program's word — a new prompt, or a change
 the shell made itself (completion, history) — the line and its cursor.
 
-- The field is that row's line in the entry's document, from the prompt's
-  last cell to its end (`fieldRange`). `writeRefusal` is the one edit gate
-  for a grid entry: only the field takes edits, on its one line — typing,
-  vim operators, undo alike (`Context.edit`, `editEach`, `admitUndo`). An
-  undo that would reach a line long since run is refused.
-- Edits are the user's, so undo is the grammar's own. The mirror keeps the
-  field row as the editor holds it (`Grid.field_text`: the prompt from the
-  cells, blanks kept, then the field), whatever the shell echoes meanwhile.
+- The field's TEXT is the shell's buffer (`Grid.field_text`: zsh
+  `$BUFFER`, bash `READLINE_LINE`, fish `commandline`), never the prompt
+  row's cells. In the document it follows the prompt as the cells have it
+  (blanks kept — they end where typing starts) and ends the line; the rows
+  the buffer's echo covers are not read. So a right prompt (zsh's
+  `RPROMPT`) is never part of the field, and a line longer than the
+  terminal is one field.
+- Its CELLS are found by flowing the buffer from the command-start mark
+  (OSC 133 B's cell), as a line editor lays it out (`grid.flowText`): wrap
+  at the terminal's width, a wide scalar that would pass the edge starts
+  the next row, a newline (zsh's multi-line buffers) starts the next row
+  at column 0. The caret, selections and flash land there, whatever the
+  echo shows at that moment. The flow is redone on every report and every
+  edit (`takeField` re-syncs the map), anchored on the B mark each time, so
+  a prompt that changes width, or zsh erasing its right prompt, cannot
+  make them drift.
+- `fieldRange` is that range; its end follows edits made since the map.
+  `writeRefusal` is the one edit gate for a grid entry: only the field
+  takes edits, and none that inserts a line break (that is Return, which is
+  the shell's) — typing, vim operators, undo alike (`Context.edit`,
+  `editEach`, `admitUndo`). An undo that would reach a line long since run
+  is refused.
+- Edits are the user's, so undo is the grammar's own.
 - After every key (`app/dispatch.flushField`), a changed line reaches the
   program: the endpoint runs with an empty key, the line and the caret's
   byte in it; the plugin sets the shell's line only when it differs from
@@ -452,7 +486,7 @@ scripts):
 
 | direction | bytes | meaning |
 |---|---|---|
-| shell → weft | `OSC 7780;hello;1` | this integration syncs its line |
+| shell → weft | `OSC 7780;hello;V` | this integration syncs its line; V 2 takes a set in band |
 | shell → weft | `OSC 7780;line;SEQ;CURSOR;HEX` | the line buffer (hex of its bytes), the cursor in bytes, the last set it applied |
 | weft → shell | `ESC [ 7780 ~ SEQ;CURSOR;HEX BEL` | set the buffer and the cursor |
 | weft → shell | `ESC [ 7781 ~` | report now |
@@ -466,10 +500,21 @@ shell is in; zsh in vi mode is tested. zsh reports on every redraw
 after each key weft sends that does not end the line. A report older than
 weft's last set (by SEQ) is a stale echo and ignored; one that differs from
 what weft set is the shell's own change, and is declared as the program's
-word. A prompt the line editor merely redraws (bash redisplays it after a
-set) is not a new prompt. A key typed raw at a prompt not yet declared
-makes the line unknown, and no prompt is declared until the shell reports
-it.
+word. A B mark while already at a prompt (bash redisplays it after a set;
+fish marks every prompt twice, natively and ours) is the same prompt, until
+a line ends (OSC 133 C, or a key that ends it). A key that went raw to the
+line editor — typed ahead while a command ran, or at a prompt not yet
+declared — asks for a report, and no prompt is declared while any asked-for
+report is outstanding (`Shell.awaiting`): the field starts with what the
+shell actually holds.
+
+**fish** (hello version 2) cannot read further input inside a key binding,
+so a set goes in band: ctrl-alt-shift-F10 (`CSI 21;8~`) empties the command
+line (and puts a vi mode into insert), the payload types in as text, and
+ctrl-alt-shift-F12 (`CSI 24;8~`) takes it back out and sets the real line
+with `commandline -r` / `-C`; ctrl-alt-shift-F11 (`CSI 23;8~`) asks for a
+report. fish 4 names only keys it knows, so a private `CSI 7780 ~` would be
+dropped.
 
 ## 9. What stayed
 
@@ -491,27 +536,19 @@ different thing from a screen, so moving them is not a rename.
   answered by that place's authority (§1).
 - **Clicks and drags to the child** when it tracks the mouse. The wheel is
   reported at the cursor's cell, not the pointer's.
-- **Soft-wrapped lines** are one document line per ROW: a long line wrapped
-  by the terminal yanks with a line break where it wrapped, and a search
-  does not match across the wrap.
 - **Search matches** are not highlighted on the cells; the caret lands on
   them.
 - **Kitty graphics and hyperlinks (OSC 8)**, and a terminal status segment.
-- **fish's integration is untested**: no fish in the test environment. zsh
-  and bash are tested end to end (§7).
 - **OSC 7's host is not checked.** A shell on another machine (over ssh)
   reporting its directory moves the entry's place to the local directory of
   that name, when there is one.
-- **The command line is one row.** A line longer than the row its prompt
-  starts on wraps in the shell's echo; the field is the first row's line,
-  so the continuation rows mirror the echo beside it. A right prompt
-  (zsh's `RPROMPT`) on the line's row reads as part of the field.
-- **Typeahead read at a new prompt.** Keys typed while a command ran, which
-  the shell then reads at the next prompt, are not seen until it reports:
-  zsh reports at once (a redraw), bash only when asked, so its field starts
-  empty and the first edit replaces what was typed ahead.
-- **fish does not sync its line** (no `hello`): at its prompt the program
-  keeps every key, as without integration.
+- **Widths are weft's guess at the shell's.** The flow uses a small
+  `scalarWidth` table (combining marks 0, East Asian wide and emoji 2). A
+  scalar the shell measures otherwise puts the caret a column off on that
+  row until the next report re-anchors it; the text is never wrong.
+- **What a command line flows over is drawn from the echo.** The cells shown
+  are the shell's; between a key and its echo they lag the field by a
+  frame.
 - **vim and helix rest in normal mode at a new prompt**, as in any text:
   `i`/`a` type. No grammar declares a "typing" resting mode, and declaring
   one for the field posture would change how every editable listing rests.

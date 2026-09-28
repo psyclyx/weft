@@ -1,10 +1,13 @@
 //! grid_mirror — a grid entry's cells as a READ-ONLY text document, kept in
 //! step with the grid (doc/terminal.md §4), so the text machinery works on a
 //! terminal unchanged: motions, search, snipe, visual selection, yank, the
-//! pointer's drag-select and copy. Row `i` of the grid (its history, then
-//! its screen) is line `i` of the document; a cell's text is
-//! `grid.cellText`, so an offset names a cell and the view draws the
-//! document's caret and selections ON the cells (`gfx/view/grid.zig`).
+//! pointer's drag-select and copy. The grid's rows (its history, then its
+//! screen) are the document's text, a LOGICAL line a document line — a row
+//! that soft-wraps runs on into the next — and at a shell's prompt the
+//! command line is the shell's buffer, flowed over the rows its echo takes.
+//! Where each row's text is goes in the row map (`Grid.Map`), so an offset
+//! names a cell and the view draws the document's caret and selections ON
+//! the cells (`gfx/view/grid.zig`).
 //!
 //! The document is written only while the entry is READ — not capturing:
 //! while a program takes every key nobody moves a caret through its output,
@@ -38,11 +41,43 @@ pub fn ensureDocument(gpa: Allocator, buffers: *Buffers, b: *Buffers.Buffer) All
     return &b.editor.?;
 }
 
-/// Bring `b`'s document up to its grid's rows.
+/// Bring `b`'s document up to its grid's rows, and the map of where each
+/// row's text is in it (`Grid.Map`).
 pub fn sync(gpa: Allocator, buffers: *Buffers, b: *Buffers.Buffer) !void {
-    const g = b.grid orelse return;
     const ed = try ensureDocument(gpa, buffers, b);
+    try syncTo(gpa, b, ed);
+}
+
+/// A row's text and its break, into `out`: the break is a newline, unless
+/// the row soft-wraps (its line goes on) or it is the last.
+fn appendRow(gpa: Allocator, out: *std.ArrayList(u8), cells: []const grid_mod.Cell, wraps: bool) !void {
+    try grid_mod.appendRowText(gpa, out, cells, wraps);
+    if (!wraps) try out.append(gpa, '\n');
+}
+
+/// Collects the rows a command line flows over (`grid.flowText`).
+const FlowRows = struct {
+    gpa: Allocator,
+    spans: *std.ArrayList(Grid.RowText),
+    /// Where the row the line starts on starts, and the line itself.
+    row_start: usize,
+    field_start: usize,
+
+    fn row(self: *FlowRows, s: usize, e: usize, col: u16) !void {
+        const first = self.spans.items.len == 0;
+        try self.spans.append(self.gpa, .{
+            .start = if (first) self.row_start else self.field_start + s,
+            .end = self.field_start + e,
+            .flow_start = self.field_start + s,
+            .flow_col = col,
+        });
+    }
+};
+
+fn syncTo(gpa: Allocator, b: *Buffers.Buffer, ed: *Editor) !void {
+    const g = b.grid orelse return;
     const rope = ed.text();
+    const map = &g.map;
     const new_start = g.history_start;
     const new_end = g.history_start + g.historyLen();
 
@@ -54,38 +89,84 @@ pub fn sync(gpa: Allocator, buffers: *Buffers, b: *Buffers.Buffer) !void {
     defer old_tail.deinit(gpa);
 
     // Where the document's history rows are still this grid's.
-    const incremental = if (g.mirror) |m| m.start <= new_start and new_start <= m.end and m.end <= new_end else false;
+    const incremental = if (g.mirror) |m|
+        m.start <= new_start and new_start <= m.end and m.end <= new_end and map.hist_bytes.items.len == m.end - m.start
+    else
+        false;
     var tail_from: usize = 0; // old-document offset the tail replaces from
     var history_from: u64 = new_start; // first history row the tail writes
     if (incremental) {
         const m = g.mirror.?;
+        tail_from = map.hist_total;
         // The rows that went from the front.
         const gone: usize = @intCast(new_start - m.start);
         if (gone > 0) {
-            const cut = lineStart(rope, gone);
+            var cut: usize = 0;
+            for (map.hist_bytes.items[0..gone]) |x| cut += x;
             reps[n] = .{ .range = .{ .start = 0, .end = cut }, .bytes = "" };
             n += 1;
+            const kept = map.hist_bytes.items.len - gone;
+            std.mem.copyForwards(u32, map.hist_bytes.items[0..kept], map.hist_bytes.items[gone..]);
+            map.hist_bytes.shrinkRetainingCapacity(kept);
+            map.hist_total -= cut;
         }
-        tail_from = lineStart(rope, @intCast(m.end - m.start));
         history_from = m.end;
+    } else {
+        map.hist_bytes.clearRetainingCapacity();
+        map.hist_total = 0;
     }
     // The tail: history rows the document lacks, then the screen.
+    try map.hist_bytes.ensureUnusedCapacity(gpa, g.historyLen());
     for (@intCast(history_from - new_start)..g.historyLen()) |i| {
-        try grid_mod.appendRowText(gpa, &tail, g.historyRow(i));
-        try tail.append(gpa, '\n');
+        const before = tail.items.len;
+        try appendRow(gpa, &tail, g.historyRow(i), g.rowWraps(i));
+        const bytes: u32 = @intCast(tail.items.len - before);
+        map.hist_bytes.appendAssumeCapacity(bytes);
+        map.hist_total += bytes;
     }
-    const field_row: ?usize = if (fieldLive(b)) g.input.line.?.row else null;
-    for (0..g.rows) |r| {
-        if (r > 0) try tail.append(gpa, '\n');
-        if (field_row == r) {
-            // The command line is the editor's while it edits it: the prompt
-            // as the cells have it (blanks kept — they end where typing
-            // starts), then the field's own text, whatever the cells echo.
-            const line = g.input.line.?;
+    // The screen, each row where its text lands. Offsets are the NEW
+    // document's: the kept history, then the rows just appended, then this.
+    const base = map.hist_total - (tail.items.len);
+    map.screen.clearRetainingCapacity();
+    map.field = null;
+    const field_line: ?Grid.Input.Line = if (fieldLive(b)) g.input.line else null;
+    var r: usize = 0;
+    while (r < g.rows) {
+        const row_start = base + tail.items.len;
+        if (field_line) |line| if (line.row == r) {
+            // The command line is the shell's buffer, not its echo: the
+            // prompt as the cells have it (blanks kept — they end where
+            // typing starts), then the field's text, flowed over as many
+            // rows as the line editor lays it out on.
             var buf: [4]u8 = undefined;
             for (g.row(r)[0..@min(line.col, g.cols)]) |c| try tail.appendSlice(gpa, grid_mod.cellText(c, &buf));
+            const field_start = base + tail.items.len;
             try tail.appendSlice(gpa, g.field_text.items);
-        } else try grid_mod.appendRowText(gpa, &tail, g.row(r));
+            map.field = .{ .start = field_start, .end = base + tail.items.len };
+            const first_span = map.screen.items.len;
+            var spans: std.ArrayList(Grid.RowText) = .empty;
+            defer spans.deinit(gpa);
+            var fr: FlowRows = .{ .gpa = gpa, .spans = &spans, .row_start = row_start, .field_start = field_start };
+            try grid_mod.flowText(g.field_text.items, line.col, g.cols, &fr, FlowRows.row);
+            // A line longer than the screen is still one field: its last row
+            // takes the rest.
+            const room = g.rows - r;
+            if (spans.items.len > room) {
+                spans.items[room - 1].end = spans.items[spans.items.len - 1].end;
+                spans.shrinkRetainingCapacity(room);
+            }
+            try map.screen.appendSlice(gpa, spans.items);
+            _ = first_span;
+            r += spans.items.len;
+            if (r < g.rows) try tail.append(gpa, '\n');
+            continue;
+        };
+        const last = r + 1 == g.rows;
+        try grid_mod.appendRowText(gpa, &tail, g.row(r), g.wraps[r] and !last);
+        const end = base + tail.items.len;
+        try map.screen.append(gpa, .{ .start = row_start, .end = end, .flow_start = end });
+        if (!last and !g.wraps[r]) try tail.append(gpa, '\n');
+        r += 1;
     }
     // Only what changed: the tail's common prefix and suffix stay.
     const end = rope.byteLen();
@@ -109,37 +190,34 @@ pub fn sync(gpa: Allocator, buffers: *Buffers, b: *Buffers.Buffer) !void {
         n += 1;
     }
     g.mirror = .{ .start = new_start, .end = new_end };
-    if (n == 0) return;
-    try ed.doc.produce(gpa, reps[0..n]);
-    // The CRDT keeps every scalar that ever passed through as an event, and
-    // what scrolled away as a tombstone: re-found the document on its text
-    // now and then (a bulk load, milliseconds), so a long-lived terminal's
-    // document holds its rows, not everything that went by.
-    if (ed.doc.eventCount() > refound_events and !ed.doc.hasPeers()) try ed.doc.refound(gpa);
+    map.revision = g.revision;
+    if (n > 0) {
+        try ed.doc.produce(gpa, reps[0..n]);
+        // The CRDT keeps every scalar that ever passed through as an event,
+        // and what scrolled away as a tombstone: re-found the document on
+        // its text now and then (a bulk load, milliseconds), so a long-lived
+        // terminal's document holds its rows, not everything that went by.
+        if (ed.doc.eventCount() > refound_events and !ed.doc.hasPeers()) try ed.doc.refound(gpa);
+    }
+    map.doc_len = ed.text().byteLen();
 }
 
 /// Events a grid's document collects before it is re-founded on its text.
 const refound_events = 1 << 16;
 
-/// Line `i`'s first byte in `rope` (its end when there are fewer lines).
-fn lineStart(rope: anytype, i: usize) usize {
-    if (i >= rope.lineCount()) return rope.byteLen();
-    return rope.lineRange(i).start;
+/// The map describes the document as it is: made for the grid as it is,
+/// and nothing edited since.
+fn inStep(g: *const Grid, ed: *Editor) bool {
+    return g.mapped() and ed.text().byteLen() == g.map.doc_len;
 }
 
-/// The document offset of the grid's own cursor: its screen row, below the
-/// history, at the bytes its cells before it take.
+/// The document offset of the grid's own cursor: the cell it is on, below
+/// the history — on a command line, where the line's text flows to it.
 pub fn cursorOffset(b: *Buffers.Buffer) ?usize {
     const g = b.grid orelse return null;
     const ed = b.textEditor() orelse return null;
-    const rope = ed.text();
-    const line = g.historyLen() + g.cursor.y;
-    if (line >= rope.lineCount()) return rope.byteLen();
-    const range = rope.lineRange(line);
-    var off: usize = 0;
-    var buf: [4]u8 = undefined;
-    for (g.row(g.cursor.y)[0..@min(g.cursor.x, g.cols)]) |c| off += grid_mod.cellText(c, &buf).len;
-    return range.start + @min(off, range.end - range.start);
+    if (!inStep(g, ed)) return null;
+    return g.offsetAtCell(g.historyLen() + g.cursor.y, g.cursor.x);
 }
 
 // ── The command line: a field at the prompt (doc/terminal.md §8) ─────
@@ -152,41 +230,44 @@ pub fn fieldLive(b: *const Buffers.Buffer) bool {
     return g.input.line != null and !g.input.owns_keys and !b.broken_out;
 }
 
-/// The document range of `b`'s command line: from where its row's prompt
-/// ends to the end of that line. Null when there is none, or the document
-/// is not in step with the cells.
+/// The document range of `b`'s command line — the shell's buffer, however
+/// many rows it wraps over; never its prompt, never a right-hand prompt
+/// beside it. Its end follows the edits made since the map (only the field
+/// takes edits). Null when there is none, or the map is stale.
 pub fn fieldRange(b: *Buffers.Buffer) ?Document.Range {
     if (!fieldLive(b)) return null;
     const g = b.grid.?;
     const ed = b.textEditor() orelse return null;
-    if (!inStep(g, ed)) return null;
-    const line = g.input.line.?;
-    const range = ed.text().lineRange(g.historyLen() + line.row);
-    var prefix: usize = 0;
-    var buf: [4]u8 = undefined;
-    for (g.row(line.row)[0..@min(line.col, g.cols)]) |c| prefix += grid_mod.cellText(c, &buf).len;
-    return .{ .start = range.start + @min(prefix, range.end - range.start), .end = range.end };
+    if (!g.mapped()) return null;
+    const f = g.map.field orelse return null;
+    const now = ed.text().byteLen();
+    const end = if (now >= g.map.doc_len) f.end + (now - g.map.doc_len) else f.end -| (g.map.doc_len - now);
+    if (end < f.start) return null;
+    return .{ .start = f.start, .end = end };
 }
 
 /// Why an edit of `r` (writing `bytes`) on grid entry `b` is refused, or
-/// null when it may land: only the command line takes edits, and only on
-/// its one line. For an entry that is no grid, its `read_only` reason.
+/// null when it may land: only the command line takes edits, and no edit
+/// breaks it (the shell's own multi-line buffer keeps its breaks; a key
+/// adding one would be a line accepted, which is the shell's Return). For
+/// an entry that is no grid, its `read_only` reason.
 pub fn writeRefusal(b: *Buffers.Buffer, r: Document.Range, bytes: []const u8) ?[]const u8 {
     if (b.grid == null) return b.read_only;
     const f = fieldRange(b) orelse return b.read_only orelse read_only;
     if (r.start < f.start or r.end > f.end) return "terminal output: only the command line takes edits";
-    if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return "the command line is one line";
+    if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return "a line break would run the command line: Return does";
     return null;
 }
 
 /// Take the command line's text from the document after a keystroke
-/// (`field_text`). True when it changed.
+/// (`field_text`), and lay it out again over its rows. True when it
+/// changed.
 pub fn takeField(gpa: Allocator, b: *Buffers.Buffer) !bool {
     const f = fieldRange(b) orelse return false;
     const g = b.grid.?;
     const ed = b.textEditor().?;
     const len = f.end - f.start;
-    if (len == g.field_text.items.len) {
+    if (len == g.field_text.items.len and ed.text().byteLen() == g.map.doc_len) {
         var buf: [256]u8 = undefined;
         if (len <= buf.len) {
             ed.text().copyRange(buf[0..len], f);
@@ -195,6 +276,9 @@ pub fn takeField(gpa: Allocator, b: *Buffers.Buffer) !bool {
     }
     try g.field_text.resize(gpa, len);
     ed.text().copyRange(g.field_text.items, f);
+    // The document already says it: the sync writes nothing, and the map
+    // follows the line as it now flows.
+    try syncTo(gpa, b, ed);
     return true;
 }
 
@@ -252,26 +336,14 @@ pub fn landmark(g: *const Grid, row: usize, dir: Direction) ?usize {
     return null;
 }
 
-/// The document is in step with the grid's rows: a line a row. Line-based
-/// answers (a landmark's line) are only true then.
-fn inStep(g: *const Grid, ed: *Editor) bool {
-    return g.mirror != null and ed.text().lineCount() == g.rowCount();
-}
-
-/// Where the command line starts on prompt row `r`: the offset, in the
-/// document, of the first cell after the row's prompt cells.
-fn inputStart(g: *const Grid, ed: *Editor, r: usize) usize {
-    const range = ed.text().lineRange(r);
-    const cells = g.rowAt(r);
-    var off: usize = 0;
-    var buf: [4]u8 = undefined;
+/// Where the command line starts on prompt row `r`: the offset of the
+/// first cell after the row's prompt cells.
+fn inputStart(g: *const Grid, r: usize) usize {
     var last_prompt: ?usize = null;
-    for (cells, 0..) |c, i| if (c.mark.prompt) {
+    for (g.rowAt(r), 0..) |c, i| if (c.mark.prompt) {
         last_prompt = i;
     };
-    const upto = if (last_prompt) |i| i + 1 else 0;
-    for (cells[0..@min(upto, cells.len)]) |c| off += grid_mod.cellText(c, &buf).len;
-    return range.start + @min(off, range.end - range.start);
+    return g.offsetAtCell(r, if (last_prompt) |i| i + 1 else 0);
 }
 
 /// Move `b`'s caret to the landmark before (or after) it — the start of
@@ -281,10 +353,10 @@ pub fn moveToLandmark(b: *Buffers.Buffer, dir: Direction) bool {
     const g = b.grid orelse return false;
     const ed = b.textEditor() orelse return false;
     if (!inStep(g, ed)) return false;
-    const row = ed.text().offsetToPoint(ed.cursorOffset()).row;
+    const row = g.rowOfOffset(ed.cursorOffset());
     const r = landmark(g, row, dir) orelse return false;
     ed.clearSelection();
-    ed.placeCursor(inputStart(g, ed, r));
+    ed.placeCursor(inputStart(g, r));
     return true;
 }
 
@@ -296,8 +368,7 @@ pub fn selectLandmarkBody(gpa: Allocator, b: *Buffers.Buffer) !bool {
     const g = b.grid orelse return false;
     const ed = b.textEditor() orelse return false;
     if (!inStep(g, ed)) return false;
-    const rope = ed.text();
-    const row = rope.offsetToPoint(ed.cursorOffset()).row;
+    const row = g.rowOfOffset(ed.cursorOffset());
     const top = if (startsLandmark(g, row)) row else landmark(g, row, .prev) orelse return false;
     // Past the prompt and the command line it holds (rows with a prompt or
     // typed input cell).
@@ -311,9 +382,13 @@ pub fn selectLandmarkBody(gpa: Allocator, b: *Buffers.Buffer) !bool {
         if (!marked) break;
     }
     var end = landmark(g, top, .next) orelse g.rowCount();
-    while (end > first and rope.lineRange(end - 1).start == rope.lineRange(end - 1).end) end -= 1;
+    while (end > first) {
+        const s = g.rowText(end - 1);
+        if (s.start != s.end) break;
+        end -= 1;
+    }
     if (end <= first) return false;
-    try ed.selectRange(gpa, rope.lineRange(first).start, rope.lineRange(end - 1).end);
+    try ed.selectRange(gpa, g.rowText(first).start, g.rowText(end - 1).end);
     return true;
 }
 
@@ -355,7 +430,7 @@ fn publish(gpa: Allocator, g: *Grid, cols: u16, screen: []const []const u8, hist
         for (hist.rows) |line| {
             var cells: [16]wire.Cell = undefined;
             for (line, 0..) |ch, i| cells[i] = .{ .cp = ch };
-            try wire.appendHistoryRow(&payload, gpa, cells[0..line.len]);
+            try wire.appendHistoryRow(&payload, gpa, cells[0..line.len], false);
         }
         try wire.appendSection(&msg, gpa, .history, payload.items);
     }
@@ -423,4 +498,93 @@ test "grid mirror: the document is the history then the screen, a line a row, an
     try t.expectEqual(@as(?usize, "x\na  b\n$ pwd\n/srv\n".len + 1), cursorOffset(b));
     // The mirror is core's writing, not the user's: nothing to undo.
     try t.expect(!ed.canUndo());
+}
+
+/// A screen of `rows` (text, wraps) `cols` wide, and an input section when
+/// `line` is given: a prompt at that row and column, its line `text`.
+fn publishWrapped(gpa: Allocator, g: *Grid, cols: u16, rows: []const struct { []const u8, bool }, line: ?struct { row: u32, col: u32, text: []const u8 }) !void {
+    var msg: std.ArrayList(u8) = .empty;
+    defer msg.deinit(gpa);
+    const h: wire.Header = .{ .cols = cols, .rows = @intCast(rows.len), .rows_sent = @intCast(rows.len) };
+    try msg.appendSlice(gpa, std.mem.asBytes(&h));
+    for (rows, 0..) |r, i| {
+        var idx: [4]u8 = undefined;
+        std.mem.writeInt(u32, &idx, @as(u32, @intCast(i)) | (if (r[1]) wire.row_wraps else 0), .little);
+        try msg.appendSlice(gpa, &idx);
+        for (0..cols) |c| {
+            const cell: wire.Cell = .{ .cp = if (c < r[0].len) r[0][c] else 0 };
+            try msg.appendSlice(gpa, std.mem.asBytes(&cell));
+        }
+    }
+    if (line) |l| {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(gpa);
+        try wire.Input.encode(&payload, gpa, .{ .flags = wire.InputHead.line | wire.InputHead.fresh, .row = l.row, .col = l.col, .cursor = @intCast(l.text.len) }, l.text, "Return");
+        try wire.appendSection(&msg, gpa, .input, payload.items);
+    }
+    const applied = try g.apply(gpa, msg.items);
+    if (applied.input) |in| if (in.head.flags & wire.InputHead.line != 0) {
+        try g.field_text.resize(gpa, in.line.len);
+        @memcpy(g.field_text.items, in.line);
+    };
+}
+
+test "grid mirror: a soft-wrapped line is one document line, and its cells map back exactly" {
+    const gpa = t.allocator;
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try Buffers.init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    const b = bufs.get(try bufs.createView(gpa, "*t*", "")).?;
+    const g = try gpa.create(Grid);
+    g.* = .{};
+    b.grid = g;
+    // "abcd efgh" wrapped at 5 — the blank at the wrap is the line's own.
+    try publishWrapped(gpa, g, 5, &.{ .{ "abcd ", true }, .{ "efgh", false }, .{ "$", false } }, null);
+    try sync(gpa, &bufs, b);
+    const ed = b.textEditor().?;
+    {
+        const s = try docText(gpa, ed);
+        defer gpa.free(s);
+        try t.expectEqualStrings("abcd efgh\n$", s);
+    }
+    // Row 1's cell 2 is the line's `g`.
+    try t.expectEqual(@as(usize, 7), g.offsetAtCell(1, 2));
+    try t.expectEqual(@as(usize, 1), g.rowOfOffset(7));
+    try t.expectEqual(@as(usize, 0), g.rowOfOffset(4));
+}
+
+test "grid mirror: a command line is its buffer flowed over its rows — never the echo, never a right-hand prompt" {
+    const gpa = t.allocator;
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try Buffers.init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    const b = bufs.get(try bufs.createView(gpa, "*t*", "")).?;
+    b.capture_endpoint = try gpa.dupe(u8, "x");
+    const g = try gpa.create(Grid);
+    g.* = .{};
+    b.grid = g;
+    // A prompt `$ ` with a right prompt `<R` on a 10-wide screen, and a
+    // buffer of 12 that wraps onto the next row (whose echo the cells hold).
+    try publishWrapped(gpa, g, 10, &.{ .{ "$ echo <R ", false }, .{ "", false }, .{ "", false } }, .{ .row = 0, .col = 2, .text = "echo abcdefg" });
+    g.input.owns_keys = false;
+    try sync(gpa, &bufs, b);
+    const ed = b.textEditor().?;
+    {
+        const s = try docText(gpa, ed);
+        defer gpa.free(s);
+        try t.expectEqualStrings("$ echo abcdefg\n", s);
+    }
+    const f = fieldRange(b).?;
+    try t.expectEqual(@as(usize, 2), f.start);
+    try t.expectEqual(@as(usize, 14), f.end);
+    // `echo abc` fills row 0 from column 2; `defg` flows onto row 1.
+    try t.expectEqual(@as(usize, 10), g.offsetAtCell(1, 0));
+    try t.expectEqual(@as(usize, 1), g.rowOfOffset(11));
+    // Only the field takes edits.
+    try t.expect(writeRefusal(b, .{ .start = 0, .end = 1 }, "") != null);
+    try t.expect(writeRefusal(b, .{ .start = 12, .end = 12 }, "z") == null);
 }

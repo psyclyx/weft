@@ -671,10 +671,11 @@ pub fn build(
             // document's scroll shows, with the document's geometry — so the
             // caret, the selections and a flash are drawn on the cells, and
             // a click or a drag lands on the cell under it.
+            // Its scroll was chosen with the snapshot, in rows (a logical
+            // line may wrap over several): the frame builder's.
             const ed = editor.?;
-            settleRows(ed, top_row, rows_visible);
             const la = self.layout_arena.allocator();
-            self.frame_layout = .{ .lines = try grid_draw.layoutRows(self, la, ed.text(), g, body_rect) };
+            self.frame_layout = .{ .lines = try grid_draw.layoutRows(self, la, g, body_rect) };
             var washes: std.ArrayList(Rect) = .empty;
             defer washes.deinit(scratch);
             for (0..ed.selectionCount()) |i| {

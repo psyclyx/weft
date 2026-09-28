@@ -257,28 +257,37 @@ pub const History = struct {
 };
 
 /// Rows of a history section: each one's cells, as bytes (unaligned: copy
-/// them out, never cast).
+/// them out, never cast), and whether it wraps onto the next.
 pub const RowIterator = struct {
     rest: []const u8,
 
-    pub fn next(self: *RowIterator) DecodeError!?[]const u8 {
+    pub const Row = struct { cells: []const u8, wraps: bool };
+
+    pub fn next(self: *RowIterator) DecodeError!?Row {
         if (self.rest.len == 0) return null;
         if (self.rest.len < 4) return error.Malformed;
-        const n = std.mem.readInt(u32, self.rest[0..4], .little);
+        const word = std.mem.readInt(u32, self.rest[0..4], .little);
+        const n = word & ~row_wraps;
         if (n > max_cells) return error.Malformed;
         const len = @as(usize, n) * @sizeOf(Cell);
         if (self.rest.len - 4 < len) return error.Malformed;
         const cells = self.rest[4..][0..len];
         self.rest = self.rest[4 + len ..];
-        return cells;
+        return .{ .cells = cells, .wraps = word & row_wraps != 0 };
     }
 };
 
-/// Append one history row (its cells, trailing blanks already trimmed by
-/// the caller if it likes) to a history payload being built.
-pub fn appendHistoryRow(list: *std.ArrayList(u8), gpa: std.mem.Allocator, cells: []const Cell) std.mem.Allocator.Error!void {
+/// A row's word — a screen row's index, a history row's cell count — with
+/// this bit set: the row SOFT-WRAPS, its line going on into the next row
+/// (the terminal wrapped it; nothing was printed to end it).
+pub const row_wraps: u32 = 1 << 31;
+
+/// Append one history row (its cells — a row that does not wrap may have
+/// its trailing blanks trimmed; a wrapping one is whole) to a history
+/// payload being built.
+pub fn appendHistoryRow(list: *std.ArrayList(u8), gpa: std.mem.Allocator, cells: []const Cell, wraps: bool) std.mem.Allocator.Error!void {
     var n: [4]u8 = undefined;
-    std.mem.writeInt(u32, &n, @intCast(cells.len), .little);
+    std.mem.writeInt(u32, &n, @as(u32, @intCast(cells.len)) | (if (wraps) row_wraps else 0), .little);
     try list.appendSlice(gpa, &n);
     try list.appendSlice(gpa, std.mem.sliceAsBytes(cells));
 }
@@ -312,10 +321,11 @@ pub const Message = struct {
 
     /// The `i`-th row sent: its index and its cells (unaligned: copy them
     /// out, never cast).
-    pub fn row(self: Message, i: usize) struct { index: u32, cells: []const u8 } {
+    pub fn row(self: Message, i: usize) struct { index: u32, wraps: bool, cells: []const u8 } {
         const stride = 4 + @as(usize, self.header.cols) * @sizeOf(Cell);
         const at = self.body[i * stride ..][0..stride];
-        return .{ .index = std.mem.readInt(u32, at[0..4], .little), .cells = at[4..] };
+        const word = std.mem.readInt(u32, at[0..4], .little);
+        return .{ .index = word & ~row_wraps, .wraps = word & row_wraps != 0, .cells = at[4..] };
     }
 
     pub fn sections(self: Message) Sections {
@@ -353,8 +363,8 @@ test "grid wire: sections follow the rows, framed, and a reader finds them by ta
     defer hist.deinit(gpa);
     const head: HistoryHead = .{ .dropped = 1, .count = 2 };
     try hist.appendSlice(gpa, std.mem.asBytes(&head));
-    try appendHistoryRow(&hist, gpa, &.{ .{ .cp = 'a' }, .{ .cp = 'b', .mark = .{ .prompt = true } } });
-    try appendHistoryRow(&hist, gpa, &.{});
+    try appendHistoryRow(&hist, gpa, &.{ .{ .cp = 'a' }, .{ .cp = 'b', .mark = .{ .prompt = true } } }, true);
+    try appendHistoryRow(&hist, gpa, &.{}, false);
     try appendSection(&msg, gpa, .history, hist.items);
 
     const m = try Message.parse(msg.items);
@@ -367,10 +377,11 @@ test "grid wire: sections follow the rows, framed, and a reader finds them by ta
     try std.testing.expectEqual(@as(u32, 1), parsed.head.dropped);
     var rows = parsed.iterator();
     const first = (try rows.next()).?;
-    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(Cell)), first.len);
-    try std.testing.expect(std.mem.bytesToValue(Cell, first[16..32]).mark.prompt);
-    try std.testing.expectEqual(@as(usize, 0), (try rows.next()).?.len);
-    try std.testing.expectEqual(@as(?[]const u8, null), try rows.next());
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(Cell)), first.cells.len);
+    try std.testing.expect(first.wraps);
+    try std.testing.expect(std.mem.bytesToValue(Cell, first.cells[16..32]).mark.prompt);
+    try std.testing.expectEqual(@as(usize, 0), (try rows.next()).?.cells.len);
+    try std.testing.expect(try rows.next() == null);
     try std.testing.expectEqual(@as(?Section, null), it.next());
     // A section cut short, or a history that says more rows than it holds,
     // is refused whole.

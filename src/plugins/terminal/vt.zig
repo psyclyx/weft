@@ -285,7 +285,7 @@ pub const Vt = struct {
             _ = c.ghostty_render_state_row_set(self.rows_it, c.GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY, @ptrCast(&no));
             if (!(all or row_dirty) or y >= rows) continue;
             var index: [4]u8 = undefined;
-            std.mem.writeInt(u32, &index, y, .little);
+            std.mem.writeInt(u32, &index, y | (if (self.rowWraps()) weft.grid.row_wraps else 0), .little);
             msg.appendSliceAssumeCapacity(&index);
             _ = c.ghostty_render_state_row_get(self.rows_it, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.cells_it));
             var x: u16 = 0;
@@ -430,13 +430,27 @@ pub const Vt = struct {
                 while (x < cols) : (x += 1) {
                     try row_cells.append(weft.allocator, if (c.ghostty_render_state_row_cells_next(self.cells_it)) self.cellHere() else .{});
                 }
+                const wraps = self.rowWraps();
                 var len = row_cells.items.len;
-                while (len > 0 and blank(row_cells.items[len - 1])) len -= 1;
-                try weft.grid.appendHistoryRow(out, weft.allocator, row_cells.items[0..len]);
+                // A row that wraps is whole: its blanks are its line's.
+                if (!wraps) while (len > 0 and blank(row_cells.items[len - 1])) {
+                    len -= 1;
+                };
+                try weft.grid.appendHistoryRow(out, weft.allocator, row_cells.items[0..len], wraps);
             }
             if (y == 0) return error.VtUnavailable; // the viewport would not move
             got += y;
         }
+    }
+
+    /// Whether the row the row iterator is on soft-wraps into the next:
+    /// the terminal wrapped it, nothing printed ended it.
+    fn rowWraps(self: *Vt) bool {
+        var raw: c.GhosttyRow = 0;
+        if (c.ghostty_render_state_row_get(self.rows_it, c.GHOSTTY_RENDER_STATE_ROW_DATA_RAW, @ptrCast(&raw)) != c.GHOSTTY_SUCCESS) return false;
+        var wraps: bool = false;
+        _ = c.ghostty_row_get(raw, c.GHOSTTY_ROW_DATA_WRAP, @ptrCast(&wraps));
+        return wraps;
     }
 
     fn blank(cell: Cell) bool {

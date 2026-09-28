@@ -622,6 +622,20 @@ fn gridReading(b: *core.Buffers.Buffer) bool {
     return b.editor != null and g.mirror != null and b.declared_posture != .capture;
 }
 
+/// The first ROW a pane reading grid `g` shows, `rows` of them: where the
+/// document's scroll (`top_line`, settled around the caret in lines) starts
+/// — then moved, if need be, to keep the caret's row in view, since a line
+/// that wraps is several rows.
+fn gridTopRow(g: *const core.grid.Grid, text: *const core.TextSnapshot, top_line: usize, rows: usize) usize {
+    const rope = text.text();
+    const line = @min(top_line, rope.lineCount() -| 1);
+    var first = g.rowOfOffset(rope.lineRange(line).start);
+    const caret = g.rowOfOffset(text.cursorOffset());
+    if (rows > 0 and caret >= first + rows) first = caret + 1 - rows;
+    if (caret < first) first = caret;
+    return first;
+}
+
 /// One pane of a frame's input: everything `View.build` reads for it, taken
 /// before any pane is laid out (doc/model.md §2.7). The text is a
 /// `core.TextSnapshot` and every layer on `hud` a `layers.Snapshot`; the rest
@@ -876,8 +890,8 @@ pub const FrameBuilder = struct {
         // document's scroll shows (settled around the caret above), history
         // and screen alike.
         const reading = gridReading(spec.buffer);
-        if (spec.buffer.grid) |g| hud.grid = if (reading)
-            try g.snapshotRows(arena, spec.top_row.*, self.view.bodyRowsIn(hud, spec.rect))
+        if (spec.buffer.grid) |g| hud.grid = if (reading and g.mapped())
+            try g.snapshotRows(arena, gridTopRow(g, &text.?, spec.top_row.*, self.view.bodyRowsIn(hud, spec.rect)), self.view.bodyRowsIn(hud, spec.rect))
         else
             try g.snapshot(arena);
         var extent = self.view.extentIn(hud, spec.rect);
