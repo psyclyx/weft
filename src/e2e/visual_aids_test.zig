@@ -403,6 +403,59 @@ test "e2e/snipe: `f`/`t` are one-character snipes, repeated by pressing them aga
     try t.expectEqual(@as(usize, 5), cursor(ed));
 }
 
+test "e2e/snipe: a `line` snipe is bounded by the caret's line, at its end, on an empty line and at the last line" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    // Offsets: a0 b1 \n2 x3 y4 \n5 \n6 b7 z8 \n9
+    authorFile(ed, "line.txt", "ab\nxy\n\nbz\n");
+    ed.chord("g g");
+
+    // On the line's last character, `t`/`f` look no further than the line.
+    ed.press("l", "");
+    try t.expectEqual(@as(usize, 1), cursor(ed));
+    snipe(ed, "t", "y");
+    try t.expectEqual(@as(usize, 1), cursor(ed));
+    try t.expectEqualStrings("snipe: can't find y", ed.echoText());
+    ed.press("Escape", "");
+    snipe(ed, "f", "x");
+    try t.expectEqual(@as(usize, 1), cursor(ed));
+
+    // At a line's start, `T`/`F` do not reach back onto the line above.
+    ed.press("Escape", "");
+    ed.press("j", "");
+    ed.press("0", "");
+    try t.expectEqual(@as(usize, 3), cursor(ed));
+    snipe(ed, "T", "b");
+    try t.expectEqual(@as(usize, 3), cursor(ed));
+    ed.press("Escape", "");
+    snipe(ed, "F", "a");
+    try t.expectEqual(@as(usize, 3), cursor(ed));
+
+    // On an empty line, nothing is ahead or behind.
+    ed.press("Escape", "");
+    ed.press("j", "");
+    try t.expectEqual(@as(usize, 6), cursor(ed));
+    snipe(ed, "f", "b");
+    try t.expectEqual(@as(usize, 6), cursor(ed));
+    ed.press("Escape", "");
+    snipe(ed, "F", "y");
+    try t.expectEqual(@as(usize, 6), cursor(ed));
+
+    // The last line still snipes along itself; `t` onto the adjacent
+    // character does not hold, as a repeated `t` must move.
+    ed.press("Escape", "");
+    ed.press("j", "");
+    try t.expectEqual(@as(usize, 7), cursor(ed));
+    snipe(ed, "f", "z");
+    try t.expectEqual(@as(usize, 8), cursor(ed));
+    ed.press("Escape", "");
+    snipe(ed, "T", "b");
+    try t.expectEqual(@as(usize, 8), cursor(ed));
+}
+
 test "e2e/snipe: matches light up as you type, the landed one apart, and go at the next key" {
     const gpa = t.allocator;
     var app: App = undefined;

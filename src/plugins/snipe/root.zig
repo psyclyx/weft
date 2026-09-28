@@ -417,7 +417,10 @@ fn find(req: Request, scope: Scope, point: usize) ?Hit {
         if (from == 0) return null;
         from = weft.step(from, .back, .char);
     }
-    const b = bounds(from, forward, scope);
+    // The scope is the caret's (its line, its view), never the stepped
+    // start's: a step past a line's end must not carry the snipe onto the
+    // next line, nor a step back before its start onto the one above.
+    const b = bounds(point, forward, scope);
     const lo = if (forward) from else b.start;
     const hi = if (forward) b.end else from;
     if (hi <= lo) return null;
