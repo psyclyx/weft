@@ -862,6 +862,14 @@ fn initExtra() void {
     // (`enterInsert`), rather than resting somewhere its keys are dead.
     weft.restingPosture(.text, "helix-normal");
     weft.restingPosture(.structural, "helix-normal");
+    // Over text, THESE are what the transfer words mean — `d`, `y` and `p`
+    // over the selections, through helix's registers: core offers
+    // std.transfer.* where a grammar provides the matching action, so the
+    // context menu over text has Cut, Copy and Paste, and they do what the
+    // keys do.
+    weft.provide("selection.cut", .{ .posture = "text" }, "helix.delete", 0);
+    weft.provide("selection.copy", .{ .posture = "text" }, "helix.yank", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "helix.paste", 0);
     // Helix's own status-line names. A mode left unnamed (goto, match, a
     // count) shows the mode the entry rests in.
     weft.modeDisplay("helix-normal", "NOR", .normal);

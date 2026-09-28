@@ -410,6 +410,9 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim.paste-text", .call = pasteText(true), .arity = each, .summary = "Paste the register's text after each caret.", .internal = true },
     .{ .name = "vim.paste-before", .call = pasteBefore, .arity = .whole, .summary = "Paste the register before the cursor.", .label = "Paste Before", .icon = "clipboard-paste" },
     .{ .name = "vim.paste-before-text", .call = pasteText(false), .arity = each, .summary = "Paste the register's text before each caret.", .internal = true },
+    .{ .name = "vim.transfer-cut", .call = transferCut, .arity = .whole, .summary = "Delete the visual selection into the register: what Cut means over text in vim.", .internal = true },
+    .{ .name = "vim.transfer-copy", .call = transferCopy, .arity = .whole, .summary = "Yank the visual selection into the register: what Copy means over text in vim.", .internal = true },
+    .{ .name = "vim.transfer-paste", .call = transferPaste, .arity = .whole, .summary = "Put the register after the caret: what Paste means over text in vim.", .internal = true },
     .{ .name = "vim.next-line", .call = openFocused, .arity = .whole, .summary = "Move to the first non-blank character of the next line.", .label = "Next Line" },
     .{ .name = "vim.prev-line", .call = openContainer, .arity = .whole, .summary = "Move to the first non-blank character of the previous line.", .label = "Previous Line" },
     .{ .name = "vim.join-lines", .call = joinLines, .arity = each, .summary = "Join the next line onto the cursor's line with a single space.", .label = "Join Lines" },
@@ -762,6 +765,12 @@ fn initExtra() void {
     // nobody wrote down is one nobody can change.
     weft.restingPosture(.text, "normal");
     weft.restingPosture(.structural, "normal");
+    // What the transfer words mean over text (`transferCut`/…): Cut and Copy
+    // over a visual selection, Paste anywhere text is.
+    const visual_text = &[_]weft.Predicate{ .{ .posture = "text" }, .{ .mode = "visual" } };
+    weft.provide("selection.cut", .{ .all = visual_text }, "vim.transfer-cut", 0);
+    weft.provide("selection.copy", .{ .all = visual_text }, "vim.transfer-copy", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "vim.transfer-paste", 0);
     // What each mode is called on the status line, as vim's own mode line
     // says it. A mode left unnamed (a count, a register, a menu) shows the
     // mode the entry rests in; `visual` is renamed V-LINE while it is
@@ -1404,10 +1413,49 @@ fn semanticDid(action: []const u8, register: u8) bool {
 /// and the prefix survives a refusal, for the text path to spend on the same
 /// slot the user named.
 fn transferred(intention: []const u8, action: []const u8) bool {
-    if (selected_register == 0) return weft.invokeIntention(intention) == .invoked;
+    if (selected_register == 0) {
+        // Over text the word is core's, offered because vim provides what it
+        // means there (`transferCut`/…): that answer is vim's own text half
+        // coming back, never a view's transfer, so it does not count.
+        routing = true;
+        routed_back = false;
+        defer routing = false;
+        return weft.invokeIntention(intention) == .invoked and !routed_back;
+    }
     if (!semanticDid(action, selected_register)) return false;
     selected_register = 0;
     return true;
+}
+
+/// A transfer key is asking the word whether a VIEW takes it (`transferred`).
+var routing: bool = false;
+/// …and the word came back to vim's own provider instead.
+var routed_back: bool = false;
+
+/// True, noting it, when the word reached vim's provider from vim's own
+/// routing: the key's text half runs instead, as it always did.
+fn routedBack() bool {
+    if (!routing) return false;
+    routed_back = true;
+    return true;
+}
+
+// What the transfer words MEAN over text in vim, for a context menu's Cut,
+// Copy and Paste (core offers std.transfer.* where a grammar provides the
+// matching action): visual `d` and `y` over the visual selection, and `p`.
+// Cut and Copy are provided in visual alone — in normal mode nothing is
+// selected, so neither is offered.
+fn transferCut() void {
+    if (routedBack()) return;
+    weft.run("vim.visual-delete-text");
+}
+fn transferCopy() void {
+    if (routedBack()) return;
+    weft.run("vim.visual-yank-text");
+}
+fn transferPaste() void {
+    if (routedBack()) return;
+    weft.run("vim.paste-text");
 }
 
 /// `Return`'s fallback: vim's ordinary `+` — next line, first non-blank. The

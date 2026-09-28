@@ -519,6 +519,223 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
     try t.expectEqualStrings("ide", ed.mode());
 }
 
+// ── Transfer over text is every grammar's ────────────────────────────
+// Core offers Cut, Copy and Paste over text only where the grammar provides
+// what they mean there (`intent.zig`), so every grammar that edits text
+// provides them — each through its own registers and clipboard.
+
+/// A config booted for a context-menu test: a shipped one by name, or a
+/// fixture's source.
+const GrammarApp = struct {
+    proj: h.Project = undefined,
+    ed: Editor = undefined,
+    loader: h.ConfigLoader = undefined,
+
+    fn init(self: *GrammarApp, gpa: std.mem.Allocator, config: []const u8, source: ?[]const u8) !void {
+        try self.proj.init(gpa);
+        errdefer self.proj.deinit();
+        try Editor.init(gpa, &self.ed);
+        errdefer self.ed.deinit();
+        self.loader = .{ .ed = &self.ed };
+        errdefer self.loader.deinit();
+        const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{self.proj.prev_cwd});
+        defer gpa.free(config_dir);
+        if (source) |src|
+            try core.quickjs.evalConfig(&self.ed.engine, self.ed.ctx, self.loader.loader(), &self.ed.config_kv, config_dir, src)
+        else
+            try h.bootConfigNamed(&self.ed, config_dir, config, &self.loader);
+        try t.expect(self.loader.missing.items.len == 0 and self.loader.failed.items.len == 0);
+        try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
+    }
+
+    fn open(self: *GrammarApp, name: []const u8, text: []const u8) !void {
+        try core.file.writeBytes(self.ed.gpa, name, text);
+        self.ed.runStr("file.open", name);
+        self.ed.applyWindow();
+    }
+
+    fn deinit(self: *GrammarApp) void {
+        self.loader.deinit();
+        self.ed.deinit();
+        self.proj.deinit();
+    }
+};
+
+/// An emacs config: the grammar, what it composes, and the context menu.
+const emacs_fixture =
+    \\weft.plugin("motions");
+    \\weft.plugin("operators");
+    \\weft.plugin("emacs");
+    \\weft.plugin("offers");
+    \\weft.bind("global", "mouse-3", "offers.menu");
+;
+
+/// Right-click over `offset` and expect a menu led by `lead`, then a rule.
+fn expectMenuLed(ed: *Editor, offset: usize, lead: []const u8) !void {
+    rightClick(ed, ed.pointAt(offset).?);
+    const view = menuView(ed) orelse return error.NoMenu;
+    var buf: [1024]u8 = undefined;
+    const got = menuText(&buf, view);
+    if (!std.mem.startsWith(u8, got, lead) or !std.mem.startsWith(u8, got[lead.len..], " |")) {
+        std.debug.print("[e2e/chrome] menu over text: '{s}', expected it led by '{s}'\n", .{ got, lead });
+        return error.TestUnexpectedMenu;
+    }
+}
+
+/// Right-click over `offset` — a menu led by Cut, Copy, Paste — and choose
+/// `label`.
+fn chooseOverText(ed: *Editor, offset: usize, label: []const u8) !void {
+    return chooseIn(ed, offset, "Cut Copy Paste", label);
+}
+
+fn chooseIn(ed: *Editor, offset: usize, lead: []const u8, label: []const u8) !void {
+    try expectMenuLed(ed, offset, lead);
+    try selectInMenu(ed, label);
+    ed.press("Return", "");
+    ed.applyWindow();
+    try t.expect(ed.head.interactions.active() == null);
+}
+
+test "e2e/chrome: GATE — every grammar that declares a text posture provides Cut, Copy and Paste over text" {
+    // A grammar that rests in text but provides none leaves its users a
+    // context menu with no clipboard words over the text they edit. Each
+    // bundled plugin, loaded alone: if it says where text rests, it says
+    // what the transfer words mean there.
+    const gpa = t.allocator;
+    const transfer = [_][]const u8{ "selection.cut", "selection.copy", "selection.paste-after" };
+    var grammars: usize = 0;
+    for (h.bundled_plugins.keys(), h.bundled_plugins.values()) |name, wasm| {
+        // The synthetic std-only fixture of the Files conformance gate
+        // speaks the standard words alone, by design.
+        if (std.mem.eql(u8, name, "gramtest")) continue;
+        var ed: Editor = undefined;
+        try Editor.init(gpa, &ed);
+        defer ed.deinit();
+        ed.load(name, wasm) catch continue;
+        if (ed.buffers.posture_modes.get(.text).len == 0) continue;
+        grammars += 1;
+        var owner_buf: [64]u8 = undefined;
+        const owner = try std.fmt.bufPrint(&owner_buf, "plugin.{s}", .{name});
+        for (transfer) |action| {
+            const provided = if (ed.ctx.actions.actions.get(action)) |a| for (a.providers.items) |p| {
+                if (std.mem.eql(u8, p.owner, owner)) break true;
+            } else false else false;
+            if (!provided) {
+                std.debug.print("[e2e/chrome] '{s}' declares a text posture but provides no '{s}'\n", .{ name, action });
+                return error.GrammarProvidesNoTransfer;
+            }
+        }
+    }
+    // vim, helix, emacs, ide.
+    try t.expectEqual(@as(usize, 4), grammars);
+}
+
+test "e2e/chrome: config.js — over vim's visual selection the context menu's Cut, Copy and Paste are vim's d, y and p" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("v.txt", "one two\n");
+
+    // Each row does what its key does in the same state: the menu's result,
+    // undone, then the key's, compared.
+    const Case = struct { label: []const u8, key: []const u8, then: []const u8 };
+    const cases = [_]Case{
+        // Copy is visual `y`, leaving visual; the `P` after it shows what
+        // the register took.
+        .{ .label = "Copy", .key = "y", .then = "P" },
+        // Cut is visual `d`.
+        .{ .label = "Cut", .key = "d", .then = "" },
+    };
+    for (cases) |c| {
+        ed.chord("g g");
+        ed.press("v", "");
+        ed.press("e", "");
+        try chooseOverText(ed, 2, c.label);
+        try t.expectEqualStrings("normal", ed.mode());
+        if (c.then.len > 0) ed.press(c.then, "");
+        const by_menu = try ed.textAlloc();
+        defer gpa.free(by_menu);
+        try t.expect(!std.mem.eql(u8, by_menu, "one two\n"));
+        ed.press("u", "");
+        try ide.expectText(ed, "one two\n");
+
+        ed.chord("g g");
+        ed.press("v", "");
+        ed.press("e", "");
+        ed.press(c.key, "");
+        if (c.then.len > 0) ed.press(c.then, "");
+        try ide.expectText(ed, by_menu);
+        ed.press("u", "");
+        try ide.expectText(ed, "one two\n");
+    }
+
+    // In normal mode nothing is selected, so there is nothing to cut or
+    // copy: Paste leads, and is `p` — after the caret's character.
+    ed.chord("g g");
+    try chooseIn(ed, 0, "Paste", "Paste");
+    const by_menu = try ed.textAlloc();
+    defer gpa.free(by_menu);
+    try t.expect(!std.mem.eql(u8, by_menu, "one two\n"));
+    ed.press("u", "");
+    ed.chord("g g");
+    ed.press("p", "");
+    try ide.expectText(ed, by_menu);
+}
+
+test "e2e/chrome: helix.js — the context menu over a selection has Cut, Copy and Paste, and they are helix's d, y and p" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "helix.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("h.txt", "one two\n");
+    ed.chord("g g");
+
+    ed.press("x", ""); // the line
+    try chooseOverText(ed, 1, "Copy");
+    try ide.expectText(ed, "one two\n");
+    try chooseOverText(ed, 1, "Cut");
+    try ide.expectText(ed, "");
+    // Paste is `p`: what the menu put is what the key puts.
+    try chooseOverText(ed, 0, "Paste");
+    const pasted = try ed.textAlloc();
+    defer gpa.free(pasted);
+    try t.expect(std.mem.indexOf(u8, pasted, "one two\n") != null);
+    ed.press("u", "");
+    try ide.expectText(ed, "");
+    ed.press("p", "");
+    try ide.expectText(ed, pasted);
+}
+
+test "e2e/chrome: an emacs config — the context menu over the region has Cut, Copy and Paste: kill-region, kill-ring-save, yank" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "emacs", emacs_fixture);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("e.txt", "one two\n");
+    try t.expectEqualStrings("emacs", ed.mode());
+
+    ed.press("C-space", "");
+    ed.press("M-f", "");
+    try chooseOverText(ed, 1, "Cut");
+    try ide.expectText(ed, "two\n");
+    // With no region, a right-click places point where it lands, as on the
+    // desktop — so Paste is asked for where it should land.
+    try chooseOverText(ed, 0, "Paste");
+    try ide.expectText(ed, "one two\n");
+    ed.press("C-a", "");
+    ed.press("C-space", "");
+    ed.press("M-f", "");
+    try chooseOverText(ed, 1, "Copy");
+    try ide.expectText(ed, "one two\n");
+    ed.press("C-e", "");
+    try chooseOverText(ed, 7, "Paste");
+    try ide.expectText(ed, "one twoone \n"); // M-f goes to the next word's start
+}
+
 // ── Per-pane chrome ──────────────────────────────────────────────────
 
 /// What pane `node`'s status line and gutter are asked with — the facts the

@@ -43,6 +43,8 @@ weft.plugin("languages.js"); // parser packages + explicit query paths
   // symbol trail on the status line. No keys: the palette reaches
   // `problems`, `terminal` and `panel.toggle`.
   "panel", "problems", "terminal", "breadcrumbs",
+  // What a context offers, as mouse-3's menu (the keys below).
+  "offers",
 ].forEach((p) => weft.plugin(p));
 
 // Grants, exactly as config.js reasons about them: the file browser goes
@@ -64,7 +66,7 @@ weft.plugin("acp.js");
 weft.use("defaults"); // picker and which-key navigation keys
 weft.use("semantic"); // SPC v, bound into helix-structural (and vim's layer)
 weft.use("panel");    // a hidden bottom panel the problems list and terminal take
-// weft.use("menubar"); // File, Edit, … with helix's keys beside each row (F10, Alt+letter)
+// weft.use("menus"); weft.use("menubar"); // File, Edit, … with helix's keys beside each row (F10, Alt+letter)
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
@@ -109,6 +111,13 @@ weft.provide("plugin.code.format", {}, "fmt.format-buffer");
 
 // ── Keys ─────────────────────────────────────────────────────────────
 weft.bind("global", "F1", "which-key.show");
+// The context menu, as in every config (doc/chrome.md §2.2): the pointer's
+// secondary button presents what the thing under it offers — over text,
+// Cut, Copy and Paste are helix's own d, y and p — and S-F10 or the Menu key
+// the focused context's, at the caret.
+weft.bind("global", "mouse-3", "offers.menu");
+weft.bind("global", "S-F10", "offers.menu-at-caret");
+weft.bind("global", "Menu", "offers.menu-at-caret");
 
 // The helix plugin binds Helix's own keymap: motions that select, `v` select
 // mode, the verbs, and the minor modes `g` `m` `z`/`Z` `[` `]` and `space`,

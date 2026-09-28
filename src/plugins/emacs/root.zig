@@ -162,6 +162,13 @@ fn initExtra() void {
     weft.bindKeys("emacs", "M-w", &.{ "std.transfer.yank", "emacs.copy-region" });
     weft.bindKeys("emacs", "C-w", &.{ "std.transfer.delete-to-register", "emacs.kill-region" });
     weft.bindKeys("emacs", "C-y", &.{ "std.transfer.paste", "emacs.yank" });
+    // …and over text the transfer words MEAN those region commands: core
+    // offers std.transfer.* where a grammar provides the matching action, so
+    // the context menu over text has Cut, Copy and Paste — kill-region,
+    // kill-ring-save and yank, through the kill ring.
+    weft.provide("selection.cut", .{ .posture = "text" }, "emacs.kill-region", 0);
+    weft.provide("selection.copy", .{ .posture = "text" }, "emacs.copy-region", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "emacs.yank", 0);
 
     // A bar caret (you're always between cells in a modeless editor).
     weft.runStr2("cursor.set-style", "emacs", "bar");

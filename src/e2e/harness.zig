@@ -2242,7 +2242,7 @@ pub const Project = struct {
 /// Every reference plugin, keyed by the name a config's `weft.plugin(name)`
 /// uses → its embedded wasm (the test module embeds them all). The
 /// analogue of the lib/weft/plugins dir the shipped binary resolves against.
-const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
+pub const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "edit", @embedFile("guest_edit_wasm") },
     .{ "complete", @embedFile("guest_complete_wasm") },
     .{ "project", @embedFile("guest_project_wasm") },
