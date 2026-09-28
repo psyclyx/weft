@@ -390,6 +390,37 @@ test "quickjs: a JS plugin whose load fails leaves nothing it registered behind"
     try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("half.act", intent.factsFor(&env.ctx)));
 }
 
+test "quickjs: a resident JS plugin's key never shadows the config's, and its rollback leaves the config's bound" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    try env.keymap.bind(gpa, "normal", "C-s", "file.save", Keymap.prio_config, "config");
+
+    // Loaded and standing: a plugin binds below the user's tier.
+    {
+        const src =
+            \\weft.command("jsp.save", () => weft.echo("mine"));
+            \\weft.bind("normal", "C-s", "jsp.save");
+            \\weft.bind("normal", "C-j", "jsp.save");
+        ;
+        var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "jsp", null, src);
+        defer plugin.deinit();
+        try t.expectEqualStrings("file.save", env.keymap.lookup("normal", "C-s").?);
+        try t.expectEqualStrings("jsp.save", env.keymap.lookup("normal", "C-j").?);
+    }
+    // A load that fails is rolled back: C-s is still the config's.
+    const bad =
+        \\weft.command("jsbad.save", () => weft.echo("mine"));
+        \\weft.bind("normal", "C-s", "jsbad.save");
+        \\throw new Error("broken");
+    ;
+    try t.expectError(error.ConfigException, JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "jsbad", null, bad));
+    try t.expectEqualStrings("file.save", env.keymap.lookup("normal", "C-s").?);
+}
+
 test "quickjs: the context event reaches only a JS plugin that installed a handler" {
     const gpa = t.allocator;
     var env: Env = undefined;

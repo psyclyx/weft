@@ -1615,10 +1615,10 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         m.addBind(mode, key, cmds[0..n]) catch {};
         return;
     }
-    // LIVE mode (a resident JS plugin): user config shadows plugins and core
-    // defaults (highest tier). Fallback lists bind their FIRST entry, as
-    // `applyDecls` does — no resolution is faked here either.
-    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_config, br.owner) catch {};
+    // LIVE mode (a resident JS plugin): the PLUGIN tier, a .wasm plugin's own —
+    // under the user's config, which it must never shadow. Fallback lists bind
+    // their FIRST entry, as `applyDecls` does — no resolution is faked here.
+    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_plugin, br.owner) catch {};
 }
 
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
@@ -1789,7 +1789,7 @@ fn cGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
         m.addGroup(mode, prefix, name) catch {};
         return;
     }
-    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_config, br.owner) catch {};
+    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_plugin, br.owner) catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind

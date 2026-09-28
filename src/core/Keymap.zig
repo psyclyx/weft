@@ -43,7 +43,47 @@ const Keymap = @This();
 /// architecture §10.2), resolved first-applicable at dispatch. A plain
 /// command binding is a one-entry list — one representation, no second
 /// shape for the single case.
-const BindEntry = struct { commands: [][]const u8, priority: i32, owner: []u8 };
+///
+/// A key is a STACK of owners' bindings, not one slot: the winner is in the
+/// entry's own fields (what every reader reads), and `under` keeps every
+/// other owner's binding it shadows, so taking an owner's binding away —
+/// `unbind`, a plugin's teardown, a failed load's rollback — gives back what
+/// was there, never a hole. One binding per owner per key; the winner is the
+/// highest priority, the latest bound among equals.
+const BindEntry = struct {
+    commands: [][]const u8,
+    priority: i32,
+    owner: []u8,
+    under: std.ArrayList(Layer) = .empty,
+
+    fn top(self: BindEntry) Layer {
+        return .{ .commands = self.commands, .priority = self.priority, .owner = self.owner };
+    }
+
+    fn crown(self: *BindEntry, layer: Layer) void {
+        self.commands = layer.commands;
+        self.priority = layer.priority;
+        self.owner = layer.owner;
+    }
+};
+/// What a winner-less entry holds between losing its last binding and being
+/// removed or refilled (`takeLayer`) — never seen by a reader. An owner is
+/// never empty (`bindArms` asserts it), so an empty one marks it.
+var vacant_arms = [_][]const u8{};
+var vacant_owner = [_]u8{};
+const vacant: Layer = .{ .commands = &vacant_arms, .priority = 0, .owner = &vacant_owner };
+
+/// One owner's binding of a key, shadowed or not.
+const Layer = struct {
+    commands: [][]const u8,
+    priority: i32,
+    owner: []u8,
+
+    fn free(self: Layer, gpa: Allocator) void {
+        freeArms(gpa, self.commands);
+        gpa.free(self.owner);
+    }
+};
 const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
 const GroupEntry = struct { name: []u8, priority: i32, owner: []u8 };
 
@@ -153,10 +193,9 @@ pub const empty: Keymap = .{};
 pub fn deinit(self: *Keymap, gpa: Allocator) void {
     for (self.modes.keys(), self.modes.values()) |mode_name, *bindings| {
         gpa.free(mode_name);
-        for (bindings.keys(), bindings.values()) |k, v| {
+        for (bindings.keys(), bindings.values()) |k, *v| {
             gpa.free(k);
-            freeArms(gpa, v.commands);
-            gpa.free(v.owner);
+            freeEntry(gpa, v);
         }
         bindings.deinit(gpa);
     }
@@ -253,11 +292,12 @@ pub fn granularityOf(self: *const Keymap, mode: []const u8) ?Granularity {
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
-/// (the binder — a plugin name, "config", or "core"). The binding takes the
-/// slot only when its priority ≥ the current holder's, so a higher tier
-/// (config > plugin > core) always wins regardless of bind order. An
+/// (the binder — a plugin name, "config", or "core"). The binding wins the
+/// key only when its priority ≥ the current winner's, so a higher tier
+/// (config > plugin > core) always wins regardless of bind order; a lower
+/// one waits under it (`BindEntry.under`) for the day the higher one goes. An
 /// equal-priority bind from a *different* owner is a collision — surfaced as a
-/// warning; last one wins.
+/// warning; last one wins. An owner binding a key again replaces its own.
 pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
     return self.bindArms(gpa, mode, key_in, &.{command}, priority, owner);
 }
@@ -267,7 +307,7 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
 /// list: it carries it whole to dispatch, which resolves first-applicable
 /// against the catalog (architecture §10.2).
 pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, commands: []const []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
-    std.debug.assert(commands.len > 0);
+    std.debug.assert(commands.len > 0 and owner.len > 0);
     self.revision +%= 1;
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
@@ -276,22 +316,73 @@ pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const
         gop.key_ptr.* = try gpa.dupe(u8, mode);
         gop.value_ptr.* = .empty;
     }
+    const layer: Layer = .{ .commands = try dupeArms(gpa, commands), .priority = priority, .owner = try gpa.dupe(u8, owner) };
+    errdefer layer.free(gpa);
     const bgop = try gop.value_ptr.getOrPut(gpa, key);
-    if (bgop.found_existing) {
-        const cur = bgop.value_ptr.*;
-        if (priority < cur.priority) return; // a lower tier can't shadow a higher one
-        if (priority == cur.priority and !std.mem.eql(u8, cur.owner, owner))
-            std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, cur.owner, owner, priority });
-        freeArms(gpa, cur.commands);
-        gpa.free(cur.owner);
-    } else {
-        bgop.key_ptr.* = try gpa.dupe(u8, key);
+    if (!bgop.found_existing) {
+        bgop.key_ptr.* = gpa.dupe(u8, key) catch |err| {
+            gop.value_ptr.swapRemoveAt(bgop.index);
+            return err;
+        };
+        bgop.value_ptr.* = .{ .commands = layer.commands, .priority = priority, .owner = layer.owner };
+        return;
     }
-    bgop.value_ptr.* = .{
-        .commands = try dupeArms(gpa, commands),
-        .priority = priority,
-        .owner = try gpa.dupe(u8, owner),
+    const entry = bgop.value_ptr;
+    try entry.under.ensureUnusedCapacity(gpa, 1);
+    // The owner's own earlier binding goes: one binding per owner per key.
+    _ = takeLayer(gpa, entry, owner);
+    if (entry.owner.len == 0) {
+        // It was the only binding, and the owner's: this one is the key's.
+        entry.crown(layer);
+    } else if (priority < entry.priority) {
+        entry.under.appendAssumeCapacity(layer); // a lower tier waits under a higher one
+    } else {
+        if (priority == entry.priority)
+            std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, entry.owner, owner, priority });
+        entry.under.appendAssumeCapacity(entry.top());
+        entry.crown(layer);
+    }
+}
+
+/// Take `owner`'s binding out of `entry`, wherever it stands; when it was
+/// the winner, the best shadowed binding (highest priority, the latest among
+/// equals) wins in its place — or, with none, the entry is left with an
+/// empty owner and no arms, for the caller to remove or refill. Whether
+/// anything was taken.
+fn takeLayer(gpa: Allocator, entry: *BindEntry, owner: []const u8) bool {
+    if (entry.owner.len != 0 and std.mem.eql(u8, entry.owner, owner)) {
+        entry.top().free(gpa);
+        var best: ?usize = null;
+        for (entry.under.items, 0..) |l, i| {
+            if (best == null or l.priority >= entry.under.items[best.?].priority) best = i;
+        }
+        if (best) |i| entry.crown(entry.under.orderedRemove(i)) else entry.crown(vacant);
+        return true;
+    }
+    for (entry.under.items, 0..) |l, i| if (std.mem.eql(u8, l.owner, owner)) {
+        entry.under.orderedRemove(i).free(gpa);
+        return true;
     };
+    return false;
+}
+
+fn freeEntry(gpa: Allocator, entry: *BindEntry) void {
+    if (entry.owner.len != 0) entry.top().free(gpa);
+    for (entry.under.items) |l| l.free(gpa);
+    entry.under.deinit(gpa);
+}
+
+/// Take `owner`'s binding of `key` out of `bindings`, removing the key when
+/// nothing is left under it.
+fn unbindIn(gpa: Allocator, bindings: *Bindings, key: []const u8, owner: []const u8) void {
+    const entry = bindings.getPtr(key) orelse return;
+    if (!takeLayer(gpa, entry, owner)) return;
+    if (entry.owner.len != 0) return;
+    if (bindings.fetchSwapRemove(key)) |removed| {
+        var v = removed.value;
+        freeEntry(gpa, &v);
+        gpa.free(removed.key);
+    }
 }
 
 fn dupeArms(gpa: Allocator, commands: []const []const u8) Allocator.Error![][]const u8 {
@@ -311,24 +402,18 @@ fn freeArms(gpa: Allocator, commands: [][]const u8) void {
     gpa.free(commands);
 }
 
-/// Remove the binding at `mode`/`key` IFF it is currently owned by `owner`
-/// (else a no-op — never steal a slot a different, or since-rebound, owner
-/// holds). Used by `manifest.zig`'s reconcile teardown (doc/cwa-prior-docs-audit.md §5):
-/// a bind declared by a PREVIOUS config manifest but absent from the
-/// reloaded one must not leave a ghost binding behind. Frees the entry's
-/// owned strings on removal.
+/// Take `owner`'s binding of `mode`/`key` away, wherever it stands — never
+/// another owner's, winning or not. When it was winning, what it shadowed
+/// wins again. Used by `manifest.zig`'s reconcile teardown
+/// (doc/cwa-prior-docs-audit.md §5): a bind declared by a PREVIOUS config
+/// manifest but absent from the reloaded one must not leave a ghost binding
+/// behind.
 pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, owner: []const u8) void {
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
     const bindings = self.modes.getPtr(mode) orelse return;
-    const entry = bindings.get(key) orelse return;
-    if (!std.mem.eql(u8, entry.owner, owner)) return;
     self.revision +%= 1;
-    if (bindings.fetchSwapRemove(key)) |removed| {
-        gpa.free(removed.key);
-        freeArms(gpa, removed.value.commands);
-        gpa.free(removed.value.owner);
-    }
+    unbindIn(gpa, bindings, key, owner);
 }
 
 /// Name an implicit chord group. `prefix` is the complete key sequence that
@@ -374,14 +459,13 @@ pub fn unbindOwner(self: *Keymap, gpa: Allocator, owner: []const u8) void {
     for (self.modes.values()) |*bindings| {
         var i: usize = 0;
         while (i < bindings.count()) {
-            const v = bindings.values()[i];
-            if (!std.mem.eql(u8, v.owner, owner)) {
+            const entry = &bindings.values()[i];
+            if (!takeLayer(gpa, entry, owner) or entry.owner.len != 0) {
                 i += 1;
                 continue;
             }
             const k = bindings.keys()[i];
-            freeArms(gpa, v.commands);
-            gpa.free(v.owner);
+            freeEntry(gpa, entry);
             bindings.swapRemoveAt(i);
             gpa.free(k);
         }
@@ -1078,6 +1162,30 @@ test "keymap: layering is order-independent — higher priority always wins" {
     try b.bind(gpa, "default", "j", "motions.down", prio_plugin, "vim");
     try b.bind(gpa, "default", "j", "cursor.down", prio_core, "core");
     try t.expectEqualStrings("my-thing", b.lookup("default", "j").?);
+}
+
+test "keymap: taking an owner's binding away gives back what it shadowed, at any tier" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.bind(gpa, "normal", "C-s", "std.persistence.save", prio_core, "core");
+    try km.bind(gpa, "normal", "C-s", "file.save", prio_config, "config");
+    // Same tier, another owner (last wins while it stands) …
+    try km.bind(gpa, "normal", "C-s", "jsp.save", prio_config, "jsp");
+    try t.expectEqualStrings("jsp.save", km.lookup("normal", "C-s").?);
+    // … and gone again: the config's binding is back, not a hole.
+    km.unbindOwner(gpa, "jsp");
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
+    // A lower tier bound under it waits there, and shows when it is uncovered.
+    try km.bind(gpa, "normal", "C-s", "vim.write", prio_plugin, "vim");
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
+    km.unbind(gpa, "normal", "C-s", "config");
+    try t.expectEqualStrings("vim.write", km.lookup("normal", "C-s").?);
+    // An owner's shadowed binding goes with it too: nothing of vim's returns.
+    km.unbindOwner(gpa, "vim");
+    try t.expectEqualStrings("std.persistence.save", km.lookup("normal", "C-s").?);
+    km.unbind(gpa, "normal", "C-s", "core");
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "C-s"));
 }
 
 test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
