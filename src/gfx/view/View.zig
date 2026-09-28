@@ -115,9 +115,11 @@ pub const Rect = struct {
 
 /// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
 /// head, or — `inside`, on a forward selection — the start of the last
-/// character it covers.
+/// character it covers. An inclusive selection's caret is on that character
+/// whatever the place (`Editor.Ends.caretIn`).
 pub fn caretDrawOffset(ed: *const core.TextSnapshot, i: usize, place: hud_mod.CaretPlace) usize {
     const ends = ed.selectionEnds(i);
+    if (ends.inclusive) return ends.caretIn(ed.text());
     if (place == .head or ends.head <= ends.anchor) return ends.head;
     const rope = ed.text();
     var off = ends.head - 1;

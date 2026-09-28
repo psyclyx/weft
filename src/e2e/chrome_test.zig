@@ -640,13 +640,13 @@ test "e2e/chrome: config.js — over vim's visual selection the context menu's C
 
     // Each row does what its key does in the same state: the menu's result,
     // undone, then the key's, compared.
-    const Case = struct { label: []const u8, key: []const u8, then: []const u8 };
+    const Case = struct { label: []const u8, key: []const u8, then: []const u8, want: []const u8 };
     const cases = [_]Case{
         // Copy is visual `y`, leaving visual; the `P` after it shows what
-        // the register took.
-        .{ .label = "Copy", .key = "y", .then = "P" },
+        // the register took — the whole of `one`, the cursor's `e` too.
+        .{ .label = "Copy", .key = "y", .then = "P", .want = "oneone two\n" },
         // Cut is visual `d`.
-        .{ .label = "Cut", .key = "d", .then = "" },
+        .{ .label = "Cut", .key = "d", .then = "", .want = " two\n" },
     };
     for (cases) |c| {
         ed.chord("g g");
@@ -657,7 +657,7 @@ test "e2e/chrome: config.js — over vim's visual selection the context menu's C
         if (c.then.len > 0) ed.press(c.then, "");
         const by_menu = try ed.textAlloc();
         defer gpa.free(by_menu);
-        try t.expect(!std.mem.eql(u8, by_menu, "one two\n"));
+        try t.expectEqualStrings(c.want, by_menu);
         ed.press("u", "");
         try ide.expectText(ed, "one two\n");
 

@@ -583,11 +583,14 @@ pub fn setSelection(r: Range) void {
 /// What an extent is a range of.
 pub const SelectionKind = enum(u32) { text = 0, rows = 1 };
 
-/// One extent's endpoints. `anchor == head` is a caret (a single row).
+/// One extent's endpoints. `anchor == head` is a caret (a single row). An
+/// `inclusive` text extent (vim's `v`) has its caret ON a character: its
+/// ends are still the range it covers, the caret the last character of it.
 pub const Selection = struct {
     anchor: usize,
     head: usize,
     kind: SelectionKind = .text,
+    inclusive: bool = false,
 
     pub fn range(s: Selection) Range {
         return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
@@ -599,8 +602,8 @@ pub const Selections = struct { primary: usize, items: []Selection };
 
 /// How many extents `selections()` can carry in one read.
 pub const max_selections = 1024;
-/// Words per extent in the door's record: kind, anchor, head.
-const extent_words = 3;
+/// Words per extent in the door's record: kind, anchor, head, flags.
+const extent_words = 4;
 var sel_words: [1 + extent_words * max_selections]u32 = undefined;
 var sel_items: [max_selections]Selection = undefined;
 
@@ -617,7 +620,7 @@ pub fn selections() Selections {
     const n = @min(total, max_selections);
     for (sel_items[0..n], 0..) |*s, i| {
         const at = 1 + extent_words * i;
-        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2] };
+        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2], .inclusive = sel_words[at + 3] & 1 != 0 };
     }
     return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
 }
@@ -633,6 +636,7 @@ pub fn setSelections(items: []const Selection, primary: usize) bool {
         sel_words[at] = @intFromEnum(s.kind);
         sel_words[at + 1] = @intCast(s.anchor);
         sel_words[at + 2] = @intCast(s.head);
+        sel_words[at + 3] = @intFromBool(s.inclusive);
     }
     return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
 }

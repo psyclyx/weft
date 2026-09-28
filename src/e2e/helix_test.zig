@@ -689,6 +689,45 @@ test "e2e/helix: an operation flashes every selection, not just the primary" {
     try t.expectEqual(@as(usize, 6), set[1].start);
 }
 
+test "e2e/helix: y and d act on exactly what is highlighted — the caret's character is inside it, either way round" {
+    // Helix's selection covers the character its caret is on, as vim's
+    // visual does; here the stored range IS what is covered (`w` from `o`
+    // stores 0..4, "one "), and the caret draws on its last character. So
+    // what the view highlights and what y and d take are one range.
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const body = "one two three\n";
+    try openFile(ed, "hl.txt", body);
+
+    for ([_][]const u8{ "w", "e", "ee", "wb", "eb", "2w", "v2e" }) |seq| {
+        keys(ed, "gg");
+        keys(ed, seq);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var snap = try core.TextSnapshot.of(textEd(ed), arena.allocator());
+        defer snap.release(ed.gpa);
+        // What the view draws: the highlight, and the caret in it.
+        const lit = snap.selectionRange(snap.primary) orelse return error.NothingHighlighted;
+        const caret = h.view.View.caretDrawOffset(&snap, snap.primary, ed.session.cursor_cfg.placeFor(ed.mode()));
+        errdefer std.debug.print("[e2e/helix] '{s}': lit {d}..{d}, caret {d}\n", .{ seq, lit.start, lit.end, caret });
+        try t.expect(caret >= lit.start and caret < lit.end);
+
+        keys(ed, "y");
+        const yanked = (ed.register.get(0) orelse return error.NothingYanked).slice();
+        try t.expectEqualStrings(body[lit.start..lit.end], yanked);
+        keys(ed, "d");
+        var want: [body.len]u8 = undefined;
+        const kept = try std.fmt.bufPrint(&want, "{s}{s}", .{ body[0..lit.start], body[lit.end..] });
+        try expectText(ed, kept);
+        keys(ed, "u");
+        try expectText(ed, body);
+        if (std.mem.eql(u8, ed.mode(), "helix-select")) ed.press("Escape", "");
+    }
+}
+
 test "e2e/helix: the caret draws on a forward selection's last character" {
     const gpa = t.allocator;
     var app: HelixApp = undefined;

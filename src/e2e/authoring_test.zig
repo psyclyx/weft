@@ -2015,21 +2015,22 @@ test "authoring: visual mode — select with a motion, then delete and change" {
     ed.typeText("hello world foo");
     ed.press("Escape", "");
 
-    // Visual DELETE: v selects, w extends over a word, d deletes it.
+    // Visual DELETE: v selects, w extends onto the next word's first
+    // character — covered, as the cursor's character always is — d deletes.
     ed.press("0", "");
     ed.press("v", "");
-    ed.press("w", ""); // select "hello "
+    ed.press("w", ""); // select "hello w"
     try t.expectEqualStrings("visual", ed.mode());
-    ed.press("d", ""); // → "world foo"
+    ed.press("d", ""); // → "orld foo"
 
-    // Visual CHANGE: v, w selects "world ", c deletes it and enters insert.
+    // Visual CHANGE: v, w selects "orld f", c deletes it and enters insert.
     ed.press("0", "");
     ed.press("v", "");
-    ed.press("w", ""); // select "world "
+    ed.press("w", ""); // select "orld f"
     ed.press("c", ""); // was unbound in visual — now change
     try t.expectEqualStrings("insert", ed.mode());
     ed.typeText("X");
-    ed.press("Escape", ""); // → "Xfoo"
+    ed.press("Escape", ""); // → "Xoo"
 
     ed.press("colon", "");
     ed.typeText("w");
@@ -2038,7 +2039,128 @@ test "authoring: visual mode — select with a motion, then delete and change" {
 
     const disk = try core.file.readAlloc(gpa, "v.txt");
     defer gpa.free(disk);
-    try t.expectEqualStrings("Xfoo", disk);
+    try t.expectEqualStrings("Xoo", disk);
+}
+
+fn expectSelected(text: anytype, start: usize, end: usize) !void {
+    const r = text.selectedRange() orelse return error.NothingSelected;
+    if (r.start != start or r.end != end) {
+        std.debug.print("[authoring] selected {d}..{d}, expected {d}..{d}\n", .{ r.start, r.end, start, end });
+        return error.TestUnexpectedSelection;
+    }
+}
+
+fn expectBuffer(ed: *h.Editor, want: []const u8) !void {
+    const got = try ed.textAlloc();
+    defer ed.gpa.free(got);
+    try t.expectEqualStrings(want, got);
+}
+
+test "authoring: charwise visual covers the character under the cursor — both ends, every operator, every caret" {
+    // Vim's `v` selects from the character the anchor is on through the one
+    // the cursor is on: `v e y` yanks "one", not "on". What is drawn and
+    // what an operator acts on are one range.
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.runStr("file.open", "vi.txt");
+    ed.press("i", "");
+    ed.typeText("one two three");
+    ed.press("Escape", "");
+    const text = ed.buffers.active().textEditor().?;
+
+    // Forward: the cursor sits on `e`, the selection covers it.
+    ed.chord("g g");
+    ed.press("v", "");
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    try expectSelected(text, 0, 1);
+    ed.press("e", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    try expectSelected(text, 0, 3);
+    ed.press("y", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    ed.press("dollar", "");
+    ed.press("p", "");
+    try expectBuffer(ed, "one two threeone");
+    ed.press("u", "");
+
+    // Backward: the anchor's character stays covered as the cursor goes
+    // left of it.
+    ed.chord("g g");
+    ed.press("w", "");
+    ed.press("e", ""); // the `o` of two
+    ed.press("v", "");
+    ed.press("b", ""); // back to its `t`
+    try t.expectEqual(@as(usize, 4), text.cursorOffset());
+    try expectSelected(text, 4, 7);
+    ed.press("d", "");
+    try expectBuffer(ed, "one  three");
+    try t.expectEqual(@as(usize, 4), text.cursorOffset());
+    ed.press("u", "");
+
+    // `v` on its own covers one character; `o` swaps the ends, both still
+    // covered.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("o", "");
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    try expectSelected(text, 0, 3);
+    ed.press("o", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    // V and back to v: the charwise range is the one it was.
+    ed.press("V", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try expectSelected(text, 0, 3);
+    // U, gU/gu and ~ act on the whole of it.
+    ed.press("U", "");
+    try expectBuffer(ed, "ONE two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.chord("g u");
+    try expectBuffer(ed, "one two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.chord("g U");
+    try expectBuffer(ed, "ONE two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("asciitilde", "");
+    try expectBuffer(ed, "one two three");
+    // Leaving with Escape puts the cursor on the character it was on.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    try t.expect(text.selectedRange() == null);
+    // Every caret: `v e d` at two carets deletes both words whole.
+    try text.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 8, .head = 8 } }, 0);
+    ed.press("v", "");
+    ed.press("e", "");
+    try t.expectEqual(@as(usize, 2), text.selectionCount());
+    try t.expectEqual(@as(usize, 3), text.selectionEnds(0).head);
+    try t.expectEqual(@as(usize, 13), text.selectionEnds(1).head);
+    ed.press("d", "");
+    try expectBuffer(ed, " two ");
+    ed.press("u", "");
+    try expectBuffer(ed, "one two three");
+
+    // `c` changes the whole of it.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("c", "");
+    ed.typeText("ONE");
+    ed.press("Escape", "");
+    try expectBuffer(ed, "ONE two three");
 }
 
 test "authoring: `V` linewise visual — select whole lines and delete them" {

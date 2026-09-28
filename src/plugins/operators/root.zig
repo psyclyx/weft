@@ -15,6 +15,7 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "operators.delete", .arity = weft.Arity.each_extent, .call = delete, .summary = "Delete the operator's range.", .internal = true },
     .{ .name = "operators.upcase", .arity = weft.Arity.each_extent, .call = upcase, .summary = "Upper-case the operator's range.", .internal = true },
     .{ .name = "operators.lowercase", .arity = weft.Arity.each_extent, .call = lowercase, .summary = "Lower-case the operator's range.", .internal = true },
+    .{ .name = "operators.toggle-case", .arity = weft.Arity.each_extent, .call = toggleCase, .summary = "Swap the case of every letter in the operator's range.", .internal = true },
 };
 
 /// Delete the awaited range (the edit door, grade-gated + CRDT-anchored).
@@ -37,6 +38,13 @@ fn upcase() void {
 }
 fn lowercase() void {
     mapCase(std.ascii.toLower);
+}
+fn toggleCase() void {
+    mapCase(struct {
+        fn f(c: u8) u8 {
+            return if (std.ascii.isUpper(c)) std.ascii.toLower(c) else std.ascii.toUpper(c);
+        }
+    }.f);
 }
 
 comptime {

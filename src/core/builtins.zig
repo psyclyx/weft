@@ -495,6 +495,17 @@ fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// `selection.start-inclusive`: vim's `v` — a selection whose caret sits on
+/// a character and covers it (`Editor.Selection`'s inclusive). A field has
+/// one kind of mark; it gets that.
+fn cSetInclusiveMark(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (try semanticFieldInput(ctx, .set_mark)) return ok;
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    try ed.setInclusiveMark(ctx.gpa);
+    return ok;
+}
+
 /// The scene selection the dispatching head holds, when the entry this call
 /// is about is a scene (no text of its own).
 fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
@@ -957,6 +968,7 @@ const table = [_]command.Command{
     command.define("cursor.row-down", "Move to the next row, onto its actionable part.", cRowDown).present(.{ .internal = true }),
     command.define("cursor.row-up", "Move to the previous row, onto its actionable part.", cRowUp).present(.{ .internal = true }),
     command.define("selection.start", "Start a selection at the cursor.", cSetMark).maps(.each_extent).present(.{ .label = "Start Selection" }),
+    command.define("selection.start-inclusive", "Start a selection that covers the character the cursor is on, and every one it moves onto.", cSetInclusiveMark).maps(.each_extent).present(.{ .label = "Start Inclusive Selection" }),
     command.define("selection.start-rows", "Start selecting a range of rows at the focused row.", cMarkRows).maps(.each_extent).present(.{ .label = "Select Rows" }),
     command.define("selection.clear", "Drop the selection.", cClearSelection).maps(.each_extent).present(.{ .label = "Clear Selection" }),
     command.define("edit.seal-undo", "Close the current undo step so the next edit starts a new one.", cUndoBarrier).present(.{ .internal = true }),

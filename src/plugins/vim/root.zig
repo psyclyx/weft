@@ -386,6 +386,7 @@ const static_cmds = [_]weft.CommandEntry{
     .{ .name = "vim.visual-comment", .call = visualOp("comment.toggle"), .arity = each, .summary = "Toggle comments over the visual selection.", .label = "Comment Selection" },
     .{ .name = "vim.visual-upcase", .call = visualOp("operators.upcase"), .arity = each, .summary = "Uppercase the visual selection.", .label = "Uppercase Selection", .icon = "case-upper" },
     .{ .name = "vim.visual-lowercase", .call = visualOp("operators.lowercase"), .arity = each, .summary = "Lowercase the visual selection.", .label = "Lowercase Selection", .icon = "case-lower" },
+    .{ .name = "vim.visual-toggle-case", .call = visualOp("operators.toggle-case"), .arity = each, .summary = "Swap the case of every letter in the visual selection.", .label = "Toggle Case of Selection" },
     .{ .name = "vim.visual-indent", .call = visualOp("indent.increase"), .arity = each, .summary = "Indent the lines of the visual selection one level.", .label = "Indent Selection", .icon = "indent-increase" },
     .{ .name = "vim.visual-dedent", .call = visualOp("indent.decrease"), .arity = each, .summary = "Dedent the lines of the visual selection one level.", .label = "Dedent Selection", .icon = "indent-decrease" },
     .{ .name = "vim.upcase", .call = enterOpUpcase, .arity = .whole, .summary = "Uppercase the text the next motion or text object covers.", .label = "Uppercase", .icon = "case-upper" },
@@ -989,6 +990,11 @@ fn initExtra() void {
     weft.bindKey("normal", "g u", "vim.lowercase");
     weft.bindKey("visual", "U", "vim.visual-upcase"); // vim: U/u case a selection
     weft.bindKey("visual", "u", "vim.visual-lowercase");
+    // …and so do gU/gu, and ~ swaps it, as vim has them over a selection
+    // (normal's gU/gu/~ want a motion or the one character instead).
+    weft.bindKey("visual", "g U", "vim.visual-upcase");
+    weft.bindKey("visual", "g u", "vim.visual-lowercase");
+    weft.bindKey("visual", "asciitilde", "vim.visual-toggle-case");
     // `>`/`<` indent operators (>> / << for the line; >ip / <j over a motion).
     weft.bindKey("normal", "greater", "vim.indent");
     weft.bindKey("normal", "less", "vim.dedent");
@@ -1103,11 +1109,10 @@ fn insertLine() void {
 var visual_linewise: bool = false;
 
 /// The range a visual verb operates on: the selection verbatim when
-/// charwise; when linewise, every line from the selection's anchor to its
-/// head, the trailing newline included. Linewise reads the ENDS, never the
-/// selected text: `V` covers its line before anything moves, when anchor and
-/// head still sit on one offset and `weft.selection()` (text, or nothing) has
-/// nothing to say — so `V d` deleted nothing.
+/// charwise (it covers the cursor's character: `visual`); when linewise,
+/// every line the selection touches, the trailing newline included.
+/// Linewise reads the extent, never the selected text: `weft.selection()`
+/// is nothing at all on an empty line, where `V` still covers the line.
 fn visualRange() ?weft.Range {
     rememberVisual();
     if (!visual_linewise) return weft.selection();
@@ -1115,8 +1120,9 @@ fn visualRange() ?weft.Range {
     if (sel.items.len == 0) return null;
     const x = sel.items[sel.primary];
     if (x.kind != .text) return null;
-    const first = weft.lineAt(@min(x.anchor, x.head));
-    const last = weft.lineAt(@max(x.anchor, x.head));
+    const covered = x.range();
+    const first = weft.lineAt(covered.start);
+    const last = weft.lineAt(if (covered.end > covered.start) covered.end - 1 else covered.start);
     const r: weft.Range = .{ .start = first.start, .end = @min(last.end + 1, weft.byteLen()) };
     return if (r.end > r.start) r else null;
 }
@@ -1146,16 +1152,21 @@ fn setVisualKind(kind: VisualKind) void {
     }, .select);
 }
 
+/// Both kinds start an INCLUSIVE selection: the cursor sits on a character
+/// and the selection covers it, and the anchor's, as vim's does — so `v e y`
+/// yanks "one", not "on", and what is drawn is what an operator takes. Core
+/// keeps it (the selection's range IS what it covers), so no verb here adds
+/// the cursor's character back, and switching kinds changes nothing about it.
 fn visual() void { // v — charwise
     setVisualKind(.char);
-    weft.run("selection.start");
+    weft.run("selection.start-inclusive");
     weft.setMode("visual");
 }
 fn visualLine() void { // V — linewise
     setVisualKind(.line);
     // Over a listing's rows a line IS a row: the range is rows, whatever
     // part of the row is focused.
-    weft.run(if (weft.posture() == .text) "selection.start" else "selection.start-rows");
+    weft.run(if (weft.posture() == .text) "selection.start-inclusive" else "selection.start-rows");
     weft.setMode("visual");
 }
 
@@ -1226,7 +1237,7 @@ fn visualReselect() void {
     const last = last_visual[lastVisualHere() orelse return];
     const r = weft.rangeEnds(last.range) orelse return;
     setVisualKind(last.kind);
-    const again = [_]weft.Selection{if (last.reversed) .{ .anchor = r.end, .head = r.start } else .{ .anchor = r.start, .head = r.end }};
+    const again = [_]weft.Selection{if (last.reversed) .{ .anchor = r.end, .head = r.start, .inclusive = true } else .{ .anchor = r.start, .head = r.end, .inclusive = true }};
     if (!weft.setSelections(&again, 0)) return;
     weft.setMode("visual");
 }
@@ -1275,12 +1286,13 @@ fn visualDeleteText() void {
         }
         selected_register = slot;
     }
-    if (visualRange()) |s| {
+    const r = visualRange();
+    if (r) |s| {
         yankVisual(s);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
-        weft.jump(s.start);
     }
     weft.run("selection.clear");
+    if (r) |s| weft.jump(s.start);
     weft.exitToResting();
 }
 fn visualYankText() void {
@@ -1293,11 +1305,15 @@ fn visualYankText() void {
         }
         selected_register = slot;
     }
-    if (visualRange()) |s| {
+    const r = visualRange();
+    if (r) |s| {
         yankVisual(s);
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("selection.clear");
+    // Vim leaves the cursor where the yanked text starts (a linewise yank
+    // keeps its column).
+    if (r) |s| if (!visual_linewise) weft.jump(s.start);
     weft.exitToResting();
 }
 
@@ -1314,12 +1330,13 @@ fn visualChange() void {
         }
         selected_register = slot;
     }
-    if (visualRange()) |s| {
+    const r = visualRange();
+    if (r) |s| {
         yankVisual(s);
         if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
-        weft.jump(s.start);
     }
     weft.run("selection.clear");
+    if (r) |s| weft.jump(s.start);
     enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (comment.toggle, operators.upcase, …) over
@@ -1328,14 +1345,13 @@ fn visualChange() void {
 fn visualOp(comptime cmd: []const u8) fn () void {
     return struct {
         fn h() void {
-            if (visualRange()) |s| {
-                if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| {
-                    weft.runRangeArg(cmd, hnd);
-                    flashAfter(hnd);
-                }
-                weft.jump(s.start);
-            }
+            const r = visualRange();
+            if (r) |s| if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| {
+                weft.runRangeArg(cmd, hnd);
+                flashAfter(hnd);
+            };
             weft.run("selection.clear");
+            if (r) |s| weft.jump(s.start);
             weft.exitToResting();
         }
     }.h;

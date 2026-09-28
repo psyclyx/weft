@@ -61,11 +61,14 @@ pub const Kind = enum(u32) {
 };
 
 /// One extent as it crosses a door: its kind and its two ends. A text caret
-/// is `anchor == head`; a single row is `anchor == head`.
+/// is `anchor == head`; a single row is `anchor == head`. A text extent may
+/// be `inclusive` (`Editor.Selection`): its ends are still the range it
+/// covers, and its caret is on the last character of it.
 pub const Extent = struct {
     kind: Kind = .text,
     anchor: u64,
     head: u64,
+    inclusive: bool = false,
 };
 
 /// How a command maps over a selection of several extents.
@@ -715,7 +718,7 @@ pub fn read(ctx: *command.Context, gpa: Allocator) Allocator.Error!struct { exte
         const out = try gpa.alloc(Extent, n);
         for (out, 0..) |*x, i| {
             const e = ed.selectionEnds(base + i);
-            x.* = .{ .kind = .text, .anchor = e.anchor, .head = e.head };
+            x.* = .{ .kind = .text, .anchor = e.anchor, .head = e.head, .inclusive = e.inclusive };
         }
         return .{ .extents = out, .primary = ed.primary - base };
     }
@@ -759,7 +762,7 @@ pub fn write(ctx: *command.Context, gpa: Allocator, extents: []const Extent, pri
         defer gpa.free(ends);
         for (extents, ends) |x, *e| {
             if (x.kind != .text) return false;
-            e.* = .{ .anchor = @intCast(@min(x.anchor, std.math.maxInt(u32))), .head = @intCast(@min(x.head, std.math.maxInt(u32))) };
+            e.* = .{ .anchor = @intCast(@min(x.anchor, std.math.maxInt(u32))), .head = @intCast(@min(x.head, std.math.maxInt(u32))), .inclusive = x.inclusive };
         }
         if (ed.visiting > 0) try ed.replaceVisited(gpa, ends) else try ed.setSelections(gpa, ends, primary);
         return true;

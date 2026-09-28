@@ -213,8 +213,14 @@ As built (phase 4, `core/selection.zig`):
   `semantic_focus`): the focus path is its primary extent, grown from
   `anchor` (`selection.start-rows`, vim's `V`), and `others` are marked rows
   (`pointer.add-selection`, C-click). Both kinds cross the same door record
-  (`wl_selections_get/set`: `[primary, kind, anchor, head, …]`; rows by their
-  place in the view's focus order) and the same SDK `Selection`.
+  (`wl_selections_get/set`: `[primary, kind, anchor, head, flags, …]`; rows
+  by their place in the view's focus order) and the same SDK `Selection`.
+  A text extent may be **inclusive** (flag bit 0; vim's `v` and `V` start
+  one, `selection.start-inclusive`): its caret sits ON a character and it
+  covers the anchor's character through the caret's. Its ends are still the
+  range it covers, so the highlight, every operator, cut/copy and a seeded
+  search read one range with no rule of their own; only the caret's place
+  differs (`Editor.Ends.caretIn`), and the cursor API translates both ways.
 - **Arity**, declared per command (`Command.arity`; guests through
   `wl_declare_arity`, the SDK's `CommandEntry.arity`, JS's fifth
   `weft.command` argument). The SDK field is required and there is no

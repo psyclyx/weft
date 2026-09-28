@@ -129,14 +129,45 @@ pub const PollState = union(enum) {
 ///
 /// Biases are fixed by role: the head is `.right` (text typed at it pushes it
 /// forward, as do other peers' inserts there), the anchor `.left`.
+///
+/// An INCLUSIVE selection (vim's charwise visual) has its caret ON a
+/// character, not between two, and covers from the anchor's character
+/// through the caret's, both included. It is stored as the range it covers:
+/// `anchor` and `head` are that range's ends, the head the end the caret is
+/// at. So every reader of what a selection covers — the highlight, an
+/// operator, cut and copy, a search seeded from it — reads the range and
+/// cannot be one character short; only WHERE THE CARET IS differs (`Ends.
+/// caretIn`: on a forward selection, the character before the head), and the
+/// cursor API translates both ways (`cursorOffset`, `moveTo`).
 pub const Selection = struct {
     head: stemma.AnchorSet.Handle,
     anchor: ?stemma.AnchorSet.Handle = null,
+    inclusive: bool = false,
 };
 
 /// A selection's endpoints as offsets — what crosses the ABI and what
-/// `setSelections` takes. `anchor == head` asks for a caret (no anchor).
-pub const Ends = struct { anchor: usize, head: usize };
+/// `setSelections` takes. `anchor == head` asks for a caret (no anchor),
+/// unless the selection is `inclusive` (then it keeps its anchor: it grows
+/// from there).
+pub const Ends = struct {
+    anchor: usize,
+    head: usize,
+    inclusive: bool = false,
+
+    /// Where the caret is: the head, or on a forward inclusive selection the
+    /// last character it covers.
+    pub fn caretIn(self: Ends, rope: *const stemma.Rope) usize {
+        if (!self.inclusive or self.head <= self.anchor) return self.head;
+        return rope.scalarToOffset(rope.offsetToScalar(self.head) - 1);
+    }
+
+    /// The character the anchor holds on to, on an inclusive selection: the
+    /// anchor, or on a backward one the character before it.
+    fn pinnedIn(self: Ends, rope: *const stemma.Rope) usize {
+        if (!self.inclusive or self.head >= self.anchor) return self.anchor;
+        return rope.scalarToOffset(rope.offsetToScalar(self.anchor) - 1);
+    }
+};
 
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.Error!Editor {
     var doc = try Document.init(gpa, user_agent);
@@ -219,7 +250,7 @@ pub fn text(self: *const Editor) *const stemma.Rope {
 
 /// The primary selection's head — "the cursor" of every single-cursor API.
 pub fn cursorOffset(self: *const Editor) usize {
-    return self.doc.anchorOffset(self.primarySelection().head);
+    return self.selectionEndsOf(self.primarySelection()).caretIn(self.text());
 }
 
 fn primarySelection(self: *const Editor) Selection {
@@ -751,15 +782,36 @@ fn solo(self: *Editor) void {
 pub fn setMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.solo();
     const sel = &self.selections.items[self.primary];
-    const a = try self.doc.addAnchor(gpa, self.doc.anchorOffset(sel.head), .left);
+    const at = self.selectionEndsOf(sel.*).caretIn(self.text());
+    const a = try self.doc.addAnchor(gpa, at, .left);
     if (sel.anchor) |m| self.doc.removeAnchor(m);
     sel.anchor = a;
+    sel.inclusive = false;
+    self.doc.anchors.set(sel.head, .{ .offset = at, .bias = .right });
 }
 
-/// Lift the anchor, leaving one caret where the head is.
+/// Start an INCLUSIVE selection at the caret (vim's `v`): it covers the
+/// character the caret is on at once, and grows through every character the
+/// caret moves onto.
+pub fn setInclusiveMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const at = self.cursorOffset();
+    try self.setMark(gpa);
+    const sel = &self.selections.items[self.primary];
+    sel.inclusive = true;
+    self.doc.anchors.set(sel.anchor.?, .{ .offset = at, .bias = .left });
+    self.doc.anchors.set(sel.head, .{ .offset = self.stepOffset(at, .fwd, .char), .bias = .right });
+    self.normalize();
+}
+
+/// Lift the anchor, leaving one caret where the caret was (on an inclusive
+/// selection, the character it was on — not the covered range's end).
 pub fn clearSelection(self: *Editor) void {
     self.solo();
     const sel = &self.selections.items[self.primary];
+    if (sel.inclusive) {
+        self.doc.anchors.set(sel.head, .{ .offset = self.selectionEndsOf(sel.*).caretIn(self.text()), .bias = .right });
+        sel.inclusive = false;
+    }
     if (sel.anchor) |m| {
         self.doc.removeAnchor(m);
         sel.anchor = null;
@@ -847,8 +899,8 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
         const anchor_off = @min(e.anchor, len);
         const head = try self.doc.addAnchor(gpa, head_off, .right);
         errdefer self.doc.removeAnchor(head);
-        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
-        next.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+        const anchor = if (anchor_off == head_off and !e.inclusive) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        next.appendAssumeCapacity(.{ .head = head, .anchor = anchor, .inclusive = e.inclusive });
     }
     for (self.selections.items) |sel| self.releaseSelection(sel);
     self.selections.deinit(gpa);
@@ -878,23 +930,24 @@ pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocat
         const anchor_off = @min(e.anchor, len);
         const head = try self.doc.addAnchor(gpa, head_off, .right);
         errdefer self.doc.removeAnchor(head);
-        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
-        slot.* = .{ .head = head, .anchor = anchor };
+        const anchor = if (anchor_off == head_off and !e.inclusive) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        slot.* = .{ .head = head, .anchor = anchor, .inclusive = e.inclusive };
         made += 1;
     }
     const first = ends[0];
     const head_off = @min(first.head, len);
     const anchor_off = @min(first.anchor, len);
     const visited = &self.selections.items[self.primary];
-    if (anchor_off != head_off and visited.anchor == null)
+    if ((anchor_off != head_off or first.inclusive) and visited.anchor == null)
         visited.anchor = try self.doc.addAnchor(gpa, anchor_off, .left);
     self.doc.anchors.set(visited.head, .{ .offset = head_off, .bias = .right });
     if (visited.anchor) |a| {
-        if (anchor_off == head_off) {
+        if (anchor_off == head_off and !first.inclusive) {
             self.doc.removeAnchor(a);
             visited.anchor = null;
         } else self.doc.anchors.set(a, .{ .offset = anchor_off, .bias = .left });
     }
+    visited.inclusive = first.inclusive;
     self.selections.appendSliceAssumeCapacity(fresh);
     self.normalize(); // the visited one stays primary wherever it lands
     self.clearGoal();
@@ -907,8 +960,8 @@ pub fn addSelection(self: *Editor, gpa: Allocator, e: Ends) Allocator.Error!void
     try self.selections.ensureUnusedCapacity(gpa, 1);
     const head = try self.doc.addAnchor(gpa, @min(e.head, len), .right);
     errdefer self.doc.removeAnchor(head);
-    const anchor = if (@min(e.anchor, len) == @min(e.head, len)) null else try self.doc.addAnchor(gpa, @min(e.anchor, len), .left);
-    self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+    const anchor = if (@min(e.anchor, len) == @min(e.head, len) and !e.inclusive) null else try self.doc.addAnchor(gpa, @min(e.anchor, len), .left);
+    self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor, .inclusive = e.inclusive });
     self.primary = self.selections.items.len - 1;
     self.normalize();
     self.history.barrier();
@@ -992,7 +1045,7 @@ fn spanOf(self: *const Editor, sel: Selection) Range {
 
 fn selectionEndsOf(self: *const Editor, sel: Selection) Ends {
     const head = self.doc.anchorOffset(sel.head);
-    return .{ .anchor = if (sel.anchor) |a| self.doc.anchorOffset(a) else head, .head = head };
+    return .{ .anchor = if (sel.anchor) |a| self.doc.anchorOffset(a) else head, .head = head, .inclusive = sel.inclusive };
 }
 
 /// Fold `other` into `into`, spanning `span`. Reuses handles rather than
@@ -1037,7 +1090,19 @@ fn mergeInto(self: *Editor, into: *Selection, other: Selection, span: Range) voi
 
 pub fn moveTo(self: *Editor, offset: usize) void {
     self.solo();
-    self.doc.anchors.set(self.primarySelection().head, .{ .offset = offset, .bias = .right });
+    const sel = self.primarySelection();
+    if (sel.inclusive) if (sel.anchor) |a| {
+        // The caret goes onto `offset`'s character; the range still covers
+        // the anchor's, whichever side of it the caret now is.
+        const pinned = self.selectionEndsOf(sel).pinnedIn(self.text());
+        const forward = offset >= pinned;
+        self.doc.anchors.set(a, .{ .offset = if (forward) pinned else self.stepOffset(pinned, .fwd, .char), .bias = .left });
+        self.doc.anchors.set(sel.head, .{ .offset = if (forward) self.stepOffset(offset, .fwd, .char) else offset, .bias = .right });
+        self.normalize();
+        self.history.barrier();
+        return;
+    };
+    self.doc.anchors.set(sel.head, .{ .offset = offset, .bias = .right });
     // Moving one head can carry it onto or past another selection; keep the
     // set sorted and disjoint (free for a single selection).
     self.normalize();

@@ -403,6 +403,43 @@ test "editor: one selection is the default, and the cursor/mark API is its view"
     try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 3 }, ed.selectionEnds(0));
 }
 
+test "editor: an inclusive selection covers the characters its anchor and caret are on, either way round" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "aé bcd");
+
+    // Started on `é` (two bytes): it is covered at once, the caret on it.
+    ed.placeCursor(1);
+    try ed.setInclusiveMark(gpa);
+    try t.expectEqual(stemma.Range{ .start = 1, .end = 3 }, ed.selectedRange().?);
+    try t.expectEqual(@as(usize, 1), ed.cursorOffset());
+    // Forward onto `c`: through it.
+    ed.placeCursor(5);
+    try t.expectEqual(@as(usize, 5), ed.cursorOffset());
+    try t.expectEqual(stemma.Range{ .start = 1, .end = 6 }, ed.selectedRange().?);
+    // Back past the anchor onto `a`: the anchor's `é` is still covered.
+    ed.moveLeft();
+    ed.moveLeft();
+    ed.moveLeft();
+    ed.moveLeft();
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
+    try t.expectEqual(stemma.Range{ .start = 0, .end = 3 }, ed.selectedRange().?);
+    // The ends cross the ABI as the covered range, flagged; setting them
+    // back keeps it inclusive.
+    const ends = ed.selectionEnds(0);
+    try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 0, .inclusive = true }, ends);
+    try ed.setSelections(gpa, &.{.{ .anchor = ends.head, .head = ends.anchor, .inclusive = true }}, 0);
+    try t.expectEqual(@as(usize, 1), ed.cursorOffset()); // on `é`, the swapped end
+    ed.moveRight();
+    try t.expectEqual(stemma.Range{ .start = 0, .end = 4 }, ed.selectedRange().?);
+    // Leaving puts the caret on the character it was on.
+    ed.clearSelection();
+    try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 3 }, ed.selectionEnds(0));
+}
+
 test "editor: typing, backspace and delete land at every caret, in reverse order, as ONE undo unit" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
