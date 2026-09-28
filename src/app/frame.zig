@@ -170,6 +170,55 @@ pub const EchoTiming = struct {
     }
 };
 
+/// A flash (vim-goggles: `core.flash`) shows for `duration_ns` from the wake
+/// that first sees its generation, then goes. `editor/flash-ms` is re-read
+/// as each new flash starts, so a reload applies to the next one; without
+/// it the duration stands. Noted at the wake's boundary, before the frame,
+/// as `EchoTiming` is — the frame only reads `showing`.
+pub const FlashTiming = struct {
+    gen: u64 = 0,
+    since_ns: u64 = 0,
+    duration_ns: u64 = 150 * std.time.ns_per_ms,
+    /// Whether the flash shows now — the frame's input.
+    showing: bool = false,
+
+    /// Note the flash set's generation `gen` (0: none ever) at `now`; `ms`
+    /// is the configured duration, when there is one. True when what the
+    /// frame shows moved — a new flash, or shown, then gone.
+    pub fn note(self: *FlashTiming, gen: u64, now: u64, ms: ?u64) bool {
+        const new = gen != self.gen;
+        if (new) {
+            self.gen = gen;
+            self.since_ns = now;
+            if (ms) |m| self.duration_ns = m * std.time.ns_per_ms;
+        }
+        const showing = gen > 0 and now -| self.since_ns < self.duration_ns;
+        defer self.showing = showing;
+        return new or showing != self.showing;
+    }
+
+    /// When the flash showing now lapses: the wake that redraws without it.
+    pub fn due(self: *const FlashTiming, now: u64) ?u64 {
+        if (!self.showing) return null;
+        const at = self.since_ns + self.duration_ns;
+        return if (at > now) at else null;
+    }
+};
+
+test "flash timing: a flash shows for its duration from the wake that sees it, and a new one restarts it" {
+    var timing: FlashTiming = .{};
+    const ms = std.time.ns_per_ms;
+    try std.testing.expect(!timing.note(0, 10 * ms, null)); // no flash yet
+    try std.testing.expect(timing.note(1, 20 * ms, null));
+    try std.testing.expect(timing.showing);
+    try std.testing.expectEqual(@as(?u64, 170 * ms), timing.due(100 * ms));
+    try std.testing.expect(!timing.note(1, 100 * ms, null)); // nothing moved
+    try std.testing.expect(timing.note(1, 170 * ms, null)); // gone
+    try std.testing.expect(!timing.showing);
+    try std.testing.expect(timing.note(2, 200 * ms, 50)); // a new one, configured
+    try std.testing.expectEqual(@as(?u64, 250 * ms), timing.due(200 * ms));
+}
+
 test "echo timing: a message shows for its duration from its saying, and again when said again" {
     var echo: core.Head.Echo = .{};
     defer echo.deinit(std.testing.allocator);
@@ -248,14 +297,8 @@ pub const FrameCtx = struct {
     /// Last render's pane frame, for click routing next frame.
     last_frame_rect: *region.Rect,
 
-    // ── vim-goggles flash timing ──
-    flash_gen: *u64,
-    flash_start_ns: *u64,
-    flash_was_active: *bool,
-    /// How long a flash shows. Re-read from `config` (`editor/flash-ms`) each
-    /// time a new flash starts, so a config reload takes effect on the next
-    /// one; the value it held before is the fallback.
-    flash_duration_ns: *u64,
+    /// Whether the vim-goggles flash shows, as the wake noted it.
+    flash_timing: *const FlashTiming,
     /// When the head's message was said, as the frame first saw it.
     echo_timing: *const EchoTiming,
     /// The system's last notice (`Buffers.notices`), timed as an echo is.

@@ -12,6 +12,7 @@ const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
 const view_mod = @import("weft_gfx").view;
 const frame = @import("frame.zig");
+const frame_builder = @import("frame_builder.zig");
 const providers = @import("providers.zig");
 const window_cmds = @import("window_cmds.zig");
 const session_mod = @import("session.zig");
@@ -30,12 +31,9 @@ pub const Application = struct {
     /// frame reads (`pointer.Hover`).
     hover: pointer_mod.Hover = .{},
     last_frame_rect: region.Rect = .{},
-    flash_gen: u64 = 0,
-    flash_start_ns: u64 = 0,
-    flash_was_active: bool = false,
-    /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
-    /// whenever a new flash starts.
-    flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
+    /// Whether the vim-goggles flash shows — noted at each wake's boundary
+    /// (`observe`), read by the frame.
+    flash_timing: frame.FlashTiming = .{},
     /// When the head's message was said, for how long the frame shows it —
     /// noted at each wake's boundary (`observe`), read by the frame.
     echo_timing: frame.EchoTiming = .{},
@@ -103,7 +101,7 @@ pub const Application = struct {
             .lifecycle = .{ .blink_period_ns = args.blink_period_ns },
             .before_async = args.before_async,
             .services = args.services,
-            .flash_duration_ns = args.flash_duration_ns,
+            .flash_timing = .{ .duration_ns = args.flash_duration_ns },
         };
         self.driver = .{
             .ctx = .{
@@ -128,10 +126,7 @@ pub const Application = struct {
                 .view_dirty = &self.view_dirty,
                 .hover = &self.hover,
                 .last_frame_rect = &self.last_frame_rect,
-                .flash_gen = &self.flash_gen,
-                .flash_start_ns = &self.flash_start_ns,
-                .flash_was_active = &self.flash_was_active,
-                .flash_duration_ns = &self.flash_duration_ns,
+                .flash_timing = &self.flash_timing,
                 .echo_timing = &self.echo_timing,
                 .notice_timing = &self.notice_timing,
                 .config = args.config orelse &args.session.system.config_kv,
@@ -363,6 +358,12 @@ pub const Application = struct {
         const ms = echoMs(self.driver.ctx.config);
         if (self.echo_timing.note(echo.said, echo.items.len > 0, self.wake_ns, ms)) damaged = true;
         if (self.notice_timing.note(notices.said, notices.len > 0, self.wake_ns, ms)) damaged = true;
+        // The vim-goggles flash, by the same rule: its start and its lapse are
+        // this wake's to note, so the frame draws it without timing it.
+        const config = self.driver.ctx.config;
+        const flash = &self.driver.ctx.caps.flash;
+        const gen = flash.genOf(flash.showing(frame_builder.configOn(config, "editor", "flash-undo")));
+        if (self.flash_timing.note(gen, self.wake_ns, configMs(config, "editor", "flash-ms"))) damaged = true;
         return damaged;
     }
 
@@ -386,6 +387,12 @@ pub const Application = struct {
 
 /// `editor/echo-ms`: how long a message shows, when a config says.
 fn echoMs(config: ?*const core.kv.Store) ?u64 {
-    const raw = (config orelse return null).get("editor", "echo-ms") orelse return null;
+    return configMs(config, "editor", "echo-ms");
+}
+
+/// A `weft.set(ns, key, "<ms>")` value in milliseconds, or null when unset
+/// or not a number.
+fn configMs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) ?u64 {
+    const raw = (config orelse return null).get(ns, key) orelse return null;
     return std.fmt.parseInt(u64, core.framed.first(raw) orelse return null, 10) catch null;
 }

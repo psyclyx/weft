@@ -403,8 +403,10 @@ styles on one frame and checks every chrome role renders under each.
   `Hover` until the target changes. Building a frame asks nothing: it
   syncs no intent plane (`Plane.syncs` holds still across a build) and
   times nothing — a message's showing is noted at the wake's boundary
-  (`EchoTiming.note`, `Application.observe`), so one frame input drawn twice
-  draws the same lists.
+  (`EchoTiming.note`, `Application.observe`), and so is the vim-goggles
+  flash's (`FlashTiming.note`: its start, its `editor/flash-ms`, its lapse;
+  the build wrote all three and dirtied the view), so one frame input drawn
+  twice draws the same lists.
 
 What this leaves for the later lanes, and two things found on the way:
 

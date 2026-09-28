@@ -156,16 +156,8 @@ fn bpLines(arena: std.mem.Allocator, caps: *core.Caps, editor: ?*core.Editor) []
     return arena.dupe(u8, csv) catch "";
 }
 
-/// A `weft.set(ns, key, "<ms>")` value in milliseconds, or null when unset
-/// or not a number.
-fn configMs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) ?u64 {
-    const raw = (config orelse return null).get(ns, key) orelse return null;
-    const s = core.framed.first(raw) orelse return null;
-    return std.fmt.parseInt(u64, s, 10) catch null;
-}
-
 /// Whether a `weft.set(ns, key, "on")` switch is on.
-fn configOn(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) bool {
+pub fn configOn(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) bool {
     const raw = (config orelse return false).get(ns, key) orelse return false;
     const s = core.framed.first(raw) orelse return false;
     return std.mem.eql(u8, s, "on") or std.mem.eql(u8, s, "true");
@@ -985,26 +977,16 @@ pub const FrameBuilder = struct {
             }
         }
         // vim-goggles: an operation flashed a set of ranges on a document;
-        // show them for the duration. The duration is re-read from the
-        // configuration as each new flash starts, so a reload applies to the
-        // next one; an undo's flash shows only where the configuration
-        // turned it on (`editor/flash-undo`).
-        // The undo set lives beside the edit set (`core/flash.zig`), so with
-        // flash-undo off an undo is not even a new generation here: a fading
-        // yank keeps fading. Every range of the set draws (frame arena).
+        // show them while the wake says the flash shows (`FlashTiming`,
+        // noted before the frame). An undo's flash shows only where the
+        // configuration turned it on (`editor/flash-undo`): the undo set lives
+        // beside the edit set (`core/flash.zig`), so with flash-undo off an
+        // undo is not even a new generation, and a fading yank keeps fading.
+        // Every range of the set draws (frame arena).
         const flash_ranges: []const stemma.Range = fblk: {
             const fs = &fx.caps.flash;
             const which = fs.showing(configOn(fx.config, "editor", "flash-undo"));
-            const gen = fs.genOf(which);
-            if (gen != fx.flash_gen.*) {
-                fx.flash_gen.* = gen;
-                fx.flash_start_ns.* = act.frame_start;
-                if (configMs(fx.config, "editor", "flash-ms")) |ms| fx.flash_duration_ns.* = ms * std.time.ns_per_ms;
-            }
-            const active = gen > 0 and (act.frame_start -| fx.flash_start_ns.*) < fx.flash_duration_ns.*;
-            if (active or fx.flash_was_active.*) fx.view_dirty.* = true; // draw it, then clear it
-            fx.flash_was_active.* = active;
-            if (!active) break :fblk &.{};
+            if (!fx.flash_timing.showing or fs.genOf(which) != fx.flash_timing.gen) break :fblk &.{};
             const ed = editor orelse break :fblk &.{};
             const buf = arena.alloc(stemma.Range, fs.countOf(which, &fx.caps.layers, &ed.doc)) catch break :fblk &.{};
             break :fblk fs.rangesOf(which, &fx.caps.layers, &ed.doc, buf);

@@ -181,7 +181,7 @@ test "e2e/visual-aids: every vim edit flashes what it touched, undo included" {
     // because config.js turned `editor/flash-undo` on: the frame that
     // followed the key treated it as live.
     try t.expectEqual(core.flash.Source.undo, ed.caps.flash.source);
-    try t.expect(ed.application.flash_was_active);
+    try t.expect(ed.application.flash_timing.showing);
 }
 
 test "e2e/visual-aids: with flash-undo off, an undo does not cut an operation's flash short" {
@@ -199,13 +199,13 @@ test "e2e/visual-aids: with flash-undo off, an undo does not cut an operation's 
     // An operation flashes what it touched, and `u` takes it back at once.
     for ([_][]const u8{ "g", "U", "i", "w" }) |k| ed.press(k, "");
     try t.expect(ed.caps.flash.gen > 0);
-    try t.expect(ed.application.flash_was_active);
+    try t.expect(ed.application.flash_timing.showing);
     ed.press("u", "");
     const text = try ed.textAlloc();
     defer gpa.free(text);
     try t.expectEqualStrings("alpha\nbeta\n", text);
     // The operation's flash is still the one showing.
-    try t.expect(ed.application.flash_was_active);
+    try t.expect(ed.application.flash_timing.showing);
     try t.expectEqual(core.flash.Source.edit, ed.caps.flash.showing(false));
 }
 

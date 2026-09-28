@@ -128,7 +128,7 @@ test "e2e/chrome-style: hover lights a toolbar button as frame input, dispatchin
     try t.expect(!ed.application.hover.ripe);
 }
 
-test "e2e/chrome-style: frame-purity — building a frame with a tooltip and a message showing changes nothing — no plane sync, no timing, the same draw lists twice" {
+test "e2e/chrome-style: frame-purity — building a frame with a tooltip, a message and a flash showing changes nothing — no plane sync, no timing, the same draw lists twice" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
     try app.init(gpa);
@@ -148,6 +148,8 @@ test "e2e/chrome-style: frame-purity — building a frame with a tooltip and a m
     try t.expect(ed.application.hover.ripe);
     try t.expectEqualStrings("C-s", ed.application.hover.hint.keys());
     ed.runStr("app.echo", "a passing remark");
+    // …and an operation has just flashed what it touched (vim-goggles).
+    try ed.ctx.caps.flash.set(gpa, &ed.ctx.caps.layers, ed.ctx.document().?, .{ .start = 0, .end = 5 }, .edit);
     ed.gpa.free(try ed.renderCompositeAt(due + 1));
 
     const fb = &ed.render.fb;
@@ -164,6 +166,8 @@ test "e2e/chrome-style: frame-purity — building a frame with a tooltip and a m
     };
     const syncs = ed.ctx.intent.?.syncs;
     const timing = ed.application.echo_timing;
+    const flash = ed.application.flash_timing;
+    try t.expect(flash.showing);
     ed.application.view_dirty = false;
 
     var drawn: [2][]h.scene.DrawItem = undefined;
@@ -183,6 +187,7 @@ test "e2e/chrome-style: frame-purity — building a frame with a tooltip and a m
     // none of them, and asked for no other frame.
     try t.expectEqual(syncs, ed.ctx.intent.?.syncs);
     try t.expectEqual(timing, ed.application.echo_timing);
+    try t.expectEqual(flash, ed.application.flash_timing);
     try t.expect(!ed.application.view_dirty);
     try t.expectEqualDeep(drawn[0], drawn[1]);
 }

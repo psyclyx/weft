@@ -103,24 +103,14 @@ pub fn backingPollDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return next.*;
 }
 
-// ── 5. vim-goggles flash expiry — old site: main.zig's inline flash block
-// inside `frame_builder.zig`'s `buildFrame` (`flash_start_ns +
-// flash_duration_ns` compare, previously only re-checked because vsync
-// forced a rebuild every frame regardless of damage). ──
+// ── 5. vim-goggles flash expiry — timed at the wake's boundary
+// (`frame.FlashTiming.note`, `Application.observe`), never by the frame. ──
 
-pub const FlashCtx = struct {
-    flash: *const core.flash.Flash,
-    flash_start_ns: *const u64,
-    /// Live: the frame re-reads `editor/flash-ms` into it per flash.
-    flash_duration_ns: *const u64,
-};
-
+/// The flash showing now lapses (`frame.FlashTiming`, noted at the wake's
+/// boundary): wake then, so the frame redraws without it.
 pub fn flashDue(ctx: ?*anyopaque, now: u64) ?u64 {
-    const self: *const FlashCtx = @ptrCast(@alignCast(ctx.?));
-    if (self.flash.gen == 0) return null;
-    const due = self.flash_start_ns.* + self.flash_duration_ns.*;
-    if (due <= now) return null; // already expired; the body clears it on this wake
-    return due;
+    const timing: *const @import("frame.zig").FlashTiming = @ptrCast(@alignCast(ctx.?));
+    return timing.due(now);
 }
 
 // ── 5b. A message's lapse — an echo's or a notice's, timed at the wake's boundary
