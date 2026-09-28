@@ -26,9 +26,9 @@
 //! Go, Run, Terminal, Help — and a plugin files INTO it; a path under any
 //! other title is left out unless a config names that title
 //! (`weft.set("menu", "menus", [...])`). Core's commands place themselves
-//! nowhere — placement is config data (`config/menus.js`, which menubar.js
-//! uses) — so reshaping the menus never means overriding core's verbs one by
-//! one. Config places whatever else it likes:
+//! nowhere — placement is config data (`config/menus.js`, used beside the
+//! menubar fragment) — so reshaping the menus never means overriding core's
+//! verbs one by one. Config places whatever else it likes:
 //! `weft.command(id, {menu, group, order, …})` files a command anywhere, and
 //! `weft.set("menu", "items", [...])` adds rows that run a command WITH an
 //! argument — `Path\tLabel\tcommand arg\t[toggle]\t[group]\t[order]` — such

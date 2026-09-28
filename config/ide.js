@@ -98,7 +98,10 @@ weft.use("toolbar");
 // command that says where it lives, with the key that runs it here beside
 // it (doc/chrome.md §2). Used AFTER the toolbar, so it docks above it: a
 // later top dock wraps the ones before it. Alt with a title's letter opens
-// its menu; F10 below lights the bar when no debugger claims the key.
+// its menu; F10 below lights the bar when no debugger claims the key. Where
+// core's own commands sit (File ▸ Save, Edit ▸ Undo, …) is config data,
+// menus.js.
+weft.use("menus");
 weft.use("menubar");
 // The View ▸ Appearance toggles for the chrome this file composes — the
 // menubar's own, and the toolbar's.

@@ -159,8 +159,9 @@ weft.use("defaults");
 // The same goes for a menubar (config/menubar.js): File, Edit, … with the
 // key that runs each row in vim beside it (`SPC f S` for Save As…). The
 // palette (SPC :) and which-key are this config's discovery surfaces; one
-// line adds the bar, and F10 or Alt with a title's letter opens it.
-// weft.use("menubar");
+// line adds the bar (with menus.js, where core's commands sit in it), and F10
+// or Alt with a title's letter opens it.
+// weft.use("menus"); weft.use("menubar");
 
 // `panel` docks a bottom panel that starts hidden: the problems list and the
 // terminal each bring themselves into it (SPC o p, SPC o t), one at a time.

@@ -242,9 +242,10 @@ All of §2, with two departures (below).
   menu (the row a key runs wins: ide's Copy over core's). Config places any
   command with the config tier's `weft.command(id, {menu, group, order})`;
   core's own commands carry no `menu`, `group` or `order` at all — where they
-  sit is `config/menus.js`, a fragment menubar.js uses, so a config that
-  renames or reshapes the menus edits that file instead of overriding each
-  core verb (a plugin still places its own commands);
+  sit is `config/menus.js`, a fragment a config uses beside menubar.js
+  (ide.js does), so a config that renames or reshapes the menus edits that
+  file instead of overriding each core verb (a plugin still places its own
+  commands);
   rows that run a command WITH an argument are the plugin's own config,
   `weft.set("menu", "items", ["View/Appearance\tToolbar\tviewport.toggle
   toolbar\tviewport.toolbar.shown"])`.

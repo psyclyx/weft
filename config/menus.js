@@ -1,5 +1,5 @@
 // Where core's commands sit in the menus — a config FRAGMENT
-// (`weft.use("menus")`), used by menubar.js, doc/chrome.md §2.
+// (`weft.use("menus")`), used beside menubar.js (ide.js does), doc/chrome.md §2.
 //
 // Core says what a command IS — its label, summary, icon, whether it asks
 // for more — and never where it lives: a menu path is placement, and

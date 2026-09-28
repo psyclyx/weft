@@ -282,8 +282,8 @@ const VimApp = struct {
         defer gpa.free(path);
         const base = try core.file.readAlloc(gpa, path);
         defer gpa.free(base);
-        // What a person adds to config.js to get the bar: one line.
-        const src = try std.fmt.allocPrint(gpa, "{s}\nweft.use(\"menubar\");\n", .{base});
+        // What a person adds to config.js to get the bar: the line in its comment.
+        const src = try std.fmt.allocPrint(gpa, "{s}\nweft.use(\"menus\");\nweft.use(\"menubar\");\n", .{base});
         defer gpa.free(src);
         try core.quickjs.evalConfig(&self.ed.engine, self.ed.ctx, self.loader.loader(), &self.ed.config_kv, config_dir, src);
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
