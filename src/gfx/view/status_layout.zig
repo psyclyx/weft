@@ -157,12 +157,14 @@ pub fn cells(text: []const u8) usize {
     return std.unicode.utf8CountCodepoints(text) catch text.len;
 }
 
-/// `text` cut to `cols` cells, the cut end marked `…` (`cols` of at least
-/// one); `text` itself when it already fits. Cut between codepoints only.
+/// `text` cut to `cols` cells, the cut end marked `…`; `text` itself when it
+/// already fits, and nothing at all in no cells — whatever `end` says, so no
+/// caller can draw past the room it asked about. Cut between codepoints only.
 /// Borrows `buf` (a copy long enough for `text` plus `…`).
 pub fn cut(buf: []u8, text: []const u8, cols: usize, end: Elide) []const u8 {
+    if (cols == 0) return text[0..0];
     const have = cells(text);
-    if (have <= cols or end == .none or cols == 0) return text;
+    if (have <= cols or end == .none) return text;
     const keep = cols - 1; // the `…` takes one cell
     // The byte where the kept cells end (`.end`) or begin (`.start`).
     const skip = if (end == .end) keep else have - keep;
@@ -342,6 +344,16 @@ test "status_layout: a cut is between codepoints, marked at the end it removed" 
     const tail = cut(&buf, "→→→→→→→→", 4, .start);
     try t.expectEqualStrings("…→→→", tail);
     try t.expect(std.unicode.utf8ValidateSlice(tail));
+}
+
+test "status_layout: no room is no text — a cut to zero cells is empty, whatever end it keeps" {
+    // A span in a pane's last partial cell asks for zero cells; handing its
+    // whole label back drew it over the next pane.
+    var buf: [64]u8 = undefined;
+    for ([_]Elide{ .none, .end, .start }) |end| {
+        try t.expectEqualStrings("", cut(&buf, "a label", 0, end));
+    }
+    try t.expectEqualStrings("", cut(&buf, "", 0, .end));
 }
 
 test "status_layout: a title keeps its label and its leaf — the path shortens from the left" {

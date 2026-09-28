@@ -485,6 +485,15 @@ fn fitLabel(scratch: Allocator, span: Span, cells: usize) Allocator.Error![]cons
     return status_layout.cut(buf, span.text, cells, .end);
 }
 
+test "a label in a pane's last partial cell draws nothing, never its whole text over the next pane" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const span: Span = .{ .node = @enumFromInt(1), .text = "main.zig", .column = 0, .tone = .normal, .focusable = true };
+    try std.testing.expectEqualStrings("", try fitLabel(arena.allocator(), span, 0));
+    try std.testing.expectEqualStrings("…", try fitLabel(arena.allocator(), span, 1));
+    try std.testing.expectEqualStrings("main.zig", try fitLabel(arena.allocator(), span, 8));
+}
+
 test "a deep tree in a narrow pane gives back indentation evenly, and every label keeps its room" {
     const Node = semantic.scene.NodeId;
     // A tree as a producer lays one out: each row indented two cells a
