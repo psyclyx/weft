@@ -813,3 +813,44 @@ test "e2e/chrome: a double click on a toolbar button runs it once" {
     ed.clickAgain(at);
     try ide.expectText(ed, "one!\n");
 }
+
+test "e2e/chrome: config.js — a change is ONE undo, whether made by an operator (cw) or over a visual selection (vec)" {
+    const gpa = t.allocator;
+    for ([_][]const []const u8{ &.{ "c", "w" }, &.{ "v", "e", "c" } }) |keys| {
+        var app: GrammarApp = undefined;
+        try app.init(gpa, "config.js", null);
+        defer app.deinit();
+        const ed = &app.ed;
+        try app.open("u.txt", "one two\n");
+        for (keys) |k| ed.press(k, k);
+        ed.typeText("ONE");
+        ed.press("Escape", "");
+        const changed = try ed.textAlloc();
+        defer gpa.free(changed);
+        try t.expectEqualStrings("ONE two\n", changed);
+        ed.press("u", "u");
+        const back = try ed.textAlloc();
+        defer gpa.free(back);
+        try t.expectEqualStrings("one two\n", back);
+    }
+}
+
+test "e2e/chrome: helix.js — `c` over a selection and the typing after it are ONE undo" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "helix.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("u.txt", "one two\n");
+    ed.press("e", "e");
+    ed.press("c", "c");
+    ed.typeText("ONE");
+    ed.press("Escape", "");
+    const changed = try ed.textAlloc();
+    defer gpa.free(changed);
+    try t.expectEqualStrings("ONE two\n", changed);
+    ed.press("u", "u");
+    const back = try ed.textAlloc();
+    defer gpa.free(back);
+    try t.expectEqualStrings("one two\n", back);
+}
