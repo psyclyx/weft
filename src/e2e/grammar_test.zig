@@ -655,8 +655,8 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try h.loadGrammar(&ed, case.grammar);
         try h.loadHeadtest(&ed); // `head.capture`: a presentation owner, across the membrane
 
-        // No capture consumer exists in-tree (§10.4), so what is wired is the
-        // DECLARATION and its pairing: a presentation declares capture on its
+        // The DECLARATION and its pairing, for every grammar (the routing of
+        // raw keys is e2e/terminal's): a presentation declares capture on its
         // entry, the read reports it, and the grammar's always-retained
         // break-out chord returns the posture capture displaced.
         const view_id = try ed.buffers.createView(gpa, "*view*", "tool");
