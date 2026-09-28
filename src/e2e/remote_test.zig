@@ -151,6 +151,37 @@ test "e2e/remote: a far-side path is never a local one — recents keep the shel
     try t.expectEqualStrings(here, ed.buffers.active().designationText());
 }
 
+test "e2e/remote: a recent that no longer opens leaves Open Recent instead of being offered again" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    try core.file.writeBytes(gpa, "here.zig", "const x = 1;\n");
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootIde(gpa, &proj, &ed, &loader);
+    // A host that is gone: its shell exits as soon as it starts.
+    const dead = [_][]const u8{ "/bin/sh", "-c", "exit 0" };
+    ed.prov.attach_deps.spawner = .{ .command = &dead };
+    ed.runStr("file.open", "here.zig");
+    var lbuf: [4096]u8 = undefined;
+    const here = try std.fmt.bufPrint(&lbuf, "{s}/here.zig", .{proj.root});
+    const gone = "weft://shell:gone/file/etc/hosts";
+    const list = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ gone, here });
+    defer gpa.free(list);
+    try ed.plugin_kv.put(gpa, "project", "recent", list);
+
+    ed.run("project.open-recent");
+    try t.expect(ed.pick.active);
+    ed.press("Return", ""); // the first: the file on the host that is gone
+    try t.expect(!ed.pick.active);
+    const recent = try core.command.run(ed.commands, ed.ctx, "project.recent", &.{});
+    try t.expectEqualStrings(here, recent.string);
+}
+
 test "e2e/remote: a shell that is gone reads offline in the status line, and its directory refuses by name" {
     const gpa = t.allocator;
     var proj: Project = undefined;

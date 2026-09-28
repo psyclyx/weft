@@ -71,9 +71,38 @@ fn onPickAccept(pick_id: u32) void {
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
     switch (outcome) {
-        .candidate => |c| weft.runStr("file.open", c.text),
+        .candidate => |c| {
+            weft.runStr("file.open", c.text);
+            // A recent that no longer opens (its host is gone, its peer no
+            // longer shares it) leaves the list rather than being offered
+            // again: `open` said why, and what it opened is not it.
+            if (!isActive(c.text)) forget(c.text);
+        },
         .input, .cancelled => {},
     }
+}
+
+/// Whether the entry now active is the one `name` (a recent) names.
+fn isActive(name: []const u8) bool {
+    if (weft.path()) |p| if (std.mem.eql(u8, p, name)) return true;
+    if (weft.designation()) |d| if (std.mem.eql(u8, d, name)) return true;
+    return false;
+}
+
+/// Drop `name` from the recent list.
+fn forget(name: []const u8) void {
+    const alloc = weft.allocator;
+    const existing = alloc.dupe(u8, weft.kvGet(recent_key) orelse "") catch return;
+    defer alloc.free(existing);
+    var kept: std.ArrayList(u8) = .empty;
+    defer kept.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, existing, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or std.mem.eql(u8, line, name)) continue;
+        if (kept.items.len > 0) kept.append(alloc, '\n') catch return;
+        kept.appendSlice(alloc, line) catch return;
+    }
+    weft.kvPut(recent_key, kept.items);
 }
 
 /// Every buffer focus records the file. The root no longer needs recording:

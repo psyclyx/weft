@@ -165,6 +165,18 @@ test "matchSpan: subsequence with tightness" {
     try t.expect(matchSpan("CL", "cursor.left") != null);
 }
 
+test "flex: the tightest alignment wins, not the first — a query spelled whole in a name beats the same letters strewn along a shared prefix" {
+    // Two recent files under one directory whose name happens to hold m…a…i…n
+    // (a random temp directory did, and Open Recent opened the wrong file).
+    const dir = "/tmp/nix-shell-27507snaqjb/build-top/weft-e2e-van4MU/";
+    const main = flexMatch("main", dir ++ "main.zig").?;
+    const other = flexMatch("main", dir ++ "other.zig").?;
+    try t.expectEqual(@as(usize, 4), main.span);
+    try t.expect(main.boundaries > other.boundaries or (main.boundaries == other.boundaries and main.span < other.span));
+    // Greedy leftmost would also have scattered "ab" over "a-xb-ab".
+    try t.expectEqual(@as(usize, 2), flexMatch("ab", "a-xb-ab").?.span);
+}
+
 test "match styles: orderless, prefix, substring, boundary bonus" {
     // orderless — tokens in any order, each a subsequence.
     try t.expect(orderlessMatch("file open", "open-file") != null);
