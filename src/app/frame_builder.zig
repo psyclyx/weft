@@ -455,8 +455,8 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 /// terminal's by "terminal") — plus a trailing close affordance that hides
 /// the viewport. Null for an ordinary pane, and for a docked one that named
 /// no tabs (the sidebar): both draw no strip.
-fn dockedTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: u32, shown: *const core.Buffers.Buffer) ?[]view_mod.Tab {
-    const decl = fx.viewports.findByPane(pane) orelse return null;
+fn dockedTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: *const window_layout.Pane, shown: *const core.Buffers.Buffer) ?[]view_mod.Tab {
+    const decl = fx.viewports.at(pane.viewport) orelse return null;
     if (decl.tabs.len == 0) return null;
     var list: std.ArrayList(view_mod.Tab) = .empty;
     var it = std.mem.splitScalar(u8, decl.tabs, '\n');
@@ -1161,7 +1161,7 @@ pub const FrameBuilder = struct {
                 .facts = other_facts,
                 .hud = .{
                     .mode = other_facts.mode,
-                    .tabs = if (tabs_pane == slot.pane.id) hud.tabs else dockedTabs(arena, fx, slot.pane.id, ob),
+                    .tabs = if (tabs_pane == slot.pane.id) hud.tabs else dockedTabs(arena, fx, slot.pane, ob),
                     .status_line = rows.statusLine(slot.pane.attrs),
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
@@ -1177,7 +1177,7 @@ pub const FrameBuilder = struct {
         var fhud = hud;
         fhud.pane_border = foc_border;
         fhud.float_bounds = frame_rect;
-        if (tabs_pane != focused.pane().id) fhud.tabs = dockedTabs(arena, fx, focused.pane().id, abuf);
+        if (tabs_pane != focused.pane().id) fhud.tabs = dockedTabs(arena, fx, focused.pane(), abuf);
         fhud.status_line = rows.statusLine(focused.pane().attrs);
         try self.capturePane(fx, input, .{
             .buffer = abuf,

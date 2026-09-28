@@ -142,13 +142,8 @@ pub fn applyIntents(
     }
     if (win_ctx.close) {
         win_ctx.close = false;
-        if (win_layout.count() > 1) {
-            const focused = window_layout.headFocus(win_layout, head);
-            const nf = win_layout.closeFocused(focused) catch focused;
-            window_layout.setHeadFocus(head, nf, win_layout);
-            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
+        if (win_layout.count() > 1 and closePane(win_layout, view, buffers, gpa, head, keymap, window_layout.headFocus(win_layout, head)))
             dirty = true;
-        }
     }
     if (win_ctx.focus_dir) |dir| {
         win_ctx.focus_dir = null;
@@ -211,6 +206,30 @@ pub fn applyIntents(
     }
     recordPrimaryFocus(win_layout, head);
     return dirty;
+}
+
+/// Close `node` — the one way a pane leaves the tree, whatever asked
+/// (`window.close`, hiding a named viewport, its header's ×). When the head
+/// was in it, focus moves to the pane the close hands it and the active
+/// entry follows, so no key ever goes to an entry no pane shows. False when
+/// the layout refused (the last pane to edit in).
+fn closePane(
+    win_layout: *window_layout.Layout,
+    view: *view_mod.View,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    node: *window_layout.Node,
+) bool {
+    const had_focus = window_layout.headFocus(win_layout, head) == node;
+    const nf = win_layout.closeFocused(node) catch return false;
+    if (nf == node) return false;
+    if (had_focus) {
+        window_layout.setHeadFocus(head, nf, win_layout);
+        applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
+    }
+    return true;
 }
 
 /// Consume `head`'s pending open placement (§9.4): ask the policy where the
@@ -288,26 +307,21 @@ pub fn materializeViewports(
 ) bool {
     var dirty = false;
     for (registry.list.items, 0..) |*decl, at| {
+        const index: u32 = @intCast(at);
+        defer if (ctx.context) |context| core.viewport.Registry.publishShown(decl, context, win_layout.paneOfViewport(index) != null);
         const edge = decl.attrs.dock orelse continue;
-        if (!decl.shown) {
-            // Hidden: undock it through the ordinary close, which already
-            // knows how a dock collapses and where a head parked in it
-            // recovers to. Its entry stays open, so showing it again
-            // re-presents the same listing rather than a fresh one.
-            if (decl.pane) |id| if (win_layout.paneById(id)) |node| {
-                const had_focus = window_layout.headFocus(win_layout, head) == node;
-                const nf = win_layout.closeFocused(node) catch continue;
-                // Focus left with it: the active entry follows the pane that
-                // has it now, as after any close — never an entry no pane
-                // shows (a hidden terminal would keep taking every key).
-                if (had_focus) {
-                    window_layout.setHeadFocus(head, nf, win_layout);
-                    applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
-                }
+        // On screen is whether a pane IS this viewport; a request to show or
+        // hide it is decided against that, here, and only here.
+        const on_screen = win_layout.paneOfViewport(index);
+        const want = decl.wanted(on_screen != null);
+        decl.want = null;
+        if (!want) {
+            // Hidden: through the one close, like any pane. Its entry stays
+            // open, so showing it again re-presents the same listing rather
+            // than a fresh one.
+            if (on_screen) |node| if (closePane(win_layout, view, buffers, gpa, head, keymap, node)) {
                 dirty = true;
             };
-            decl.pane = null;
-            decl.presented = false;
             continue;
         }
         // A pending take, only while its entry is still open.
@@ -318,8 +332,8 @@ pub fn materializeViewports(
         // entry has closed since, the designation opened again below; never
         // the stranger that took the closed entry's slot.
         var kept: ?core.Buffers.Id = null;
-        var docked = false;
-        if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
+        const docked = on_screen == null;
+        const node = on_screen orelse dock: {
             kept = if (decl.entry) |held| (if (core.designation.findText(buffers, held)) |b| b.id else null) else null;
             // Dock showing what it showed last (or is being handed), never a
             // second view of the active document when there is one.
@@ -329,19 +343,18 @@ pub fn materializeViewports(
             // is shown.
             var outer: [window_layout.max_panes]window_layout.PaneId = undefined;
             var nouter: usize = 0;
-            for (registry.list.items[at + 1 ..]) |later| if (later.pane) |id| if (nouter < outer.len) {
-                outer[nouter] = id;
+            for (at + 1..registry.list.items.len) |later| if (win_layout.paneOfViewport(@intCast(later))) |n| if (nouter < outer.len) {
+                outer[nouter] = n.leaf.id;
                 nouter += 1;
             };
             const panel = win_layout.dockWithin(edge, decl.extent, first, decl.attrs, outer[0..nouter]) catch continue;
-            decl.pane = panel.leaf.id;
+            panel.leaf.viewport = index;
             // Something to show already: an entry kept across a hide stays
             // what it was, rather than being re-presented over.
             decl.presented = kept != null and take == null;
-            docked = true;
             dirty = true;
-        }
-        const node = win_layout.paneById(decl.pane.?) orelse continue;
+            break :dock panel;
+        };
         if (take) |id| {
             takeInto(win_layout, view, buffers, gpa, head, keymap, node, id);
             hold(gpa, buffers, decl, id);
@@ -452,7 +465,7 @@ fn presentDeclared(
     if (target) |t| {
         const owned = gpa.dupe(u8, t) catch return false;
         defer gpa.free(owned);
-        presentBy(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, "file.open", owned);
+        presentBy(ctx, win_layout, buffers, gpa, head, keymap, node.pane().id, "file.open", owned);
     } else presentEmpty(ctx, buffers, gpa, registry, decl, node);
     const shown = buffers.get(node.pane().buffer_id);
     // What the previous presentation made, and nothing shows any more.

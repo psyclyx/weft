@@ -1385,7 +1385,7 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     try t.expectEqualStrings("place", decl.subject.text);
     try t.expect(decl.reveal.key);
     try t.expectEqualStrings("entry", decl.reveal.text);
-    try t.expect(decl.pane == null); // nothing realized during eval
+    try t.expect(ed.viewportPane("sidebar") == null); // nothing realized during eval
 
     // The layout phase realizes it — an ordinary application wake, with no
     // sidebar-specific path anywhere.

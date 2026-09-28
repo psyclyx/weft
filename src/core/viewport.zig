@@ -169,17 +169,17 @@ fn validateBinding(b: Binding) PresentError!void {
     }
 }
 
-/// One declared viewport plus the workspace's note of whether it has been
-/// realized yet. The declaration half is manifest data (`weft.viewport` /
-/// `weft.present`); `pane`/`presented` are the layout phase's bookkeeping,
-/// kept beside it so "declared but not yet on screen" is one lookup rather
-/// than a second parallel table that can disagree with this one.
 /// Where a pending reveal waits: the view asked, at the revision it answered.
 pub const RevealWait = struct {
     view: semantic.view.Ref,
     revision: u64,
 };
 
+/// A NAMED viewport: what config says of it (`weft.viewport` /
+/// `weft.present`) and what it remembers while hidden. There is one kind of
+/// viewport — a pane (`window_layout.Pane`), which says which declaration it
+/// is, if any; this is never a second, parallel record of the pane, so the
+/// two cannot disagree about whether it is on screen, or where.
 pub const Declaration = struct {
     name: []u8,
     attrs: Attrs,
@@ -197,8 +197,6 @@ pub const Declaration = struct {
     /// What to highlight inside what is presented, without taking focus
     /// (`Binding`; its text owned).
     reveal: Binding = .none,
-    /// The `window_layout` pane slot this was materialized into.
-    pane: ?u32 = null,
     presented: bool = false,
     /// The reveal is to be (re)applied at the next layout phase: after a
     /// presentation, or when the reveal key moved.
@@ -220,11 +218,15 @@ pub const Declaration = struct {
     /// the next one can close it once nothing shows it: following a key
     /// must not leave a trail of listings behind as tabs.
     made: ?Buffers.Ref = null,
-    /// Whether the workspace holds this viewport on screen. A declaration
-    /// starts shown; `toggle` flips it and the layout phase docks or undocks
-    /// to match. Workspace state, not manifest data: a config reload
-    /// re-declaring the viewport leaves it as the user left it.
-    shown: bool = true,
+    /// A show/hide asked for and not yet applied. Whether a viewport is on
+    /// screen is never stored: it is whether the pane tree holds a pane that
+    /// IS this viewport (`window_layout.Pane.viewport`), so a pane closed by
+    /// any means — `window.close`, a hide, its header's × — is simply not
+    /// shown, and nothing can bring it back behind the user's back. The
+    /// layout phase applies this against the tree and clears it. A first
+    /// declaration asks to show (unless `hidden`); a re-declaration asks
+    /// nothing, so a config reload leaves it as the user left it.
+    want: ?Want = null,
     /// The entry this viewport last showed: what the layout phase presented
     /// into it, or what `take` put there. Kept across a hide, so showing it
     /// again brings the same entry back rather than whatever is active, and
@@ -256,6 +258,20 @@ pub const Declaration = struct {
 
     /// The empty state's entry and the view it shows.
     pub const EmptyState = struct { entry_generation: u64, view: semantic.view.Ref };
+
+    /// What `want` asks of the tree. `toggle` is decided there, against
+    /// whether the viewport is on screen when the layout phase runs.
+    pub const Want = enum { show, hide, toggle };
+
+    /// Whether a viewport on screen (`shown`) is to be after `want`.
+    pub fn wanted(self: *const Declaration, shown: bool) bool {
+        const want = self.want orelse return shown;
+        return switch (want) {
+            .show => true,
+            .hide => false,
+            .toggle => !shown,
+        };
+    }
 
     /// Whether there is anything to present.
     pub fn hasPresentation(self: *const Declaration) bool {
@@ -306,15 +322,13 @@ pub const Registry = struct {
         return null;
     }
 
-    /// The declaration materialized into `pane` (`window_layout.PaneId`), or
-    /// null when `pane` is not one (an ordinary tiled pane): what the render
-    /// path asks to find a docked pane's header tabs (`weft.viewport`'s
-    /// `tabs`) without knowing the viewport's name.
-    pub fn findByPane(self: *const Registry, pane: u32) ?*const Declaration {
-        for (self.list.items) |*d| {
-            if (d.pane == pane) return d;
-        }
-        return null;
+    /// The declaration a pane IS (`window_layout.Pane.viewport`), or null for
+    /// an ordinary pane: what the render path asks to find a docked pane's
+    /// header tabs without knowing the viewport's name. Declarations are
+    /// only ever appended, so an index names one for the whole run.
+    pub fn at(self: *const Registry, viewport: ?u32) ?*const Declaration {
+        const i = viewport orelse return null;
+        return if (i < self.list.items.len) &self.list.items[i] else null;
     }
 
     pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: Extent) !void {
@@ -356,29 +370,30 @@ pub const Registry = struct {
         errdefer gpa.free(owned_tabs);
         const owned_close = if (tabs.len > 0) try closeCommand(gpa, owned) else @as([]u8, &.{});
         errdefer gpa.free(owned_close);
-        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .shown = !opts.hidden, .tabs = owned_tabs, .close_command = owned_close });
+        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .want = if (opts.hidden) null else .show, .tabs = owned_tabs, .close_command = owned_close });
     }
 
-    /// Publish every declared viewport's shown state into `context` as the
-    /// global key `viewport.<name>.shown` — `on` while shown, absent while
-    /// hidden — so what is on screen is a FACT like any other: a toggle
-    /// command's check mark reads it (doc/chrome.md §1.2 `toggle`), and a
-    /// predicate may name it. Called wherever the state is decided.
-    pub fn publishShown(self: *const Registry, context: *@import("context.zig").Context) void {
-        for (self.list.items) |d| {
-            var buf: [96]u8 = undefined;
-            const key = std.fmt.bufPrint(&buf, "viewport.{s}.shown", .{d.name}) catch continue;
-            _ = context.store.setCore(.global, key, if (d.shown) "on" else "") catch {};
-        }
+    /// Publish whether `d` is on screen into `context` as the global key
+    /// `viewport.<name>.shown` — `on` while shown, absent while hidden — so
+    /// what is on screen is a FACT like any other: a toggle command's check
+    /// mark reads it (doc/chrome.md §1.2 `toggle`), and a predicate may name
+    /// it. The layout phase calls it, from the tree, where the answer lives.
+    pub fn publishShown(d: *const Declaration, context: *@import("context.zig").Context, shown: bool) void {
+        var buf: [96]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "viewport.{s}.shown", .{d.name}) catch return;
+        _ = context.store.setCore(.global, key, if (shown) "on" else "") catch {};
     }
 
-    /// Flip whether `name` is held on screen; returns the new state. Only the
-    /// intent is recorded here — the layout phase realizes it, exactly as it
-    /// realizes a declaration.
-    pub fn toggle(self: *Registry, name: []const u8) error{UnknownViewport}!bool {
+    /// Ask to flip whether `name` is on screen. Only the request is recorded
+    /// — the layout phase decides it against the tree — so two toggles
+    /// before it runs cancel out, as two presses should.
+    pub fn toggle(self: *Registry, name: []const u8) error{UnknownViewport}!void {
         const d = self.find(name) orelse return error.UnknownViewport;
-        d.shown = !d.shown;
-        return d.shown;
+        d.want = if (d.want) |w| switch (w) {
+            .show => .hide,
+            .hide => .show,
+            .toggle => null,
+        } else .toggle;
     }
 
     /// Put the entry opening `designation` in `name`, show it, and focus it —
@@ -389,7 +404,7 @@ pub const Registry = struct {
     pub fn takeEntry(self: *Registry, gpa: std.mem.Allocator, name: []const u8, designation: []const u8) (error{UnknownViewport} || std.mem.Allocator.Error)!void {
         const d = self.find(name) orelse return error.UnknownViewport;
         try hold(gpa, &d.take, designation);
-        d.shown = true;
+        d.want = .show;
     }
 
     /// Replace the designation `slot` holds (null lets go).
@@ -487,7 +502,7 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
 
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
     try reg.present(gpa, "sidebar", .{ .subject = .{ .text = "/srv/proj" } });
-    reg.find("sidebar").?.pane = 3;
+    reg.find("sidebar").?.want = null; // the layout phase applied it
     reg.find("sidebar").?.presented = true;
 
     // Re-applying the same manifest updates in place — no second sidebar,
@@ -495,13 +510,12 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
     try reg.present(gpa, "sidebar", .{ .subject = .{ .text = "/srv/proj" } });
     try t.expectEqual(@as(usize, 1), reg.list.items.len);
-    try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
+    try t.expectEqual(@as(?Declaration.Want, null), reg.find("sidebar").?.want);
     try t.expect(reg.find("sidebar").?.presented);
 
     // A new subject is a new presentation, and only that.
     try reg.present(gpa, "sidebar", .{ .subject = .{ .text = "weft://here/dir/srv/proj/src" } });
     try t.expect(!reg.find("sidebar").?.presented);
-    try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
 
     try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", .{ .subject = .{ .text = "/srv" } }));
     // A relative subject names nothing, and says so where it is written.
@@ -541,18 +555,28 @@ test "viewport: a subject bound to a context key presents again when THAT key mo
     try t.expect(reg.find("strip").?.presented);
 }
 
-test "viewport: toggling is workspace state a re-declaration leaves alone" {
+test "viewport: showing and hiding are requests the tree decides; a re-declaration asks nothing" {
     const gpa = t.allocator;
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
 
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
-    try t.expect(reg.find("sidebar").?.shown);
-    try t.expect(!try reg.toggle("sidebar"));
-    // A config reload re-declares it; the choice to hide it stands.
+    const d = reg.find("sidebar").?;
+    // A first declaration asks to be shown, whatever is on screen.
+    try t.expect(d.wanted(false) and d.wanted(true));
+    d.want = null; // applied
+
+    // Nothing asked: on screen is what the tree says.
+    try t.expect(d.wanted(true) and !d.wanted(false));
+    // A toggle is decided against the tree when it is applied.
+    try reg.toggle("sidebar");
+    try t.expect(!d.wanted(true) and d.wanted(false));
+    // Two toggles before the tree sees either cancel out.
+    try reg.toggle("sidebar");
+    try t.expectEqual(@as(?Declaration.Want, null), d.want);
+    // A config reload re-declares it and asks nothing: the user's choice stands.
     try reg.declare(gpa, "sidebar", companion, .{ .fraction = 0.25 });
-    try t.expect(!reg.find("sidebar").?.shown);
-    try t.expect(try reg.toggle("sidebar"));
+    try t.expectEqual(@as(?Declaration.Want, null), d.want);
     try t.expectError(error.UnknownViewport, reg.toggle("nope"));
 }
 
@@ -605,7 +629,7 @@ test "viewport: edge names round-trip; an unknown spelling is not an edge" {
     try t.expectEqual(@as(?Edge, null), parseEdge("LEFT"));
 }
 
-test "viewport: tabs declares a header's commands, precomputes its close command, and findByPane finds it" {
+test "viewport: tabs declares a header's commands, precomputes its close command, and a pane names its declaration by index" {
     const gpa = t.allocator;
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
@@ -621,9 +645,9 @@ test "viewport: tabs declares a header's commands, precomputes its close command
     const d = reg.find("panel").?;
     try t.expectEqualStrings("problems.open\nterminal.open", d.tabs);
     try t.expectEqualStrings("viewport.toggle panel", d.close_command);
-    d.pane = 7;
-    try t.expectEqual(@as(*const Declaration, d), reg.findByPane(7).?);
-    try t.expectEqual(@as(?*const Declaration, null), reg.findByPane(8));
+    try t.expectEqual(@as(*const Declaration, d), reg.at(0).?);
+    try t.expectEqual(@as(?*const Declaration, null), reg.at(1));
+    try t.expectEqual(@as(?*const Declaration, null), reg.at(null));
 
     // Re-declaring with the SAME tabs changes nothing (no needless realloc);
     // with DIFFERENT tabs, both are replaced, not appended to.
@@ -645,17 +669,15 @@ test "viewport: a panel can start hidden, take an entry, and holds it as chrome"
     defer reg.deinit(gpa);
     const panel: Attrs = .{ .dock = .bottom, .persistent = true, .cycles = false };
     try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{ .hidden = true });
-    try t.expect(!reg.find("panel").?.shown);
+    try t.expect(!reg.find("panel").?.wanted(false));
     // A re-declaration never re-hides what the user showed.
-    reg.find("panel").?.shown = true;
     try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "", .{ .hidden = true });
-    try t.expect(reg.find("panel").?.shown);
+    try t.expect(reg.find("panel").?.wanted(true));
 
-    reg.find("panel").?.shown = false;
     const terminal = "weft://here/proc/terminal.1";
     const problems = "weft://here/diagnostics/srv/proj";
     try reg.takeEntry(gpa, "panel", terminal);
-    try t.expect(reg.find("panel").?.shown);
+    try t.expect(reg.find("panel").?.wanted(false));
     try t.expectEqualStrings(terminal, reg.find("panel").?.take.?);
     try t.expectError(error.UnknownViewport, reg.takeEntry(gpa, "nope", terminal));
 

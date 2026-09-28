@@ -88,6 +88,11 @@ pub const Pane = struct {
     buffer_id: core.Buffers.Id,
     top_row: usize = 0,
     attrs: core.viewport.Attrs = .tiled,
+    /// The named viewport this pane IS (`core.viewport.Registry.at`), or null
+    /// for an ordinary one. The pane carries it, so it moves with the pane
+    /// through every relocation and goes when the pane goes: whether a named
+    /// viewport is on screen is whether some pane says so.
+    viewport: ?u32 = null,
 };
 
 /// A slot-table index for a live pane — the numerator half of the
@@ -408,6 +413,12 @@ pub const Layout = struct {
         return findDock(self.root, edge);
     }
 
+    /// The pane that IS named viewport `viewport`, or null while it is not
+    /// on screen.
+    pub fn paneOfViewport(self: *Layout, viewport: u32) ?*Node {
+        return findViewport(self.root, viewport);
+    }
+
     /// The live leaf a pane id names, or null once it is gone. The read-only
     /// counterpart of the `headFocus` handle check, for callers that hold an
     /// id but no generation (a materialized viewport, a feed event): a
@@ -724,6 +735,14 @@ fn findDock(node: *Node, edge: core.viewport.Edge) ?*Node {
         },
         .split => |s| return findDock(s.first, edge) orelse findDock(s.second, edge),
     }
+}
+
+fn findViewport(node: *Node, viewport: u32) ?*Node {
+    return switch (node.*) {
+        .leaf => |l| if (l.viewport == viewport) node else null,
+        .dock => |d| findViewport(d.panel, viewport) orelse findViewport(d.rest, viewport),
+        .split => |s| findViewport(s.first, viewport) orelse findViewport(s.second, viewport),
+    };
 }
 
 fn rectOfNode(node: *Node, rect: Rect, target: *Node, rows: Rows) ?Rect {

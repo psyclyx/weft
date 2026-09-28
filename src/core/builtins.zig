@@ -842,8 +842,7 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
 /// the intent on the declaration; the layout phase docks or undocks to match.
 fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
-    _ = registry.toggle(args.name) catch return .{ .string = "no viewport by that name" };
-    if (ctx.context) |context| registry.publishShown(context);
+    registry.toggle(args.name) catch return .{ .string = "no viewport by that name" };
     return ok;
 }
 
@@ -862,7 +861,6 @@ fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Valu
         error.UnknownViewport => .{ .string = "no viewport by that name" },
         else => err,
     };
-    if (ctx.context) |context| registry.publishShown(context);
     return ok;
 }
 

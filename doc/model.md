@@ -102,6 +102,17 @@ attribute bundles in config, never workspace kinds.
 The shift: **a viewport's subject is a designation or a context key.** See
 §2.5.
 
+There is one kind of viewport: a pane. A *named* one (`weft.viewport`) is a
+pane that says which declaration it is (`Pane.viewport`); the declaration
+holds only what config said and what the viewport remembers while hidden.
+Whether it is on screen is never stored beside the tree: it is whether a
+pane says it is that viewport. Showing, hiding and toggling are requests the
+layout phase decides against the tree, and a pane leaves the tree one way
+(`closePane`), which hands focus on — so `window.close` on a panel hides it,
+and no key goes to an entry no pane shows. (Landed 2026-09-28, branch
+`arc/viewports`: the old registry kept its own `shown` flag and pane id, and
+the two close paths disagreed.)
+
 ### 2.4 Projection: how content becomes a view
 
 A provider that turns a designation of some kind into a view model: a text

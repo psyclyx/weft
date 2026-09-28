@@ -358,3 +358,36 @@ test "e2e/panels: the panel's header lists Problems and Terminal from their meta
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
     try t.expect(ed.pointAtTabCommand("terminal.open") != null);
 }
+
+test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, focus leaves with it, and showing it again brings back what it held" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "alpha\n");
+
+    // Problems into the panel, focused there.
+    ed.press("C-S-m", "");
+    ed.applyWindow();
+    try t.expectEqualStrings("*problems*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+    try t.expectEqualStrings("*problems*", ed.buffers.active().name);
+
+    // The ordinary window close: one pane leaving the tree, like any other.
+    ed.runStr("window.close", "");
+    ed.applyWindow();
+    try t.expect(ed.viewportPane("panel") == null);
+    try t.expectEqualStrings("a.txt", activeName(ed));
+    // Nothing remembers it as shown behind the tree's back: later layout
+    // phases leave it closed.
+    ed.applyWindow();
+    try frame(ed);
+    ed.applyWindow();
+    try t.expect(ed.viewportPane("panel") == null);
+
+    // A toggle decides against the tree: it is hidden, so it shows — with
+    // what it held.
+    ed.press("C-j", "");
+    ed.applyWindow();
+    try t.expectEqualStrings("*problems*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+}
