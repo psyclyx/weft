@@ -175,9 +175,6 @@ test "e2e/terminal: a full-screen program takes the screen, and gives it back wh
     defer app.deinit();
     const ed = &app.ed;
     {
-        const found = try app.proj.oracle("command -v less >/dev/null && echo yes || echo no");
-        defer gpa.free(found);
-        if (!std.mem.startsWith(u8, found, "yes")) return error.SkipZigTest;
         const made = try app.proj.oracle("printf 'first line\\nsecond line\\n' > pager.txt");
         gpa.free(made);
     }
@@ -260,9 +257,10 @@ fn hermeticShellHomeWith(app: anytype, comptime rc: []const u8) !void {
         "printf \"PS1='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.bashrc && " ++
         "printf 'setopt no_global_rcs\\n' > home/.zshenv && " ++
         "printf \"PROMPT='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.zshrc && " ++
-        "cp home/.bashrc home/.shrc");
+        "cp home/.bashrc home/.shrc && mkdir -p home/.config/fish && " ++
+        "printf \"set -g fish_greeting\\nfunction fish_prompt; printf '%%s ' '" ++ test_prompt ++ "'; end\\n\" > home/.config/fish/config.fish");
     gpa.free(out);
-    const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00", .{app.proj.root});
+    const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00XDG_CONFIG_HOME={0s}/home/.config\x00XDG_DATA_HOME={0s}/home/.local/share\x00", .{app.proj.root});
     defer gpa.free(vars);
     const system = app.ed.session.system;
     _ = try system.environments.publish(system.buffers.active().place, "e2e", vars);
@@ -680,14 +678,6 @@ test "e2e/terminal: out of capture under ide, a drag selects the terminal's cell
 
 // ── Shell integration (doc/terminal.md §7) ───────────────────────────
 
-/// Whether `program` is on the PATH the tests run with.
-fn have(app: anytype, program: []const u8) !bool {
-    var buf: [128]u8 = undefined;
-    const found = try app.proj.oracle(try std.fmt.bufPrint(&buf, "command -v {s} >/dev/null && echo yes || echo no", .{program}));
-    defer app.ed.gpa.free(found);
-    return std.mem.startsWith(u8, found, "yes");
-}
-
 /// The directory the terminal entry's place is, or "".
 fn placeDir(ed: *Editor) []const u8 {
     const b = named(ed, term) orelse return "";
@@ -737,6 +727,8 @@ fn integrationCase(app: *IdeApp, shell: []const u8) !void {
     // what its tab in the panel's header reads.
     {
         const b = named(ed, term).?;
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline and !std.mem.endsWith(u8, b.label(), "sub/deeper")) ed.settle(1);
         try t.expect(std.mem.endsWith(u8, b.label(), "sub/deeper"));
     }
 
@@ -799,7 +791,6 @@ test "e2e/terminal: bash gets weft's integration injected — marked prompts, cd
     var app: IdeApp = undefined;
     try app.init(gpa);
     defer app.deinit();
-    if (!try have(&app, "bash")) return error.SkipZigTest;
     try integrationCase(&app, "bash");
 }
 
@@ -808,9 +799,15 @@ test "e2e/terminal: zsh gets weft's integration injected through ZDOTDIR, its ow
     var app: IdeApp = undefined;
     try app.init(gpa);
     defer app.deinit();
-    // zsh is not in the nix shell itself; the host's may be on PATH.
-    if (!try have(&app, "zsh")) return error.SkipZigTest;
     try integrationCase(&app, "zsh");
+}
+
+test "e2e/terminal: fish gets weft's integration injected through XDG_DATA_DIRS, its config.fish still read" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    try integrationCase(&app, "fish");
 }
 
 test "e2e/terminal: integration off, or a whole command line, runs the shell as it is" {
@@ -871,7 +868,6 @@ test "e2e/terminal: at a zsh prompt in vi mode, vim edits the command line with 
     try app.init(gpa, "config.js", null);
     defer app.deinit();
     const ed = &app.ed;
-    if (!try have(&app, "zsh")) return error.SkipZigTest;
     // The user's zsh is in vi mode: weft's line still lands, whatever
     // keymap the shell is in.
     try vimAtPrompt(&app, "zsh", "bindkey -v");
@@ -926,7 +922,7 @@ test "e2e/terminal: at the prompt workspace chords are the grammar's — C-w mov
     try app.init(gpa, "config.js", null);
     defer app.deinit();
     const ed = &app.ed;
-    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    const shell = "zsh";
     try vimAtPrompt(&app, shell, "");
     try t.expectEqualStrings(term, ed.buffers.active().name);
     // The panel is below the editor: C-w k is vim's, and the editor has
@@ -943,7 +939,7 @@ test "e2e/terminal: a running program gets every key — C-w and Escape included
     try app.init(gpa, "config.js", null);
     defer app.deinit();
     const ed = &app.ed;
-    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    const shell = "zsh";
     try vimAtPrompt(&app, shell, "");
     ed.press("i", "i");
     // A program reading the keyboard raw: three bytes, then their codes.
@@ -968,7 +964,7 @@ test "e2e/terminal: a running program gets every key — C-w and Escape included
     try t.expect(ed.ctx.posture() != core.input.Posture.capture);
 
     // A full-screen program declares the alternate screen: every key its.
-    if (try have(&app, "less")) {
+    {
         const made = try app.proj.oracle("printf 'page one\\npage two\\n' > page.txt");
         gpa.free(made);
         ed.press("i", "i");
@@ -980,4 +976,31 @@ test "e2e/terminal: a running program gets every key — C-w and Escape included
         try waitPrompt(ed);
         try t.expect(ed.ctx.posture() != core.input.Posture.capture);
     }
+}
+
+test "e2e/terminal: a fish prompt is a field too — ide types into it, Return runs it" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(&app);
+    try ed.setConfig("terminal", "shell", "fish");
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+    try waitPrompt(ed);
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    ed.typeText("echo fish-fie");
+    ed.press("BackSpace", "");
+    ed.typeText("eld");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo fish-field", line);
+    }
+    try waitFor(ed, test_prompt ++ " echo fish-field");
+    ed.press("Return", "");
+    try waitFor(ed, "\nfish-field\n");
 }

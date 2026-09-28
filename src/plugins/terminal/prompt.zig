@@ -5,7 +5,8 @@
 //!   OSC 133 ; B            the command line starts (the cursor is there)
 //!   OSC 133 ; C            the line was accepted: a command runs
 //!   OSC 133 ; D [; N]      it finished
-//!   OSC 7780 ; hello ; 1   the integration syncs its command line (v1)
+//!   OSC 7780 ; hello ; V   the integration syncs its command line: V 1 reads
+//!                          a set-line payload after its key, V 2 takes it in band
 //!   OSC 7780 ; line ; SEQ ; CURSOR ; HEX
 //!                          the shell's line buffer (hex of its bytes), its
 //!                          cursor in bytes, and the last line-set it applied
@@ -14,6 +15,8 @@
 //!
 //!   ESC [ 7780 ~ SEQ ; CURSOR ; HEX BEL   set the line buffer and cursor
 //!   ESC [ 7781 ~                          report the line now
+//!   (v2) ESC [ 7782 ~ SEQ ; CURSOR ; HEX ESC [ 7780 ~
+//!                                         the same set, its payload typed in band
 //!
 //! The emulator sees every byte too (it ignores the private OSC); this only
 //! watches. Nothing here routes a key: the state it keeps is what the
@@ -46,7 +49,8 @@ pub const Event = union(enum) {
     line_start,
     command_start,
     command_end,
-    hello,
+    /// The integration syncs its line, speaking protocol version N.
+    hello: u8,
     /// The shell's line: `payload` is `SEQ;CURSOR;HEX`, borrowed until the
     /// next byte.
     line: []const u8,
@@ -121,7 +125,7 @@ pub const Scanner = struct {
             'D' => .command_end,
             else => null,
         };
-        if (std.mem.startsWith(u8, s, "7780;hello;")) return .hello;
+        if (std.mem.startsWith(u8, s, "7780;hello;")) return .{ .hello = std.fmt.parseInt(u8, s["7780;hello;".len..], 10) catch 1 };
         if (std.mem.startsWith(u8, s, "7780;line;")) return .{ .line = s["7780;line;".len..] };
         return null;
     }

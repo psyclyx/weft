@@ -347,7 +347,8 @@ overrides it at spawn). A bare shell program starts through `launch`:
   status) and `PS0`.
 - **fish**: weft's directory goes first on `XDG_DATA_DIRS`, so fish sources
   `fish/vendor_conf.d/weft.fish`, which puts `XDG_DATA_DIRS` back and wraps
-  `fish_prompt` at the first prompt.
+  `fish_prompt` at the first prompt (its `fish_title` too, unless the
+  user defined one).
 
 Each then sources `${XDG_CONFIG_HOME:-~/.config}/weft/shell/<shell>` when it
 exists: the user's own hook. `TERM_PROGRAM=weft` stays, for an rc file to
@@ -414,7 +415,10 @@ it (`Grid.input`) and routes by it. The user's own break-out overrides it.
 
 - **Declared, never guessed.** The plugin computes OWNS_KEYS from ghostty's
   modes (`altScreen`, `kittyFlags`, `mouseTracking`) and the OSC 133 marks
-  it watches on the byte stream (`prompt.Scanner`); nothing else.
+  it watches on the byte stream (`prompt.Scanner`); nothing else. Kitty
+  keyboard flags count only when set and not the ones the line editor had
+  at its B mark: fish pushes its own to read its line, and pops them while
+  it runs a binding — neither is a program claiming the keys.
 - **Capture follows the program** (`Buffer.followProgram`, run on every
   publish): OWNS_KEYS declares capture, PROMPT releases it, BROKEN OUT
   (`Buffer.broken_out`) holds both off. `wl_declare_capture` sets the
@@ -425,7 +429,7 @@ it (`Grid.input`) and routes by it. The user's own break-out overrides it.
   mode at a new prompt (vim and helix normal: `i`, `a` start typing as in any
   text; ide and emacs type directly).
 - **Without integration** — a whole command line as `shell`, `integration`
-  off, fish (which does not sync its line) — nothing is ever declared, and
+  off — nothing is ever declared, and
   the program owns every key: capture, as before.
 
 **The command line is a field** (`core/grid_mirror.zig`). At a PROMPT the
@@ -452,7 +456,7 @@ scripts):
 
 | direction | bytes | meaning |
 |---|---|---|
-| shell → weft | `OSC 7780;hello;1` | this integration syncs its line |
+| shell → weft | `OSC 7780;hello;V` | this integration syncs its line; V 2 takes a set in band |
 | shell → weft | `OSC 7780;line;SEQ;CURSOR;HEX` | the line buffer (hex of its bytes), the cursor in bytes, the last set it applied |
 | weft → shell | `ESC [ 7780 ~ SEQ;CURSOR;HEX BEL` | set the buffer and the cursor |
 | weft → shell | `ESC [ 7781 ~` | report now |
@@ -466,10 +470,21 @@ shell is in; zsh in vi mode is tested. zsh reports on every redraw
 after each key weft sends that does not end the line. A report older than
 weft's last set (by SEQ) is a stale echo and ignored; one that differs from
 what weft set is the shell's own change, and is declared as the program's
-word. A prompt the line editor merely redraws (bash redisplays it after a
-set) is not a new prompt. A key typed raw at a prompt not yet declared
-makes the line unknown, and no prompt is declared until the shell reports
-it.
+word. A B mark while already at a prompt (bash redisplays it after a set;
+fish marks every prompt twice, natively and ours) is the same prompt, until
+a line ends (OSC 133 C, or a key that ends it). A key that went raw to the
+line editor — typed ahead while a command ran, or at a prompt not yet
+declared — asks for a report, and no prompt is declared while any asked-for
+report is outstanding (`Shell.awaiting`): the field starts with what the
+shell actually holds.
+
+**fish** (hello version 2) cannot read further input inside a key binding,
+so a set goes in band: ctrl-alt-shift-F10 (`CSI 21;8~`) empties the command
+line (and puts a vi mode into insert), the payload types in as text, and
+ctrl-alt-shift-F12 (`CSI 24;8~`) takes it back out and sets the real line
+with `commandline -r` / `-C`; ctrl-alt-shift-F11 (`CSI 23;8~`) asks for a
+report. fish 4 names only keys it knows, so a private `CSI 7780 ~` would be
+dropped.
 
 ## 9. What stayed
 
@@ -497,8 +512,6 @@ different thing from a screen, so moving them is not a rename.
 - **Search matches** are not highlighted on the cells; the caret lands on
   them.
 - **Kitty graphics and hyperlinks (OSC 8)**, and a terminal status segment.
-- **fish's integration is untested**: no fish in the test environment. zsh
-  and bash are tested end to end (§7).
 - **OSC 7's host is not checked.** A shell on another machine (over ssh)
   reporting its directory moves the entry's place to the local directory of
   that name, when there is one.
@@ -506,12 +519,6 @@ different thing from a screen, so moving them is not a rename.
   starts on wraps in the shell's echo; the field is the first row's line,
   so the continuation rows mirror the echo beside it. A right prompt
   (zsh's `RPROMPT`) on the line's row reads as part of the field.
-- **Typeahead read at a new prompt.** Keys typed while a command ran, which
-  the shell then reads at the next prompt, are not seen until it reports:
-  zsh reports at once (a redraw), bash only when asked, so its field starts
-  empty and the first edit replaces what was typed ahead.
-- **fish does not sync its line** (no `hello`): at its prompt the program
-  keeps every key, as without integration.
 - **vim and helix rest in normal mode at a new prompt**, as in any text:
   `i`/`a` type. No grammar declares a "typing" resting mode, and declaring
   one for the field posture would change how every editable listing rests.

@@ -55,3 +55,78 @@ function __weft_init --on-event fish_prompt
     set -l hook (set -q XDG_CONFIG_HOME; and echo $XDG_CONFIG_HOME; or echo $HOME/.config)/weft/shell/fish
     test -r $hook; and source $hook
 end
+
+# The title: the directory at a prompt, as the other shells say it — unless
+# the user's config defined its own fish_title (fish's own lives under
+# functions/, on disk or embedded).
+function __weft_title_init --on-event fish_prompt
+    functions -e __weft_title_init
+    set -l src (functions --details fish_title)
+    if test "$src" = n/a; or string match -q -- "*functions/fish_title.fish" $src
+        function fish_title
+            string replace -r -- "^$HOME" '~' $PWD
+        end
+    end
+end
+
+# ── The command line (doc/terminal.md §8) ─────────────────────────────
+# As bash: fish has no redraw hook, so it reports when asked —
+#   OSC 7780 ; line ; SEQ ; CURSOR ; HEX     (CURSOR in bytes)
+# on ESC [ 7781 ~, and weft sets the line with ESC [ 7780 ~ SEQ;CURSOR;HEX BEL.
+# Both keys are bound in every bind mode, so vi mode takes them too.
+set -g __weft_seq 0
+
+function __weft_hex
+    printf %s $argv[1] | od -An -v -tx1 | string join '' | string replace -ra '\s' ''
+end
+
+function __weft_report_now
+    set -l line (commandline | string collect)
+    set -l pre (string sub -l (commandline -C) -- $line | string collect)
+    set -l hex (__weft_hex $line)
+    set -l prehex (__weft_hex $pre)
+    printf '\e]7780;line;%s;%s;%s\a' $__weft_seq (math (string length -- "$prehex") / 2) "$hex"
+end
+
+# A key binding cannot read further input in fish, so weft sends the line
+# IN BAND (hello version 2): ESC [ 7782 ~ empties the command line (and puts
+# a vi mode into insert, where the payload types as text), the payload
+# SEQ;CURSOR;HEX types in, and ESC [ 7780 ~ takes it back out of the
+# command line and sets the real one. The payload is digits, hex and `;`:
+# nothing an abbreviation or a completion acts on.
+function __weft_line_begin
+    set -g __weft_mode_was $fish_bind_mode
+    # A vi mode other than insert would read the payload as commands.
+    if test "$fish_key_bindings" = fish_vi_key_bindings; and test "$fish_bind_mode" != insert
+        set -g fish_bind_mode insert
+    end
+    commandline -r ''
+end
+
+function __weft_set_line
+    set -l parts (string split -m 2 ';' -- (commandline | string collect))
+    if set -q __weft_mode_was[1]
+        set -g fish_bind_mode $__weft_mode_was
+        set -e __weft_mode_was
+    end
+    test (count $parts) -eq 3; or return
+    set -g __weft_seq $parts[1]
+    set -l hex $parts[3]
+    set -l line (printf (string replace -ra '(..)' '\\\\x$1' -- $hex) | string collect)
+    set -l pre (printf (string replace -ra '(..)' '\\\\x$1' -- (string sub -l (math $parts[2] \* 2) -- $hex)) | string collect)
+    commandline -r -- $line
+    commandline -C (string length -- "$pre")
+    commandline -f repaint-mode
+end
+
+# Bound at the first prompt, after config.fish: a `fish_vi_key_bindings`
+# there has set its modes up already, and our keys go into every one.
+function __weft_bind_init --on-event fish_prompt
+    functions -e __weft_bind_init
+    for mode in default insert visual replace replace_one
+        bind -M $mode ctrl-alt-shift-f12 __weft_set_line
+        bind -M $mode ctrl-alt-shift-f11 __weft_report_now
+        bind -M $mode ctrl-alt-shift-f10 __weft_line_begin
+    end
+    printf '\e]7780;hello;2\a'
+end
