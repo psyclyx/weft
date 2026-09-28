@@ -296,6 +296,9 @@ pub const Plane = struct {
     /// frame never asks (doc/model.md §2.7): what it shows of the plane was
     /// asked before it was built, so a build leaves this where it was.
     syncs: u64 = 0,
+    /// Which key runs what, per context (`Where`) — the reverse of the keymap
+    /// as this plane's snapshots resolve it, held until either moves.
+    keys: [@typeInfo(Where).@"enum".fields.len]@import("keys_for.zig").Index = @splat(.{}),
 
     /// Wire the DERIVED publisher, once `Actions` exists. Separate from `init`
     /// because the two are constructed in the other order and neither can be
@@ -327,6 +330,7 @@ pub const Plane = struct {
             gpa.destroy(self.derived);
             self.derived_attached = false;
         }
+        for (&self.keys) |*index| index.deinit();
         self.invokers.deinit(gpa);
         self.catalog.deinit();
         self.* = undefined;

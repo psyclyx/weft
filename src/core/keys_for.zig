@@ -60,24 +60,29 @@ pub fn keysFor(ctx: *command.Context, gpa: Allocator, target: []const u8, mode: 
 /// primary context while a companion holds the keyboard. `mode` is that
 /// context's binding mode (`modeAt`).
 pub fn keysForAt(ctx: *command.Context, gpa: Allocator, target: []const u8, mode: []const u8, where: intent.Where) Allocator.Error![][]u8 {
-    var bindings: std.ArrayList(Keymap.Binding) = .empty;
-    defer bindings.deinit(gpa);
-    var groups: std.ArrayList(bool) = .empty;
-    defer groups.deinit(gpa);
-    _ = try ctx.keymap.resolveBindingsInto(gpa, mode, &bindings, &groups);
+    // Asked once per question, not once per intention arm per key: the
+    // snapshot is what every arm of this reading is resolved against.
+    const snap = if (ctx.intent) |plane| plane.snapshotAt(ctx, where) else null;
+    const stamp: Stamp = .of(ctx, snap);
+    var scratch: Index = .{};
+    defer scratch.deinit();
+    // The plane holds one index per context; a system without one (a unit
+    // test's) reads through a throwaway.
+    const index = if (ctx.intent) |plane| &plane.keys[@intFromEnum(where)] else &scratch;
+    if (!index.fresh(stamp, mode)) try index.rebuild(ctx, stamp, mode, snap);
 
-    var out: std.ArrayList([]u8) = .empty;
+    const keys = index.by_target.get(target) orelse &.{};
+    const out = try gpa.alloc([]u8, keys.len);
+    var n: usize = 0;
     errdefer {
-        for (out.items) |k| gpa.free(k);
-        out.deinit(gpa);
+        for (out[0..n]) |k| gpa.free(k);
+        gpa.free(out);
     }
-    for (bindings.items, groups.items) |b, is_group| {
-        if (is_group) continue;
-        if (!runs(ctx, b.arms, target, where)) continue;
-        try out.append(gpa, try gpa.dupe(u8, b.key));
+    for (keys) |k| {
+        out[n] = try gpa.dupe(u8, k);
+        n += 1;
     }
-    std.mem.sort([]u8, out.items, {}, shorter);
-    return out.toOwnedSlice(gpa);
+    return out;
 }
 
 pub fn free(gpa: Allocator, keys: [][]u8) void {
@@ -85,27 +90,116 @@ pub fn free(gpa: Allocator, keys: [][]u8) void {
     gpa.free(keys);
 }
 
-/// Whether the arm dispatch would take from `arms` here is `target`.
-fn runs(ctx: *command.Context, arms: []const []const u8, target: []const u8, where: intent.Where) bool {
+/// Which key runs what, in one binding mode of one context: every name a key
+/// runs there (the arm dispatch would take, and the command an intention's
+/// winning offer runs through) → its keys, shortest first. The reverse of the
+/// keymap, walked once per question rather than once per ROW: the palette
+/// asks it of every command it lists, a menu of every row, and walking every
+/// key's arms each time cost a resolution of the whole mode chain and a
+/// catalog snapshot per intention arm, per row.
+///
+/// Held for one `Stamp` — the keymap's revision, the command registry's, the
+/// binding mode, and the catalog snapshot it was resolved against — so any
+/// bind, load, focus move or offer change reads afresh.
+pub const Index = struct {
+    /// Everything the index holds, in memory of its OWN: an asker hands in
+    /// whatever allocator its answer should live in (a frame's scratch, for
+    /// a tooltip), and the index outlives every one of them.
+    arena: ?std.heap.ArenaAllocator = null,
+    stamp: ?Stamp = null,
+    mode: []const u8 = "",
+    by_target: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+
+    pub fn deinit(self: *Index) void {
+        if (self.arena) |*arena| arena.deinit();
+        self.* = .{};
+    }
+
+    fn fresh(self: *const Index, stamp: Stamp, mode: []const u8) bool {
+        const held = self.stamp orelse return false;
+        return std.meta.eql(held, stamp) and std.mem.eql(u8, self.mode, mode);
+    }
+
+    fn rebuild(self: *Index, ctx: *command.Context, stamp: Stamp, mode: []const u8, snap: ?*const catalog.Snapshot) Allocator.Error!void {
+        self.deinit();
+        const gpa = ctx.gpa;
+        self.arena = .init(gpa);
+        const a = self.arena.?.allocator();
+
+        var bindings: std.ArrayList(Keymap.Binding) = .empty;
+        defer bindings.deinit(gpa);
+        var groups: std.ArrayList(bool) = .empty;
+        defer groups.deinit(gpa);
+        _ = try ctx.keymap.resolveBindingsInto(gpa, mode, &bindings, &groups);
+
+        var lists: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
+        for (bindings.items, groups.items) |b, is_group| {
+            if (is_group) continue;
+            const ran = ranBy(ctx, b.arms, snap) orelse continue;
+            const key = try a.dupe(u8, b.key);
+            try addKey(a, &lists, ran.name, key);
+            if (ran.via) |via| if (!std.mem.eql(u8, via, ran.name)) try addKey(a, &lists, via, key);
+        }
+        try self.by_target.ensureTotalCapacity(a, lists.count());
+        var it = lists.iterator();
+        while (it.next()) |e| {
+            std.mem.sort([]const u8, e.value_ptr.items, {}, shorter);
+            self.by_target.putAssumeCapacity(e.key_ptr.*, e.value_ptr.items);
+        }
+        self.mode = try a.dupe(u8, mode);
+        self.stamp = stamp;
+    }
+
+    fn addKey(a: Allocator, lists: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)), name: []const u8, key: []const u8) Allocator.Error!void {
+        const gop = try lists.getOrPut(a, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try a.dupe(u8, name);
+            gop.value_ptr.* = .empty;
+        }
+        try gop.value_ptr.append(a, key);
+    }
+};
+
+/// What an `Index` was derived from. Every field is a counter that moves
+/// when its source does, so equality is freshness.
+const Stamp = struct {
+    keymap: u64,
+    commands: u64,
+    snapshot: ?struct { key: u64, revision: u64, epoch: u64 },
+
+    fn of(ctx: *command.Context, snap: ?*const catalog.Snapshot) Stamp {
+        return .{
+            .keymap = ctx.keymap.revision,
+            .commands = ctx.commands.revision,
+            .snapshot = if (snap) |s| .{ .key = s.key, .revision = s.revision, .epoch = s.epoch } else null,
+        };
+    }
+};
+
+/// What a key runs here: the arm dispatch would take from `arms` (`name`),
+/// and — for an intention arm that would run — the command its winning offer
+/// runs through (`via`). Null when the key runs nothing here.
+const Ran = struct { name: []const u8, via: ?[]const u8 = null };
+
+fn ranBy(ctx: *command.Context, arms: []const []const u8, snap: ?*const catalog.Snapshot) ?Ran {
     for (arms) |arm| {
         if (!catalog.isIntentionName(arm)) {
             // A flat arm that names something ends the walk, as it does for
             // dispatch: a registered command, or a menu to enter.
-            if (ctx.commands.resolve(arm) != null) return std.mem.eql(u8, arm, target);
-            if (ctx.keymap.modeHasTag(arm, "menu")) return false;
+            if (ctx.commands.resolve(arm) != null) return .{ .name = arm };
+            if (ctx.keymap.modeHasTag(arm, "menu")) return null;
             continue;
         }
-        switch (armVerdict(ctx, arm, where)) {
+        switch (armVerdict(ctx, arm, snap)) {
             .skip => continue,
-            .runs => |cmd| return std.mem.eql(u8, arm, target) or
-                (if (cmd) |c| std.mem.eql(u8, c, target) else false),
+            .runs => |cmd| return .{ .name = arm, .via = cmd },
             // Refused here: the key still MEANS this intention — pressing it
             // reports why — so it is the key for the intention, and runs
             // nothing else.
-            .refused => return std.mem.eql(u8, arm, target),
+            .refused => return .{ .name = arm },
         }
     }
-    return false;
+    return null;
 }
 
 const Verdict = union(enum) {
@@ -116,10 +210,10 @@ const Verdict = union(enum) {
     refused,
 };
 
-fn armVerdict(ctx: *command.Context, intention: []const u8, where: intent.Where) Verdict {
+fn armVerdict(ctx: *command.Context, intention: []const u8, snapshot: ?*const catalog.Snapshot) Verdict {
     const plane = ctx.intent orelse return .skip;
     const id = plane.catalog.findIntention(intention) orelse return .skip;
-    const snap = plane.snapshotAt(ctx, where) orelse return .skip;
+    const snap = snapshot orelse return .skip;
     return switch (snap.resolveOne(id)) {
         .decision => |d| .{ .runs = plane.invokers.commandOf(ctx, d.endpoint) },
         .unavailable => |u| switch (u) {
@@ -130,7 +224,7 @@ fn armVerdict(ctx: *command.Context, intention: []const u8, where: intent.Where)
     };
 }
 
-fn shorter(_: void, a: []u8, b: []u8) bool {
+fn shorter(_: void, a: []const u8, b: []const u8) bool {
     const ka = std.mem.count(u8, a, " ");
     const kb = std.mem.count(u8, b, " ");
     if (ka != kb) return ka < kb;
@@ -191,4 +285,53 @@ test "keysFor: a flat arm, an intention arm and its fallback, a shadowed key, sh
     defer free(gpa, there);
     try t.expectEqual(@as(usize, 3), there.len);
     try t.expectEqualStrings("C-s", there[1]);
+}
+
+test "keysFor: the index is read again after a bind, an unbind, a fallback or a command moves" {
+    const gpa = t.allocator;
+    const pool = try @import("task.zig").Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try @import("System.zig").create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+    var ctx = sys.contextFor(&sys.default_head);
+    try sys.default_head.setModeRaw(gpa, "normal");
+    const km = &sys.keymap;
+
+    const count = struct {
+        fn of(c: *command.Context, target: []const u8) !usize {
+            const keys = try keysFor(c, t.allocator, target, "normal");
+            defer free(t.allocator, keys);
+            return keys.len;
+        }
+    }.of;
+    try km.bind(gpa, "normal", "Z", "file.save", Keymap.prio_config, "t");
+    // Asked with a frame's scratch that is gone before the next question (a
+    // tooltip's): the index is in memory of its own, not the asker's.
+    {
+        var frame = std.heap.ArenaAllocator.init(gpa);
+        defer frame.deinit();
+        const keys = try keysFor(&ctx, frame.allocator(), "file.save", "normal");
+        try t.expectEqual(@as(usize, 1), keys.len);
+    }
+    try t.expectEqual(@as(usize, 1), try count(&ctx, "file.save"));
+    try t.expectEqual(@as(usize, 1), try count(&ctx, "file.save")); // held
+    try km.bind(gpa, "normal", "W", "file.save", Keymap.prio_config, "t");
+    try t.expectEqual(@as(usize, 2), try count(&ctx, "file.save"));
+    km.unbind(gpa, "normal", "W", "t");
+    try t.expectEqual(@as(usize, 1), try count(&ctx, "file.save"));
+    // A mode it falls back to lends it keys.
+    try km.bind(gpa, "base", "Q", "file.save", Keymap.prio_config, "t");
+    try t.expectEqual(@as(usize, 1), try count(&ctx, "file.save"));
+    try km.setFallback(gpa, "normal", "base");
+    try t.expectEqual(@as(usize, 2), try count(&ctx, "file.save"));
+    // A flat arm counts only while it names a command.
+    try km.bind(gpa, "normal", "Y", "zz.later", Keymap.prio_config, "t");
+    try t.expectEqual(@as(usize, 0), try count(&ctx, "zz.later"));
+    const later = struct {
+        fn run(_: *command.Context, _: struct {}) anyerror!command.Value {
+            return .nil;
+        }
+    }.run;
+    _ = try sys.commands.bind(gpa, "zz.later", command.define("zz.later", "Later.", later));
+    try t.expectEqual(@as(usize, 1), try count(&ctx, "zz.later"));
 }

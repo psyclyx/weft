@@ -64,6 +64,11 @@ pub const prio_config = 100;
 pub const max_bind_commands = 8;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
+/// Moves on every change to what a key resolves to in some mode — a bind or
+/// an unbind, a fallback, a variant, a menu tag — so a reading derived from
+/// the resolved tables (`keys_for.Index`, which key runs what) knows when to
+/// derive again. Only equality is meaningful.
+revision: u64 = 0,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
@@ -186,7 +191,9 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.displays.deinit(gpa);
     for (self.granularities.keys()) |k| gpa.free(k);
     self.granularities.deinit(gpa);
-    self.* = .{};
+    // A keymap emptied and filled again is a change too, never a return to
+    // a revision something derived from before.
+    self.* = .{ .revision = self.revision +% 1 };
 }
 
 /// DECLARE what `mode` is called on the status line, and its tone. The last
@@ -261,6 +268,7 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
 /// against the catalog (architecture §10.2).
 pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, commands: []const []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
     std.debug.assert(commands.len > 0);
+    self.revision +%= 1;
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
     const gop = try self.modes.getOrPut(gpa, mode);
@@ -315,6 +323,7 @@ pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u
     const bindings = self.modes.getPtr(mode) orelse return;
     const entry = bindings.get(key) orelse return;
     if (!std.mem.eql(u8, entry.owner, owner)) return;
+    self.revision +%= 1;
     if (bindings.fetchSwapRemove(key)) |removed| {
         gpa.free(removed.key);
         freeArms(gpa, removed.value.commands);
@@ -361,6 +370,7 @@ pub fn unsetGroupName(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: [
 /// a resident plugin's teardown (`JsPlugin.retract`), which binds by key
 /// and so has no list of what it bound to walk.
 pub fn unbindOwner(self: *Keymap, gpa: Allocator, owner: []const u8) void {
+    self.revision +%= 1;
     for (self.modes.values()) |*bindings| {
         var i: usize = 0;
         while (i < bindings.count()) {
@@ -515,6 +525,7 @@ fn prefixIn(b: *const Bindings, seq: []const u8) bool {
 
 /// Make `mode` inherit `parent`'s bindings (chain-walked at lookup).
 pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     const gop = try self.parents.getOrPut(gpa, mode);
     if (gop.found_existing) {
         gpa.free(gop.value_ptr.*);
@@ -528,6 +539,7 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
 /// keys up in `variant`. The variant is an ordinary mode: what it falls back
 /// to is the declarer's own `setFallback`. Re-declaring replaces.
 pub fn declareVariant(self: *Keymap, gpa: Allocator, mode: []const u8, facet: BindingFacet, variant: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     var buf: [256]u8 = undefined;
     const key = tagKey(&buf, mode, @tagName(facet)) orelse return;
     const gop = try self.variants.getOrPut(gpa, key);
@@ -666,6 +678,7 @@ pub const tag_resting = "resting";
 /// is about how LOOKUP works and lookup is core's: a menu inherits `menu`, and
 /// `menu` inherits `menu-nav`. What binds on either layer is config's.
 pub fn tagMode(self: *Keymap, gpa: Allocator, mode: []const u8, tag: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     var buf: [256]u8 = undefined;
     const key = tagKey(&buf, mode, tag) orelse return;
     const gop = try self.mode_tags.getOrPut(gpa, key);

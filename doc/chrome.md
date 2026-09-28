@@ -136,7 +136,12 @@ All of §1.
   winning offer runs (`Invokers.commandOf`), a refused one only for the
   intention. "Here" is the focused context's binding mode, or the mode a
   picker was opened from. `wl_keys_for`/`qjs_keys_for`; the chrome tooltip's
-  `KeyHints` hook is filled with it.
+  `KeyHints` hook is filled with it. The walk is done once, not once per
+  row: `keys_for.Index` is the keymap reversed (name → keys) for one binding
+  mode of one context, held by the intent plane until the keymap's revision,
+  the command registry's or the catalog snapshot moves — every palette and
+  menu row reads it. Asked for every command (ReleaseFast): 74 ms → 1 ms
+  under config.js, and opening the palette 349 ms → 88 ms.
 - **Consumers.** The palette lists labels (`Open File…`), with the id, shape
   and summary as secondary text and the key beside it; its regex hide list is
   gone. which-key shows labels and hides internal commands. marginalia's
