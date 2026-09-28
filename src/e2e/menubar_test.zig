@@ -438,9 +438,11 @@ test "e2e/menubar: Alt+F opens File from the keys, Enter runs in the primary con
     try t.expect(fact(row(file, "Save").?, "mnemonic") != null);
     shot(&app, "menubar-file-keyboard");
     // Save's letter chooses it: the EDITOR is saved, not the listing that
-    // has the keys, and the keys stay in the listing.
+    // has the keys, and the keys stay in the listing. A save writes on a
+    // worker (`Editor.requestSave`): the disk is read once it has landed.
     ed.press("s", "");
     try t.expect(ed.head.interactions.active() == null);
+    ed.waitSaveOf(editor);
     const disk = try core.file.readAlloc(gpa, "k.txt");
     defer gpa.free(disk);
     try t.expectEqualStrings("one!\n", disk);
@@ -466,6 +468,7 @@ test "e2e/menubar: Alt+F opens File from the keys, Enter runs in the primary con
     try t.expectEqualStrings("Save", litLabel(try menu(ed)).?);
     ed.press("Return", "");
     try t.expect(ed.head.interactions.active() == null);
+    ed.waitSaveOf(editor);
     const again = try core.file.readAlloc(gpa, "k.txt");
     defer gpa.free(again);
     try t.expectEqualStrings("one!?\n", again);
@@ -542,11 +545,13 @@ test "e2e/menubar: a row that asks for an argument runs in the primary context t
     }
     try t.expectEqualStrings("Save As…", litLabel(try menu(ed)).?);
     ed.press("Return", "");
-    // The path through the prompt's own line (its typing is its mode's
-    // commit, which a listing's type-ahead must not take — a separate gate).
-    ed.runStr("menu.arg-type", "b.txt");
+    // The path typed into the prompt's own line: its mode commits text, so
+    // the focused listing's type-ahead does not take the letters.
+    ed.typeText("b.txt");
     ed.press("Return", "");
     ed.applyWindow();
+    // The save writes on a worker (`Editor.requestSave`).
+    ed.waitSaveOf(editor);
     const disk = core.file.readAlloc(gpa, "b.txt") catch |err| {
         std.debug.print("[e2e/menubar] Save As… wrote nothing (echo: '{s}')\n", .{ed.head.echo.items});
         return err;

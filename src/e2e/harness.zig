@@ -683,10 +683,17 @@ pub const Editor = struct {
     /// of iterations regardless; the bound only matters as a genuine-hang
     /// backstop.
     pub fn waitSave(self: *Editor) void {
+        self.waitSaveOf(self.buffers.active_id);
+    }
+
+    /// `waitSave` for entry `id`, active or not — a save a menu ran in the
+    /// primary context while the keys are elsewhere.
+    pub fn waitSaveOf(self: *Editor, id: core.Buffers.Id) void {
         const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
             _ = self.advanceAt(core.task.nowNs(), false) catch {};
-            if (self.buffers.active().textEditor().?.save_state != .saving) return;
+            const entry = self.buffers.get(id) orelse return;
+            if (entry.textEditor().?.save_state != .saving) return;
             std.Thread.yield() catch {};
         }
     }
