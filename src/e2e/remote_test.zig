@@ -284,6 +284,32 @@ test "e2e/remote: a peer's file is editable where the peer granted a write surfa
     }
 }
 
+test "e2e/remote: a peer save keeps the file's mode, and a temp a lost save left behind neither blocks the next save nor outlives it" {
+    const gpa = t.allocator;
+    var pair: PeerPair = undefined;
+    try pair.init(gpa, .read_write);
+    defer pair.deinit(gpa);
+    const b = &pair.b;
+    // An executable, and the litter of a save whose connection dropped
+    // between the upload and the move (the old fixed name, and a new one).
+    try t.expectEqual(@as(c_int, 0), std.c.chmod("shared/src/main.zig", 0o755));
+    try core.file.writeBytes(gpa, "shared/src/.main.zig.weft-tmp", "half a save");
+    try core.file.writeBytes(gpa, "shared/src/.main.zig.weft-tmp-0123456789abcdef", "half a save");
+
+    try t.expect(projection.openOk(b, try pair.fileDesignation()));
+    const te = b.buffers.active().textEditor().?;
+    te.moveTo(te.text().byteLen());
+    try te.insertText(gpa, "// edited\n");
+    try te.requestSave(gpa);
+    try t.expect(te.pollSave(gpa));
+    try t.expectEqual(@as(u32, 0o755), core.file.statFull(gpa, "shared/src/main.zig").mode);
+    try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp").kind == core.file.Stat.absent.kind);
+    try t.expect(core.file.statFull(gpa, "shared/src/.main.zig.weft-tmp-0123456789abcdef").kind == core.file.Stat.absent.kind);
+    const on_disk = try pair.disk(gpa);
+    defer gpa.free(on_disk);
+    try t.expectEqualStrings("pub fn main() void {}\n// edited\n", on_disk);
+}
+
 test "e2e/remote: a peer's file without a write grant is read-only and says why" {
     const gpa = t.allocator;
     var pair: PeerPair = undefined;

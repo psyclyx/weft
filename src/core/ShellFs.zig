@@ -256,6 +256,50 @@ fn hashCmd(self: *ShellFs, gpa: Allocator) Error![]const u8 {
     return self.hash_cmd;
 }
 
+/// The temp a write stages `path`'s new bytes in: hidden beside it, named
+/// for it, with a random suffix, so two writes never share one and a temp a
+/// dropped channel left behind blocks nothing. Returns the prefix every such
+/// temp starts with and the name; caller owns both.
+pub fn tempName(gpa: Allocator, io: std.Io, path: []const u8) Allocator.Error!struct { prefix: []u8, name: []u8 } {
+    const dir = std.fs.path.dirnamePosix(path);
+    const prefix = try std.fmt.allocPrint(gpa, "{s}{s}.{s}.weft-tmp-", .{ dir orelse "", if (dir == null) "" else "/", std.fs.path.basenamePosix(path) });
+    errdefer gpa.free(prefix);
+    var suffix: [8]u8 = undefined;
+    io.random(&suffix);
+    return .{ .prefix = prefix, .name = try std.fmt.allocPrint(gpa, "{s}{s}", .{ prefix, &std.fmt.bytesToHex(suffix, .lower) }) };
+}
+
+/// Stage `bytes` for `path` (quoted as `q`) in a fresh temp; the temp's
+/// quoted name, caller owns. The script first takes back every temp an
+/// earlier write to `path` left behind (a channel lost between upload and
+/// move), then starts the temp as a `cp -p` of the file when there is one
+/// — so the move keeps the file's mode, its execute bit included — made
+/// writable for the upload and made read-only again after, when it was.
+fn appendStaging(self: *ShellFs, gpa: Allocator, script: *std.ArrayList(u8), path: []const u8, q: []const u8, bytes: []const u8) Allocator.Error![]u8 {
+    const temp = try tempName(gpa, self.threaded.io(), path);
+    defer gpa.free(temp.prefix);
+    defer gpa.free(temp.name);
+    const qprefix = try quote(gpa, temp.prefix);
+    defer gpa.free(qprefix);
+    const qtmp = try quote(gpa, temp.name);
+    errdefer gpa.free(qtmp);
+    const head = try std.fmt.allocPrint(
+        gpa,
+        "rm -f -- {s}*\nweft_ro=\nif [ -e {s} ]; then [ -w {s} ] || weft_ro=1; cp -p -- {s} {s} 2>/dev/null && chmod u+w -- {s}; fi\n",
+        .{ qprefix, q, q, q, qtmp, qtmp },
+    );
+    defer gpa.free(head);
+    try script.appendSlice(gpa, head);
+    const b64 = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+    defer gpa.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, bytes);
+    try appendUpload(gpa, script, qtmp, b64);
+    const tail = try std.fmt.allocPrint(gpa, "[ -z \"$weft_ro\" ] || chmod u-w -- {s}\n", .{qtmp});
+    defer gpa.free(tail);
+    try script.appendSlice(gpa, tail);
+    return qtmp;
+}
+
 /// Heredoc upload of base64 text into `qtmp` (already quoted). Lines
 /// wrapped — some base64 -d implementations dislike unbounded lines.
 fn appendUpload(gpa: Allocator, script: *std.ArrayList(u8), qtmp: []const u8, b64: []const u8) Allocator.Error!void {
@@ -379,30 +423,21 @@ pub fn writeGuarded(
 ) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
-    defer gpa.free(tmp);
-    const qtmp = try quote(gpa, tmp);
-    defer gpa.free(qtmp);
-
-    const b64_len = std.base64.standard.Encoder.calcSize(bytes.len);
-    const b64 = try gpa.alloc(u8, b64_len);
-    defer gpa.free(b64);
-    _ = std.base64.standard.Encoder.encode(b64, bytes);
-
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(gpa);
-    try appendUpload(gpa, &script, qtmp, b64);
+    const qtmp = try self.appendStaging(gpa, &script, path, q, bytes);
+    defer gpa.free(qtmp);
     const hc = try self.hashCmd(gpa);
     const guard = if (expected) |token|
         try std.fmt.allocPrint(
             gpa,
-            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s} && echo \"weft-ok $tok\"; else rm -f {s}; echo weft-stale; false; fi",
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv -- {s} {s} && echo \"weft-ok $tok\"; else rm -f -- {s}; echo weft-stale; false; fi",
             .{ hc, qtmp, hc, q, token, qtmp, q, qtmp },
         )
     else
         try std.fmt.allocPrint(
             gpa,
-            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f {s}; echo weft-stale; false; else mv {s} {s} && echo \"weft-ok $tok\"; fi",
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f -- {s}; echo weft-stale; false; else mv -- {s} {s} && echo \"weft-ok $tok\"; fi",
             .{ hc, qtmp, q, qtmp, qtmp, q },
         );
     defer gpa.free(guard);
@@ -419,19 +454,13 @@ pub fn writeGuarded(
 pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []const u8) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
-    defer gpa.free(tmp);
-    const qtmp = try quote(gpa, tmp);
-    defer gpa.free(qtmp);
-    const b64 = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
-    defer gpa.free(b64);
-    _ = std.base64.standard.Encoder.encode(b64, bytes);
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(gpa);
-    try appendUpload(gpa, &script, qtmp, b64);
+    const qtmp = try self.appendStaging(gpa, &script, path, q, bytes);
+    defer gpa.free(qtmp);
     const mv = try std.fmt.allocPrint(
         gpa,
-        "tok=$({s} < {s} | tr -d ' \\t-')\nmv {s} {s} && echo \"weft-ok $tok\"",
+        "tok=$({s} < {s} | tr -d ' \\t-')\nmv -- {s} {s} && echo \"weft-ok $tok\"",
         .{ try self.hashCmd(gpa), qtmp, qtmp, q },
     );
     defer gpa.free(mv);
@@ -699,6 +728,36 @@ test "shellfs: a far-side name is only ever a name — it cannot end a reply, pl
     const back = try fs.readAll(gpa, plain);
     defer gpa.free(back);
     try t.expectEqualStrings("plain bytes", back);
+}
+
+test "shellfs: a write keeps the file's mode, and takes back a temp an earlier lost write left beside it" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    var fs = try spawn(gpa, &.{"/bin/sh"}, testEnviron());
+    defer fs.deinit();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/build.sh", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    gpa.free(try fs.writeGuarded(gpa, path, "#!/bin/sh\n", null));
+    const dir = std.fs.path.dirname(path).?;
+    const setup = try std.fmt.allocPrint(gpa, "chmod 755 '{s}' && echo x > '{s}/.build.sh.weft-tmp-dead'", .{ path, dir });
+    defer gpa.free(setup);
+    const setup_r = try fs.run(gpa, setup);
+    gpa.free(setup_r.out);
+    try t.expectEqual(@as(u8, 0), setup_r.status);
+    const h1 = try fs.hashToken(gpa, path);
+    defer gpa.free(h1);
+    gpa.free(try fs.writeGuarded(gpa, path, "#!/bin/sh\necho hi\n", h1));
+    try t.expectEqual(@as(u32, 0o755), @import("file.zig").statFull(gpa, path).mode);
+    gpa.free(try fs.writeAtomic(gpa, path, "#!/bin/sh\necho hello\n"));
+    try t.expectEqual(@as(u32, 0o755), @import("file.zig").statFull(gpa, path).mode);
+
+    var listing = try fs.list(gpa, dir);
+    defer listing.deinit(gpa);
+    for (listing.entries) |e| if (std.mem.indexOf(u8, e.name, "weft-tmp") != null) {
+        std.debug.print("left behind: {s}\n", .{e.name});
+        return error.TempLeftBehind;
+    };
 }
 
 test "shellfs: connecting until the far side answers, degraded while a round trip hangs, offline once it dies (R5)" {

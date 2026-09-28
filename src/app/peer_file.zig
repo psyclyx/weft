@@ -7,7 +7,9 @@
 //! it, each granted or not by the peer (`--share-fs`, `collab.share-fs`).
 //!
 //! A save is the guarded test-and-set, over the portable filesystem plan:
-//! the new bytes land beside the file in a temp (`create_file`, exclusive),
+//! the new bytes land beside the file in a temp (`create_file`, exclusive,
+//! with the file's observed mode, under a random name — a temp a lost save
+//! left is taken back by the next save's listing, never collided with),
 //! then replace it by rename only while it is still the revision this side
 //! last merged (`rename` with `expected = .entry`) — else STALE, and the
 //! backing merges the peer's disk and retries. An external change is merged
@@ -142,21 +144,46 @@ fn parentDirectory(self: *PeerFile) RemoteError!fs.target.Directory {
 
 /// `name` in `dir` as the provider lists it now: its ref and revision
 /// (the token, owned by `gpa`), or null when there is no regular file.
-const Found = struct { ref: contract.EntryRef, token: []u8 };
+/// Its permission bits too, when the provider says them — what a save's temp
+/// is created with, so the move keeps them.
+const Found = struct { ref: contract.EntryRef, token: []u8, mode: ?u32 = null };
 
 fn find(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, name: []const u8) RemoteError!?Found {
+    return self.scan(gpa, dir, name, null);
+}
+
+/// `find`, and — when `litter` is given — every temp an earlier save of
+/// `name` left behind (its connection lost between upload and move), taken
+/// back as it is seen: one listing either way.
+fn scan(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, name: []const u8, litter: ?[]const u8) RemoteError!?Found {
     var listing = self.router.list(gpa, dir.root, dir.node) catch |err| return mapError(err);
     defer listing.deinit();
+    var found: ?Found = null;
+    errdefer if (found) |f| gpa.free(f.token);
     for (listing.value.entries) |e| {
-        if (!std.mem.eql(u8, e.name.bytes, name)) continue;
-        if (e.observation.kind != .regular) return error.Failed;
         const ref = switch (e.observation.node) {
             .entry => |r| r,
-            .root => return error.Failed,
+            .root => continue,
         };
-        return .{ .ref = ref, .token = try gpa.dupe(u8, e.observation.revision.token) };
+        if (litter) |prefix| if (e.observation.kind == .regular and isTemp(e.name.bytes, prefix)) {
+            self.discard(gpa, dir, ref, e.observation.revision.token);
+            continue;
+        };
+        if (!std.mem.eql(u8, e.name.bytes, name)) continue;
+        if (e.observation.kind != .regular) return error.Failed;
+        found = .{
+            .ref = ref,
+            .token = try gpa.dupe(u8, e.observation.revision.token),
+            .mode = if (e.observation.metadata.mode) |m| m & 0o777 else null,
+        };
     }
-    return null;
+    return found;
+}
+
+/// A save's temp for the file `prefix` names: `prefix` then the random
+/// suffix, or the fixed name saves used before temps had one.
+fn isTemp(name: []const u8, prefix: []const u8) bool {
+    return std.mem.startsWith(u8, name, prefix) or std.mem.eql(u8, name, prefix[0 .. prefix.len - 1]);
 }
 
 fn fetch(ctx: *anyopaque, gpa: std.mem.Allocator, expected: ?[]const u8) RemoteError!?core.backing.Fetched {
@@ -194,19 +221,24 @@ fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?
     const self = cast(ctx);
     const dir = try self.parentDirectory();
     const name = self.leaf();
-    // Test: the file is still what this side last merged (or still absent).
-    const current = try self.find(gpa, dir, name);
+    // A fresh temp name, and the prefix every save of this file's temp has.
+    const temp = try core.ShellFs.tempName(gpa, std.Io.Threaded.global_single_threaded.io(), name);
+    defer gpa.free(temp.prefix);
+    defer gpa.free(temp.name);
+    // Test: the file is still what this side last merged (or still absent),
+    // taking back what a lost save left beside it on the way.
+    const current = try self.scan(gpa, dir, name, temp.prefix);
     defer if (current) |c| gpa.free(c.token);
     if (expected) |e| {
         const c = current orelse return error.Stale;
         if (!std.mem.eql(u8, c.token, e)) return error.Stale;
     } else if (current != null) return error.Stale;
 
-    // Upload beside it.
-    const tmp_name = try std.fmt.allocPrint(gpa, ".{s}.weft-tmp", .{name});
-    defer gpa.free(tmp_name);
+    // Upload beside it, with the file's own mode (an executable stays one).
+    const tmp_name = temp.name;
     const tmp_slot: contract.Slot = .{ .parent = parentRef(dir), .name = contract.Name.init(tmp_name) catch return error.Failed };
-    switch (try self.applyOne(gpa, dir, .{ .create_file = .{ .destination = tmp_slot, .contents = bytes } }, 1)) {
+    const mode = if (current) |c| c.mode else null;
+    switch (try self.applyOne(gpa, dir, .{ .create_file = .{ .destination = tmp_slot, .contents = bytes, .mode = mode } }, 1)) {
         .applied => {},
         .stale => return error.Stale,
         else => return error.Failed,
@@ -222,17 +254,17 @@ fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?
         .destination = destination,
         .expected = guard,
     } }, 2) catch |err| {
-        self.discard(gpa, dir, tmp);
+        self.discard(gpa, dir, tmp.ref, tmp.token);
         return err;
     };
     switch (moved) {
         .applied => {},
         .stale, .conflict => {
-            self.discard(gpa, dir, tmp);
+            self.discard(gpa, dir, tmp.ref, tmp.token);
             return error.Stale;
         },
         else => {
-            self.discard(gpa, dir, tmp);
+            self.discard(gpa, dir, tmp.ref, tmp.token);
             return error.Failed;
         },
     }
@@ -241,11 +273,12 @@ fn write(ctx: *anyopaque, gpa: std.mem.Allocator, bytes: []const u8, expected: ?
     return landed.token;
 }
 
-/// Take the temp back after a failed move. Best effort: a temp left behind
-/// is litter, never a lost update.
-fn discard(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, tmp: Found) void {
+/// Take a temp back — after a failed move, or one a lost save left. Best
+/// effort: a temp left behind is litter (the next save takes it), never a
+/// lost update.
+fn discard(self: *PeerFile, gpa: std.mem.Allocator, dir: fs.target.Directory, ref: contract.EntryRef, token: []const u8) void {
     _ = self.applyOne(gpa, dir, .{ .remove = .{
-        .source = .{ .root = dir.root, .ref = tmp.ref, .revision = .{ .token = tmp.token } },
+        .source = .{ .root = dir.root, .ref = ref, .revision = .{ .token = token } },
         .policy = .permanent,
     } }, 3) catch {};
 }
