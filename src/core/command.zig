@@ -340,7 +340,7 @@ pub const Context = struct {
         const b = self.buffer();
         // A focused semantic FIELD, or point inside a projection row.s editable
         // span — the same question asked of either plane.
-        return b.posture(self.head.scene_selection.field != null or b.fieldAtPoint());
+        return b.posture(self.head.scene_selection.edit != null or b.fieldAtPoint());
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the

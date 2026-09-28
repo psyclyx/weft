@@ -334,9 +334,10 @@ pub const Plane = struct {
         self: *Plane,
         services: *const semantic.Services,
         focus: *const Head.SceneSelection,
+        mode: []const u8,
         here: ?view_offers.Here,
     ) Allocator.Error!void {
-        _ = try self.views.refresh(&self.catalog, services, focus, here);
+        _ = try self.views.refresh(&self.catalog, services, focus, mode, here);
     }
 
     /// What point is on, when the scope's entry is a text PROJECTION and its
@@ -452,7 +453,7 @@ pub const Plane = struct {
     pub fn snapshotAt(self: *Plane, ctx: *command.Context, where: Where) ?*const catalog_mod.Snapshot {
         const scope = scopeOf(ctx, where);
         self.syncShape(self.shapeOf(scope)) catch {};
-        if (ctx.semantic) |services| self.syncFocus(services, scope.focus, hereIn(ctx, scope)) catch {};
+        if (ctx.semantic) |services| self.syncFocus(services, scope.focus, scope.mode, hereIn(ctx, scope)) catch {};
         // The third built-in provider, synced HERE rather than on the dispatch
         // path, because "what would this key do" and "what does this key do"
         // must read the same table. Hung off `dispatchSpec` first, and the
@@ -651,7 +652,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
         .tool = entry.tool,
         .role = entry.focusedRole(),
         .locality = entry.locality(),
-        .posture = @tagName(entry.posture(focus.field != null)),
+        .posture = @tagName(entry.posture(focus.edit != null)),
         .pane = pane,
         .context = open,
     };
@@ -661,7 +662,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
 /// head left it, else where its posture rests (an entry never visited).
 pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
     if (entry.mode.len > 0) return entry.mode;
-    return buffers.restingModeFor(entry.posture(entry.scene_selection.field != null));
+    return buffers.restingModeFor(entry.posture(entry.scene_selection.edit != null));
 }
 
 // ── Chosen contexts ──────────────────────────────────────────────────

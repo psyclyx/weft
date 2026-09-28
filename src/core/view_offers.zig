@@ -181,14 +181,16 @@ pub const Publisher = struct {
         cat: *catalog.Catalog,
         services: *const semantic.Services,
         focus: *const Head.SceneSelection,
+        mode: []const u8,
         here: ?Here,
     ) Allocator.Error!bool {
         const path = self.pathHere(services, focus, here) orelse return self.withdraw(cat);
         const instance = services.views.get(path.view) orelse return self.withdraw(cat);
         const leaf = path.leaf() orelse return self.withdraw(cat);
-        // A begun edit belongs to the head's own focus, never to a path
-        // synthesized from a text projection.
-        const editing = focus.began and focus.path() != null;
+        // A begun edit — any edit, under `row` (`scene_edit.begun`) — belongs
+        // to the head's own focus, never to a path synthesized from a text
+        // projection.
+        const editing = focus.edit != null and services.granularityIn(mode) == .row and focus.path() != null;
         const next: Signature = .{
             .view = path.view,
             .leaf = leaf,
@@ -487,7 +489,7 @@ const Fixture = struct {
     }
 
     fn refresh(self: *Fixture) !bool {
-        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head.scene_selection, null);
+        return self.plane.views.refresh(&self.plane.catalog, &self.services, &self.head.scene_selection, self.head.currentMode(), null);
     }
 
     fn context(self: *const Fixture) catalog.Context {

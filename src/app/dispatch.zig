@@ -666,9 +666,9 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
         break :blk true;
     };
     if (jumped) return;
-    // A begun field edit commits too (`Head.textCommit`); anywhere nothing
+    // A begun field edit commits too (`scene_edit.textCommit`); anywhere nothing
     // does, the key is unhandled.
-    const commit_cmd = ctx.head.textCommit(ctx.keymap) orelse return;
+    const commit_cmd = core.scene_edit.textCommit(ctx.semantic, ctx.keymap, ctx.head, ctx.head.currentMode()) orelse return;
     core.task.beginHotSection();
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {

@@ -922,7 +922,7 @@ pub const Services = struct {
         // as `SPC v y` on the focused row. A BEGUN edit (doc/chrome.md §5.2) is
         // such a selection too: while a row's name is being typed, Delete
         // deletes text, never the row.
-        if (path.field != null and (head.scene_selection.selection_mark or head.scene_selection.began) and
+        if (path.field != null and (head.scene_selection.selection_mark or scene_edit.begun(self, head)) and
             (std.mem.eql(u8, action, semantic.action.standard.copy) or
                 std.mem.eql(u8, action, semantic.action.standard.cut) or
                 std.mem.eql(u8, action, semantic.action.standard.delete)))
@@ -1087,7 +1087,7 @@ pub const Services = struct {
         const start = @min(anchor, caret);
         const end = @max(anchor, caret);
         if (start == end) {
-            if (!head.scene_selection.began) return null;
+            if (!scene_edit.begun(self, head)) return null;
             // Mid-edit with nothing selected: a delete takes the character
             // after the caret, and there is no text to copy or cut.
             if (std.mem.eql(u8, action, semantic.action.standard.delete)) _ = try self.inputFocusedField(head, gpa, .delete_next);
@@ -2337,7 +2337,8 @@ test "ordinary editor input targets semantic fields and focus order" {
     try services.registerActionProvider(std.testing.allocator, owner, .init(&actions));
     var head: Head = .empty;
     defer head.deinit(std.testing.allocator);
-    try head.scene_selection.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
+    try head.scene_selection.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) } });
+    try head.scene_selection.startEdit(std.testing.allocator, first_ref, "old");
 
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqualStrings("new", first.bytes.items);

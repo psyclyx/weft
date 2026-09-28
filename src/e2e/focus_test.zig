@@ -138,7 +138,7 @@ test "e2e/focus: ide.js — a click focuses the sidebar ROW, typing jumps, F2 ed
     ed.applyWindow();
     try expectRow(ed, "m.txt");
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
-    try t.expect(ed.head.scene_selection.field == null);
+    try t.expect(ed.head.scene_selection.edit == null);
     try expectNoCaret(ed);
     app.proj.shot(ed, "focus-row-clicked");
 
@@ -162,7 +162,7 @@ test "e2e/focus: ide.js — a click focuses the sidebar ROW, typing jumps, F2 ed
     // F2 begins an edit of the name: the field posture, a BAR caret (typing
     // inserts now), the whole name selected so typing replaces it.
     ed.press("F2", "");
-    try t.expect(ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit != null);
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try expectCaret(ed, .bar);
     ed.typeText("renamed.zig");
@@ -173,7 +173,7 @@ test "e2e/focus: ide.js — a click focuses the sidebar ROW, typing jumps, F2 ed
     // name just typed is applied as typed — no question — and the file is
     // renamed on disk.
     ed.press("Return", "");
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
     try t.expect(ed.head.interactions.active() == null);
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f renamed.zig && test ! -e main.zig && printf ok", "ok"));
@@ -193,12 +193,12 @@ test "e2e/focus: ide.js — switching panes mid-edit commits the edit; coming ba
     // typed, applied), not suspended in the listing to resume later.
     ed.run("window.focus-right");
     ed.applyWindow();
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f moved.txt && test ! -e m.txt && printf ok", "ok"));
     ed.run("window.focus-left");
     ed.applyWindow();
     try t.expectEqualStrings("ide-structural", ed.mode());
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
 }
 
@@ -253,7 +253,7 @@ test "e2e/focus: ide.js — Escape cancels an edit, putting the name back; movin
     ed.typeText("zzz");
     try expectRow(ed, "zzz");
     ed.press("Escape", "");
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
     try expectRow(ed, "m.txt");
     try expectNoCaret(ed);
@@ -266,7 +266,7 @@ test "e2e/focus: ide.js — Escape cancels an edit, putting the name back; movin
     ed.press("F2", "");
     ed.typeText("n.txt");
     ed.press("Down", "");
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expect(ed.head.interactions.active() == null);
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -f n.txt && test ! -e m.txt && printf ok", "ok"));
 }
@@ -282,9 +282,9 @@ test "e2e/focus: ide.js — a slow second click on the focused row edits its nam
     const m = try pointAtName(ed, "m.txt");
     ed.click(m);
     ed.applyWindow();
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     ed.clickSlow(m);
-    try t.expect(ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit != null);
     try expectCaret(ed, .bar);
     ed.press("Escape", "");
     try expectRow(ed, "m.txt");
@@ -293,7 +293,7 @@ test "e2e/focus: ide.js — a slow second click on the focused row edits its nam
     const main_zig = try pointAtName(ed, "main.zig");
     ed.clickSlow(main_zig);
     try expectRow(ed, "main.zig");
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
 
     // A double click opens the row, and edits nothing — even when its first
     // click was a slow one that began an edit on the way.
@@ -301,7 +301,7 @@ test "e2e/focus: ide.js — a slow second click on the focused row edits its nam
     ed.clickSlow(main_zig);
     ed.clickAgain(main_zig);
     try t.expect(fileOpen(ed, "main.zig"));
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expect(!ed.session.system.semantic.holdsDraft(ed.toolView() orelse return));
 }
 
@@ -337,7 +337,7 @@ test "e2e/focus: ide.js — a status listing and the problems list show a focuse
     };
     ed.click(ed.pointAt(at) orelse return error.RowNotDrawn);
     // Its own mode takes no text: a printable key inserts nothing there.
-    try t.expect(ed.head.textCommit(ed.keymap) == null);
+    try t.expect(core.scene_edit.textCommit(&ed.session.system.semantic, ed.keymap, ed.head, ed.mode()) == null);
     try expectNoCaret(ed);
 
     // The problems list is a scene of action rows: focused by the keyboard,
@@ -350,7 +350,7 @@ test "e2e/focus: ide.js — a status listing and the problems list show a focuse
     ed.press("C-S-m", "");
     ed.applyWindow();
     try t.expectEqualStrings("*problems*", ed.buffers.active().name);
-    try t.expect(ed.head.scene_selection.field == null);
+    try t.expect(ed.head.scene_selection.edit == null);
     try expectNoCaret(ed);
     ed.typeText("2");
     const view = ed.session.system.semantic.views.get(ed.toolView() orelse return error.NoProblemsView).?;
@@ -436,7 +436,7 @@ fn expectEditsOnFocus(config: []const u8, insert_key: []const u8) !void {
     ed.click(try pointAtName(ed, "m.txt"));
     ed.applyWindow();
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
-    try t.expect(!ed.head.scene_selection.began);
+    try t.expect(!core.scene_edit.begun(&ed.session.system.semantic, ed.head));
     try expectCaret(ed, .block);
     // The grammar's own insert key types into it — with a bar, now it does.
     ed.press(insert_key, insert_key);
@@ -465,5 +465,5 @@ test "e2e/focus: config.js with ide's plugin loaded too — each grammar's modes
     ed.click(try pointAtName(ed, "m.txt"));
     ed.applyWindow();
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
-    try t.expect(ed.head.scene_selection.field != null);
+    try t.expect(ed.head.scene_selection.edit != null);
 }

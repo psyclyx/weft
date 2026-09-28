@@ -460,7 +460,7 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, mode: []const u8) bool {
     if (fx.semantic.granularityFor(fx.head) != .row) return false;
     if (buffer.projection == null or buffer.fieldAtPoint()) return false;
-    return fx.head.textCommitIn(fx.keymap, mode) == null;
+    return core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, mode) == null;
 }
 
 fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
@@ -471,7 +471,7 @@ fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *c
         .root = &instance.scene,
         .title = buffer.name,
         .focused = if (path.leaf()) |node| if (instance.node(node) != null) node else instance.reconcileFocus(null) else instance.reconcileFocus(null),
-        .editing = focus.field,
+        .editing = if (focus.edit) |edit| edit.field else null,
         .selected = selectedRows(arena, instance, focus),
         .revealed = fx.semantic.views.revealed(path.view),
         .active = active,
@@ -1032,7 +1032,7 @@ pub const FrameBuilder = struct {
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
-            .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, fx.head.textCommitIn(fx.keymap, cursor_mode) != null),
+            .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
             .row_focus = rowFocused(fx, abuf, cursor_mode),

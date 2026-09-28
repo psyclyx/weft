@@ -567,13 +567,18 @@ granularity a click places the caret, as now.
 
 What the build settled:
 
-- **The states.** `Head.SceneSelection.field` is the field being *edited*;
-  a row focus leaves it null. `core/scene_edit.zig` is the one place a
-  focus lands (`land`): every focus path (`Services.focusView`,
+- **The states.** `Head.SceneSelection.edit` is the field being *edited*
+  together with the text it began from (`origin`, for cancel) — one
+  optional value; a row focus leaves it null. `core/scene_edit.zig` is the
+  one place a focus lands (`land`): every focus path (`Services.focusView`,
   `moveHeadFocus`, a provider's focus request, the row mapping in
   `selection.zig`) goes through it, and it alone reads the granularity.
-  `SceneSelection.began` marks an edit begun under `row`, with the text it
-  began from (`origin`) for cancel.
+  Under `row` every edit is a begun one (`scene_edit.begun`): it takes
+  printable input, answers activate and cancel, and commits when the focus
+  leaves. A field, a `began` flag and an origin were three fields once, and
+  a commit that failed partway (or a buffer switch, or a `text`→`row`
+  switch) could leave a field edited that nothing typed into; commit and
+  cancel now end the edit before anything that can fail.
 - **The declaration** is a command, `mode.set-structural-focus <mode>
   text|row`, stored PER MODE in the keymap (`Keymap.granularityOf`, like a
   mode's display name) and read down the fallback chain, else from the mode
@@ -593,7 +598,7 @@ What the build settled:
   `std.target.activate` as *commit* (so every grammar's Return commits
   without a binding) and `std.gesture.cancel` as *cancel*; ide binds Escape
   to `["std.gesture.cancel", "ide-escape"]`. A begun edit takes printable
-  input itself (`Head.textCommit`: the mode's commit command, else core's
+  input itself (`scene_edit.textCommit`: the mode's commit command, else core's
   `insert-text` while an edit is begun), so ide stays in `ide-structural`
   and needs no field-resting mode. Committing ends the edit and, when the
   text changed, runs the view's `view.apply`. Whether that asks is the files

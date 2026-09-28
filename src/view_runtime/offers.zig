@@ -75,7 +75,7 @@ pub const Item = struct {
 
 pub const Focus = struct {
     path: semantic.focus.Path,
-    /// An edit of the focused row's field was BEGUN (`SceneSelection.began`):
+    /// An edit of the focused row's field was BEGUN (`scene_edit.begun`: an edit under `row`):
     /// the edit, not the row, answers activation and cancel.
     editing: bool = false,
 };

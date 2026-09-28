@@ -688,7 +688,7 @@ test "e2e/grammar: a grammar that declares no focus granularity focuses ROWS; an
     try focusRowByName(ed, gpa, "top.txt");
     try t.expectEqual(core.input.Granularity.row, ed.session.system.semantic.granularityFor(ed.head));
     try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
-    try t.expect(ed.head.scene_selection.field == null);
+    try t.expect(ed.head.scene_selection.edit == null);
     try t.expect(offeredHere(ed, "std.editing.begin"));
 
     // `std.editing.begin` edits the row's primary field: point on the NAME is a

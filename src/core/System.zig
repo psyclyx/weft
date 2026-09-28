@@ -439,7 +439,7 @@ pub fn attachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!vo
         // Same posture pairing `Buffers.switchTo` uses (§10.4) — an entry
         // this head has never visited still rests where its DECLARED posture
         // says, not in whatever the outgoing system was doing.
-        try head.setModeRaw(gpa, self.buffers.restingModeFor(active.posture(head.scene_selection.field != null)));
+        try head.setModeRaw(gpa, self.buffers.restingModeFor(active.posture(head.scene_selection.edit != null)));
     }
 }
 

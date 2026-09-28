@@ -31,7 +31,7 @@ pub const CursorConfig = struct {
         return mode;
     }
     /// The caret's shape in `mode` — DERIVED from whether a printable key
-    /// inserts there (`Head.textCommit`), not chosen (doc/chrome.md §5.2).
+    /// inserts there (`scene_edit.textCommit`), not chosen (doc/chrome.md §5.2).
     /// A bar says "type here", so it is drawn only where typing inserts: a
     /// mode that declared one and commits nothing gets a block, which is
     /// honest about a position that matters but takes no text. Where typing

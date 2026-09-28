@@ -250,23 +250,21 @@ pub const SceneSelection = struct {
     view: ?semantic.view.Ref = null,
     nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
     /// The field being EDITED — a text extent inside the focused row
-    /// (doc/chrome.md §5.2). Null while the focus is the row itself: a row
-    /// whose leaf happens to be a field is not a field being edited, so the
-    /// `field` posture, the field caret and field input all read this, never
-    /// the shape of the focus path. Where the focus LANDS decides it
-    /// (`scene_edit.land`), by the grammar's declared granularity.
-    field: ?semantic.scene.FieldRef = null,
-    /// Whether the edit of `field` was BEGUN — `std.editing.begin`, a slow
-    /// second click, a provider entering a field — under `row` granularity.
-    /// A begun edit owns printable input whatever the mode commits
-    /// (`Head.textCommit`), ends when activated (commit) or cancelled, and
-    /// commits when the focus leaves its row. A `text` granularity grammar
-    /// never begins one: it edits the focused field as a matter of course,
-    /// through its own modes.
-    began: bool = false,
-    /// The field's text when the edit began — what cancelling restores.
-    /// Meaningful only while `began`.
-    origin: std.ArrayList(u8) = .empty,
+    /// (doc/chrome.md §5.2) — and the text it held when the edit began,
+    /// which cancelling restores. Null while the focus is the row itself: a
+    /// row whose leaf happens to be a field is not a field being edited, so
+    /// the `field` posture, the field caret and field input all read this,
+    /// never the shape of the focus path. ONE value, so no field is edited
+    /// without its origin, and an edit ends in one assignment that nothing
+    /// fallible precedes (`scene_edit.commit`/`cancel`). Whether the edit is
+    /// a BEGUN one — taking printable input itself, committing when the
+    /// focus leaves its row — is the head's granularity
+    /// (`scene_edit.begun`); under `text` the grammar's modes drive it.
+    /// Where the focus LANDS decides it (`scene_edit.land`).
+    edit: ?Edit = null,
+    /// Where `Edit.origin` lives, kept between edits. Read only through
+    /// `edit`.
+    origin_storage: std.ArrayList(u8) = .empty,
     /// A one-shot row anchor used when an action temporarily focuses a
     /// secondary, non-focusable node in this same view. It is head-local so
     /// another head can navigate the same view independently.
@@ -285,11 +283,28 @@ pub const SceneSelection = struct {
 
     pub const empty: SceneSelection = .{};
 
+    /// One edit: the field and the text it began from.
+    pub const Edit = struct {
+        field: semantic.scene.FieldRef,
+        /// The field's text when the edit began — what cancelling restores.
+        /// Borrowed from `origin_storage`, valid until the next edit starts.
+        origin: []const u8,
+    };
+
     pub fn deinit(self: *SceneSelection, gpa: Allocator) void {
         self.nodes.deinit(gpa);
         self.others.deinit(gpa);
-        self.origin.deinit(gpa);
+        self.origin_storage.deinit(gpa);
         self.* = .{};
+    }
+
+    /// Start editing `field`, which held `origin` as the edit began. Any
+    /// edit before it is over first, so a failed start leaves none.
+    pub fn startEdit(self: *SceneSelection, gpa: Allocator, field: semantic.scene.FieldRef, origin: []const u8) Allocator.Error!void {
+        self.edit = null;
+        self.origin_storage.clearRetainingCapacity();
+        try self.origin_storage.appendSlice(gpa, origin);
+        self.edit = .{ .field = field, .origin = self.origin_storage.items };
     }
 
     /// Focus `next`. Within the same view the extents stay — a move grows a
@@ -301,9 +316,12 @@ pub const SceneSelection = struct {
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(next.nodes);
         self.view = next.view;
-        // An edit belongs to its field: a path naming another (or none) ends it.
-        if (!sameField(self.field, next.field)) self.began = false;
-        self.field = next.field;
+        // An edit belongs to its field: a path naming another (or none) ends
+        // it. A path naming a new field starts nothing — an edit needs its
+        // origin, which `startEdit` is handed (`scene_edit.land`).
+        if (self.edit) |edit| if (!sameField(edit.field, next.field)) {
+            self.edit = null;
+        };
         self.navigation_anchor = null;
         self.selection_mark = false;
         if (!same_view) self.collapse();
@@ -312,8 +330,7 @@ pub const SceneSelection = struct {
     pub fn clear(self: *SceneSelection) void {
         self.view = null;
         self.nodes.clearRetainingCapacity();
-        self.field = null;
-        self.began = false;
+        self.edit = null;
         self.navigation_anchor = null;
         self.selection_mark = false;
         self.collapse();
@@ -354,10 +371,9 @@ pub const SceneSelection = struct {
         self.others.clearRetainingCapacity();
         self.others.appendSliceAssumeCapacity(other.others.items);
         self.view = other.view;
-        self.field = other.field;
-        self.began = other.began;
-        self.origin.clearRetainingCapacity();
-        try self.origin.appendSlice(gpa, other.origin.items);
+        if (other.edit) |edit| try self.startEdit(gpa, edit.field, edit.origin) else {
+            self.edit = null;
+        }
         self.navigation_anchor = other.navigation_anchor;
         self.selection_mark = other.selection_mark;
         self.anchor = other.anchor;
@@ -377,7 +393,7 @@ pub const SceneSelection = struct {
         return .{
             .view = self.view orelse return null,
             .nodes = self.nodes.items,
-            .field = self.field,
+            .field = if (self.edit) |edit| edit.field else null,
         };
     }
 };
@@ -771,23 +787,6 @@ pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
     return km.commitCommand(self.mode);
 }
 
-/// Where a printable keystroke nothing bound goes as TEXT, or null when it
-/// inserts nothing (doc/chrome.md §5.2): the mode's commit command, else
-/// core's own `edit.insert-text` while a begun edit holds a field — the edit took
-/// the keys, whatever the resting mode says. The one question both the
-/// commit path and the caret shape ask, so a bar can never be drawn where
-/// typing does nothing.
-pub fn textCommit(self: *const Head, km: *const Keymap) ?[]const u8 {
-    return self.textCommitIn(km, self.mode);
-}
-
-/// `textCommit` as it would be in `mode` — a menu mode draws the caret of
-/// the mode it returns to, and asks this of that one.
-pub fn textCommitIn(self: *const Head, km: *const Keymap, mode: []const u8) ?[]const u8 {
-    if (km.commitCommand(mode)) |cmd| return cmd;
-    return if (self.scene_selection.began) "edit.insert-text" else null;
-}
-
 /// Feed one keyspec through THIS HEAD's pending sequence — see
 /// `Keymap.Feed`/the module doc on chords. Mutates `self.pending`; a `.run`
 /// arm list borrows `km` — use it before any rebind.
@@ -1135,7 +1134,8 @@ test "head: semantic focus and interaction scopes are independent" {
     const view_ref: semantic.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
     const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
     const nodes = [_]semantic.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
-    try a.scene_selection.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
+    try a.scene_selection.set(gpa, .{ .view = view_ref, .nodes = &nodes });
+    try a.scene_selection.startEdit(gpa, field_ref, "");
     try t.expectEqual(@as(usize, 2), a.scene_selection.path().?.nodes.len);
     try t.expect(b.scene_selection.path() == null);
 

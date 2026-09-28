@@ -309,7 +309,7 @@ pub const Ctx = struct {
                 .tool = buf.tool,
                 .role = buf.focusedRole(),
                 .locality = buf.locality(),
-                .posture = @tagName(buf.posture(ctx.head.scene_selection.field != null)),
+                .posture = @tagName(buf.posture(ctx.head.scene_selection.edit != null)),
                 // The open keys, read through the store: the stack's entry →
                 // place → global resolution happens INSIDE the reader, so this
                 // one scope carries all three levels and the reflective merge

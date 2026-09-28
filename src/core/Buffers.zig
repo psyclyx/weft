@@ -802,11 +802,12 @@ pub const LeaveEdit = struct {
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
-    // The edit ends here, committed, while the head still holds it; what is
-    // saved below is a row focus at most.
-    if (head.scene_selection.began) {
+    // A begun edit ends here, committed, while the head still holds it —
+    // over even when the commit fails (`scene_edit.commit`) — so what is
+    // saved below is a row focus at most. An edit under `text` is the
+    // entry's own and is saved with it.
+    if (head.scene_selection.edit != null) {
         if (self.leave_edit) |leave| leave.commit(leave.ctx, head, gpa);
-        head.scene_selection.began = false;
     }
     const old = self.active();
     // Moving between entries is a jump, and only here does core see every
@@ -836,7 +837,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         const resting = if (!keymap.anyModeHasTag("resting") or keymap.modeHasTag(base, "resting"))
             base
         else
-            self.restingModeFor(old.posture(old.scene_selection.field != null));
+            self.restingModeFor(old.posture(old.scene_selection.edit != null));
         const held = try gpa.dupe(u8, resting);
         gpa.free(old.mode);
         old.mode = held;
@@ -869,7 +870,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         // declared what that posture means, so a structural entry can never
         // be stamped with the text editing base. This is the mode-leak
         // class's remaining half — the founding bug's mirror image.
-        const resting = self.restingModeFor(target.posture(head.scene_selection.field != null));
+        const resting = self.restingModeFor(target.posture(head.scene_selection.edit != null));
         if (resting.len > 0) {
             try head.setModeRaw(gpa, resting);
             target.mode = try gpa.dupe(u8, resting);

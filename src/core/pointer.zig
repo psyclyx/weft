@@ -516,7 +516,7 @@ fn slowClickOnFocus(ctx: *Context, node: NodeRef) bool {
     const prior = g.prior orelse return false;
     if (!prior.view.eql(node.view) or prior.node != node.node) return false;
     const selection = &ctx.head.scene_selection;
-    if (selection.began) return false;
+    if (selection.edit != null) return false;
     const view = selection.view orelse return false;
     return view.eql(node.view) and selection.head() == node.node;
 }
