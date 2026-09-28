@@ -12,6 +12,13 @@ Core moves bytes, sizes and cells. It does not know what a terminal is, which
 program runs, what `TERM` says, or how a key becomes bytes. All of that lives
 in `src/plugins/terminal/`.
 
+A terminal is used like the rest of weft: there may be several, each an
+ordinary entry (§4); out of capture its screen and scrollback are text the
+grammar's own keys read (§6); a shell tells it where its prompts are and
+where it is (§7); and at a prompt the command line is a field the grammar
+edits, keys going to the program only where the program DECLARED it wants
+them (§8) — so the break-out chord is rarely needed.
+
 ## 1. The pty door
 
 `core/pty.zig` puts a child on a pseudo-terminal. The guest reaches it
@@ -132,21 +139,21 @@ cover a full composite: read, emulate, publish, build and CPU raster.
 
 | case | time to reach the screen | frames | per-frame time |
 |---|---|---|---|
-| `yes \| head -n 200000` | 43 ms | 6 | p50 6.9 ms, max 11.0 ms |
-| `ls -R /nix/store \| head -n 100000` | 428 ms | 65 | p50 5.0 ms, p90 12.3 ms |
-| `yes …`, read (broken out, §6) | 155 ms | 4 | p50 52 ms |
-| `ls -R …`, read (broken out, §6) | 1984 ms | 76 | p50 4.2 ms, p90 81 ms |
+| `yes \| head -n 200000` | 44 ms | 4 | p50 12.8 ms, max 19.8 ms |
+| `ls -R /nix/store \| head -n 100000` | 481 ms | 77 | p50 4.2 ms, p90 11.8 ms |
+| `yes …`, read (broken out, §6) | 159 ms | 4 | p50 51 ms |
+| `ls -R …`, read (broken out, §6) | 2075 ms | 64 | p50 5.3 ms, p90 84 ms |
 
 - The first two rows are the terminal capturing, as before this document's
-  §6 existed: they are unchanged (48 and 539 ms then, on this machine's
-  earlier measure). History is not copied while nothing reads it.
+  §6 existed, and still scanning the stream for the shell's marks (§7, §8):
+  48 and 539 ms before this work. History is not copied while nothing reads it.
 - The last two are the flood with the terminal READ as text: every wake also
   sends the rows that scrolled into the scrollback and core keeps the
   document in step. `ls -R` turns over ~2500 wide rows a wake; the cost is
   the rows' cells and their text, not the CRDT (below).
 - Each wake digests at most 256 KiB, so a flood draws as it goes rather than
   one frame waiting on all of it.
-- A frame with the panel full of 40 coloured rows has a median of 4.9 ms,
+- A frame with the panel full of 40 coloured rows has a median of 4.1 ms,
   against 4.5 ms for the problems list in the same panel.
 
 ## 4. Several terminals, and a header that lists entries
