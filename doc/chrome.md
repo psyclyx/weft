@@ -431,8 +431,11 @@ What this leaves for the later lanes, and two things found on the way:
 - `theme.set-color` bound at the transient tier under one owner and never
   unbound, so a second `theme.set-color` of the same name tied with the first and
   lost (`Container.betterThan` keeps the earlier). Fixed for the class:
-  `Container.bind` at the transient tier replaces the same owner's binding
-  on that slot, so the chrome switch no longer unbinds first.
+  a setter binds with `Container.rebind`, which replaces the same owner's
+  binding on that slot and tier, so the chrome switch no longer unbinds
+  first. (It was first done inside `bind` for the whole transient tier,
+  which silently dropped one of a plugin's two transient slot providers
+  and orphaned it; `bind` accumulates at every tier.)
 
 ## 4. The status bar
 

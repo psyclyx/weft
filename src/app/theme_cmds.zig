@@ -19,9 +19,9 @@ const Style = view_mod.chrome.Style;
 const owner = "theme.set-chrome";
 
 /// Replace the transient chrome binding with `style` (a transient rebind from
-/// one owner replaces its last, `Container.bind`).
+/// one owner replaces its last, `Container.rebind`).
 fn bindStyle(container: *core.container.Container, style: Style) !void {
-    container.bind(.{
+    container.rebind(.{
         .slot = View.chrome_slot,
         .provider = .{ .value = style.name() },
         .predicate = .{ .all = &.{} },

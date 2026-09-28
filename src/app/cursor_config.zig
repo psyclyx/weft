@@ -77,7 +77,7 @@ pub fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []co
     const v: *view_mod.View = @ptrCast(@alignCast(data.?));
     const slot = core.palette.slotFor(args[0].string) orelse return error.InvalidArgument;
     if (core.palette.parseHex(args[1].string) == null) return error.InvalidArgument;
-    ctx.actions.container.bind(.{
+    ctx.actions.container.rebind(.{
         .slot = slot,
         .provider = .{ .value = args[1].string },
         .predicate = .{ .all = &.{} },
