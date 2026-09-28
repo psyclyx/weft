@@ -498,17 +498,6 @@ fn selectedRows(arena: std.mem.Allocator, instance: anytype, focus: *const core.
 /// What the pointer rests on in `pane`, as this frame's input for the chrome
 /// style (`Hud.pointer`): the target, whether a button is held on it, and
 /// whether its tooltip is due. Nothing, for a pane the pointer is not over.
-/// A tooltip's and a menu item's key hint (`chrome.KeyHints`): the shortest
-/// key that runs `name` where the person is (`keys_for`, doc/chrome.md §1.3),
-/// as a person reads it. Null when no key runs it here.
-fn tooltipKeys(raw: *anyopaque, scratch: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    const ctx: *core.command.Context = @ptrCast(@alignCast(raw));
-    const keys = core.keys_for.keysFor(ctx, scratch, name, core.keys_for.personMode(ctx)) catch return null;
-    if (keys.len == 0) return null;
-    var buf: [256]u8 = undefined;
-    return scratch.dupe(u8, ctx.keymap.displayKey(&buf, keys[0])) catch null;
-}
-
 fn pointerIn(fx: *const FrameCtx, pane: u32) view_mod.Hover {
     const hover = fx.hover;
     if (hover.target.pane != pane) return .{};
@@ -798,7 +787,11 @@ pub const FrameBuilder = struct {
         input.snapshot_ns += stats_mod.nowNs() - t0;
         layers.apply(&hud);
         hud.pointer = pointerIn(fx, spec.pane);
-        hud.key_hints = .{ .context = fx.cmd_ctx, .keysFor = tooltipKeys };
+        // Found when the pointer settled (`Hover.settle`), never here.
+        hud.key_hint = .{
+            .command = try arena.dupe(u8, fx.hover.hint.command()),
+            .keys = try arena.dupe(u8, fx.hover.hint.keys()),
+        };
 
         // Every answer this pane draws or asks for is about its subject: a
         // pane that just moved to another entry draws none of the last one's.
@@ -1041,9 +1034,9 @@ pub const FrameBuilder = struct {
             // production; see `View.build`'s doc.
             .pick = null,
         };
-        const echo_live = fx.echo_timing.live(&fx.head.echo, act.frame_start, configMs(fx.config, "editor", "echo-ms"));
-        if (echo_live != fx.echo_timing.was_live) fx.view_dirty.* = true; // shown, then gone
-        fx.echo_timing.was_live = echo_live;
+        // Timed where it was said (`EchoTiming.note`, the wake's boundary);
+        // the frame only reads whether it shows.
+        const echo_live = fx.echo_timing.showing;
         // What the head says on a status line: its messages and its
         // connection, and where the active entry stands among the open ones.
         const head_status: StatuslineArgs.Head = .{

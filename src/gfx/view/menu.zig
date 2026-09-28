@@ -420,7 +420,7 @@ pub fn draw(
                 .radio = it.radio,
             }, rb.rect, pb.columns);
             if (is_hovered and tooltip and it.reason.len != 0)
-                v.build_tip = .{ .label = it.label, .reason = it.reason, .command = it.name };
+                v.build_tip = .{ .label = it.label, .key_hint = it.keys, .reason = it.reason, .command = it.name };
             try hits.append(hit_arena, .{ .node = it.node, .rect = rb.rect });
         }
     }

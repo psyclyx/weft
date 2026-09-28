@@ -541,8 +541,8 @@ pub fn paintSelected(s: Sink, row: region.Rect, color: [4]f32) !void {
     }
 }
 
-/// What a tooltip says: a label, the keys that run it (from a `KeyHints`
-/// hook, once one is wired), and why it cannot run, when it cannot.
+/// What a tooltip says: a label, the keys that run it (its own, else the
+/// frame's `KeyHint`), and why it cannot run, when it cannot.
 pub const Tip = struct {
     label: []const u8,
     key_hint: []const u8 = "",
@@ -573,18 +573,19 @@ pub fn paintTooltip(s: Sink, tip: Tip, at: [2]f32, bounds: region.Rect) !void {
     if (tip.reason.len != 0) try s.label(tip.reason, tx, y + 3 + v.line_h, th.diag_warn, box);
 }
 
-/// The keys that run a command here — the tooltip's and a menu item's key
-/// hint. The shell answers it with `keysFor` (doc/chrome.md §1.3), so the key
-/// shown is the one that would work in the focused pane; a frame built with
-/// no hook shows none.
-pub const KeyHints = struct {
-    context: *anyopaque,
-    keysFor: *const fn (context: *anyopaque, scratch: Allocator, command: []const u8) ?[]const u8,
+/// The key that runs the hovered element's command here — the tooltip's key
+/// hint, as frame INPUT. The shell asks `keysFor` (doc/chrome.md §1.3) once,
+/// when the pointer settles on the element, so the key shown is the one that
+/// would work in the focused pane and a frame build asks nothing.
+pub const KeyHint = struct {
+    /// What the hint was found for.
+    command: []const u8 = "",
+    keys: []const u8 = "",
 
-    pub fn of(self: ?KeyHints, scratch: Allocator, command: []const u8) []const u8 {
-        const hints = self orelse return "";
-        if (command.len == 0) return "";
-        return hints.keysFor(hints.context, scratch, command) orelse "";
+    /// The keys for `command`, or "" when the hint is for something else.
+    pub fn of(self: KeyHint, command: []const u8) []const u8 {
+        if (command.len == 0 or !std.mem.eql(u8, command, self.command)) return "";
+        return self.keys;
     }
 };
 

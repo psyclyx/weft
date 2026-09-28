@@ -396,7 +396,7 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                     },
                     else => try chrome_mod.paint(sink, role, state, content, box),
                 }
-                if (hovered and hud.pointer.tooltip) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
+                if (hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
                 occupied = column + span.cellsIn(v) + 1;
                 if (!span.focusable and !span.activatable) continue;
                 try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });

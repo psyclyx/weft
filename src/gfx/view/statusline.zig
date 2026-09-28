@@ -128,7 +128,7 @@ const Look = struct {
 /// when the pointer rests on it and a click would run something.
 fn lookOf(v: *View, hud: Hud, seg: ui_mesh.Seg, index: usize) Look {
     const hover = seg.command.len != 0 and hud.pointer.onChrome(.status, index, .body);
-    if (hud.pointer.onChrome(.status, index, .body) and hud.pointer.tooltip and (seg.tooltip.len != 0 or seg.command.len != 0))
+    if (hud.pointer.onChrome(.status, index, .body) and (seg.tooltip.len != 0 or seg.command.len != 0))
         v.build_tip = .{ .label = if (seg.tooltip.len != 0) seg.tooltip else seg.command, .command = seg.command };
     return .{
         .role = if (seg.bg_override != null) .chip else .status_segment,

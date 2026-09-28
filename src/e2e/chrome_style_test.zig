@@ -26,6 +26,7 @@ const ConfigLoader = h.ConfigLoader;
 const IdeApp = ide.IdeApp;
 const Style = h.view.chrome.Style;
 const Rect = h.region.Rect;
+const frame_builder = h.app.frame_builder;
 
 fn toolbarButton(ed: *Editor, label: []const u8) !Rect {
     const pane = try @import("chrome_test.zig").viewportPane(ed, "toolbar");
@@ -125,6 +126,65 @@ test "e2e/chrome-style: hover lights a toolbar button as frame input, dispatchin
     try motion(ed, .{ at[0], at[1] + 200 });
     try t.expect(ed.application.view_dirty);
     try t.expect(!ed.application.hover.ripe);
+}
+
+test "e2e/chrome-style: frame-purity — building a frame with a tooltip and a message showing changes nothing — no plane sync, no timing, the same draw lists twice" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "main.zig", "const x = 1;\n");
+    ed.applyWindow();
+    ed.gpa.free(try ed.renderComposite());
+
+    // The tooltip over Save is showing, its key found when the pointer
+    // settled; a message has just been said.
+    const save = try toolbarButton(ed, "Save");
+    try motion(ed, .{ save.x + save.w / 2, save.y + save.h / 2 });
+    ed.gpa.free(try ed.renderComposite());
+    const due = ed.application.hover.dueAt() orelse return error.NoTooltipPending;
+    ed.gpa.free(try ed.renderCompositeAt(due));
+    try t.expect(ed.application.hover.ripe);
+    try t.expectEqualStrings("C-s", ed.application.hover.hint.keys());
+    ed.runStr("app.echo", "a passing remark");
+    ed.gpa.free(try ed.renderCompositeAt(due + 1));
+
+    const fb = &ed.render.fb;
+    const fx = &ed.application.driver.ctx;
+    const prepared = try ed.application.prepare();
+    const act: h.app.frame.Active = .{
+        .editor = prepared.editor,
+        .abuf = prepared.buffer,
+        .attach = prepared.attach,
+        .frame_start = due + 2,
+        .fb = .{ h.app_w, h.app_h },
+        .blink_on = true,
+        .menu_shown = false,
+    };
+    const syncs = ed.ctx.intent.?.syncs;
+    const timing = ed.application.echo_timing;
+    ed.application.view_dirty = false;
+
+    var drawn: [2][]h.scene.DrawItem = undefined;
+    for (&drawn) |*list| {
+        var input: frame_builder.FrameInput = .init(gpa);
+        defer input.deinit();
+        try fb.capture(fx, act, &input);
+        var tops: [16]usize = undefined;
+        try fb.draw(&input, tops[0..input.panes.items.len]);
+        var all: std.ArrayList(h.scene.DrawItem) = .empty;
+        for (fb.built_panes.items) |pane| try all.appendSlice(gpa, pane.items);
+        list.* = try all.toOwnedSlice(gpa);
+    }
+    defer for (drawn) |list| gpa.free(list);
+
+    // Building read the plane, the hover and the message's timing; it wrote
+    // none of them, and asked for no other frame.
+    try t.expectEqual(syncs, ed.ctx.intent.?.syncs);
+    try t.expectEqual(timing, ed.application.echo_timing);
+    try t.expect(!ed.application.view_dirty);
+    try t.expectEqualDeep(drawn[0], drawn[1]);
 }
 
 test "e2e/chrome-style: config.js draws text chrome, and theme.set-chrome switches the next frame live" {

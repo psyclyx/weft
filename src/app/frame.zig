@@ -129,33 +129,40 @@ pub const MenuOverlay = struct {
 };
 
 /// A message is brief. It shows on a status line for `duration_ns` from the
-/// frame that first sees it said (`Head.Echo.said`), then the line shows what
+/// wake that first sees it said (`Head.Echo.said`), then the line shows what
 /// it shows at rest — so neither a startup echo nor a refusal sits there for
-/// the rest of the session, and a message said again shows again. Timed by
-/// the frame, as a flash is; `editor/echo-ms` is re-read at each saying.
+/// the rest of the session, and a message said again shows again.
+/// `editor/echo-ms` is re-read at each saying. Noted at the wake's boundary,
+/// before the frame (`note`); the frame only reads `showing`, so building it
+/// changes nothing (doc/model.md §2.7).
 pub const EchoTiming = struct {
     said: u64 = 0,
     since_ns: u64 = 0,
     duration_ns: u64 = default_ns,
-    /// Whether the last frame showed it — the frame after it lapses redraws.
-    was_live: bool = false,
+    /// Whether the message shows now — the frame's input.
+    showing: bool = false,
 
     pub const default_ns = 4 * std.time.ns_per_s;
 
-    /// Whether `echo` shows at `now`, noting a new saying; `ms` is the
-    /// configured duration, when there is one.
-    pub fn live(self: *EchoTiming, echo: *const core.Head.Echo, now: u64, ms: ?u64) bool {
-        if (echo.said != self.said) {
+    /// Note `echo` at `now`: a new saying starts its time, and a message
+    /// past its time stops showing; `ms` is the configured duration, when
+    /// there is one. True when what the line shows moved — a new saying, or
+    /// shown, then gone — so the frame is due.
+    pub fn note(self: *EchoTiming, echo: *const core.Head.Echo, now: u64, ms: ?u64) bool {
+        const new = echo.said != self.said;
+        if (new) {
             self.said = echo.said;
             self.since_ns = now;
             self.duration_ns = if (ms) |m| m * std.time.ns_per_ms else default_ns;
         }
-        return echo.items.len > 0 and now -| self.since_ns < self.duration_ns;
+        const showing = echo.items.len > 0 and now -| self.since_ns < self.duration_ns;
+        defer self.showing = showing;
+        return new or showing != self.showing;
     }
 
     /// When the message showing now lapses: the wake that redraws without it.
     pub fn due(self: *const EchoTiming, now: u64) ?u64 {
-        if (!self.was_live) return null;
+        if (!self.showing) return null;
         const at = self.since_ns + self.duration_ns;
         return if (at > now) at else null;
     }
@@ -168,14 +175,21 @@ test "echo timing: a message shows for its duration from its saying, and again w
     const s = std.time.ns_per_s;
     echo.clearRetainingCapacity();
     try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.live(&echo, 10 * s, null));
-    try std.testing.expect(timing.live(&echo, 13 * s, null));
-    try std.testing.expect(!timing.live(&echo, 15 * s, null));
+    try std.testing.expect(timing.note(&echo, 10 * s, null));
+    try std.testing.expect(timing.showing);
+    try std.testing.expect(!timing.note(&echo, 13 * s, null)); // nothing moved
+    try std.testing.expect(timing.showing);
+    try std.testing.expectEqual(@as(?u64, 14 * s), timing.due(13 * s));
+    try std.testing.expect(timing.note(&echo, 15 * s, null)); // gone
+    try std.testing.expect(!timing.showing);
+    try std.testing.expect(timing.due(15 * s) == null);
     // The same words, said again: shown again.
     echo.clearRetainingCapacity();
     try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.live(&echo, 20 * s, 1000));
-    try std.testing.expect(!timing.live(&echo, 21 * s + 1, 1000));
+    try std.testing.expect(timing.note(&echo, 20 * s, 1000));
+    try std.testing.expect(timing.showing);
+    try std.testing.expect(timing.note(&echo, 21 * s + 1, 1000));
+    try std.testing.expect(!timing.showing);
 }
 
 pub const FrameCtx = struct {
@@ -241,7 +255,7 @@ pub const FrameCtx = struct {
     /// one; the value it held before is the fallback.
     flash_duration_ns: *u64,
     /// When the head's message was said, as the frame first saw it.
-    echo_timing: *EchoTiming,
+    echo_timing: *const EchoTiming,
     /// The `weft.set` values the frame reads live (`editor/flash-ms`,
     /// `editor/flash-undo`). Null in an embedding with no configuration.
     config: ?*const core.kv.Store = null,

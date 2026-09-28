@@ -372,8 +372,15 @@ styles on one frame and checks every chrome role renders under each.
   the target changes — no keyspec, no dispatch. Each pane's `Hud.pointer`
   carries the target, `pressed` and `tooltip`. The tooltip delay is a loop
   timer (`tooltip_delay`); the pane built last paints the frame's tooltip
-  above every pane. Its key hint is a `chrome.KeyHints` hook that §1.3's
-  `keysFor` fills; until then hints are absent.
+  above every pane. Its key hint is frame input (`Hud.key_hint`): when the
+  pointer settles — the wake the delay ripens — the shell asks §1.3's
+  `keysFor` for what the element under it runs (`View.hoveredCommand`, what
+  the last frame's hovered element offered) and keeps the answer on the
+  `Hover` until the target changes. Building a frame asks nothing: it
+  syncs no intent plane (`Plane.syncs` holds still across a build) and
+  times nothing — a message's showing is noted at the wake's boundary
+  (`EchoTiming.note`, `Application.observe`), so one frame input drawn twice
+  draws the same lists.
 
 What this leaves for the later lanes, and two things found on the way:
 

@@ -292,6 +292,10 @@ pub const Plane = struct {
     /// `provide` to the plane a keystroke actually reads.
     derived: *action_offers.Publisher = undefined,
     derived_attached: bool = false,
+    /// How many times the plane was synced to a context (`snapshotAt`). A
+    /// frame never asks (doc/model.md §2.7): what it shows of the plane was
+    /// asked before it was built, so a build leaves this where it was.
+    syncs: u64 = 0,
 
     /// Wire the DERIVED publisher, once `Actions` exists. Separate from `init`
     /// because the two are constructed in the other order and neither can be
@@ -451,6 +455,7 @@ pub const Plane = struct {
     /// the sidebar republishes them back. Both are signature comparisons
     /// when nothing moved, and the two contexts keep separate cache keys.
     pub fn snapshotAt(self: *Plane, ctx: *command.Context, where: Where) ?*const catalog_mod.Snapshot {
+        self.syncs +%= 1;
         const scope = scopeOf(ctx, where);
         self.syncShape(self.shapeOf(scope)) catch {};
         if (ctx.semantic) |services| self.syncFocus(services, scope.focus, scope.mode, hereIn(ctx, scope)) catch {};

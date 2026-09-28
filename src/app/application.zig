@@ -36,8 +36,12 @@ pub const Application = struct {
     /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
     /// whenever a new flash starts.
     flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
-    /// When the head's message was said, for how long the frame shows it.
+    /// When the head's message was said, for how long the frame shows it —
+    /// noted at each wake's boundary (`observe`), read by the frame.
     echo_timing: frame.EchoTiming = .{},
+    /// This wake's clock (`tickAsync`'s `frame_start`), for what `observe`
+    /// notes just before the frame.
+    wake_ns: u64 = 0,
 
     next_backing_poll_ns: u64 = 0,
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
@@ -202,6 +206,7 @@ pub const Application = struct {
     }
 
     pub fn tickAsync(self: *Application, active: frame.Driver.Prepared, frame_start: u64) !bool {
+        self.wake_ns = frame_start;
         var damaged = try frame.tickAsync(
             &self.driver.ctx,
             active.buffer,
@@ -220,7 +225,12 @@ pub const Application = struct {
         };
         // The pointer has rested long enough: the frame that shows the
         // tooltip is due (the loop's `tooltip_delay` timer woke us for it).
-        if (self.hover.ripen(frame_start)) damaged = true;
+        // Its key hint is found now, off the frame path: the frame is handed
+        // it (doc/model.md §2.7).
+        if (self.hover.ripen(frame_start)) {
+            self.hover.settle(&self.session.cmd_ctx, self.driver.view.hoveredCommand());
+            damaged = true;
+        }
         if (try self.services.call(self, active)) damaged = true;
         return damaged;
     }
@@ -341,6 +351,10 @@ pub const Application = struct {
                 damaged = true;
             }
         }
+        // The head's message, timed where it was said: the last thing noted
+        // before the frame, so whatever this wake said is in it, and the
+        // frame only reads whether it shows.
+        if (self.echo_timing.note(&self.session.head.echo, self.wake_ns, echoMs(self.driver.ctx.config))) damaged = true;
         return damaged;
     }
 
@@ -361,3 +375,9 @@ pub const Application = struct {
         });
     }
 };
+
+/// `editor/echo-ms`: how long a message shows, when a config says.
+fn echoMs(config: ?*const core.kv.Store) ?u64 {
+    const raw = (config orelse return null).get("editor", "echo-ms") orelse return null;
+    return std.fmt.parseInt(u64, core.framed.first(raw) orelse return null, 10) catch null;
+}

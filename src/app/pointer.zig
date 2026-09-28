@@ -43,6 +43,45 @@ pub const Hover = struct {
     /// The pointer has rested on `target` past `delay_ns`: tooltips show.
     ripe: bool = false,
     delay_ns: u64 = 600 * std.time.ns_per_ms,
+    /// The tooltip's key hint, found when the pointer settled (`settle`), so
+    /// the frame that shows the tooltip is handed it and asks nothing.
+    hint: Hint = .{},
+
+    /// The shortest key that runs a command where the person is, as a
+    /// person reads it — owned, since it outlives the wake that found it.
+    pub const Hint = struct {
+        command_buf: [128]u8 = undefined,
+        command_len: usize = 0,
+        keys_buf: [64]u8 = undefined,
+        keys_len: usize = 0,
+
+        pub fn command(self: *const Hint) []const u8 {
+            return self.command_buf[0..self.command_len];
+        }
+
+        pub fn keys(self: *const Hint) []const u8 {
+            return self.keys_buf[0..self.keys_len];
+        }
+
+        /// The key that runs `name` in `ctx`'s person mode (`keys_for`,
+        /// doc/chrome.md §1.3); none when nothing does, or `name` is too
+        /// long to hold.
+        pub fn find(ctx: *core.command.Context, name: []const u8) Hint {
+            var hint: Hint = .{};
+            if (name.len == 0 or name.len > hint.command_buf.len) return hint;
+            @memcpy(hint.command_buf[0..name.len], name);
+            hint.command_len = name.len;
+            const found = core.keys_for.keysFor(ctx, ctx.gpa, name, core.keys_for.personMode(ctx)) catch return hint;
+            defer core.keys_for.free(ctx.gpa, found);
+            if (found.len == 0) return hint;
+            var buf: [256]u8 = undefined;
+            const shown = ctx.keymap.displayKey(&buf, found[0]);
+            if (shown.len > hint.keys_buf.len) return hint;
+            @memcpy(hint.keys_buf[0..shown.len], shown);
+            hint.keys_len = shown.len;
+            return hint;
+        }
+    };
 
     pub const Target = struct {
         pane: ?u32 = null,
@@ -78,6 +117,7 @@ pub const Hover = struct {
         self.target = target;
         self.since_ns = now_ns;
         self.ripe = false;
+        self.hint = .{};
         return true;
     }
 
@@ -95,6 +135,12 @@ pub const Hover = struct {
         if (now_ns < due) return false;
         self.ripe = true;
         return true;
+    }
+
+    /// The pointer has settled: find the key hint for `command`, what the
+    /// element under it runs (`View.hoveredCommand`, the last frame's).
+    pub fn settle(self: *Hover, ctx: *core.command.Context, command: []const u8) void {
+        self.hint = .find(ctx, command);
     }
 };
 

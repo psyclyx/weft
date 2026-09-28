@@ -136,11 +136,18 @@ icon_set: icons.Set,
 /// Whether the theme's icon set is the bundled one (`theme/icons`); `none`
 /// turns every icon off, whatever the chrome style.
 icons_on: bool = true,
-/// The tooltip the current build's hovered element offered, painted last.
+/// The tooltip the current build's hovered element offers — due or not, so
+/// what the pointer rests on is known before the frame that shows it.
 build_tip: ?chrome_mod.Tip = null,
 /// The frame's tooltip, whichever pane's element offered it, until the pane
-/// that paints tooltips (`Hud.tooltips`) draws it. Reset with the frame.
-frame_tip: ?struct { tip: chrome_mod.Tip, at: [2]f32 } = null,
+/// that paints tooltips (`Hud.tooltips`) draws it — when it is `due`. Reset
+/// with the frame; between frames, what the last one's pointer rested on
+/// (`hoveredCommand`).
+frame_tip: ?struct { tip: chrome_mod.Tip, at: [2]f32, due: bool } = null,
+/// What the last frame's hovered element runs, owned past the frame's
+/// arenas — `hoveredCommand`.
+hovered_buf: [128]u8 = undefined,
+hovered_len: usize = 0,
 
 em: f32,
 cell_w: f32,
@@ -275,6 +282,14 @@ pub fn rowsIn(self: *const View, h: f32) usize {
     return @intFromFloat(@max(1, @floor((h - 2 * margin) / self.line_h)));
 }
 
+/// What the element the pointer rested on in the last frame runs ("" for
+/// nothing, or an element that runs nothing) — what the shell looks a
+/// tooltip's key hint up by when the pointer settles, before the frame
+/// that shows the tooltip is built (doc/model.md §2.7).
+pub fn hoveredCommand(self: *const View) []const u8 {
+    return self.hovered_buf[0..self.hovered_len];
+}
+
 pub fn colsIn(self: *const View, w: f32) usize {
     return @intFromFloat(@max(1, @floor((w - 2 * margin) / self.cell_w)));
 }
@@ -381,6 +396,7 @@ pub fn resetFrame(self: *View) void {
     self.build_hits = &.{};
     self.build_chrome = &.{};
     self.frame_tip = null;
+    self.hovered_len = 0;
     self.pane_map_count = 0;
 }
 
@@ -724,7 +740,7 @@ pub fn build(
                 .pressed = hud.pointer.pressed and hud.pointer.onChrome(.tab, tb.index, .body),
             };
             try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = "file" }, box, if (close.w > 0) close else null, on_close);
-            if (state.hover and hud.pointer.tooltip) self.build_tip = .{ .label = if (on_close) "Close" else tab.path };
+            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else tab.path };
             if (box.w <= 0) continue;
             // The body is the tab less its close glyph, so the two parts'
             // hit regions never overlap.
@@ -809,14 +825,18 @@ pub fn build(
     // paints last (`Hud.tooltips`), so a toolbar button's tooltip hangs over
     // the editor below it instead of being clipped to the strip. Only the
     // element the pointer rests on offers one, once the delay has passed
-    // (`Hud.pointer`).
+    // (`Hud.pointer`). Its key hint is frame input (`Hud.key_hint`), found by
+    // the shell when the pointer settled — a build asks nothing.
     if (self.build_tip) |tip| if (hud.pointer.at) |at| {
-        self.frame_tip = .{ .tip = tip, .at = at };
+        self.frame_tip = .{ .tip = tip, .at = at, .due = hud.pointer.tooltip };
+        const n = @min(tip.command.len, self.hovered_buf.len);
+        @memcpy(self.hovered_buf[0..n], tip.command[0..n]);
+        self.hovered_len = if (n == tip.command.len) n else 0;
     };
     const top: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
-    if (hud.tooltips) if (self.frame_tip) |ft| {
+    if (hud.tooltips) if (self.frame_tip) |ft| if (ft.due) {
         var shown = ft.tip;
-        if (shown.key_hint.len == 0) shown.key_hint = chrome_mod.KeyHints.of(hud.key_hints, scratch, shown.command);
+        if (shown.key_hint.len == 0) shown.key_hint = hud.key_hint.of(shown.command);
         try chrome_mod.paintTooltip(sink, shown, ft.at, hud.float_bounds orelse frame);
     };
 
