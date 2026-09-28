@@ -10,11 +10,11 @@ var child: semantic.target.Located = undefined;
 
 fn describe() callconv(.c) void {
     weft.requestPerm(.fs_read);
-    weft.declareCommand("fixture-close-child-directory");
+    weft.declareCommand("semantic-fs-fixture.close-child-directory");
 }
 
 fn init() callconv(.c) void {
-    _ = weft.register("fixture-close-child-directory");
+    _ = weft.register("semantic-fs-fixture.close-child-directory");
     const parent: semantic.target.Located = .{
         .target = .{ .authority = .here, .slot = 0, .generation = 1 },
         .revision = 1,

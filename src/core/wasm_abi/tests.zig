@@ -288,7 +288,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqual(@as(usize, 0), child_listing.value.entries.len);
     try t.expectEqual(@as(usize, 1), provider.derive_calls);
 
-    const closed = try command.run(&env.commands, &env.ctx, "fixture-close-child-directory", &.{});
+    const closed = try command.run(&env.commands, &env.ctx, "semantic-fs-fixture.close-child-directory", &.{});
     try t.expectEqual(command.Value{ .integer = 1 }, closed);
     try t.expectEqual(@as(usize, 0), first.semantic_directories.items.len);
     try t.expect(semantic.targets.get(first_child.ref) == null);
@@ -610,17 +610,17 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &ctx, "wasm.plugin", @embedFile("guest_plugin_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &ctx, "fixture", @embedFile("guest_plugin_wasm"), .{});
     defer plugin.deinit();
 
-    // The guest's init() registered "wasm-mark" through the host.
-    try t.expect(commands.resolve("wasm-mark") != null);
+    // The guest's init() registered "fixture.mark" through the host.
+    try t.expect(commands.resolve("fixture.mark") != null);
 
     // Running it dispatches back into the guest, which edits via the host
     // gate — authored as the plugin's peer, across the membrane.
     try buffers.active().textEditor().?.insertText(gpa, "xy");
     buffers.active().textEditor().?.placeCursor(1);
-    _ = try command.run(&commands, &ctx, "wasm-mark", &.{});
+    _ = try command.run(&commands, &ctx, "fixture.mark", &.{});
     const s = try buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("x[wasm]y", s);
@@ -940,7 +940,7 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     // denied call (a regression back to the old silent -1), it would set its
     // result string to "did not trap" instead — so a bug here fails loud
     // either way.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "sneaky.go", &.{}));
 }
 
 test "wasm plugin: a handle the guest never got is refused, not fatal to the host" {
@@ -968,7 +968,7 @@ test "wasm plugin: a handle the guest never got is refused, not fatal to the hos
     // A normal return IS the assertion — a regression panics the test binary
     // rather than failing it, so the guest also echoes on the way out to
     // prove it ran the whole gauntlet instead of trapping partway.
-    _ = try command.run(&env.commands, &env.ctx, "hostile-handles", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "hostile-handle.run", &.{});
     try t.expectEqualStrings("survived", env.head.echo.text());
 
     // Nothing was opened, so nothing can have been closed: a bogus handle
@@ -1021,18 +1021,18 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
 
     // `head.poke` (on_command — DISPATCHING): the identical `weft.setMode`/
     // `weft.echo` pair `on_poll` traps on above now succeeds.
-    _ = try command.run(&env.commands, &env.ctx, "head.poke", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "headtest.poke", &.{});
     try t.expectEqualStrings("poked", env.head.currentMode());
     try t.expectEqualStrings("poked", env.head.echo.text());
 
-    // `head.relay` (on_command -> wl_run("head.poke") -> on_command, nested)
+    // `head.relay` (on_command -> wl_run("headtest.poke") -> on_command, nested)
     // THEN a second `weft.echo` write after the nested call returns. Both the
     // nested call's writes and the post-nesting write must succeed — proving
     // `in_dispatch` (like `active_ctx`) is saved/restored around the nested
     // dispatch (still true before and after), not bare-set-and-lost the
     // instant the inner call returns.
-    _ = try command.run(&env.commands, &env.ctx, "head.relay", &.{});
-    try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head.poke
+    _ = try command.run(&env.commands, &env.ctx, "headtest.relay", &.{});
+    try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head-poke
     try t.expectEqualStrings("after-relay", env.head.echo.text()); // written AFTER the nesting, still succeeds
 }
 
@@ -1048,7 +1048,7 @@ test "wasm plugin: nested same-plugin dispatch preserves its caller's live range
     defer plugin.deinit();
 
     try env.buffers.active().textEditor().?.insertText(gpa, "abc");
-    const result = try command.run(&env.commands, &env.ctx, "head.range-relay", &.{});
+    const result = try command.run(&env.commands, &env.ctx, "headtest.range-relay", &.{});
     try t.expect(result == .range);
     const resolved = result.range.resolve(&env.buffers.active().textEditor().?.doc) orelse return error.TestUnexpectedResult;
     try t.expectEqual(@as(usize, 1), resolved.start);
@@ -1311,7 +1311,7 @@ test "D2: one guest CONSUMES another guest's novel slot — typed, contextual, w
     defer gpa.free(live_version);
     try t.expect(live_version.len > 0);
 
-    const answer = try command.run(&env.commands, &env.ctx, "badge-read", &.{});
+    const answer = try command.run(&env.commands, &env.ctx, "badge-consumer.read", &.{});
     // provider | text | count | the version the HOST stamped. The consumer
     // never chose that version and never saw the provider's claimed one.
     const expected = try std.fmt.allocPrint(gpa, "badge|3 failing|3|{s}", .{live_version});
@@ -1326,7 +1326,7 @@ test "D2: one guest CONSUMES another guest's novel slot — typed, contextual, w
     defer env2.deinit(gpa);
     const lonely = try loadPlugin(&engine, &env2.ctx, "badge_consumer", @embedFile("guest_badge_consumer_wasm"), .{});
     defer lonely.deinit();
-    const none = try command.run(&env2.commands, &env2.ctx, "badge-read", &.{});
+    const none = try command.run(&env2.commands, &env2.ctx, "badge-consumer.read", &.{});
     try t.expectEqualStrings("no-provider", none.string);
 }
 
@@ -1347,13 +1347,13 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
 
     // init() bound C-d → dup-up through the config surface.
     try env.head.setModeRaw(gpa, "default");
-    try t.expectEqualStrings("dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
+    try t.expectEqualStrings("demo-config.dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "dup-up", &.{});
-    // dup-up ran edit.duplicate-line ("ab\nab") then edit.upcase-line on the current
+    _ = try command.run(&env.commands, &env.ctx, "demo-config.dup-up", &.{});
+    // dup-up ran duplicate-line ("ab\nab") then upcase-line on the current
     // line (cursor still at 0 → the first line) across the membrane.
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -1400,7 +1400,7 @@ test "wasm plugin: palette status echoes the active buffer (introspection)" {
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "palette", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
 
     // status walks the buffers (bufferCount/bufferAt) and echoes the active
@@ -1419,7 +1419,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "palette", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
 
     // palette.open builds a pick over the whole registry and opens it.
@@ -2614,17 +2614,17 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
 
     // In-root write, then read, succeed — across the membrane, through the
     // REAL split semantic bodies + the semantic-confined RootedFs backstop.
-    const wr = try command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
+    const wr = try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
     try t.expectEqual(command.Value{ .integer = 1 }, wr);
-    const rr = try command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = in_path }});
+    const rr = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = in_path }});
     try t.expectEqualStrings("hi from guest", rr.string);
 
     // Out-of-root: the guest's call traps outright — never a fake "<absent>"
     // it could keep running past (the same trap-on-deny discipline
     // `deny.zig`'s test proves for a missing perm; this is the identical
     // property for a POSSESSED-but-out-of-bounds path).
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = "totally/unrelated/path.txt" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = "totally/unrelated/path.txt" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "totally/unrelated/path.txt" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "totally/unrelated/path.txt" }}));
 
     // Traversal: lexically prefixed by the root (passes the fast lexical
     // gate) but escapes it via `..` — the KERNEL gate (RootedFs,
@@ -2632,8 +2632,8 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     // exactly the same way: a trap, not a silent allow.
     var esc_path_buf: [300]u8 = undefined;
     const esc_path = try std.fmt.bufPrint(&esc_path_buf, "{s}/../../etc/passwd", .{root});
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = esc_path }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = esc_path }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
 }
 
 // ── doc/place.md §4.1: an ABSENT limit means the PLACE, not the machine ──
@@ -2681,30 +2681,30 @@ test "wasm plugin: a declared-but-ungranted fs capability is confined to the DIS
     // byte-identical to what a cwd-relative path always meant.
     try t.expectEqual(
         command.Value{ .integer = 1 },
-        try command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
+        try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
     );
-    const got = try command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = rel }});
+    const got = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = rel }});
     try t.expectEqualStrings("in place", got.string);
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.file) },
-        try command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = rel }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = rel }}),
     );
 
     // INSIDE the place, spelled ABSOLUTELY — the same file, still allowed. A
     // place confinement is about WHERE, not about how the guest spelled it.
-    const got_abs = try command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = abs }});
+    const got_abs = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = abs }});
     try t.expectEqualStrings("in place", got_abs.string);
 
     // OUTSIDE the place: refused. Not a `<absent>` the guest could keep
     // running past — a trap, the same discipline `.fs_root` already has.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = "/etc/hostname" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = "/etc" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "/etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
     // And a climb out of it, relative or absolute, is refused too.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = "../etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "../etc/hostname" }}));
     const climb = try std.fmt.allocPrint(gpa, "{s}/../../etc/hostname", .{here});
     defer gpa.free(climb);
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = climb }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = climb }}));
 
     // THE ESCAPE HATCH, and it is a sentence someone had to write:
     // `weft.grant("fs_limit", "fs_read", { root: "/" })`. Applied to the SAME
@@ -2714,13 +2714,13 @@ test "wasm plugin: a declared-but-ungranted fs capability is confined to the DIS
     try t.expectEqual(grants_mod.Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = "/etc" }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}),
     );
-    const outside = try command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = "/etc/hostname" }});
+    const outside = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "/etc/hostname" }});
     try t.expect(outside.string.len > 0 or std.mem.eql(u8, outside.string, "<absent>"));
     // fs_WRITE was not widened, so it is still confined — the two capabilities
     // are separate rows and a widening of one is not a widening of both.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
 }
 
 // ── doc/place.md §4.1: bucket 1 is carved out UNCONDITIONALLY ────────────
@@ -2777,17 +2777,17 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     defer gpa.free(content_path);
     try t.expectEqual(
         command.Value{ .integer = 1 },
-        try command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
+        try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
     );
-    const ord = try command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = content_path }});
+    const ord = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = content_path }});
     try t.expectEqualStrings("ordinary", ord.string);
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = "/etc" }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}),
     );
     // A mundane miss is a 0, NOT a trap — the answer every refusal below has
     // to stay distinguishable from.
-    const absent = try command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
+    const absent = try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
     try t.expectEqual(command.Value{ .integer = @intFromEnum(file.Kind.none) }, absent);
 
     // 1. The wasm module cache (`wasm.Engine.cacheDir`). Read, probe, and
@@ -2798,15 +2798,15 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
         defer gpa.free(dir);
         const inside = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{dir});
         defer gpa.free(inside);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = dir }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = inside }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = inside }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = inside }, .{ .string = "x" } }));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = dir }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = inside }, .{ .string = "x" } }));
         // The `..` spelling doesn't walk in either — the comparison is on the
         // normalized path, not the string the guest typed.
         const traversal = try std.fmt.allocPrint(gpa, "{s}/sub/../deadbeef.cwasm", .{dir});
         defer gpa.free(traversal);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = traversal }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = traversal }}));
     }
 
     // 2. The plugin kv store (`kv_file.stateDir`) — one plugin's private
@@ -2816,9 +2816,9 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
         defer gpa.free(dir);
         const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").plugins_file });
         defer gpa.free(blob);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = blob }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = blob }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = blob }, .{ .string = "x" } }));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = blob }, .{ .string = "x" } }));
     }
 
     // 3/4. The two keystores. READ and PROBE only, deliberately: unlike the
@@ -2831,13 +2831,13 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     const machinery = @import("../machinery.zig");
     var pbuf: [512]u8 = undefined;
     if (@import("../identity.zig").configPath(&pbuf, machinery.Posix{})) |p| {
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = p }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = p }}));
     }
     var kbuf: [512]u8 = undefined;
     if (@import("../known_peers.zig").configPath(&kbuf, machinery.Posix{})) |p| {
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = p }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = p }}));
     }
 }
 
@@ -2884,18 +2884,18 @@ test "wasm plugin: a symlink cannot walk into the machinery a plugin may not nam
     if (std.os.linux.errno(std.os.linux.symlinkat(targetz.ptr, std.os.linux.AT.FDCWD, linkz.ptr)) != .SUCCESS)
         return error.SkipZigTest;
 
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.read", &.{.{ .string = linkz }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = linkz }}));
     const through = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{linkz});
     defer gpa.free(through);
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try.write", &.{ .{ .string = through }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = through }, .{ .string = "x" } }));
 
     // The same tmp directory, NOT through the link, is ordinary content the
     // unconfined grant still reaches — the symlink is what was refused, not
     // the neighbourhood.
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try.exists", &.{.{ .string = dir }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = dir }}),
     );
 }
 
@@ -3241,7 +3241,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     // authority, and this guest declares none.
     for (plugin.perms) |granted| try t.expect(!granted);
 
-    _ = try command.run(&env.commands, &env.ctx, "proj.build", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.build", &.{});
     const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
     {
         const text = try buf.textEditor().?.text().toOwnedSlice(gpa);
@@ -3269,7 +3269,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     try editor.setMark(gpa);
     editor.placeCursor(new_end);
 
-    _ = try command.run(&env.commands, &env.ctx, "proj.report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.report", &.{});
     {
         const line = try execReport(&env, gpa, "*proj-report*");
         defer gpa.free(line);
@@ -3285,8 +3285,8 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     // the cursor are keyed, so both survive an insertion that moved every
     // offset below it — the case a positional memory gets wrong.
     editor.placeCursor(std.mem.indexOf(u8, text, "  b.zig").?);
-    _ = try command.run(&env.commands, &env.ctx, "proj.fold-b", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "proj.rebuild", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.fold-b", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.rebuild", &.{});
     {
         const after = try buf.textEditor().?.text().toOwnedSlice(gpa);
         defer gpa.free(after);
@@ -3295,7 +3295,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
         // was, and found by name rather than by where it used to be.
         try t.expectEqual(std.mem.indexOf(u8, after, "  b.zig").?, buf.textEditor().?.cursorOffset());
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj.report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.report", &.{});
     {
         const line = try execReport(&env, gpa, "*proj-report*");
         defer gpa.free(line);
@@ -3340,7 +3340,7 @@ test "wasm plugin: a third party puts a verb on rows it did not produce" {
         .owner = "third-party",
     });
 
-    _ = try command.run(&env.commands, &env.ctx, "proj.build", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.build", &.{});
     const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
     const editor = buf.textEditor().?;
     const text = try editor.text().toOwnedSlice(gpa);
@@ -3511,7 +3511,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
 
     // The two streams arrive APART. Under the fill doors this needed `2>&1`,
     // after which nothing could tell them back apart.
-    _ = try command.run(&env.commands, &env.ctx, "exec.ok", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.ok", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-ok*");
@@ -3522,7 +3522,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     }
 
     // A non-zero exit crosses as a NUMBER. Nothing in the output says 7.
-    _ = try command.run(&env.commands, &env.ctx, "exec.fail", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.fail", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-fail*");
@@ -3536,7 +3536,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     // `$`, backticks, a pipe, and both kinds of quote reaches the child WHOLE —
     // there is no shell between the guest and the argv, so there is nothing for
     // a hand-written `'{s}'` to fail to escape.
-    _ = try command.run(&env.commands, &env.ctx, "exec.argv", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.argv", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-argv*");
@@ -3545,7 +3545,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     }
 
     // A continuation carries its own value. The token stays the SDK's.
-    _ = try command.run(&env.commands, &env.ctx, "exec.ctx", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.ctx", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-ctx*");
@@ -3570,7 +3570,7 @@ test "wasm plugin: wl_exec keeps the spool contract — a real file, no fs perm,
     defer plugin.deinit();
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
 
-    _ = try command.run(&env.commands, &env.ctx, "exec.spool", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.spool", &.{});
     drainJobs(&loop);
     const line = try execReport(&env, gpa, "*exec-spool*");
     defer gpa.free(line);
@@ -3983,7 +3983,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
     const plugin = try loadPlugin(&engine, &env.ctx, "projection_gate", @embedFile("guest_projection_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "proj.plan", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan", &.{});
     const buf = namedBuffer(&env.buffers, "*plan*") orelse return error.TestExpectedEqual;
     const editor = buf.textEditor().?;
 
@@ -3991,7 +3991,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
     // were published as. The `# reorder me` comment is not editable and does
     // not appear — a row a producer did not offer for editing is not one it is
     // asked about.
-    _ = try command.run(&env.commands, &env.ctx, "proj.plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4014,7 +4014,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
         defer gpa.free(doc_text);
         std.debug.print("PLANDOC=[{s}]\n", .{doc_text});
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj.plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4033,7 +4033,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
         const at = std.mem.indexOf(u8, text, "pick aaa first").?;
         try env.ctx.edit(.{ .start = at, .end = at + "pick aaa first".len }, "");
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj.plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4067,8 +4067,8 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     ed.placeCursor(0); // a motion: seals the typing's undo unit
 
     // add/remove/collapse are SDK compositions over the get/set record.
-    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms.add", &.{ .{ .integer = 4 }, .{ .integer = 4 } }));
-    try t.expectEqual(command.Value{ .integer = 3 }, try command.run(&env.commands, &env.ctx, "ms.add", &.{ .{ .integer = 8 }, .{ .integer = 8 } }));
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "multisel.add", &.{ .{ .integer = 4 }, .{ .integer = 4 } }));
+    try t.expectEqual(command.Value{ .integer = 3 }, try command.run(&env.commands, &env.ctx, "multisel.add", &.{ .{ .integer = 8 }, .{ .integer = 8 } }));
     try t.expectEqual(@as(usize, 3), ed.selectionCount());
     // The last added is primary, and the cursor view reads it.
     try t.expectEqual(@as(usize, 2), ed.primary);
@@ -4077,7 +4077,7 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     // Motion once per selection, operator once per range: every word's first
     // letter upcased — and the operator's own jump (a barrier) did not split
     // the unit.
-    _ = try command.run(&env.commands, &env.ctx, "ms.upcase-each", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.upcase-each", &.{});
     try expectDoc(gpa, ed, "Abc Def Ghi");
     try t.expect(try ed.undo(gpa, .user_driven));
     try expectDoc(gpa, ed, "abc def ghi");
@@ -4087,9 +4087,9 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
 
     // remove(1) keeps the primary on the same selection; collapse keeps it alone.
     const primary_at = ed.cursorOffset();
-    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms.remove", &.{.{ .integer = 1 }}));
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "multisel.remove", &.{.{ .integer = 1 }}));
     try t.expectEqual(primary_at, ed.cursorOffset());
-    try t.expectEqual(command.Value{ .integer = 1 }, try command.run(&env.commands, &env.ctx, "ms.collapse", &.{}));
+    try t.expectEqual(command.Value{ .integer = 1 }, try command.run(&env.commands, &env.ctx, "multisel.collapse", &.{}));
     try t.expectEqual(primary_at, ed.cursorOffset());
 }
 
@@ -4137,12 +4137,12 @@ test "wasm plugin: an undo unit a guest leaves open ends with its dispatch, and 
 
     // Nothing open in this dispatch: the close is refused, not taken from
     // anyone else's bracket.
-    try t.expectEqual(command.Value{ .integer = -1 }, try command.run(&env.commands, &env.ctx, "ms.unit-close", &.{}));
+    try t.expectEqual(command.Value{ .integer = -1 }, try command.run(&env.commands, &env.ctx, "multisel.unit-close", &.{}));
 
     // The guest opens a unit and returns without closing it. The unit ended
     // with the dispatch, so barriers work again: the typing after a motion is
     // its own undo unit, not folded into the guest's.
-    _ = try command.run(&env.commands, &env.ctx, "ms.unit-leak", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.unit-leak", &.{});
     try expectDoc(gpa, ed, "Xabc");
     try t.expectEqual(@as(u32, 0), ed.history.held);
     ed.placeCursor(4);
@@ -4169,18 +4169,18 @@ test "wasm plugin: multiple selections — a per-selection yank distributes acro
     try ed.insertText(gpa, "one two|");
     // Two selections over the two words, then yank one value each.
     try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 3 }, .{ .anchor = 4, .head = 7 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.yank", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.yank", &.{});
     try t.expectEqual(@as(usize, 2), reg.get(0).?.valueCount());
     try t.expectEqualStrings("one\ntwo", reg.get(0).?.slice());
 
     // Two carets → each gets its own value (counts match).
     try ed.setSelections(gpa, &.{ .{ .anchor = 3, .head = 3 }, .{ .anchor = 8, .head = 8 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.paste", &.{});
     try expectDoc(gpa, ed, "oneone two|two");
 
     // One caret → the joined text (counts differ; nothing yanked is dropped).
     try ed.setSelections(gpa, &.{.{ .anchor = 0, .head = 0 }}, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.paste", &.{});
     try expectDoc(gpa, ed, "one\ntwooneone two|two");
 }
 
@@ -4200,16 +4200,16 @@ test "wasm plugin: a command that declares no mapping is refused on several sele
     try ed.insertText(gpa, "abc");
     // One selection is the degenerate case: an undeclared command runs.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.undeclared", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.undeclared", &.{});
     try expectDoc(gpa, ed, "?abc");
 
     // Two: it would act on one of them, so it does not run at all — and the
     // door a person reaches it through says why.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
-    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "ms.undeclared", &.{}));
+    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "multisel.undeclared", &.{}));
     try expectDoc(gpa, ed, "?abc");
-    command.invoke(&env.commands, &env.ctx, "ms.undeclared", &.{});
-    try t.expectEqualStrings("ms.undeclared: acts on one selection; several are selected", env.head.echo.text());
+    command.invoke(&env.commands, &env.ctx, "multisel.undeclared", &.{});
+    try t.expectEqualStrings("multisel.undeclared: acts on one selection; several are selected", env.head.echo.text());
     try expectDoc(gpa, ed, "?abc");
     // Both selections survive the refusal.
     try t.expectEqual(@as(usize, 2), ed.selectionCount());
@@ -4231,7 +4231,7 @@ test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge ex
     try ed.insertText(gpa, "one two\nthree\n");
     const Count = struct {
         fn of(e: *Env) !i64 {
-            return (try command.run(&e.commands, &e.ctx, "ms.epilogues", &.{})).integer;
+            return (try command.run(&e.commands, &e.ctx, "multisel.epilogues", &.{})).integer;
         }
     };
     // Each read runs the epilogue once itself (ms.epilogues is a command).
@@ -4240,17 +4240,17 @@ test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge ex
     // Two carets on one line: the first run selects the line, merging the
     // other caret into it, so fewer runs happen than were scheduled.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 5, .head = 5 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.line", &.{});
     try t.expectEqual(@as(usize, 1), ed.selectionCount());
     try t.expectEqual(start + 2, try Count.of(&env));
 
     // Two carets, neither with a target: no run at all, one epilogue.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 10, .head = 10 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms.op-none", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.op-none", &.{});
     try t.expectEqual(start + 4, try Count.of(&env));
 
     // Two carets on two lines: two runs, still one epilogue.
-    _ = try command.run(&env.commands, &env.ctx, "ms.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.line", &.{});
     try t.expectEqual(start + 6, try Count.of(&env));
 }
 
@@ -4269,7 +4269,7 @@ test "context: a wasm plugin publishes at a scope, a predicate reads it, and unl
 
     const S = struct {
         fn set(e: *Env, key: []const u8, value: []const u8, scope: []const u8) ![]const u8 {
-            const v = try command.run(&e.commands, &e.ctx, "ow.context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
+            const v = try command.run(&e.commands, &e.ctx, "offerwatch.context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
             return v.string;
         }
     };
@@ -4331,9 +4331,9 @@ test "designation: a kind is its producer's by name or by manifest — a plugin 
     // At run time a foreign claim is refused (-3), and the plugin stays.
     const ow = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
     defer ow.deinit();
-    const claim = try command.run(&env.commands, &env.ctx, "ow.claim", &.{ .{ .string = "stranger" }, .{ .string = "ow.probe" } });
+    const claim = try command.run(&env.commands, &env.ctx, "offerwatch.claim", &.{ .{ .string = "stranger" }, .{ .string = "offerwatch.probe" } });
     try t.expectEqualStrings("refused", claim.string);
-    const own = try command.run(&env.commands, &env.ctx, "ow.claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow.probe" } });
+    const own = try command.run(&env.commands, &env.ctx, "offerwatch.claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "offerwatch.probe" } });
     try t.expectEqualStrings("ok", own.string);
     grep.deinit();
 }

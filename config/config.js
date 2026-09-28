@@ -441,13 +441,13 @@ weft.bind("normal", "SPC o p", "problems.open");     // the diagnostics list, in
 weft.bind("normal", "SPC o t", "terminal.open");     // the shell, in the bottom panel
 weft.bind("normal", "SPC o P", "panel.toggle"); // hide or show whichever the panel holds
 
-// SPC a — coding agents (ACP). Each `agent.start` is a fresh conversation:
+// SPC a — coding agents (ACP). Each `acp.start` is a fresh conversation:
 // its own subprocess, transcript buffer and CRDT sub-peer, so selective undo
 // separates one agent's edits from another's. Set weft.set("acp", "cmd", …)
 // above first; the launch command is yours, weft assumes nothing.
-weft.bind("normal", "SPC a a", "agent.start");
-weft.bind("normal", "SPC a s", "agent.send");  // send this line to the focused conversation
-weft.bind("normal", "SPC a f", "agent.focus"); // choose which conversation that is
+weft.bind("normal", "SPC a a", "acp.start");
+weft.bind("normal", "SPC a s", "acp.send");  // send this line to the focused conversation
+weft.bind("normal", "SPC a f", "acp.focus"); // choose which conversation that is
 
 // SPC d — debug. Breakpoints are gutter markers the debug plugin owns;
 // run/step/inspect are the DAP session (dap.js) over the adapter you named.
@@ -455,16 +455,16 @@ weft.bind("normal", "SPC a f", "agent.focus"); // choose which conversation that
 weft.bind("normal-source", "SPC d b", "debug.toggle-breakpoint");
 weft.bind("normal", "SPC d c", "debug.clear-breakpoints");
 weft.bind("normal", "SPC d l", "debug.list-breakpoints");
-weft.bind("normal", "SPC d d", "debug.start");
-weft.bind("normal", "SPC d r", "debug.continue");
-weft.bind("normal", "SPC d n", "debug.step-over");
-weft.bind("normal", "SPC d i", "debug.step-into");
-weft.bind("normal", "SPC d o", "debug.step-out");
-weft.bind("normal", "SPC d q", "debug.stop");
-weft.bind("normal", "F5", "debug.continue");
+weft.bind("normal", "SPC d d", "dap.start");
+weft.bind("normal", "SPC d r", "dap.continue");
+weft.bind("normal", "SPC d n", "dap.step-over");
+weft.bind("normal", "SPC d i", "dap.step-into");
+weft.bind("normal", "SPC d o", "dap.step-out");
+weft.bind("normal", "SPC d q", "dap.stop");
+weft.bind("normal", "F5", "dap.continue");
 weft.bind("normal-source", "F9", "debug.toggle-breakpoint");
-weft.bind("normal", "F10", "debug.step-over");
-weft.bind("normal", "F11", "debug.step-into");
+weft.bind("normal", "F10", "dap.step-over");
+weft.bind("normal", "F11", "dap.step-into");
 
 // ── SPC n — notes and EMBEDS ─────────────────────────────────────────
 // `notes.capture` appends the current line to the notes file; `notes-capture-

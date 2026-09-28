@@ -111,21 +111,21 @@ The ACP client works end-to-end and is launchable in the running editor:
   ACP agent (no agent binary or display needed). **A working coding agent:**
   reads + writes your files + streams responses. Launchable: `weft.set("acp",
   "cmd",…)` + `weft.grant("acp", "proc"|"fs_read"|"fs_write")` +
-  `weft.plugin("acp.js")` + `agent.start`. The grants are not optional: a
+  `weft.plugin("acp.js")` + `acp.start`. The grants are not optional: a
   `.js` plugin declares nothing about itself, so an ungranted `weft.procSpawn`
   / `weft.fileRead` throws.
 
-**Multi-turn:** `weft.lineText()` + the `agent.send` command send the current
+**Multi-turn:** `weft.lineText()` + the `acp.send` command send the current
 line as the next prompt on the focused conversation, and `sendPrompt` echoes it
 into that conversation's transcript. Bind `SPC o s`.
 
-**Conversations are instances.** Every `agent.start` mints one: its own
+**Conversations are instances.** Every `acp.start` mints one: its own
 subprocess, its own ACP session, its own transcript buffer (`*agent*`,
 `*agent:2*`, … — the instanced tool-buffer naming idiom) and its own live
 `TranscriptDoc` on the host (one per projected buffer, `JsPlugin.conversations`).
 Streamed updates route by the proc handle that carried them, so two agents in
-flight can never land a chunk in each other's transcript. `agent.focus` picks
-which one `agent.send` addresses.
+flight can never land a chunk in each other's transcript. `acp.focus` picks
+which one `acp.send` addresses.
 
 **Permission:** `session/request_permission` → a pick — `weft.pick(prompt,
 options, token)` (bound to the JsPlugin) + `weft.onPick` answer the agent with
@@ -156,7 +156,7 @@ produced output read-only, its input line editable), guarded at the edit door.
 
 Concurrent conversations are supported (isolated transcripts, isolated
 permission continuations, per-conversation peers). Only a **dashboard** (one
-list across agents, grouped by status) is left as a future nicety — `agent.focus`
+list across agents, grouped by status) is left as a future nicety — `acp.focus`
 is the plain-pick stand-in.
 
 ## Build order (each phase committable, independently useful)

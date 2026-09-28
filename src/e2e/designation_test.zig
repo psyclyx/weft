@@ -418,33 +418,33 @@ test "e2e/designation: the guest doors — read an entry's name, declare only wh
 
     // `weft.designation()` reads what core derives.
     ed.runStr("file.open", "a.txt");
-    try t.expectEqualStrings(app.under(&want, "file", "/a.txt"), result(ed, &buf, "ow.designation", &.{}));
+    try t.expectEqualStrings(app.under(&want, "file", "/a.txt"), result(ed, &buf, "offerwatch.designation", &.{}));
     // A file is named by its file: nothing overrides that.
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/proc/mine" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/proc/mine" }}));
 
     // The user's own scratch is no plugin's to re-declare: not as a process
     // (closing it would then destroy the text), and not by clearing either.
     ed.runStr("buffer.create", "*mine*");
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/proc/ow.1" }}));
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/proc/ow.1" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "" }}));
     try t.expect(ed.buffers.active().designation.len == 0);
 
     // On a scratch entry it made: no plugin may say it is a file or a document…
-    _ = result(ed, &buf, "ow.create", &.{.{ .string = "*produced*" }});
+    _ = result(ed, &buf, "offerwatch.create", &.{.{ .string = "*produced*" }});
     try t.expectEqualStrings("*produced*", ed.bufferName());
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/file/etc/passwd" }}));
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/doc/000102030405060708090a0b0c0d0e0f" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/file/etc/passwd" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/doc/000102030405060708090a0b0c0d0e0f" }}));
     // …nor another producer's projection (the dashboard's is claimed)…
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/dashboard/main" }}));
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.claim", &.{ .{ .string = "dashboard" }, .{ .string = "x" } }));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/dashboard/main" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.claim", &.{ .{ .string = "dashboard" }, .{ .string = "x" } }));
     // …nor claim a grammar kind; nor a process in a namespace another
     // plugin reattaches.
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.claim", &.{ .{ .string = "file" }, .{ .string = "x" } }));
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/proc/repl.9" }}));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.claim", &.{ .{ .string = "file" }, .{ .string = "x" } }));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/proc/repl.9" }}));
     // Its own projection kind, claimed, it may declare — and then `open`
     // finds the entry by it.
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow.claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow.probe" } }));
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow.designate", &.{.{ .string = "weft://here/offerwatch.probe/one" }}));
+    try t.expectEqualStrings("ok", result(ed, &buf, "offerwatch.claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "offerwatch.probe" } }));
+    try t.expectEqualStrings("ok", result(ed, &buf, "offerwatch.designate", &.{.{ .string = "weft://here/offerwatch.probe/one" }}));
     try t.expectEqualStrings("weft://here/offerwatch.probe/one", named(ed));
     const produced = ed.buffers.active_id;
     ed.runStr("file.open", "a.txt");
@@ -473,7 +473,7 @@ test "e2e/designation: a place is named by its designation — the builtin reads
 
     // Published at this place, named — then retracted by the same name from
     // an entry somewhere else entirely.
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "live" }, .{ .string = place_owned } }));
+    try t.expectEqualStrings("ok", result(ed, &buf, "offerwatch.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "live" }, .{ .string = place_owned } }));
     try t.expectEqualStrings("live", core.intent.factsFor(ed.ctx).get("offerwatch.session").?);
     // Another project: its own marker makes it its own place.
     try core.file.writeBytesMakingDirs(t.allocator, "other/.git", "other/.git/HEAD", "ref: refs/heads/main\n");
@@ -482,11 +482,11 @@ test "e2e/designation: a place is named by its designation — the builtin reads
     ed.applyWindow();
     try t.expectEqualStrings(app.under(&want, "dir", "/other"), core.intent.factsFor(ed.ctx).get("place").?);
     try t.expect(core.intent.factsFor(ed.ctx).get("offerwatch.session") == null); // not published here
-    try t.expectEqualStrings("ok", result(ed, &buf, "ow.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "" }, .{ .string = place_owned } }));
+    try t.expectEqualStrings("ok", result(ed, &buf, "offerwatch.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "" }, .{ .string = place_owned } }));
     ed.runStr("file.open", "a.txt");
     try t.expect(core.intent.factsFor(ed.ctx).get("offerwatch.session") == null);
     // Only a directory names a place.
-    try t.expectEqualStrings("refused", result(ed, &buf, "ow.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "v" }, .{ .string = "weft://here/proc/x" } }));
+    try t.expectEqualStrings("refused", result(ed, &buf, "offerwatch.context-set-at", &.{ .{ .string = "offerwatch.session" }, .{ .string = "v" }, .{ .string = "weft://here/proc/x" } }));
 }
 
 test "e2e/designation: a scratch document outlives the process and opens by its name in the next one" {
@@ -540,22 +540,22 @@ test "e2e/designation: a scratch document outlives the process and opens by its 
 /// watch, through the same bodies a `.wasm` plugin reaches (doc/model.md
 /// §3.5: JS plugins had none of them).
 const js_producer =
-    \\weft.designationOpener("jsp.probe", "jsp-probe");
+    \\weft.designationOpener("jsp.probe", "jsp.probe");
     \\var keys = [];
     \\var subjects = [];
     \\weft.onContextChanged(function (k) { keys = keys.concat(k); });
     \\weft.onSubjectChanged(function (d) { subjects.push(d + "#" + weft.byteLen()); });
-    \\weft.command("jsp-probe", function () {});
-    \\weft.command("jsp-name", function () { weft.echo(weft.designation() || "none"); });
-    \\weft.command("jsp-make", function () {
+    \\weft.command("jsp.probe", function () {});
+    \\weft.command("jsp.name", function () { weft.echo(weft.designation() || "none"); });
+    \\weft.command("jsp.make", function () {
     \\  weft.run("buffer.create", "*jsmade*");
     \\  weft.echo(weft.designate("weft://here/jsp.probe/one") ? "ok" : "refused");
     \\});
-    \\weft.command("jsp-foreign", function () { weft.echo(weft.designate("weft://here/jsp.probe/two") ? "ok" : "refused"); });
-    \\weft.command("jsp-steal", function () { weft.echo(weft.designationOpener("dashboard", "x") ? "ok" : "refused"); });
-    \\weft.command("jsp-watch", function () { weft.echo(weft.subjectWatch(weft.designation()) ? "ok" : "refused"); });
-    \\weft.command("jsp-keys", function () { weft.echo(keys.indexOf("entry") >= 0 ? "entry" : "none"); keys = []; });
-    \\weft.command("jsp-subjects", function () { weft.echo(subjects.length ? subjects.join(",") : "(none)"); subjects = []; });
+    \\weft.command("jsp.foreign", function () { weft.echo(weft.designate("weft://here/jsp.probe/two") ? "ok" : "refused"); });
+    \\weft.command("jsp.steal", function () { weft.echo(weft.designationOpener("dashboard", "x") ? "ok" : "refused"); });
+    \\weft.command("jsp.watch", function () { weft.echo(weft.subjectWatch(weft.designation()) ? "ok" : "refused"); });
+    \\weft.command("jsp.keys", function () { weft.echo(keys.indexOf("entry") >= 0 ? "entry" : "none"); keys = []; });
+    \\weft.command("jsp.subjects", function () { weft.echo(subjects.length ? subjects.join(",") : "(none)"); subjects = []; });
 ;
 
 test "e2e/designation: a JS plugin reads and declares designations and claims a kind under the wasm rules" {
@@ -567,17 +567,17 @@ test "e2e/designation: a JS plugin reads and declares designations and claims a 
 
     // It reads what core derives.
     ed.runStr("buffer.create", "*mine*");
-    ed.run("jsp-name");
+    ed.run("jsp.name");
     const doc = ed.buffers.active().textEditor().?.doc.id.text();
     var want: [64]u8 = undefined;
     try t.expectEqualStrings(try std.fmt.bufPrint(&want, "weft://here/doc/{s}", .{&doc}), ed.echoText());
     // The user's entry is not its to re-declare: the creator rule.
-    ed.run("jsp-foreign");
+    ed.run("jsp.foreign");
     try t.expectEqualStrings("refused", ed.echoText());
     try t.expect(ed.buffers.active().designation.len == 0);
     // An entry it made, in the kind it claimed at load, it may declare — and
     // `open` finds the entry by it.
-    ed.run("jsp-make");
+    ed.run("jsp.make");
     try t.expectEqualStrings("ok", ed.echoText());
     try t.expectEqualStrings("*jsmade*", ed.bufferName());
     try t.expectEqualStrings("jsp", ed.buffers.active().creator);
@@ -588,7 +588,7 @@ test "e2e/designation: a JS plugin reads and declares designations and claims a 
     try t.expectEqual(made, ed.buffers.active_id);
     // A kind outside its name is not its to claim (and a JS plugin declares
     // no capabilities to widen that).
-    ed.run("jsp-steal");
+    ed.run("jsp.steal");
     try t.expectEqualStrings("refused", ed.echoText());
 }
 
@@ -611,16 +611,16 @@ test "e2e/designation: a JS plugin hears the context move and its watched subjec
 
     ed.runStr("buffer.create", "*subject*");
     const subject = ed.buffers.active();
-    ed.run("jsp-watch");
+    ed.run("jsp.watch");
     try t.expectEqualStrings("ok", ed.echoText());
-    ed.run("jsp-name");
+    ed.run("jsp.name");
     var name_buf: [128]u8 = undefined;
     const name = try std.fmt.bufPrint(&name_buf, "{s}", .{ed.echoText()});
 
     // Moving to another entry moves the `entry` key: onContextChanged hears it.
     ed.runStr("buffer.create", "*other*");
     ed.applyWindow();
-    ed.run("jsp-keys");
+    ed.run("jsp.keys");
     try t.expectEqualStrings("entry", ed.echoText());
 
     // The subject changes while another entry is in front: the handler is
@@ -629,11 +629,11 @@ test "e2e/designation: a JS plugin hears the context move and its watched subjec
     try doc.insert(gpa, 0, "four");
     try doc.insert(gpa, 4, "56");
     ed.applyWindow();
-    ed.run("jsp-subjects");
+    ed.run("jsp.subjects");
     var want: [160]u8 = undefined;
     try t.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}#6", .{name}), ed.echoText());
     // Nothing moved since: nothing is delivered.
     ed.applyWindow();
-    ed.run("jsp-subjects");
+    ed.run("jsp.subjects");
     try t.expectEqualStrings("(none)", ed.echoText());
 }

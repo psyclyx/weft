@@ -163,6 +163,15 @@ All of §1.
   (`wl_command_revision`: a command bound, unbound or described moves it) —
   a plugin loaded later with its own `listen` makes `listen` ambiguous.
 
+- **Ids have a runtime owner** (review follow-up). `Commands.bind` asks
+  `Command.admit`: core binds in any namespace; a plugin only an id in the
+  grammar, in its own namespace (`which_key` owns `which-key.*`) or a core
+  domain (`command_id.mayName`); and nobody binds an id another owner holds,
+  so a JS plugin's `weft.command("file.save", …)` is refused, not a
+  replacement. No plugin may be named `core`. dap.js's commands are
+  `dap.*` and acp.js's `acp.*` (they were `debug.*`, the breakpoint
+  plugin's namespace, and `agent.*`).
+
 Found on the way: which-key's page clamp, stepping 12 but clamping to a
 multiple of 32, cycled a short menu (0, 12, 0, …) under repeated page-down;
 ide.js pinned a toolbar button to a command that no longer existed.

@@ -123,22 +123,22 @@ test "e2e/clipboard: a JS plugin without the grant is refused, with it reads the
     defer ed.deinit();
     try ed.head.clipboard.set(gpa, "desk");
     try ed.loadJs("peeker",
-        \\weft.command("peek-ungranted", function () {
+        \\weft.command("peeker.peek", function () {
         \\  try { weft.echo("got:" + weft.clipboardGet()); }
         \\  catch (e) { weft.echo("refused"); }
         \\});
     );
-    ed.run("peek-ungranted");
+    ed.run("peeker.peek");
     try t.expectEqualStrings("refused", ed.echoText());
 
     try ed.grant("granted", "clipboard");
     try ed.loadJs("granted",
-        \\weft.command("peek-granted", function () { weft.echo("got:" + weft.clipboardGet()); });
-        \\weft.command("put-granted", function () { weft.clipboardSet("from js"); });
+        \\weft.command("granted.peek", function () { weft.echo("got:" + weft.clipboardGet()); });
+        \\weft.command("granted.put", function () { weft.clipboardSet("from js"); });
     );
-    ed.run("peek-granted");
+    ed.run("granted.peek");
     try t.expectEqualStrings("got:desk", ed.echoText());
-    ed.run("put-granted");
+    ed.run("granted.put");
     try t.expectEqualStrings("from js", ed.head.clipboard.text());
 }
 

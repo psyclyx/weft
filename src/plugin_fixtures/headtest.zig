@@ -43,13 +43,13 @@ var poll_count: i32 = 0;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
-    .{ .name = "head.poke", .handler = poke },
-    .{ .name = "head.relay", .handler = relay },
-    .{ .name = "head.spawn", .handler = spawn },
-    .{ .name = "head.poll-count", .handler = pollCount },
-    .{ .name = "head.range-source", .handler = rangeSource },
-    .{ .name = "head.range-relay", .handler = rangeRelay },
-    .{ .name = "head.capture", .handler = capture },
+    .{ .name = "headtest.poke", .handler = poke },
+    .{ .name = "headtest.relay", .handler = relay },
+    .{ .name = "headtest.spawn", .handler = spawn },
+    .{ .name = "headtest.poll-count", .handler = pollCount },
+    .{ .name = "headtest.range-source", .handler = rangeSource },
+    .{ .name = "headtest.range-relay", .handler = rangeRelay },
+    .{ .name = "headtest.capture", .handler = capture },
 };
 
 fn describe() callconv(.c) void {
@@ -83,7 +83,7 @@ fn poke() void {
 /// test hinges on is that THIS second write still lands on the dispatching
 /// head, not the plugin's load-time one.
 fn relay() void {
-    weft.run("head.poke");
+    weft.run("headtest.poke");
     weft.echo("after-relay");
 }
 
@@ -104,7 +104,7 @@ fn rangeSource() void {
 fn rangeRelay() void {
     const len = weft.byteLen();
     const outer = weft.anchorRange(.{ .start = @min(1, len), .end = @min(2, len) }) orelse return;
-    const inner = weft.runRange("head.range-source") orelse return;
+    const inner = weft.runRange("headtest.range-source") orelse return;
     const inner_ends = weft.rangeEnds(inner) orelse return;
     if (inner_ends.start != 0 or inner_ends.end != @min(1, len)) return;
     weft.setResultRange(outer);

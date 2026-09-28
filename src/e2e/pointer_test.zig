@@ -192,13 +192,13 @@ test "e2e/pointer: a config rebinds mouse-1, and its command reads the click thr
     // A JS command reads the pointer facts through the plugin door and acts
     // on them: here, it lands the caret one past the click per button.
     try ed.loadJs("ptest",
-        \\weft.command("ptest-click", function () {
+        \\weft.command("ptest.click", function () {
         \\  var p = weft.pointer();
         \\  if (p === null || p.offset === null || p.kind !== "press") return;
         \\  weft.jump(p.offset + p.button + p.clicks + (p.focused ? 1 : 0));
         \\});
     );
-    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, null, "weft.bind(\"global\", \"mouse-1\", \"ptest-click\");");
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, null, "weft.bind(\"global\", \"mouse-1\", \"ptest.click\");");
 
     ed.click(ed.pointAt(3).?);
     // 3 + button 1 + one click + focused: the config's meaning, not the default's.

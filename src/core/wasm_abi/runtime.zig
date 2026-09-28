@@ -174,6 +174,7 @@ pub const LoadOptions = struct {
 /// fails the load and rolls the partial plugin back — the same contract
 /// abi.zig enforces in-process.
 pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, opts: LoadOptions) !*WasmPlugin {
+    if (std.mem.eql(u8, name, command.Command.core_owner)) return error.ReservedPluginName;
     var module = try engine.compileCached(wasm_bytes);
     var module_owned = true;
     defer if (module_owned) module.deinit();

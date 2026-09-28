@@ -350,13 +350,13 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     // and receives its dispatch back — the JS-plugin reactor, proving the
     // describe/init/on_command lifecycle works one layer up under the engine.
     const src =
-        \\weft.command("greet", () => weft.echo("hi from js"));
+        \\weft.command("test.greet", () => weft.echo("hi from js"));
     ;
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
-    try t.expect(env.commands.resolve("greet") != null);
-    _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
+    try t.expect(env.commands.resolve("test.greet") != null);
+    _ = try command.run(&env.commands, &env.ctx, "test.greet", &.{});
     try t.expectEqualStrings("hi from js", env.head.echo.text());
 }
 
@@ -388,6 +388,41 @@ test "quickjs: a JS plugin whose load fails leaves nothing it registered behind"
     try t.expect(env.keymap.groupName("normal", "C-x") == null);
     try env.head.setModeRaw(gpa, "normal");
     try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("half.act", intent.factsFor(&env.ctx)));
+}
+
+fn coreSave(_: *command.Context, _: ?*anyopaque, _: []const command.Value) anyerror!command.Value {
+    return .{ .string = "core saved" };
+}
+
+test "quickjs: a JS plugin names only its own commands — it cannot replace core's, take another plugin's, or leave the grammar" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    _ = try env.commands.bind(gpa, "file.save", .{ .name = "file.save", .summary = "Save.", .args = &.{}, .handler = coreSave, .meta = .{ .label = "Save" } });
+
+    const src =
+        \\weft.command("file.save", () => weft.echo("hijacked"));
+        \\weft.command("git.push", () => weft.echo("not mine"));
+        \\weft.command("greet", () => weft.echo("no namespace"));
+        \\weft.command("jsp.greet", () => weft.echo("mine"));
+        \\weft.command("buffer.shuffle", () => weft.echo("a core domain"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "jsp", null, src);
+    defer plugin.deinit();
+
+    const save = env.commands.resolve("file.save").?;
+    try t.expectEqualStrings("core", save.owner);
+    try t.expectEqualStrings("core saved", (try command.run(&env.commands, &env.ctx, "file.save", &.{})).string);
+    try t.expect(env.commands.resolve("git.push") == null);
+    try t.expect(env.commands.resolve("greet") == null);
+    try t.expectEqualStrings("jsp", env.commands.resolve("jsp.greet").?.owner);
+    try t.expectEqualStrings("jsp", env.commands.resolve("buffer.shuffle").?.owner);
+
+    // Nor can a plugin take core's name for itself.
+    try t.expectError(error.ReservedPluginName, JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "core", null, "weft.command(\"file.save\", () => 0);"));
 }
 
 test "quickjs: a resident JS plugin's key never shadows the config's, and its rollback leaves the config's bound" {
@@ -462,25 +497,25 @@ test "quickjs: a JS plugin publishes context through the wasm door's body, confi
         \\weft.provide("plugin.chat.send", { context: { "chat.session": "*" } }, "chat-send");
     );
     const src =
-        \\weft.command("go", () => weft.echo(String(weft.contextSet("chat.session", "*acp*", "place"))));
-        \\weft.command("read", () => weft.echo(String(weft.contextGet("chat.session"))));
-        \\weft.command("bad", () => weft.echo(String(weft.contextSet("mode", "x", "global"))));
-        \\weft.command("stop", () => weft.contextSet("chat.session", "", "place"));
+        \\weft.command("chat.go", () => weft.echo(String(weft.contextSet("chat.session", "*acp*", "place"))));
+        \\weft.command("chat.read", () => weft.echo(String(weft.contextGet("chat.session"))));
+        \\weft.command("chat.bad", () => weft.echo(String(weft.contextSet("mode", "x", "global"))));
+        \\weft.command("chat.stop", () => weft.contextSet("chat.session", "", "place"));
     ;
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "chat", null, src);
     var loaded = true;
     defer if (loaded) plugin.deinit();
 
     try t.expectEqual(@as(?[]const u8, null), env.actions.resolveFacts("plugin.chat.send", intent.factsFor(&env.ctx)));
-    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "chat.go", &.{});
     try t.expectEqualStrings("true", env.head.echo.text());
     try t.expectEqualStrings("chat-send", env.actions.resolveFacts("plugin.chat.send", intent.factsFor(&env.ctx)).?);
     // A builtin is not a plugin's to publish, on this plane either.
-    _ = try command.run(&env.commands, &env.ctx, "bad", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "chat.bad", &.{});
     try t.expectEqualStrings("false", env.head.echo.text());
     // Reading answers the PRIMARY context, and there is none without a
     // layout: honest absence, not the active entry passed off as primary.
-    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "chat.read", &.{});
     try t.expectEqualStrings("null", env.head.echo.text());
 
     // Unloading retracts what it published, with no `stop` ever run.
@@ -506,12 +541,12 @@ test "quickjs: weft.pick delivers structured acceptance and cancellation" {
         \\    weft.echo(o.kind + "|" + o.index + "|" + o.text + "|" + o.query + "|" + o.match.start + "|" + o.match.span);
         \\  else weft.echo(o.kind);
         \\});
-        \\weft.command("open-pick", () => weft.pick("choose", "alpha\n\nbeta"));
+        \\weft.command("test.open-pick", () => weft.pick("choose", "alpha\n\nbeta"));
     ;
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.open-pick", &.{});
     try t.expect(env.head.pick.active);
     _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
     _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
@@ -520,12 +555,12 @@ test "quickjs: weft.pick delivers structured acceptance and cancellation" {
     // The live query is not bounded by the original option payload. Preserve
     // it exactly without sizing guest memory from that unrelated input.
     const long_query = "                    beta";
-    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.open-pick", &.{});
     _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = long_query }});
     _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqualStrings("candidate|2|beta|                    beta|0|4", env.head.echo.text());
 
-    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.open-pick", &.{});
     try t.expect(env.head.pick.active);
     _ = try command.run(&env.commands, &env.ctx, "pick.cancel", &.{});
     try t.expectEqualStrings("cancelled", env.head.echo.text());
@@ -550,9 +585,9 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     // `config/plugins/acp.js`'s real onOutput→weft.pick path uses).
     const src =
         \\let reply = "";
-        \\weft.onOutput((h) => { reply = weft.procRead(h); weft.run("deliver"); });
-        \\weft.command("deliver", () => { weft.echo("got:" + reply); });
-        \\weft.command("go", () => {
+        \\weft.onOutput((h) => { reply = weft.procRead(h); weft.run("test.deliver"); });
+        \\weft.command("test.deliver", () => { weft.echo("got:" + reply); });
+        \\weft.command("test.go", () => {
         \\  let h = weft.procSpawn("read x; printf '%s\n' \"$x\"");
         \\  weft.procSend(h, "ping\n");
         \\});
@@ -561,7 +596,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.go", &.{});
     // Pump the frame-boundary output dispatch until the reply arrives.
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
     while (std.mem.indexOf(u8, env.head.echo.text(), "ping") == null and task.nowNs() < deadline) {
@@ -580,13 +615,13 @@ test "quickjs: an echo from a background entry reaches the status feed, never a 
     defer engine.deinit();
     const src =
         \\weft.onOutput((h) => { weft.echo("bg:" + weft.procRead(h).trim()); });
-        \\weft.command("go", () => { weft.procSpawn("printf 'pong\\n'"); });
+        \\weft.command("test.go", () => { weft.procSpawn("printf 'pong\\n'"); });
     ;
     try env.grant("test", "proc");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.go", &.{});
     try env.head.echo.say(gpa, "");
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
     while (env.buffers.notices.get() == null and task.nowNs() < deadline) {
@@ -644,8 +679,8 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
     const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
     defer gpa.free(src);
 
-    try env.grant("test", "proc"); // what config/config.js's weft.grant("acp", "proc") mints
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    try env.grant("acp", "proc"); // what config/config.js's weft.grant("acp", "proc") mints
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "acp", null, src);
     defer plugin.deinit();
 
     // Pump the frame-boundary output dispatch until the agent's message lands
@@ -680,9 +715,9 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
     // above uses) runs its whole body in one uninterruptible JS_Eval, which
     // can't be inspected mid-script.
     const src =
-        \\weft.command("open", () => weft.transcriptEntry("*t*", "user", "hi"));
-        \\weft.command("chunk", () => weft.transcriptAppend("*t*", "!"));
-        \\weft.command("open2", () => weft.transcriptEntry("*t*", "agent", "yo"));
+        \\weft.command("test.open", () => weft.transcriptEntry("*t*", "user", "hi"));
+        \\weft.command("test.chunk", () => weft.transcriptAppend("*t*", "!"));
+        \\weft.command("test.open2", () => weft.transcriptEntry("*t*", "agent", "yo"));
     ;
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
@@ -697,10 +732,10 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         }
     }.get;
 
-    // "open": the model gets its first (role, text) entry; the FULL `fill`
+    // "test.open": the model gets its first (role, text) entry; the FULL `fill`
     // path runs (a structural change — new row), which mints entry 0's
     // subbuffer claim — cached as `live_sub`.
-    _ = try command.run(&env.commands, &env.ctx, "open", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.open", &.{});
     try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.transcript.count());
     try t.expectEqualStrings("user", plugin.conversation("*t*").?.transcript.at(0).role());
     {
@@ -716,18 +751,18 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
     try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len);
     const sub_a = plugin.conversation("*t*").?.live_sub.?;
 
-    // "chunk" ×2: streamed onto the SAME row. The claim object's IDENTITY
+    // "test.chunk" ×2: streamed onto the SAME row. The claim object's IDENTITY
     // (not just its resolved range) stays the SAME pointer across both —
     // the precise signature of the INCREMENTAL path (`SubBuffer.extendEnd`
     // mutates the existing claim in place); a full-`fill` fallback would
     // `dropDoc` + re-`claim`, minting a BRAND NEW object each time, which
     // this asserts did NOT happen.
-    _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.chunk", &.{});
     const sub_b = plugin.conversation("*t*").?.live_sub.?;
     try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len); // no new/leaked claim
     try t.expect(sub_a == sub_b);
 
-    _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.chunk", &.{});
     const sub_c = plugin.conversation("*t*").?.live_sub.?;
     try t.expectEqual(@as(usize, 1), plugin.conversation("*t*").?.subs.list.items.len);
     try t.expect(sub_b == sub_c);
@@ -757,10 +792,10 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         try t.expectEqualStrings(full, got);
     }
 
-    // "open2": a NEW row — role tagging carries through per entry, not just
+    // "test.open2": a NEW row — role tagging carries through per entry, not just
     // per plugin — and its claim is a genuinely DIFFERENT object (the full
     // `fill` this triggers re-mints every row's claim, entry 0's included).
-    _ = try command.run(&env.commands, &env.ctx, "open2", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.open2", &.{});
     try t.expectEqual(@as(usize, 2), plugin.conversation("*t*").?.transcript.count());
     try t.expectEqualStrings("agent", plugin.conversation("*t*").?.transcript.at(1).role());
     const sub_d = plugin.conversation("*t*").?.live_sub.?;
@@ -789,13 +824,13 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
 
     // fs/read is answered from disk (no open buffer here) — the harness reading
     // a file for the agent.
-    const src = try std.fmt.allocPrint(gpa, "weft.command(\"r\", () => weft.echo(weft.fileRead(\"{s}\")));", .{fpath});
+    const src = try std.fmt.allocPrint(gpa, "weft.command(\"test.r\", () => weft.echo(weft.fileRead(\"{s}\")));", .{fpath});
     defer gpa.free(src);
     try env.grant("test", "fs_read");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "r", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.r", &.{});
     try t.expectEqualStrings("file contents here", env.head.echo.text());
 }
 
@@ -810,11 +845,11 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
 /// was denied. `weft.echo` is head-gated, so both arms defer nothing — they
 /// run inside the dispatching command that called them.
 const grant_gate_js =
-    \\weft.command("spawn", () => {
+    \\weft.command("gate.spawn", () => {
     \\  try { weft.procSpawn("true"); weft.echo("spawned"); }
     \\  catch (e) { weft.echo("threw: " + e.message); }
     \\});
-    \\weft.command("read", () => {
+    \\weft.command("gate.read", () => {
     \\  try { weft.echo("read:" + weft.fileRead("/etc/hostname")); }
     \\  catch (e) { weft.echo("threw: " + e.message); }
     \\});
@@ -829,16 +864,16 @@ test "quickjs: a JS plugin with NO declared grants gets NO effect capability —
     defer engine.deinit();
 
     // Nothing granted: fail closed on every effect door, and loudly.
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ungranted", null, grant_gate_js);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "gate", null, grant_gate_js);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "gate.spawn", &.{});
     try t.expect(std.mem.startsWith(u8, env.head.echo.text(), "threw: "));
     try t.expect(std.mem.indexOf(u8, env.head.echo.text(), "permission denied") != null);
     // Denial is not a spawn that merely failed — no child was ever started.
     try t.expectEqual(@as(usize, 0), plugin.resources.streams.len());
 
-    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "gate.read", &.{});
     try t.expect(std.mem.startsWith(u8, env.head.echo.text(), "threw: "));
 }
 
@@ -850,19 +885,19 @@ test "quickjs: a granted JS plugin spawns — and revoking `proc` stops it on th
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
-    try env.grant("gated", "proc");
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "gated", null, grant_gate_js);
+    try env.grant("gate", "proc");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "gate", null, grant_gate_js);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "gate.spawn", &.{});
     try t.expectEqualStrings("spawned", env.head.echo.text());
     // `fs_read` was never granted — one capability is not the others.
-    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "gate.read", &.{});
     try t.expect(std.mem.startsWith(u8, env.head.echo.text(), "threw: "));
 
     // Possession, not a cached boolean: the plugin re-checks the SAME row.
-    try t.expectEqual(@as(usize, 1), env.grants.revoke("gated", "proc"));
-    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    try t.expectEqual(@as(usize, 1), env.grants.revoke("gate", "proc"));
+    _ = try command.run(&env.commands, &env.ctx, "gate.spawn", &.{});
     try t.expect(std.mem.startsWith(u8, env.head.echo.text(), "threw: "));
 }
 
@@ -895,9 +930,9 @@ test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/f
         \\    catch (e) {{ weft.echo("threw"); }}
         \\  }});
         \\}}
-        \\reader("in", "{s}");
-        \\reader("out", "{s}");
-        \\reader("up", "{s}");
+        \\reader("confined.in", "{s}");
+        \\reader("confined.out", "{s}");
+        \\reader("confined.up", "{s}");
     , .{ inside, outside, traversal });
     defer gpa.free(src);
 
@@ -905,12 +940,12 @@ test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/f
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "in", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.in", &.{});
     try t.expectEqualStrings("read:in root", env.head.echo.text());
     // Possessed, but out of the granted root — a denial, not an empty read.
-    _ = try command.run(&env.commands, &env.ctx, "out", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.out", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
-    _ = try command.run(&env.commands, &env.ctx, "up", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.up", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
 }
 
@@ -960,11 +995,11 @@ test "quickjs: no grant, however broad, reaches the editor's own machinery (gues
         \\    catch (e) {{ weft.echo("threw"); }}
         \\  }});
         \\}}
-        \\reader("content", "{s}");
-        \\reader("cache", "{s}");
-        \\reader("kv", "{s}");
-        \\reader("identity", "{s}");
-        \\reader("peers", "{s}");
+        \\reader("broad.content", "{s}");
+        \\reader("broad.cache", "{s}");
+        \\reader("broad.kv", "{s}");
+        \\reader("broad.identity", "{s}");
+        \\reader("broad.peers", "{s}");
     , .{ content, cached, kv_blob, id_path orelse content, peers_path orelse content });
     defer gpa.free(src);
 
@@ -973,19 +1008,19 @@ test "quickjs: no grant, however broad, reaches the editor's own machinery (gues
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "content", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "broad.content", &.{});
     try t.expectEqualStrings("read:ordinary", env.head.echo.text());
 
-    _ = try command.run(&env.commands, &env.ctx, "cache", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "broad.cache", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
-    _ = try command.run(&env.commands, &env.ctx, "kv", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "broad.kv", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
     if (id_path != null) {
-        _ = try command.run(&env.commands, &env.ctx, "identity", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "broad.identity", &.{});
         try t.expectEqualStrings("threw", env.head.echo.text());
     }
     if (peers_path != null) {
-        _ = try command.run(&env.commands, &env.ctx, "peers", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "broad.peers", &.{});
         try t.expectEqualStrings("threw", env.head.echo.text());
     }
 }
@@ -1013,7 +1048,7 @@ test "quickjs: an OPEN buffer doesn't launder the machinery carve-out either" {
     try env.buffers.get(bid).?.textEditor().?.openFile(gpa, cached);
 
     const src = try std.fmt.allocPrint(gpa,
-        \\weft.command("go", () => {{
+        \\weft.command("broad.go", () => {{
         \\  try {{ weft.echo("read:" + weft.fileRead("{s}")); }}
         \\  catch (e) {{ weft.echo("threw"); }}
         \\}});
@@ -1024,7 +1059,7 @@ test "quickjs: an OPEN buffer doesn't launder the machinery carve-out either" {
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "broad.go", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
 }
 
@@ -1045,7 +1080,7 @@ test "quickjs: an agent's fileWrite cannot bind a buffer onto the editor's machi
     defer gpa.free(blob);
 
     const src = try std.fmt.allocPrint(gpa,
-        \\weft.command("w", () => {{
+        \\weft.command("broad.w", () => {{
         \\  try {{ weft.fileWrite("{s}", "clobbered", "a1"); weft.echo("wrote"); }}
         \\  catch (e) {{ weft.echo("threw"); }}
         \\}});
@@ -1056,7 +1091,7 @@ test "quickjs: an agent's fileWrite cannot bind a buffer onto the editor's machi
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "broad.w", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
     try t.expect(env.buffers.findByPath(blob) == null);
 }
@@ -1083,7 +1118,7 @@ test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
     try env.buffers.get(id).?.textEditor().?.openFile(gpa, outside);
 
     const src = try std.fmt.allocPrint(gpa,
-        \\weft.command("go", () => {{
+        \\weft.command("confined.go", () => {{
         \\  try {{ weft.echo("read:" + weft.fileRead("{s}")); }}
         \\  catch (e) {{ weft.echo("threw"); }}
         \\}});
@@ -1096,7 +1131,7 @@ test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.go", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
 }
 
@@ -1111,7 +1146,7 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     // fs/write to a path that isn't open → weft binds a buffer to it and applies
     // the content as the agent peer (gated + attributed), not a raw disk write.
     const src =
-        \\weft.command("w", () => weft.fileWrite("/tmp/weft-agent-out.zig", "const x = 1;"));
+        \\weft.command("test.w", () => weft.fileWrite("/tmp/weft-agent-out.zig", "const x = 1;"));
     ;
     // `fs_write`, declared: this door is possession-gated like every other
     // effect door (it was not always — see the confinement test below), so
@@ -1119,7 +1154,7 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     try env.grant("test", "fs_write");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
-    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "test.w", &.{});
 
     const id = env.buffers.findByPath("/tmp/weft-agent-out.zig") orelse return error.NoAgentBuffer;
     const b = env.buffers.get(id).?;
@@ -1163,9 +1198,9 @@ test "quickjs: an agent's fileWrite outside a narrowed fs_write root is refused 
         \\    catch (e) {{ weft.echo("threw"); }}
         \\  }});
         \\}}
-        \\writer("in", "{s}");
-        \\writer("out", "{s}");
-        \\writer("abs", "/tmp/weft-agent-escape.zig");
+        \\writer("confined.in", "{s}");
+        \\writer("confined.out", "{s}");
+        \\writer("confined.abs", "/tmp/weft-agent-escape.zig");
     , .{ inside, outside });
     defer gpa.free(src);
 
@@ -1174,15 +1209,15 @@ test "quickjs: an agent's fileWrite outside a narrowed fs_write root is refused 
     defer plugin.deinit();
 
     // In root: the agent edit lands, exactly as before the gate.
-    _ = try command.run(&env.commands, &env.ctx, "in", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.in", &.{});
     try t.expectEqualStrings("wrote", env.head.echo.text());
     try t.expect(env.buffers.findByPath(inside) != null);
 
     // Out of root, and an absolute path with nothing to do with the grant:
     // both REFUSED — a thrown denial, never a write the agent thinks landed.
-    _ = try command.run(&env.commands, &env.ctx, "out", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.out", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
-    _ = try command.run(&env.commands, &env.ctx, "abs", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "confined.abs", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
 
     // And refusal means NO buffer was bound to either path — the door's own
@@ -1200,7 +1235,7 @@ test "quickjs: an ungranted JS plugin cannot fileWrite at all — possession, no
     defer engine.deinit();
 
     const src =
-        \\weft.command("w", () => {
+        \\weft.command("ungranted.w", () => {
         \\  try { weft.fileWrite("/tmp/weft-agent-ungranted.zig", "x"); weft.echo("wrote"); }
         \\  catch (e) { weft.echo("threw"); }
         \\});
@@ -1208,7 +1243,7 @@ test "quickjs: an ungranted JS plugin cannot fileWrite at all — possession, no
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ungranted", null, src);
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ungranted.w", &.{});
     try t.expectEqualStrings("threw", env.head.echo.text());
     try t.expect(env.buffers.findByPath("/tmp/weft-agent-ungranted.zig") == null);
 }
@@ -1257,9 +1292,9 @@ test "quickjs: a refused agent write is ANSWERED, not swallowed — the rest of 
     const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
     defer gpa.free(src);
 
-    try env.grant("test", "proc");
-    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "test", null);
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    try env.grant("acp", "proc");
+    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "acp", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "acp", null, src);
     defer plugin.deinit();
 
     const deadline = task.nowNs() + 3 * std.time.ns_per_s;
@@ -1718,14 +1753,14 @@ test "quickjs: weft.grant is config-plane only — a resident JS plugin's call i
     // warning, never crash and never mutate anything (statusSegment's exact
     // precedent for a config-only verb reached from the plugin plane).
     const src =
-        \\weft.command("try-grant", function() {
+        \\weft.command("grantplugin.try-grant", function() {
         \\  weft.grant("other", "fs_write", { root: "x" });
         \\  weft.echo("survived");
         \\});
     ;
     const plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "grantplugin", null, src);
     defer plugin.deinit();
-    _ = try command.run(&env.commands, &env.ctx, "try-grant", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "grantplugin.try-grant", &.{});
     try t.expectEqualStrings("survived", env.head.echo.text());
 }
 
@@ -2008,22 +2043,22 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     defer gpa.free(acp);
     const src = try std.fmt.allocPrint(gpa,
         \\{s}
-        \\weft.command("start-a", () => startAgent("/bin/sh {s}", "hi", "claude"));
-        \\weft.command("start-b", () => startAgent("/bin/sh {s}", "hi", "codex"));
+        \\weft.command("acp.start-a", () => startAgent("/bin/sh {s}", "hi", "claude"));
+        \\weft.command("acp.start-b", () => startAgent("/bin/sh {s}", "hi", "codex"));
     , .{ acp, mocks[0], mocks[1] });
     defer gpa.free(src);
 
-    try env.grant("test", "proc");
+    try env.grant("acp", "proc");
     // …and `fs_write`, which the mocks' `fs/write_text_file` step needs: the
     // shared-file assertion below (both sub-peers authored it) is only
     // reachable through that door, and the door is possession-gated.
-    try env.grant("test", "fs_write");
+    try env.grant("acp", "fs_write");
     // Two live agents pin two reader tasks (each mock BLOCKS on stdin waiting
     // for its own answer), so the shared fixture's single-thread pool would
     // starve the second spawn — concurrency here is the subject, not scenery.
     const pool = try task.Pool.init(gpa, .{ .threads = 4 });
     defer pool.deinit();
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, pool, .empty, "test", null, src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, pool, .empty, "acp", null, src);
     defer plugin.deinit();
     // A bail with a request still open must not leave the head's pick session
     // live — teardown asserts every acceptor was answered.
@@ -2108,13 +2143,13 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
 
     // Agent one: its own transcript instance, and its permission pick opens
     // (from the BACKGROUND output handler, through the nested-run door).
-    _ = try command.run(&env.commands, &env.ctx, "start-a", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "acp.start-a", &.{});
     try t.expect(H.until(plugin, &env, gpa, "*agent*", "alpha one"));
     try t.expect(H.untilPick(plugin, &env));
 
     // Agent two: a SECOND instance — its own buffer, its own model. Its
     // permission request queues behind agent one's open pick.
-    _ = try command.run(&env.commands, &env.ctx, "start-b", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "acp.start-b", &.{});
     try t.expect(H.until(plugin, &env, gpa, "*agent:2*", "beta one"));
 
     // Interleaved updates landed in the right transcripts, both directions.

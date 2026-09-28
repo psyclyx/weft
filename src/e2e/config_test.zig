@@ -1277,9 +1277,9 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     // #1 asks for permission and DIES. #2 asks and stays (`exec`, so the pid
     // weft holds is the live process).
     try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' doomed 'doomed tool'");
-    ed.run("agent.start");
+    ed.run("acp.start");
     try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' alive 'surviving tool'; exec sleep 30");
-    ed.run("agent.start");
+    ed.run("acp.start");
 
     // Whichever order the two land in, the settled state is the same: #1's
     // pick resolved cancelled with #1, and #2's took the screen.
@@ -1301,7 +1301,7 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     // The freed slot is REUSED: a third conversation takes ordinal 1 back and
     // streams into `*agent*`, which only a released slot allows.
     try ed.setConfig("acp", "cmd", "printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"text\":\"third-turn\"}}}}\\n'");
-    ed.run("agent.start");
+    ed.run("acp.start");
     try t.expect(drainToolContains(&ed, "*agent*", "third-turn"));
 
     // #2 is untouched throughout: its pick is still the one on screen, so its
@@ -1482,14 +1482,14 @@ test "e2e/config: every showcased binding names a command that exists" {
         .{ .sequence = "space o d", .command = "files.browse" },
         .{ .sequence = "space o e", .command = "direnv.status" },
         // Coding agents (acp.js) — an instanced conversation apiece.
-        .{ .sequence = "space a a", .command = "agent.start" },
-        .{ .sequence = "space a s", .command = "agent.send" },
-        .{ .sequence = "space a f", .command = "agent.focus" },
+        .{ .sequence = "space a a", .command = "acp.start" },
+        .{ .sequence = "space a s", .command = "acp.send" },
+        .{ .sequence = "space a f", .command = "acp.focus" },
         // The debugger: breakpoints (wasm) and the DAP session (dap.js).
         .{ .sequence = "space d b", .command = "debug.toggle-breakpoint" },
-        .{ .sequence = "space d d", .command = "debug.start" },
-        .{ .sequence = "space d o", .command = "debug.step-out" },
-        .{ .sequence = "F5", .command = "debug.continue" },
+        .{ .sequence = "space d d", .command = "dap.start" },
+        .{ .sequence = "space d o", .command = "dap.step-out" },
+        .{ .sequence = "F5", .command = "dap.continue" },
         // Notes + embeds.
         .{ .sequence = "space n n", .command = "notes.open" },
         .{ .sequence = "space n c", .command = "notes.capture" },

@@ -396,8 +396,8 @@ test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head,
     try t.expectEqualStrings("default", ed.mode());
     try t.expectEqualStrings("default", b.mode());
 
-    // "head.poke" (weft.setMode + weft.echo) dispatched "as" B.
-    b.run("head.poke");
+    // "headtest.poke" (weft.setMode + weft.echo) dispatched "as" B.
+    b.run("headtest.poke");
 
     // B mutated: both writes landed on B's Head.
     try t.expectEqualStrings("poked", b.mode());
@@ -422,14 +422,14 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // "head.relay": wl_run("head.poke") (a nested, in-guest reentrant
+    // "headtest.relay": wl_run("headtest.poke") (a nested, in-guest reentrant
     // dispatch through THIS SAME plugin) then a SECOND weft.echo write AFTER
     // the nested call returns. Both the nested call's writes and the outer
     // handler's post-nesting write must land on B throughout — this is what
     // fails under a "reset active_ctx to the load-time default as soon as a
     // nested dispatch returns" bug (a bare set instead of save/restore):
     // the post-nesting echo would land back on A instead.
-    b.run("head.relay");
+    b.run("headtest.relay");
 
     try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head.poke
     try t.expectEqualStrings("after-relay", b.echoText()); // written AFTER the nested call returned — still B
@@ -455,8 +455,8 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     // (perm proc; spawns a real subprocess so a REAL readiness-driven
     // on_poll fires off the frame-loop tick, not a synthetic direct export
     // call).
-    b.run("head.poke");
-    b.run("head.spawn");
+    b.run("headtest.poke");
+    b.run("headtest.spawn");
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("default", ed.mode()); // A untouched by B's dispatches
 
@@ -469,9 +469,9 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     var round: usize = 0;
     while (round < 200) : (round += 1) {
         ed.settle(1);
-        if (runInt(&ed, "head.poll-count") != 0) break;
+        if (runInt(&ed, "headtest.poll-count") != 0) break;
     }
-    try t.expect(runInt(&ed, "head.poll-count") >= 1); // on_poll really did fire
+    try t.expect(runInt(&ed, "headtest.poll-count") >= 1); // on_poll really did fire
 
     // BEFORE task #19 item 4: on_poll's `weft.setMode("polled")`/
     // `weft.echo("polled")` silently landed on A (the load-time/system-

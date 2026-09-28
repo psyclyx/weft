@@ -67,6 +67,47 @@ fn checkPart(part: []const u8) ?Violation {
     return null;
 }
 
+/// The namespaces no one plugin owns: core's domains (doc/chrome.md §1.1).
+/// A plugin may name a NEW command in one (`buffers` adds `buffer.pick`);
+/// an id already bound there stays its binder's.
+pub const core_domains = [_][]const u8{ "buffer", "window", "view", "edit", "selection", "pointer", "scroll", "jump", "macro", "pick" };
+
+/// `name`'s namespace: the part before its first `.`.
+pub fn namespaceOf(name: []const u8) []const u8 {
+    return name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
+}
+
+/// Whether `ns` is `owner` spelled as a namespace: a plugin's name with `_`
+/// read as `-` (`which_key` owns `which-key.*`).
+pub fn isOwnerNamespace(owner: []const u8, ns: []const u8) bool {
+    if (owner.len != ns.len or owner.len == 0) return false;
+    for (owner, ns) |o, n| if ((if (o == '_') '-' else o) != n) return false;
+    return true;
+}
+
+/// Whether plugin `owner` may name the command `name` (already in the
+/// grammar): in its own namespace, in a core domain, or — spelled as an
+/// intention — as `plugin.<owner>.…`. Never `std.*`: that vocabulary is
+/// core's.
+pub fn mayName(owner: []const u8, name: []const u8) bool {
+    if (isIntentionShaped(name)) {
+        if (!std.mem.startsWith(u8, name, "plugin.")) return false;
+        return isOwnerNamespace(owner, namespaceOf(name["plugin.".len..]));
+    }
+    const ns = namespaceOf(name);
+    if (isOwnerNamespace(owner, ns)) return true;
+    for (core_domains) |d| if (std.mem.eql(u8, d, ns)) return true;
+    return false;
+}
+
+/// Whether `owner` may describe how `name` is presented: only in its own
+/// namespace — a core domain's commands, and another plugin's, are not its
+/// to relabel.
+pub fn mayDescribe(owner: []const u8, name: []const u8) bool {
+    if (isIntentionShaped(name)) return mayName(owner, name);
+    return isOwnerNamespace(owner, namespaceOf(name));
+}
+
 /// `std.<package>.<operation>` or `plugin.<id>.<…>`, every segment a
 /// lowercase `-` word: the intention grammar (doc/configuration.md §5.1),
 /// which an action a config declares as an offer is named in.

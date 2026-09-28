@@ -192,7 +192,8 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .arity = decl.arity,
         .meta = decl.meta,
         .data = wc,
-    }) catch {
+    }) catch |err| {
+        std.log.warn("plugin {s}: command '{s}' refused: {s}", .{ p.name, wc.name, @errorName(err) });
         results[0] = -1;
         return;
     };

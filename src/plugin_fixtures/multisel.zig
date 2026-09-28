@@ -31,20 +31,20 @@ const weft = @import("weft");
 const each = weft.Arity.each_extent;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ms.add", .call = add, .arity = .whole, .summary = "Exercise the ms.add fixture command.", .internal = true },
-    .{ .name = "ms.remove", .call = remove, .arity = .whole, .summary = "Exercise the ms.remove fixture command.", .internal = true },
-    .{ .name = "ms.collapse", .call = collapse, .arity = .whole, .summary = "Exercise the ms.collapse fixture command.", .internal = true },
-    .{ .name = "ms.motion", .call = motion, .arity = each, .summary = "Exercise the ms.motion fixture command.", .internal = true },
-    .{ .name = "ms.upcase-each", .call = opUpcase, .arity = .{ .each = .{ .over = "ms.motion" } }, .summary = "Exercise the ms.upcase-each fixture command.", .internal = true },
-    .{ .name = "ms.yank", .call = yank, .arity = each, .summary = "Exercise the ms.yank fixture command.", .internal = true },
-    .{ .name = "ms.paste", .call = paste, .arity = each, .summary = "Exercise the ms.paste fixture command.", .internal = true },
-    .{ .name = "ms.undeclared", .arity = .one, .call = undeclared, .summary = "Exercise the ms.undeclared fixture command.", .internal = true },
-    .{ .name = "ms.unit-leak", .call = unitLeak, .arity = .whole, .summary = "Exercise the ms.unit-leak fixture command.", .internal = true },
-    .{ .name = "ms.unit-close", .call = unitClose, .arity = .whole, .summary = "Exercise the ms.unit-close fixture command.", .internal = true },
-    .{ .name = "ms.line", .call = line, .arity = each, .summary = "Exercise the ms.line fixture command.", .internal = true },
-    .{ .name = "ms.none", .call = none, .arity = each, .summary = "Exercise the ms.none fixture command.", .internal = true },
-    .{ .name = "ms.op-none", .call = opUpcase, .arity = .{ .each = .{ .over = "ms.none" } }, .summary = "Exercise the ms.op-none fixture command.", .internal = true },
-    .{ .name = "ms.epilogues", .call = epilogueCount, .arity = .whole, .summary = "Exercise the ms.epilogues fixture command.", .internal = true },
+    .{ .name = "multisel.add", .call = add, .arity = .whole, .summary = "Exercise the ms.add fixture command.", .internal = true },
+    .{ .name = "multisel.remove", .call = remove, .arity = .whole, .summary = "Exercise the ms.remove fixture command.", .internal = true },
+    .{ .name = "multisel.collapse", .call = collapse, .arity = .whole, .summary = "Exercise the ms.collapse fixture command.", .internal = true },
+    .{ .name = "multisel.motion", .call = motion, .arity = each, .summary = "Exercise the ms.motion fixture command.", .internal = true },
+    .{ .name = "multisel.upcase-each", .call = opUpcase, .arity = .{ .each = .{ .over = "multisel.motion" } }, .summary = "Exercise the ms.upcase-each fixture command.", .internal = true },
+    .{ .name = "multisel.yank", .call = yank, .arity = each, .summary = "Exercise the ms.yank fixture command.", .internal = true },
+    .{ .name = "multisel.paste", .call = paste, .arity = each, .summary = "Exercise the ms.paste fixture command.", .internal = true },
+    .{ .name = "multisel.undeclared", .arity = .one, .call = undeclared, .summary = "Exercise the ms.undeclared fixture command.", .internal = true },
+    .{ .name = "multisel.unit-leak", .call = unitLeak, .arity = .whole, .summary = "Exercise the ms.unit-leak fixture command.", .internal = true },
+    .{ .name = "multisel.unit-close", .call = unitClose, .arity = .whole, .summary = "Exercise the ms.unit-close fixture command.", .internal = true },
+    .{ .name = "multisel.line", .call = line, .arity = each, .summary = "Exercise the ms.line fixture command.", .internal = true },
+    .{ .name = "multisel.none", .call = none, .arity = each, .summary = "Exercise the ms.none fixture command.", .internal = true },
+    .{ .name = "multisel.op-none", .call = opUpcase, .arity = .{ .each = .{ .over = "multisel.none" } }, .summary = "Exercise the ms.op-none fixture command.", .internal = true },
+    .{ .name = "multisel.epilogues", .call = epilogueCount, .arity = .whole, .summary = "Exercise the ms.epilogues fixture command.", .internal = true },
 };
 
 comptime {

@@ -3,8 +3,9 @@
 //! time. Referencing a name before anything is bound to it is fine (it
 //! resolves to null until someone binds it), and rebinding is visible
 //! through every previously interned handle — the property that lets
-//! config reference commands that plugins provide later, and lets a
-//! plugin shadow a built-in by rebinding its name.
+//! config reference commands that plugins provide later. Who may bind a
+//! name is the bound type's rule (`admit`): a command is its owner's, and
+//! no plugin shadows another's — core's included — by binding its id.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -62,9 +63,17 @@ pub fn Registry(comptime T: type) type {
             return self.map.keys()[@intFromEnum(name)];
         }
 
+        /// What `T.admit` may refuse a bind for; none when `T` has no rule.
+        const has_rule = @typeInfo(T) == .@"struct" and @hasDecl(T, "admit");
+        pub const AdmitError = if (has_rule) T.AdmitError else error{};
+
         /// Bind (or rebind) `name` to `value`; visible immediately
-        /// through every held handle.
-        pub fn bind(self: *Self, gpa: Allocator, name: []const u8, value: T) Allocator.Error!Name {
+        /// through every held handle. A `T` that declares `admit` is asked
+        /// first, with what `name` is bound to now — the one door every
+        /// binding passes, so a rule there (who may bind which name) has no
+        /// way around it.
+        pub fn bind(self: *Self, gpa: Allocator, name: []const u8, value: T) (Allocator.Error || AdmitError)!Name {
+            if (has_rule) try T.admit(name, self.resolve(name), value);
             const n = try self.intern(gpa, name);
             if (self.map.values()[@intFromEnum(n)] != null) {
                 self.rebinds += 1;

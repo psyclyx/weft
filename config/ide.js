@@ -171,7 +171,7 @@ provideLocal("plugin.code.run", { lang: "py" }, "modes.run", { label: "Run", gro
 weft.action("plugin.code.test");
 provideLocal("plugin.code.test", { lang: "zig" }, "make.test", { label: "Test", group: "build", order: 2 });
 weft.action("plugin.code.debug");
-provideLocal("plugin.code.debug", { lang: "zig" }, "debug.start", { label: "Debug", group: "build", order: 3 });
+provideLocal("plugin.code.debug", { lang: "zig" }, "dap.start", { label: "Debug", group: "build", order: 3 });
 weft.action("plugin.code.format");
 provideInSource("plugin.code.format", {}, "fmt.format-buffer", { label: "Format", group: "edit", order: 10 });
 
@@ -262,12 +262,12 @@ weft.bind("ide", "M-S-f", "plugin.code.format");  // format the buffer
 // menubar, the other thing F10 conventionally does: an intention is offered
 // only where its provider's facts hold, so the key falls through to the
 // menubar the moment no session is there to step.
-bindWorkspace("F5", "debug.continue");
+bindWorkspace("F5", "dap.continue");
 weft.bind("ide", "F9", "debug.toggle-breakpoint");
 weft.action("plugin.debug.step-over");
-weft.provide("plugin.debug.step-over", { context: { "dap.session": "*" } }, "debug.step-over", { label: "Step Over", group: "debug", order: 2 });
+weft.provide("plugin.debug.step-over", { context: { "dap.session": "*" } }, "dap.step-over", { label: "Step Over", group: "debug", order: 2 });
 bindWorkspace("F10", ["plugin.debug.step-over", "menu.focus-bar"]);
-bindWorkspace("F11", "debug.step-into");
+bindWorkspace("F11", "dap.step-into");
 
 weft.bind("global", "F1", "which-key.show");
 

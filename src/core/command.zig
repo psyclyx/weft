@@ -857,6 +857,33 @@ pub const Command = struct {
     /// (one extent, `.whole`): the handler's return is its end.
     ended: ?*const fn (ctx: *Context, data: ?*anyopaque) void = null,
 
+    pub const AdmitError = error{
+        /// A plugin's id outside the grammar (`command_id.check`).
+        IdOutsideGrammar,
+        /// A plugin's id outside its own namespace and core's domains.
+        NotOwnNamespace,
+        /// The id is already another owner's command.
+        OwnedByAnother,
+    };
+
+    /// Who may bind `name` (`Commands.bind` asks, with what it is bound to
+    /// now). Core binds in any namespace; a plugin only an id in the grammar,
+    /// in its own namespace or a core domain (`command_id.mayName`) — the
+    /// runtime twin of `weft.plugin`'s comptime check, which a JS plugin never
+    /// ran. And nobody takes an id another owner holds: a plugin cannot
+    /// replace `file.save`, nor one plugin another's command. Its owner may
+    /// bind it again (a reload).
+    pub fn admit(name: []const u8, bound: ?Command, cmd: Command) AdmitError!void {
+        if (bound) |b| if (!std.mem.eql(u8, b.owner, cmd.owner)) return error.OwnedByAnother;
+        if (std.mem.eql(u8, cmd.owner, core_owner)) return;
+        const command_id = @import("weft_membrane").command_id;
+        if (command_id.check(name) != null) return error.IdOutsideGrammar;
+        if (!command_id.mayName(cmd.owner, name)) return error.NotOwnNamespace;
+    }
+
+    /// The owner core's own commands carry; no plugin is named it.
+    pub const core_owner = "core";
+
     /// This command, declaring `arity`.
     pub fn maps(self: Command, arity: ?selection.Arity) Command {
         var c = self;

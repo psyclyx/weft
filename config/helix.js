@@ -218,23 +218,23 @@ weft.bind("helix-normal", "SPC o C", "console.send");
 weft.bind("helix-normal", "SPC o a", "llm.ask-line");
 weft.bind("helix-normal", "SPC o h", "http.get");
 
-weft.bind("helix-normal", "SPC A a", "agent.start");
-weft.bind("helix-normal", "SPC A s", "agent.send");
-weft.bind("helix-normal", "SPC A f", "agent.focus");
+weft.bind("helix-normal", "SPC A a", "acp.start");
+weft.bind("helix-normal", "SPC A s", "acp.send");
+weft.bind("helix-normal", "SPC A f", "acp.focus");
 
 weft.bind("helix-source", "SPC G b", "debug.toggle-breakpoint");
 weft.bind("helix-normal", "SPC G c", "debug.clear-breakpoints");
 weft.bind("helix-normal", "SPC G l", "debug.list-breakpoints");
-weft.bind("helix-normal", "SPC G d", "debug.start");
-weft.bind("helix-normal", "SPC G r", "debug.continue");
-weft.bind("helix-normal", "SPC G n", "debug.step-over");
-weft.bind("helix-normal", "SPC G i", "debug.step-into");
-weft.bind("helix-normal", "SPC G o", "debug.step-out");
-weft.bind("helix-normal", "SPC G q", "debug.stop");
-weft.bind("helix-normal", "F5", "debug.continue");
+weft.bind("helix-normal", "SPC G d", "dap.start");
+weft.bind("helix-normal", "SPC G r", "dap.continue");
+weft.bind("helix-normal", "SPC G n", "dap.step-over");
+weft.bind("helix-normal", "SPC G i", "dap.step-into");
+weft.bind("helix-normal", "SPC G o", "dap.step-out");
+weft.bind("helix-normal", "SPC G q", "dap.stop");
+weft.bind("helix-normal", "F5", "dap.continue");
 weft.bind("helix-source", "F9", "debug.toggle-breakpoint");
-weft.bind("helix-normal", "F10", "debug.step-over");
-weft.bind("helix-normal", "F11", "debug.step-into");
+weft.bind("helix-normal", "F10", "dap.step-over");
+weft.bind("helix-normal", "F11", "dap.step-into");
 
 weft.bind("helix-normal", "SPC n n", "notes.open");
 weft.bind("helix-normal", "SPC n c", "notes.capture");

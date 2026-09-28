@@ -1315,13 +1315,13 @@ test "debug: a real DAP session — launch, hit a breakpoint, see the stack, con
 
     // Start a debug session. The client drives initialize → launch →
     // setBreakpoints → configurationDone; the adapter stops at the breakpoint.
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     // ... and the client requested the stack and rendered where we are.
     try t.expect(drainToolContains(ed, "*debug*", "program:7"));
 
     // Continue → the program runs to completion.
-    ed.run("debug.continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -1374,12 +1374,12 @@ test "debug: a REAL lldb-dap session — compile C, break on a line, stop, conti
     try ed.loadJs("dap", js);
 
     // A real debugger: launch → stop at the breakpoint → report the stack line.
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped"));
     try t.expect(drainToolContains(ed, "*debug*", "main.c:5"));
 
     // Continue → the program runs to completion.
-    ed.run("debug.continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -1418,10 +1418,10 @@ test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop t
     try ed.grant("dap", "proc"); // what `weft.grant("dap", "proc")` mints in config
     try ed.loadJs("dap", src);
 
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", "program:3")); // the MARKED line, not the fallback
-    ed.run("debug.continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -2457,7 +2457,7 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     try ed.setConfig("dap", "cmd", mock);
     try ed.setConfig("dap", "program", "alpha");
     try ed.setConfig("dap", "line", "7");
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", ":7"));
 
@@ -2465,7 +2465,7 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     // first — it lands in its own buffer and the first is still there.
     try ed.setConfig("dap", "program", "beta");
     try ed.setConfig("dap", "line", "11");
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug:2*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug:2*", ":11"));
     try t.expect(ed.buffers.findByName("*debug*") != null);
@@ -2487,14 +2487,14 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     // Stop the FOCUSED session (one) — routing is by the buffer you are
     // looking at, not by "the last one started".
     try h.focusBuffer(ed, "*debug*");
-    ed.run("debug.stop");
+    ed.run("dap.stop");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 
     // Session two is untouched: it still steps, and its own transcript grows.
     try h.focusBuffer(ed, "*debug:2*");
-    ed.run("debug.step-over");
+    ed.run("dap.step-over");
     try t.expect(drainToolContains(ed, "*debug:2*", "stopped: step"));
-    ed.run("debug.continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug:2*", "terminated"));
 }
 
@@ -2544,7 +2544,7 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
 
     // The mock stops on the first breakpoint line it is sent: 4, the line the
     // marked text moved to — not 3 (where it was marked) or 9 (the fallback).
-    ed.run("debug.start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", "program:4"));
     {
@@ -2552,7 +2552,7 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "program:3") == null);
     }
-    ed.run("debug.continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 

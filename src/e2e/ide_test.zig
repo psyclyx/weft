@@ -442,23 +442,23 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     // The first wake delivers the first description; quiet wakes deliver
     // nothing — no polling, and no event without a change.
     ed.applyWindow();
-    const first = runInt(ed, "ow.fired", &.{});
+    const first = runInt(ed, "offerwatch.fired", &.{});
     try t.expect(first >= 1);
     ed.applyWindow();
     ed.applyWindow();
-    try t.expectEqual(first, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first, runInt(ed, "offerwatch.fired", &.{}));
     // A caret move changes nothing a toolbar shows.
     ed.press("End", "");
     ed.applyWindow();
-    try t.expectEqual(first, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first, runInt(ed, "offerwatch.fired", &.{}));
     // An edit does — Undo becomes available — and it is ONE event however
     // many wakes follow.
     ed.typeText("!");
     ed.applyWindow();
     ed.applyWindow();
-    try t.expectEqual(first + 1, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first + 1, runInt(ed, "offerwatch.fired", &.{}));
     // …and it names exactly what moved: the offers, not the entry or mode.
-    try t.expectEqualStrings("offers", runStr(ed, &buf, "ow.keys", &.{}));
+    try t.expectEqualStrings("offers", runStr(ed, &buf, "offerwatch.keys", &.{}));
 
     // Focus the docked sidebar. The PRIMARY context is still the editor, so
     // what a toolbar describes did not move: no event.
@@ -467,18 +467,18 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     try t.expect(ed.buffers.active_id != editor_entry);
     ed.press("Down", ""); // onto a row, as a user would
     ed.applyWindow();
-    try t.expectEqual(first + 1, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first + 1, runInt(ed, "offerwatch.fired", &.{}));
 
     // The primary enumeration is the EDITOR's — its history and persistence
     // words, presented with the intention table's labels and groups — while
     // the active one is the listing's.
-    const primary = runStr(ed, &buf, "ow.list", &.{.{ .integer = 1 }});
+    const primary = runStr(ed, &buf, "offerwatch.list", &.{.{ .integer = 1 }});
     try t.expect(std.mem.indexOf(u8, primary, "std.history.undo|core.editing|enabled||Undo|history|") != null);
     try t.expect(std.mem.indexOf(u8, primary, "std.history.redo|core.editing|disabled|nothing-to-redo|Redo|history|") != null);
     try t.expect(std.mem.indexOf(u8, primary, "std.persistence.save|core.editing|enabled||Save|persistence|") != null);
     try t.expect(std.mem.indexOf(u8, primary, "core.view") == null);
     var active_buf: [1 << 14]u8 = undefined;
-    const active = runStr(ed, &active_buf, "ow.list", &.{.{ .integer = 0 }});
+    const active = runStr(ed, &active_buf, "offerwatch.list", &.{.{ .integer = 0 }});
     try t.expect(std.mem.indexOf(u8, active, "|core.view|") != null);
     // The listing's own non-standard node actions are offers too, labelled as
     // the scene labels them — what a toolbar in the sidebar would show.
@@ -486,7 +486,7 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
 
     // Invoking in the primary context acts on the editor, and leaves the
     // head where it was.
-    try t.expectEqualStrings("invoked", runStr(ed, &buf, "ow.invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } }));
+    try t.expectEqualStrings("invoked", runStr(ed, &buf, "offerwatch.invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } }));
     try t.expect(ed.buffers.active_id != editor_entry);
     {
         const text = try ed.buffers.get(editor_entry).?.textEditor().?.text().toOwnedSlice(gpa);
@@ -495,30 +495,30 @@ test "e2e/ide: a toolbar's doors describe the editor while a sidebar holds focus
     }
     // …which moved the editor's availability (undo spent, redo ready): one
     // event, delivered at the frame boundary rather than inside the invoke.
-    try t.expectEqual(first + 1, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first + 1, runInt(ed, "offerwatch.fired", &.{}));
     ed.applyWindow();
-    try t.expectEqual(first + 2, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first + 2, runInt(ed, "offerwatch.fired", &.{}));
     // A refusal says why instead of doing nothing.
-    const refusal = runStr(ed, &buf, "ow.invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } });
+    const refusal = runStr(ed, &buf, "offerwatch.invoke", &.{ .{ .integer = 1 }, .{ .string = "std.history.undo" } });
     try t.expect(std.mem.indexOf(u8, refusal, "nothing-to-undo") != null);
 
     // A provider registering is a change; its presentation override shows.
-    try t.expectEqual(@as(i64, 1), runInt(ed, "ow.provide", &.{}));
+    try t.expectEqual(@as(i64, 1), runInt(ed, "offerwatch.provide", &.{}));
     ed.applyWindow();
-    try t.expectEqual(first + 3, runInt(ed, "ow.fired", &.{}));
-    const probed = runStr(ed, &buf, "ow.list", &.{.{ .integer = 1 }});
+    try t.expectEqual(first + 3, runInt(ed, "offerwatch.fired", &.{}));
+    const probed = runStr(ed, &buf, "offerwatch.list", &.{.{ .integer = 1 }});
     try t.expect(std.mem.indexOf(u8, probed, "plugin.offerwatch.probe|plugin.offerwatch|enabled||Probe|watch|5") != null);
 
     // Back to the editor: the same primary context, so no event…
     ed.run("window.focus-right");
     ed.applyWindow();
     try t.expectEqual(editor_entry, ed.buffers.active_id);
-    try t.expectEqual(first + 3, runInt(ed, "ow.fired", &.{}));
+    try t.expectEqual(first + 3, runInt(ed, "offerwatch.fired", &.{}));
     // …and a different entry in the primary pane is one, naming the entry.
     try openFile(ed, "b.txt", "two\n");
     ed.applyWindow();
-    try t.expectEqual(first + 4, runInt(ed, "ow.fired", &.{}));
-    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow.keys", &.{}), "entry") != null);
+    try t.expectEqual(first + 4, runInt(ed, "offerwatch.fired", &.{}));
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "entry") != null);
 }
 
 test "e2e/ide: a live REPL is a key of the context — the event names it, a predicate reads it, explain agrees with the keypress" {
@@ -536,21 +536,21 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
 
     // Nothing publishes `repl.session`: the gated provider is not offered,
     // and explain says so exactly as a keypress would find it.
-    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow.context-get", &.{.{ .string = "repl.session" }}));
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "offerwatch.context-get", &.{.{ .string = "repl.session" }}));
     try t.expect(!offered(ed, "plugin.code.send-to-repl"));
     try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
 
     // Starting one publishes it on this place, and the ONE event of that
     // frame lists it.
     ed.runStr("repl.start", "cat");
-    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow.keys", &.{}), "repl.session") != null);
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "repl.session") != null);
     ed.runStr("file.open", "a.txt");
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
     // Its value is the REPL's designation: a live resource, by name.
-    try t.expectEqualStrings("weft://here/proc/repl", runStr(ed, &buf, "ow.context-get", &.{.{ .string = "repl.session" }}));
+    try t.expectEqualStrings("weft://here/proc/repl", runStr(ed, &buf, "offerwatch.context-get", &.{.{ .string = "repl.session" }}));
     // Back on the source, the entry moved — the REPL key did not.
-    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow.keys", &.{}), "repl.session") == null);
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "repl.session") == null);
 
     // Explain and the keypress read the same freshly synced table: both say
     // the config's provider runs it, and running it sends the line.
@@ -563,12 +563,12 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     try t.expect(h.drainToolContains(ed, "*repl*", "sent line"));
 
     // Quitting retracts it: one event naming the key, and nothing offered.
-    const before = runInt(ed, "ow.fired", &.{});
+    const before = runInt(ed, "offerwatch.fired", &.{});
     ed.run("repl.quit");
     ed.applyWindow();
-    try t.expect(runInt(ed, "ow.fired", &.{}) > before);
-    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "ow.keys", &.{}), "repl.session") != null);
-    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "ow.context-get", &.{.{ .string = "repl.session" }}));
+    try t.expect(runInt(ed, "offerwatch.fired", &.{}) > before);
+    try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "repl.session") != null);
+    try t.expectEqualStrings("<unset>", runStr(ed, &buf, "offerwatch.context-get", &.{.{ .string = "repl.session" }}));
     try t.expect(core.intent.explain(ed.ctx, &arms) == .blocked);
 }
 

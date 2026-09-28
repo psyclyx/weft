@@ -209,7 +209,7 @@ test "e2e/identity: presentation crosses every plane — a wasm table, a JS plug
 
     // A resident JS plugin's `weft.command(name, fn, {…})`, through
     // `qjs_declare_command_meta` — the same body.
-    const agent = core.presentations.of(ed.ctx, "agent.start").?;
+    const agent = core.presentations.of(ed.ctx, "acp.start").?;
     try t.expectEqualStrings("Start Agent", agent.label);
     try t.expectEqualStrings("Run/Agents", agent.menu);
     try t.expectEqualStrings("bot", agent.icon);

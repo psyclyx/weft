@@ -524,6 +524,7 @@ pub const JsPlugin = struct {
     /// go by the one path an unload takes (`deinit`), so a half-registered
     /// plugin is not a state the editor can be in.
     pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
+        if (std.mem.eql(u8, name, command.Command.core_owner)) return error.ReservedPluginName;
         const self = try instantiate(gpa, engine, ctx, pool, environ, name, config_store);
         self.run(src) catch |e| {
             self.deinit();
@@ -1572,7 +1573,10 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .arity = if (decl) |d| d.arity else null,
         .meta = if (decl) |d| d.meta else .{},
         .data = c,
-    }) catch {
+    }) catch |err| {
+        // `Command.admit`'s refusal (not its namespace, outside the grammar,
+        // another owner's id) says so; the plugin keeps loading without it.
+        std.log.warn("plugin {s}: command '{s}' refused: {s}", .{ self.name, name, @errorName(err) });
         results[0] = -1;
         return;
     };
@@ -1840,6 +1844,18 @@ fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     defer gpa.free(meta);
     if (br.manifest) |m| {
         m.addDescribe(name, meta) catch {};
+        return;
+    }
+    // LIVE: a resident plugin describes only its own commands — a bound id
+    // it owns, or an unbound one in its own namespace. Relabelling core's,
+    // or another plugin's, or clearing its `internal`, is the user's tier
+    // (the config, staged above), never a plugin's.
+    const allowed = if (br.activeCtx().commands.resolve(name)) |cmd|
+        std.mem.eql(u8, cmd.owner, br.owner)
+    else
+        @import("weft_membrane").command_id.mayDescribe(br.owner, name);
+    if (!allowed) {
+        std.log.warn("plugin {s}: may not describe '{s}' — not its command", .{ br.owner, name });
         return;
     }
     const table = br.activeCtx().presentations orelse return;

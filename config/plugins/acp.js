@@ -12,7 +12,7 @@
 // launch is passed in, not baked (NixOS-friendly); nothing here assumes how
 // the adapter is installed.
 //
-// CONVERSATIONS ARE INSTANCES. Every `agent.start` mints its OWN conversation:
+// CONVERSATIONS ARE INSTANCES. Every `acp.start` mints its OWN conversation:
 // its own subprocess, its own ACP session, its own transcript buffer
 // (`*agent*`, `*agent:2*`, … — the instanced tool-buffer naming idiom, the
 // repl/console/llm and git RepoSessions precedent) and its own CRDT sub-peer
@@ -32,8 +32,8 @@ const MAX_CONVERSATIONS = 16;
 // Live conversations, by ordinal. The ordinal is the instance identity: it
 // names the transcript buffer and the CRDT sub-peer.
 const convs = new Map();
-// The conversation `agent.send` addresses (the most recently started, until
-// `agent.focus` picks another).
+// The conversation `acp.send` addresses (the most recently started, until
+// `acp.focus` picks another).
 let focused = null;
 
 // `*agent*` at 1, `*agent:n*` above — the instanced tool-buffer naming idiom.
@@ -178,7 +178,7 @@ function askPermission(c, msg) {
   });
   setStatus(c, "◌", "waiting");
   pickQueue.push(token);
-  weft.run("agent.answer-permission");
+  weft.run("acp.answer-permission");
 }
 
 // Open the next queued permission pick, if the head is free. Called from a
@@ -201,13 +201,13 @@ function openNextPick() {
 // Internal: the deferred half of session/request_permission — not a
 // user-facing verb, invoked only via weft.run from the background
 // weft.onOutput handler.
-weft.command("agent.answer-permission", openNextPick, {
+weft.command("acp.answer-permission", openNextPick, {
   summary: "Answer the agent's pending permission request.",
   arity: "whole",
   internal: true,
 });
 
-// The OTHER pick this plugin opens (`agent.focus`, below): its own
+// The OTHER pick this plugin opens (`acp.focus`, below): its own
 // continuation identity, and the conversations it offered.
 const focus_token = "focus";
 let focusChoices = [];
@@ -366,14 +366,14 @@ function endConversation(c, why) {
   if (focused === c) focused = convs.values().next().value || null;
   weft.procClose(c.proc);
   c.proc = null;
-  weft.run("agent.reap"); // the head-gated half; see below
+  weft.run("acp.reap"); // the head-gated half; see below
 }
 
 // Internal: the deferred half of a conversation's end — closing the dead
 // pick needs a dispatching head, and a nested `weft.run` is one. Cancelling
 // resolves it through the ordinary `onPick` path, which then opens whatever
 // a LIVE conversation still has queued.
-weft.command("agent.reap", () => {
+weft.command("acp.reap", () => {
   if (!dead_pick) {
     openNextPick();
     return;
@@ -436,7 +436,7 @@ globalThis.startAgent = startAgent;
 // agent.start: launch a NEW conversation and run one turn. The launch command
 // is config data (weft.set("acp", "cmd", "…") — never baked), and the opening
 // prompt is weft.set("acp", "prompt", "…") (default "Hello").
-weft.command("agent.start", () => {
+weft.command("acp.start", () => {
   const cmd = weft.config("cmd");
   if (!cmd) {
     weft.echo('acp: set an agent command first — weft.set("acp","cmd","codex-acp")');
@@ -462,7 +462,7 @@ weft.command("agent.start", () => {
 // for a wasm plugin (wasm_host/edit.zig's `read_doors`). Before them the only
 // thing a JS plugin could see of the buffer was `weft.lineText()`, which is why
 // "send this line" was the whole of what this command could mean.
-weft.command("agent.send", () => {
+weft.command("acp.send", () => {
   const sel = weft.selection();
   const line = (sel ? weft.slice(sel.start, sel.end) : weft.lineText()).trim();
   if (!line) {
@@ -483,12 +483,12 @@ weft.command("agent.send", () => {
   icon: "bot",
 });
 
-// agent.focus: choose which conversation `agent.send` addresses. It rides
+// acp.focus: choose which conversation `acp.send` addresses. It rides
 // the same continuation token the permission picks use — a second identity
 // sharing one `onPick`, which is the point: an outcome always says which
 // request it answers, so this can never steal a permission answer (nor be
 // answered by one).
-weft.command("agent.focus", () => {
+weft.command("acp.focus", () => {
   if (!convs.size) {
     weft.echo("acp: no conversations");
     return;

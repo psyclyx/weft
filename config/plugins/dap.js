@@ -19,7 +19,7 @@
 // owning its own buffer: `*debug*`, `*debug:2*`, … The buffer name IS the
 // session's identity (the repl/console/llm and git-repo idiom, weft.zig's
 // `Instances`). A command routes to the session whose buffer is FOCUSED, else
-// the most recent, so `debug.stop` stops the one you are looking at and leaves
+// the most recent, so `dap.stop` stops the one you are looking at and leaves
 // the other running. `program`/`source`/`line` are snapshotted from config at
 // START, never re-read: a session's target cannot change under it.
 
@@ -161,7 +161,7 @@ weft.onOutput((h) => {
 });
 
 // ── Commands ──────────────────────────────────────────────────────────
-weft.command("debug.start", () => {
+weft.command("dap.start", () => {
   const cmd = weft.config("cmd");
   if (!cmd) {
     weft.echo('debug: set an adapter — weft.set("dap","cmd","…")');
@@ -219,13 +219,13 @@ function stepCmd(name, command, options) {
     send(s, command, { threadId: s.thread });
   }, { ...options, arity: "whole", menu: "Run", group: "step" });
 }
-stepCmd("debug.continue", "continue", { summary: "Let the program run on.", label: "Continue", order: 1, icon: "play" });
-stepCmd("debug.step-over", "next", { summary: "Step over this line.", label: "Step Over", order: 2, icon: "step-forward" });
-stepCmd("debug.step-into", "stepIn", { summary: "Step into the call.", label: "Step Into", order: 3, icon: "arrow-down-to-line" });
-stepCmd("debug.step-out", "stepOut", { summary: "Run to the end of this frame.", label: "Step Out", order: 4, icon: "arrow-up-from-line" });
+stepCmd("dap.continue", "continue", { summary: "Let the program run on.", label: "Continue", order: 1, icon: "play" });
+stepCmd("dap.step-over", "next", { summary: "Step over this line.", label: "Step Over", order: 2, icon: "step-forward" });
+stepCmd("dap.step-into", "stepIn", { summary: "Step into the call.", label: "Step Into", order: 3, icon: "arrow-down-to-line" });
+stepCmd("dap.step-out", "stepOut", { summary: "Run to the end of this frame.", label: "Step Out", order: 4, icon: "arrow-up-from-line" });
 
 // Stop the FOCUSED session only — a second debugger keeps running.
-weft.command("debug.stop", () => {
+weft.command("dap.stop", () => {
   const s = current();
   if (!s) {
     weft.echo("debug: no session");

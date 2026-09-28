@@ -24,11 +24,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "exec.ok", .arity = .one, .call = execOk, .summary = "Exercise the exec.ok fixture command.", .internal = true },
-    .{ .name = "exec.fail", .arity = .one, .call = execFail, .summary = "Exercise the exec.fail fixture command.", .internal = true },
-    .{ .name = "exec.argv", .arity = .one, .call = execArgv, .summary = "Exercise the exec.argv fixture command.", .internal = true },
-    .{ .name = "exec.spool", .arity = .one, .call = execSpool, .summary = "Exercise the exec.spool fixture command.", .internal = true },
-    .{ .name = "exec.ctx", .arity = .one, .call = execCtx, .summary = "Exercise the exec.ctx fixture command.", .internal = true },
+    .{ .name = "exec-gate.ok", .arity = .one, .call = execOk, .summary = "Exercise the exec.ok fixture command.", .internal = true },
+    .{ .name = "exec-gate.fail", .arity = .one, .call = execFail, .summary = "Exercise the exec.fail fixture command.", .internal = true },
+    .{ .name = "exec-gate.argv", .arity = .one, .call = execArgv, .summary = "Exercise the exec.argv fixture command.", .internal = true },
+    .{ .name = "exec-gate.spool", .arity = .one, .call = execSpool, .summary = "Exercise the exec.spool fixture command.", .internal = true },
+    .{ .name = "exec-gate.ctx", .arity = .one, .call = execCtx, .summary = "Exercise the exec.ctx fixture command.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();
