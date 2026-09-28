@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 
 const text_engine = @import("weft_text");
 const core = @import("weft_core");
+const status_layout = @import("status_layout.zig");
 const region = @import("../region.zig");
 const view = @import("../view.zig");
 
@@ -365,19 +366,31 @@ fn drawTopSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects
     if (nrows == 0) return;
     const pad_y = v.line_h * 0.25;
     const w = @min(@max(0, area.w - 4 * v.cell_w), @max(60 * v.cell_w, area.w * 0.55));
-    const inner: region.Rect = .{
-        .x = area.x + (area.w - w) / 2,
-        .y = area.y + v.line_h * 0.5 + pad_y,
-        .w = w,
-        .h = @as(f32, @floatFromInt(nrows)) * v.line_h,
-    };
-    const dl = (try layoutDockSurface(v, scratch, surf, inner)) orelse return;
+    const x = area.x + (area.w - w) / 2;
+    const y = area.y + v.line_h * 0.5 + pad_y;
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-    try chrome.paintPanel(sink, .{ .x = dl.x, .y = dl.y - pad_y, .w = dl.w, .h = dl.h + 2 * pad_y }, v.theme.selection, v.theme.accent, .popup);
-    for (dl.rows[0..nrows]) |row| {
-        if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.accent);
-        const color = if (row.selected) v.theme.background else spanRoleColor(v, row.role);
-        try propLine(v, scratch, runs, row.text, dl.x + v.cell_w, row.y + v.ascent, color);
+    try chrome.paintPanel(sink, .{ .x = x, .y = y - pad_y, .w = w, .h = @as(f32, @floatFromInt(nrows)) * v.line_h + 2 * pad_y }, v.theme.selection, v.theme.accent, .popup);
+    const inner_cols: usize = @intFromFloat(@max(0, (w - 2 * v.cell_w) / v.cell_w));
+    for (surf.rows.items[0..nrows], 0..) |row, i| {
+        const row_y = y + @as(f32, @floatFromInt(i)) * v.line_h;
+        const selected = surf.selected != null and surf.selected.? == i;
+        if (selected) try chrome.paintSelected(sink, .{ .x = x, .y = row_y, .w = w, .h = v.line_h }, v.theme.accent);
+        if (row.spans.items.len == 0) continue;
+        // A second span is the row's key: right-aligned, and the label gives
+        // way to it — shortened with "…", never running past the panel.
+        const key: []const u8 = if (row.spans.items.len > 1) row.spans.items[row.spans.items.len - 1].text else "";
+        const key_cols = status_layout.cells(key);
+        const room = inner_cols -| (if (key_cols > 0) key_cols + 2 else 0);
+        const main = row.spans.items[0];
+        const cut_buf = try scratch.alloc(u8, main.text.len + 4);
+        const text = status_layout.cut(cut_buf, main.text, room, .end);
+        const color = if (selected) v.theme.background else spanRoleColor(v, fromRole(main.role));
+        try propLine(v, scratch, runs, text, x + v.cell_w, row_y + v.ascent, color);
+        if (key_cols > 0 and key_cols < inner_cols) {
+            const kx = x + w - v.cell_w - @as(f32, @floatFromInt(key_cols)) * v.cell_w;
+            const kcolor = if (selected) v.theme.background else spanRoleColor(v, .muted);
+            try propLine(v, scratch, runs, key, kx, row_y + v.ascent, kcolor);
+        }
     }
 }
 

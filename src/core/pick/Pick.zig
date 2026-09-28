@@ -678,6 +678,18 @@ fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize, plac
         const item = self.items.items[self.filtered.items[fi]];
         const doc = self.docOf(fi);
         const ann = self.annotationOf(fi);
+        // A TOP panel keeps the annotation (the key that runs the row) as a
+        // span of its own, which the panel right-aligns — a palette's look.
+        if (place == .top) {
+            const main = (if (doc.len > 0)
+                std.fmt.allocPrint(scratch, "{s}  · {s}", .{ item, doc })
+            else
+                std.fmt.allocPrint(scratch, "{s}", .{item})) catch continue;
+            surf.addRow(scratch);
+            surf.addSpan(scratch, main, .muted);
+            if (ann.len > 0) surf.addSpan(scratch, ann, .annotation);
+            continue;
+        }
         // The dock joins into one span (it never column-aligns), so the
         // annotation trails the producer's own note with the same separator.
         const l = (if (doc.len > 0 and ann.len > 0)

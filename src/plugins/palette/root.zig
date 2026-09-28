@@ -218,7 +218,9 @@ fn offers() void {
             std.fmt.bufPrint(&doc_buf, "{s} · offered by {s} · {s}", .{ item.name, item.provider, item.reason }) catch continue
         else
             std.fmt.bufPrint(&doc_buf, "{s} · offered by {s}", .{ item.name, item.provider }) catch continue;
-        addRow(item.label, if (brief and item.enabled()) "" else doc, item.name, true);
+        // Brief: an enabled offer is its label; a disabled one says only why.
+        const shown_doc = if (!brief) doc else if (item.enabled()) "" else item.reason;
+        addRow(item.label, shown_doc, item.name, true);
     }
 }
 
