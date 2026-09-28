@@ -1034,6 +1034,19 @@ pub fn runArgs(cmd: []const u8, args: []const []const u8) void {
     e.wl_run_argv(p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n));
 }
 
+/// `runArgs` in a chosen context: a menubar row that asked for its argument
+/// runs in the primary context (the editor it describes), whichever pane has
+/// the keys. False when no command has that name. Dispatching entries only.
+pub fn runArgsIn(where: OfferContext, cmd: []const u8, args: []const []const u8) bool {
+    var vec: [4]u32 = undefined;
+    const n = @min(args.len, vec.len / 2);
+    for (args[0..n], 0..) |a, i| {
+        vec[i * 2] = p(a.ptr);
+        vec[i * 2 + 1] = @intCast(a.len);
+    }
+    return e.wl_run_argv_at(@intFromEnum(where), p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n)) == 0;
+}
+
 // ── Introspection (palettes/help/buffers) ────────────────────────────
 pub fn commandCount() usize {
     return e.wl_command_count();

@@ -79,6 +79,10 @@ pub fn Invoker(comptime cfg: Config) type {
         var need: usize = 0;
         var takes: usize = 0;
         var asking: bool = cfg.ask;
+        // Where the assembled call runs: null is the focused context (the
+        // palette's, the `:` line's); a menubar names the primary one. Held
+        // with the call, since the asking happens across prompts.
+        var where: ?weft.OfferContext = null;
 
         var label_buf: [NAME_CAP + 64]u8 = undefined;
         var hint_buf: [256]u8 = undefined;
@@ -143,6 +147,19 @@ pub fn Invoker(comptime cfg: Config) type {
         /// of the line (`:llm.ask write me a poem` is one argument, `:grant fp
         /// edit` is two) instead of against a fixed guess.
         pub fn invokeLine(text: []const u8) void {
+            invokeLineAt(null, text);
+        }
+
+        /// `invokeLine`, run — once every argument is had — in a chosen
+        /// context: a menubar row acts on the editor it describes
+        /// (doc/chrome.md §2.3) even when what it asked for was typed while
+        /// the sidebar had the keys.
+        pub fn invokeLineIn(in: weft.OfferContext, text: []const u8) void {
+            invokeLineAt(in, text);
+        }
+
+        fn invokeLineAt(in: ?weft.OfferContext, text: []const u8) void {
+            where = in;
             const trimmed = trim(text);
             if (trimmed.len == 0) return;
             var i: usize = 0;
@@ -154,6 +171,7 @@ pub fn Invoker(comptime cfg: Config) type {
         /// accepted row. Identical to `line` with an empty tail; spelled
         /// separately because that is what the caller means.
         pub fn invokeName(cmd: []const u8) void {
+            where = null;
             begin(cmd, "");
         }
 
@@ -325,11 +343,13 @@ pub fn Invoker(comptime cfg: Config) type {
 
         /// Hand the assembled call to the one door that runs AND reports
         /// (`command.invoke`, host side) — so a refusal or an answer lands on
-        /// the echo line rather than in a dropped return value.
+        /// the echo line rather than in a dropped return value — in the
+        /// context the call was begun for.
         fn fire() void {
             var argv: [max_args][]const u8 = undefined;
             for (0..filled) |i| argv[i] = arg_bufs[i][0..arg_lens[i]];
-            weft.runArgs(name_buf[0..name_len], argv[0..filled]);
+            const in = where orelse return weft.runArgs(name_buf[0..name_len], argv[0..filled]);
+            _ = weft.runArgsIn(in, name_buf[0..name_len], argv[0..filled]);
         }
 
         /// Keep one argument, or refuse it out loud. Truncating silently is

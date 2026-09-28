@@ -245,8 +245,12 @@ All of §2, with two departures (below).
   command whose key is refused for the moment shows the key that means it (a
   greyed Undo shows C-z). Running is `wl_intent_invoke_at`, which now runs
   a name that is no intention as a command in the chosen context. A row
-  with an argument still to give asks for it, as the palette does. A menu's
-  rows are asked about when it opens, never kept.
+  with an argument still to give asks for it, as the palette does, and runs
+  in the primary context too once it has it (`weft_invoke`'s
+  `invokeLineIn(.primary, …)` over `wl_run_argv_at`, `wl_run_argv` in a
+  chosen context through the same `intent.runAt`): File ▸ Save As… from the
+  sidebar saves the editor, as does a config `items` row carrying its own
+  argument. A menu's rows are asked about when it opens, never kept.
 - **Toggles and choices.** A `toggle` context key checks its row; the form
   `key=value` is one choice among several (a dot). The frame publishes the
   style it draws as `theme.chrome`, and View ▸ Appearance ▸ Chrome Style's

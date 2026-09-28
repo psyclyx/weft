@@ -192,6 +192,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_run_str", .handler = commands.hRunStr },
     .{ .name = "wl_run_str2", .handler = commands.hRunStr2 },
     .{ .name = "wl_run_argv", .handler = commands.hRunArgv },
+    .{ .name = "wl_run_argv_at", .handler = commands.hRunArgvAt },
     .{ .name = "wl_command_count", .handler = commands.hCommandCount },
     .{ .name = "wl_command_name", .handler = commands.hCommandName },
     .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
@@ -686,6 +687,7 @@ const head_gated_list = [_][]const u8{
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
     "wl_semantic_action", // semantic.zig hSemanticAction
     "wl_intent_invoke_at", // intent.zig hIntentInvokeAt
+    "wl_run_argv_at", // commands.zig hRunArgvAt
 };
 
 test "membrane contract: table .head_gated metadata agrees with the handlers' actual requireDispatch gates" {

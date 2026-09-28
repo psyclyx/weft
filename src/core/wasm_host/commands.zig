@@ -279,44 +279,94 @@ pub fn hRunArgv(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(cmd);
-    const argc: usize = @intCast(@max(args[3], 0));
-    if (argc > max_argv) {
-        // Refused OUT LOUD, on the same echo line every other refusal uses:
-        // a guest that asked for a wider call has hit the gate above, and
-        // silence here is the exact failure mode this whole change is about.
-        var buf: [96]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
-            cmd, argc, max_argv,
-        }) catch "too many arguments";
-        p.activeCtx().head.echo.clearRetainingCapacity();
-        p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
-        return;
-    }
-    // The vector first, as bytes, then each string it points at. An
-    // out-of-bounds read refuses the WHOLE call (`readMemory` bounds-checks):
-    // a partially decoded argument list would invoke the command with
-    // something the guest did not say.
-    const vec = caller.readMemory(gpa, @intCast(args[2]), argc * 8) catch return;
-    defer gpa.free(vec);
-
-    var values: [max_argv]command.Value = undefined;
-    var owned: [max_argv][]u8 = undefined;
-    var n: usize = 0;
-    defer for (owned[0..n]) |s| gpa.free(s);
-    while (n < argc) {
-        const ptr = std.mem.readInt(u32, vec[n * 8 ..][0..4], .little);
-        const len = std.mem.readInt(u32, vec[n * 8 + 4 ..][0..4], .little);
-        const s = caller.readMemory(gpa, ptr, len) catch return;
-        owned[n] = s;
-        values[n] = .{ .string = s };
-        n += 1;
-    }
-    invoke(p, cmd, values[0..argc]);
+    var argv: Argv = .{};
+    defer argv.deinit(gpa);
+    if (!argv.read(p, caller, cmd, args[2], args[3])) return;
+    invoke(p, cmd, argv.values[0..argv.n]);
 }
 
-/// Arguments one `wl_run_argv` call may carry — and a SECURITY BOUND, not a
-/// buffer size. `app/providers.zig`'s census gate turns on the fact that no
-/// guest command runner passes three arguments: `syntax.add-grammar` needs three, and
+/// `wl_run_argv_at(where, cmd, vec, argc)`: `wl_run_argv` in a CHOSEN
+/// context (`intent.runAt`) — what a menubar row that asks for an argument
+/// runs once it has one: File › Save As… `<path>` saves the editor the menu
+/// describes, not the sidebar that holds the keys. 0 ran (the command
+/// reports its own refusal), -1 no such command or an unknown `where`.
+///
+/// HEAD-GATED, like `wl_intent_invoke_at`: running in the primary context
+/// moves which entry the head is on for the call, a dispatching entry's
+/// business, never a background callback's.
+pub fn hRunArgvAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    results[0] = -1;
+    if (!shared.requireDispatch(p, caller, "wl_run_argv_at")) return;
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse return;
+    const cmd = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer gpa.free(cmd);
+    var argv: Argv = .{};
+    defer argv.deinit(gpa);
+    if (!argv.read(p, caller, cmd, args[3], args[4])) return;
+    var buf: [256]u8 = undefined;
+    results[0] = switch (intent_mod.runAt(p.activeCtx(), where, cmd, argv.values[0..argv.n], &buf)) {
+        .invoked => 0,
+        .unknown => -1,
+        .refused => |why| blk: {
+            p.activeCtx().head.echo.clearRetainingCapacity();
+            p.activeCtx().head.echo.appendSlice(gpa, why) catch {};
+            break :blk 0;
+        },
+    };
+}
+
+/// A run door's arguments, read out of guest memory: the `(ptr, len)` vector
+/// first, as bytes, then each string it points at.
+const Argv = struct {
+    values: [max_argv]command.Value = undefined,
+    owned: [max_argv][]u8 = undefined,
+    n: usize = 0,
+
+    fn deinit(self: *Argv, gpa: std.mem.Allocator) void {
+        for (self.owned[0..self.n]) |s| gpa.free(s);
+    }
+
+    /// False when the call is refused: wider than a plugin may pass (said on
+    /// the echo line), or an argument out of the guest's bounds. An
+    /// out-of-bounds read refuses the WHOLE call (`readMemory` bounds-checks):
+    /// a partially decoded argument list would invoke the command with
+    /// something the guest did not say.
+    fn read(self: *Argv, p: *WasmPlugin, caller: *wasm.Caller, cmd: []const u8, vec_ptr: i32, argc_in: i32) bool {
+        const gpa = p.gpa;
+        const argc: usize = @intCast(@max(argc_in, 0));
+        if (argc > max_argv) {
+            // Refused OUT LOUD, on the same echo line every other refusal
+            // uses: a guest that asked for a wider call has hit the gate
+            // below, and silence here is the exact failure mode this whole
+            // change is about.
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
+                cmd, argc, max_argv,
+            }) catch "too many arguments";
+            p.activeCtx().head.echo.clearRetainingCapacity();
+            p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+            return false;
+        }
+        const vec = caller.readMemory(gpa, @intCast(vec_ptr), argc * 8) catch return false;
+        defer gpa.free(vec);
+        while (self.n < argc) {
+            const ptr = std.mem.readInt(u32, vec[self.n * 8 ..][0..4], .little);
+            const len = std.mem.readInt(u32, vec[self.n * 8 + 4 ..][0..4], .little);
+            const s = caller.readMemory(gpa, ptr, len) catch return false;
+            self.owned[self.n] = s;
+            self.values[self.n] = .{ .string = s };
+            self.n += 1;
+        }
+        return true;
+    }
+};
+
+/// Arguments one `wl_run_argv`/`wl_run_argv_at` call may carry — and a
+/// SECURITY BOUND, not a buffer size. `app/providers.zig`'s census gate turns
+/// on the fact that no guest command runner passes three arguments:
+/// `syntax.add-grammar` needs three, and
 /// what it does with them is `std.DynLib.open` on a caller-named directory.
 /// Arity is the gate. A wider door here would open that one, which is why the
 /// census lists this runner with the number below and the test fails if they

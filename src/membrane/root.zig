@@ -286,6 +286,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_run_str", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with one string arg" },
     .{ .name = "wl_run_str2", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with two string args" },
     .{ .name = "wl_run_argv", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .commands, .doc = "run a command by name with `argc` string args, given as a vector of (ptr,len) pairs" },
+    .{ .name = "wl_run_argv_at", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .head_gated = true, .operation = .{ .name = "legacy.wl_run_argv" }, .doc = "`wl_run_argv` in a chosen context (0 active, 1 primary focus): run a command by name with `argc` string args THERE; 0 = ran (the command reports its own refusal), -1 = no such command" },
     .{ .name = "wl_command_count", .params = &.{}, .results = &.{.u32}, .group = .commands, .doc = "the number of registered commands (introspection)" },
     .{ .name = "wl_command_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's name, into guest memory" },
     .{ .name = "wl_command_summary", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's one-line summary, into guest memory" },
@@ -617,7 +618,7 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 263;
+const max_import_count: usize = 264;
 const max_export_count: usize = 22;
 const max_semantic_operation_count: usize = 285;
 
@@ -779,7 +780,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 263), census.imports);
+    try t.expectEqual(@as(usize, 264), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
     try t.expectEqual(@as(usize, 285), census.semantic_operations);
 }

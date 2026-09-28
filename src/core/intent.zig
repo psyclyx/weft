@@ -587,17 +587,27 @@ pub const Plane = struct {
             .unknown => {},
             else => |done| return done,
         }
-        if (ctx.commands.resolve(name) == null) return .unknown;
-        const scope = scopeOf(ctx, where);
-        if (scope.live) {
-            command.invoke(ctx.commands, ctx, name, &.{});
-            return .invoked;
-        }
-        ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, command.invoke, .{ ctx.commands, ctx, name, @as([]const command.Value, &.{}) }) catch |err|
-            return refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
-        return .invoked;
+        return runAt(ctx, where, name, &.{}, buf);
     }
 };
+
+/// Run the registered COMMAND `name` with `args` in a chosen context — the
+/// one road a chosen context's command takes, with arguments or none: a
+/// menubar's File › Save and its Save As… `<path>` alike act on the editor
+/// the menu describes while the sidebar holds the keys. The command reports
+/// its own refusal (`command.invoke`), so a refused one is still `invoked`;
+/// `unknown` when no command has that name.
+pub fn runAt(ctx: *command.Context, where: Where, name: []const u8, args: []const command.Value, buf: []u8) Invocation {
+    if (ctx.commands.resolve(name) == null) return .unknown;
+    const scope = scopeOf(ctx, where);
+    if (scope.live) {
+        command.invoke(ctx.commands, ctx, name, args);
+        return .invoked;
+    }
+    ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, command.invoke, .{ ctx.commands, ctx, name, args }) catch |err|
+        return refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
+    return .invoked;
+}
 
 /// What `invokeNamed` did. `unknown` is not a refusal: the name is no
 /// intention at all, so the caller's other vocabulary (commands) still owns it.

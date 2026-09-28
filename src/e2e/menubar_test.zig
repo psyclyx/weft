@@ -510,6 +510,44 @@ test "e2e/menubar: Alt+F opens File from the keys, Enter runs in the primary con
     try t.expect(ed.head.interactions.active() == null);
 }
 
+test "e2e/menubar: a row that asks for an argument runs in the primary context too — Save As… from the sidebar writes the editor" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "alpha\n");
+    const editor = ed.buffers.active_id;
+    ed.applyWindow();
+
+    // The keys in the sidebar; File ▸ Save As… asks for the path, then
+    // saves the EDITOR there, not the listing that has the keys.
+    const sidebar = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
+    ed.click(centre(rectOf(ed, @intFromEnum((try sidebarRow(ed, sidebar)).node)).?));
+    ed.applyWindow();
+    try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
+    ed.press("M-f", "");
+    for (0..20) |_| {
+        if (std.mem.eql(u8, litLabel(try menu(ed)).?, "Save As…")) break;
+        ed.press("Down", "");
+    }
+    try t.expectEqualStrings("Save As…", litLabel(try menu(ed)).?);
+    ed.press("Return", "");
+    // The path through the prompt's own line (its typing is its mode's
+    // commit, which a listing's type-ahead must not take — a separate gate).
+    ed.runStr("menu.arg-type", "b.txt");
+    ed.press("Return", "");
+    ed.applyWindow();
+    const disk = core.file.readAlloc(gpa, "b.txt") catch |err| {
+        std.debug.print("[e2e/menubar] Save As… wrote nothing (echo: '{s}')\n", .{ed.head.echo.items});
+        return err;
+    };
+    defer gpa.free(disk);
+    try t.expectEqualStrings("alpha\n", disk);
+    try t.expect(ed.buffers.get(editor) != null);
+    try t.expectEqual(sidebar.pane().buffer_id, ed.buffers.active_id);
+}
+
 fn sidebarRow(ed: *Editor, sidebar: *window_layout.Node) !h.view.semantic.Hit {
     const view = try ed.ensureView();
     for (view.pane_maps[0..view.pane_map_count]) |m| {

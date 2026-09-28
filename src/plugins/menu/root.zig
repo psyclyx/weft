@@ -604,11 +604,13 @@ fn activate(entry: *const Entry) void {
     const invocation = std.fmt.bufPrint(&buf, "{s}", .{run.invocation}) catch return closeAll();
     const needs_args = if (run.index) |i| (weft.commandArityRequired(i) orelse 0) > 0 else std.mem.indexOfScalar(u8, invocation, ' ') != null;
     closeAll();
-    if (needs_args) return asker.invokeLine(invocation);
+    // A row with an argument — given in its invocation, or still to ask —
+    // runs where every row runs: the primary context.
+    if (needs_args) return asker.invokeLineIn(.primary, invocation);
     switch (weft.invokeIntentionIn(.primary, invocation)) {
         .invoked => {},
         .refused => |why| weft.echo(why),
-        .unknown => asker.invokeLine(invocation),
+        .unknown => asker.invokeLineIn(.primary, invocation),
     }
 }
 
