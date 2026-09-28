@@ -12,7 +12,7 @@ const dispatch = @import("dispatch.zig");
 const providers = @import("providers.zig");
 
 /// Bind the capability consumers (complete) plus the data-driven grammar registry
-/// (grammar-add) onto `commands`. Each UI/registry is caller-owned (declared in
+/// (syntax.add-grammar) onto `commands`. Each UI/registry is caller-owned (declared in
 /// `main()` with its own defer); this only wires the command specs, in
 /// registration order. hover / goto-definition / references / symbols / rename /
 /// format / diagnostics / completion are all the `lsp` PLUGIN's now — the only

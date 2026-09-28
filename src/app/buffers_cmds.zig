@@ -272,7 +272,7 @@ const RemoteBrowse = struct {
     path: []u8,
 };
 
-/// `browse-remote <host> <path>` — list a remote directory over the
+/// `file.browse-remote <host> <path>` — list a remote directory over the
 /// persistent ssh shell and pick over it (streamed by fs_source).
 pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const command_context: *Context = @ptrCast(@alignCast(data.?));

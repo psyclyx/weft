@@ -157,7 +157,7 @@ pub const LoadOptions = struct {
     /// The async loop `shellInsert` schedules its off-thread work on. Null =
     /// shell effects are unavailable (dropped).
     loop: ?*async_loop.Loop = null,
-    /// The task pool interactive REPL sessions run on. Null = repl-start drops.
+    /// The task pool interactive REPL sessions run on. Null = repl.start drops.
     pool: ?*Pool = null,
     /// doc/contextual-workspace-architecture.md §13.5 — the grant table this plugin's
     /// `describe()`-declared perms mint POSSESSED handles into (see

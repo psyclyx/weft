@@ -41,7 +41,7 @@ const std_paste = "std.transfer.paste";
 // `op_edit_cmd` is the range-arg operator to apply (null = pure yank); `op_copies`
 // is whether to first yank the range into the register (d/c/y do, gc doesn't);
 // `op_after` is the mode to enter after. This trio lets ANY range-arg operator —
-// op.delete, op.comment, a plugin's own — ride the operator-pending machinery.
+// operators.delete, comment.toggle, a plugin's own — ride the operator-pending machinery.
 var op_edit_cmd: ?[]const u8 = "operators.delete";
 var op_copies: bool = true;
 var op_after: []const u8 = "normal"; // mode to enter after the operator
@@ -232,7 +232,7 @@ fn opByMotion(comptime motion: []const u8) fn () void {
 
 /// Apply the pending operator over an anchored range. `op_copies` yanks it
 /// into the register first (d/c/y); `op_edit_cmd` then runs the gated edit
-/// (op.delete for d/c, op.comment for gc, …) and enters the after-mode. A pure
+/// (operators.delete for d/c, comment.toggle for gc, …) and enters the after-mode. A pure
 /// yank (no edit command) flashes and returns to normal.
 fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
@@ -258,7 +258,7 @@ fn flashAfter(hnd: u32) void {
     if (after.end > after.start) weft.flash(after.start, after.end);
 }
 
-/// `vim-operate <range>`: apply the pending operator over a range ANOTHER
+/// `vim.operate <range>`: apply the pending operator over a range ANOTHER
 /// plugin computed. This is the door a motion that has to read keys before
 /// it knows its target (snipe's `d z a b`) composes through: it cannot be
 /// a synchronous range command like `motions`' — its answer arrives a key
@@ -853,7 +853,7 @@ fn initExtra() void {
     weft.bindKey("op-pending", "Escape", "vim.cancel-operator");
     inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim.operate-to-" ++ comptime motionWord(m.motion));
     // The doubled operator is linewise (dd, yy, cc, gUU, guu; gcc's second key
-    // `c` is already here). Each maps to op-line, which applies whatever operator
+    // `c` is already here). Each maps to vim.operate-line, which applies whatever operator
     // is pending to the current line.
     for ([_][]const u8{ "d", "c", "y", "u", "U", "greater", "less" }) |k| weft.bindKey("op-pending", k, "vim.operate-line");
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
@@ -1322,7 +1322,7 @@ fn visualChange() void {
     weft.run("selection.clear");
     enterInsert();
 }
-/// A visual-mode operator: run a range-arg `cmd` (op.comment, op.upcase, …) over
+/// A visual-mode operator: run a range-arg `cmd` (comment.toggle, operators.upcase, …) over
 /// the selection, then clear it and return to normal. `gc`/`U`/`u` in visual all
 /// ride this — the same operators the motion path uses, no register touched.
 fn visualOp(comptime cmd: []const u8) fn () void {

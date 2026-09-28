@@ -67,7 +67,7 @@ fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
     return null;
 }
 
-/// `set-color <name> <#rrggbb>` — a BINDING at the transient tier, then a
+/// `theme.set-color <name> <#rrggbb>` — a BINDING at the transient tier, then a
 /// re-resolve, rather than a poke at the view's struct. So the interactive
 /// command and a config's `weft.set("theme", ...)` are the same mechanism at
 /// different tiers, and the interactive one wins because `transient` outranks
@@ -96,7 +96,7 @@ pub fn setCursorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
     return .nil;
 }
 
-/// `cursor-place <mode> head|inside` — where the caret draws relative to the
+/// `cursor.set-place <mode> head|inside` — where the caret draws relative to the
 /// selection in `mode` (`view_mod.CaretPlace`). A grammar declares it, as it
 /// declares the caret's shape; core picks no answer for anyone.
 pub fn cursorPlaceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {

@@ -133,7 +133,7 @@ test "two heads: A mid-chord does not touch B's mode/pending, and B types in ins
     try t.expectEqual(@as(usize, 0), b.head.pending.len);
 
     // B types — this dispatch resolves through B's OWN mode's commit command
-    // (insert-text), not A's half-typed chord.
+    // (edit.insert-text), not A's half-typed chord.
     b.typeText("hello");
     const text1 = try ed.textAlloc();
     defer gpa.free(text1);
@@ -161,7 +161,7 @@ test "two heads: A in a menu mode does not move B out of normal" {
     // never self-inserts) AND reachable as a one-shot menu, the same shape
     // `dispatch.dispatchSpec` gives any bound command whose name NAMES a menu
     // mode (see its "legacy mode-menu path" comment) — the same mechanism a
-    // real git-status keybinding uses.
+    // real git.status keybinding uses.
     try ed.keymap.tagMode(gpa, "tool-mode", "menu");
     try ed.keymap.tagMode(gpa, "tool-mode", "resting");
     try ed.keymap.bind(gpa, "normal", "g", "tool-mode", core.Keymap.prio_config, "test");
@@ -214,7 +214,7 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try t.expectEqualStrings("pick", b.mode());
 
     // Typing dispatches through each head's OWN "pick" mode commit command
-    // (pick-input) into each head's OWN query — not the other's.
+    // (pick.input) into each head's OWN query — not the other's.
     ed.typeText("no");
     try t.expectEqualStrings("no", ed.pick.query.items);
     try t.expectEqual(@as(usize, 0), b.head.pick.query.items.len);
@@ -258,7 +258,7 @@ test "two heads: distinct dot-repeat registers — B's `.` never replays A's cha
     defer b.deinit(gpa);
 
     // B's FIRST action after attaching: a BARE MOTION (no edit) — "l"
-    // (cursor-right), not `.`. This is the exact scenario `DotRepeat.synced`
+    // (cursor.right), not `.`. This is the exact scenario `DotRepeat.synced`
     // exists for: WITHOUT it, B's fresh-but-unsynced bookkeeping
     // (commits=0/cursor=0 defaults) misreads the gap since B's creation —
     // during which A already committed the "seed " edit above — as an
@@ -431,7 +431,7 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
     // the post-nesting echo would land back on A instead.
     b.run("head.relay");
 
-    try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head-poke
+    try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head.poke
     try t.expectEqualStrings("after-relay", b.echoText()); // written AFTER the nested call returned — still B
 
     // A never touched, at any point in the nesting.
@@ -450,8 +450,8 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // B is "the last-dispatching head": it dispatches head-poke (so its
-    // mode/echo are visibly different from A's default) and head-spawn
+    // B is "the last-dispatching head": it dispatches head.poke (so its
+    // mode/echo are visibly different from A's default) and head.spawn
     // (perm proc; spawns a real subprocess so a REAL readiness-driven
     // on_poll fires off the frame-loop tick, not a synthetic direct export
     // call).
@@ -484,7 +484,7 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     try t.expectEqualStrings("default", ed.mode()); // A: never touched, was "polled" before this fix
     try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
     // B, meanwhile, is untouched by the background entry either way — still
-    // exactly where its own last dispatch (head-poke) left it.
+    // exactly where its own last dispatch (head.poke) left it.
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("poked", b.echoText());
 }

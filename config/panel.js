@@ -5,7 +5,7 @@
 // last brought into it with core's `viewport.take` (the problems list, the
 // terminal) — taking replaces, and hiding keeps the entry for when it is
 // shown again. Nothing is presented at startup, so it starts hidden and
-// opens on demand; `viewport-toggle panel` shows and hides it.
+// opens on demand; `viewport.toggle panel` shows and hides it.
 weft.viewport("panel", {
   edge: "bottom",
   extent: { rows: 12 },

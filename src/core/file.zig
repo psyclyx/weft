@@ -15,7 +15,7 @@ pub const WriteError = std.Io.Dir.WriteFileError || std.Io.Dir.RenameError || Al
 
 /// What a cwd-relative path is, without reading it: absent, a regular file,
 /// a directory, or something else (symlink target kind, socket, …). The
-/// building block for existence checks and project-root detection (does
+/// building block for existence checks and project.show-root detection (does
 /// `<dir>/.git` exist, and is it a file or a dir — worktrees make it either).
 pub const Kind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 
@@ -257,7 +257,7 @@ test "read/write round trip through the atomic path" {
     try t.expectEqualStrings("saved by a worker, honestly", back);
 
     // statKind sees the file we just wrote, its parent dir, and reports absent
-    // for a path that isn't there — the project-root probe's building block.
+    // for a path that isn't there — the project.show-root probe's building block.
     try t.expectEqual(Kind.file, statKind(gpa, dir_path));
     const parent = std.fs.path.dirname(dir_path).?;
     try t.expectEqual(Kind.dir, statKind(gpa, parent));

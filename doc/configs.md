@@ -258,8 +258,8 @@ Phases:
   acts on the character under it. Helix draws its cursor ON the last selected character,
   where core draws at the head, one past it on a forward selection; phase 4's round added
   the declaration that closes the gap (below).
-- Each motion is generated twice, `hx/n/<m>` (move: the motion's own selection) and
-  `hx/x/<m>` (extend: the anchor stays). `helix-normal` binds the first, `helix-select`
+- Each motion is generated twice, `helix.move-<m>` (move: the motion's own selection)
+  and `helix.extend-<m>` (extend: the anchor stays). `helix-normal` binds the first, `helix-select`
   (`v`) the second. `helix-op` is gone: a verb acts on the selections.
 - Every verb is a one-selection program that declares how it maps over the set
   (doc/model.md §2.6): `d c y p P R r ~ \` A-\` o O i a` run once per selection, and
@@ -308,7 +308,7 @@ settled:
 - The last pattern lives in core's register bank, slot 27 (`register.Bank.search`), not in
   helix. A new door `wl_register_set` (SDK `registerSet`) writes typed bytes as one value
   without touching unnamed. `n` reads it back, `"/` names it in helix, and vim's `"/p`
-  pastes it (vim's `/` stays consult-line; vim has no `n`).
+  pastes it (vim's `/` stays consult.line; vim has no `n`).
 - `gw` labels every word of two or more word characters in view with two letters, nearest
   first, alternating after and before the cursor; the first key narrows the labels to the
   one still to type. The label machinery is a plugin library, `labels`; snipe linked it
@@ -371,7 +371,7 @@ gesture reducer (`platform/pointer.zig`: click counting, wheel steps). The
 shell names each one as a keyspec and dispatches it through `dispatchSpec`
 (`app/pointer.zig`). The grammar and the generic commands (`pointer.click`,
 `pointer.drag-select`, `pointer.extend-selection`, `pointer.activate`,
-`pointer.focus-pane`, `scroll-wheel-up/down`, `view.run-focused-action`) live
+`pointer.focus-pane`, `scroll.wheel-up/down`, `view.run-focused-action`) live
 in `core/pointer.zig`, and `config/defaults.js` binds them. The hit facts sit
 on `Head.pointer`, which guests read through `wl_pointer` / `weft.pointer()`.
 Every pane's geometry from the last frame is hit-testable (`View.pane_maps`),
@@ -530,14 +530,13 @@ the pattern alone would not), so helix's `n` and vim's `"/p` go on from it.
      format; in the files sidebar it shows new file and rename; in git it shows stage and
      commit.
    - No toolbar code knows any of those tools.
-3. **Context menu** (plugin `contextmenu`) on `mouse-3`: the offers plus node actions at
-   the pointer's hit point, as a caret-placed surface.
+3. **Context menu** (the `offers` plugin's `offers.menu`) on `mouse-3`: the offers plus
+   node actions at the pointer's hit point, in the menu widget.
 4. **Clickable tabs** (activate and close), a clickable status line, a problems panel (a
    bottom dock over the diagnostics layer), a terminal panel (a bottom dock), and
    breadcrumbs (focus feed plus LSP symbols).
-5. A **menubar** is deliberately left out of this arc. The palette (C-S-p) plus the
-   toolbar is the discovery surface; a menubar is the next consumer of the same offer
-   metadata.
+5. A **menubar** was left out of this arc. It landed with doc/chrome.md §2: the `menu`
+   plugin's `weft://here/menu/main`, docked by config/menubar.js in ide.js.
 
 **Landed (2 and 3).** The doors, all generic:
 
@@ -575,7 +574,7 @@ The chrome, since doc/model.md phase 3 — compositions, not plugins that own vi
   …); git status shows `Stage Diff Commit Push Pull Fetch Refresh` (git labels its
   verbs with `provideAffordance`).
 - **The context menu** is mouse-3 presenting `weft://here/offers/at-pointer` `as:
-  "menu"` (`offers-menu`; S-F10 and Menu present `offers/active` at the caret,
+  "menu"` (`offers.menu`; S-F10 and Menu present `offers/active` at the caret,
   `offers.menu-at-caret`). It runs `pointer.focus-point`, then lists the active
   context's offers as a head-local interaction, leaving out what cannot run and the
   key-only words (navigation, input, gesture, line break; `weft.set("offers", "hide",
@@ -639,7 +638,7 @@ The plugins:
 - **`panel`** (`config/panel.js`) is a bottom viewport, 12 rows, persistent, out of
   the cycle, not a focus source, hidden at start. `panel.toggle` is C-j.
 - **`problems`** (C-S-m) reads a source command's rows (`path\tline\tcol\tseverity\t
-  message`, default `diagnostics-list`, which `lsp` now answers from every session)
+  message`, default `lsp.list-diagnostics`, which `lsp` now answers from every session)
   into a semantic view of `action` rows under a heading per file. It re-reads on the
   `diagnostics` signal, which `lsp` raises when a publish lands or a set is released.
   Return or a click opens the file at the line and column. The open lands in the
@@ -707,7 +706,7 @@ provider in each, with `explain` answering the same way.
 ### 3.8 Order
 
 1. The ide grammar with keyboard only, plus ide.js with the sidebar. This ships on
-   existing doors, with C-f through consult-line.
+   existing doors, with C-f through consult.line.
 2. Pointer events and keyspecs (3.1.1-2), then double/triple-click and drag bindings.
 3. Action doors (3.5), then the toolbar and context menu (3.6.2-3).
 4. Clipboard, then find/replace (on 0.2), then C-d (on 0.1).

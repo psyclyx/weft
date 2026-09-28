@@ -111,7 +111,7 @@ pub const System = @This();
 /// `System` VALUES themselves never move, only the map of pointers to them
 /// does. Do not embed a `System` by value inside another moving container.
 gpa: Allocator,
-/// This system's name — the `system-swap <name>` / `Host.hostSystem`
+/// This system's name — the `app.swap-system <name>` / `Host.hostSystem`
 /// registration key ("editor", "agent-ux", ...).
 name: []u8,
 buffers: Buffers,
@@ -596,7 +596,7 @@ pub const Host = struct {
     pub const SwapError = error{ UnknownSystem, OpenTransient, PickReopenedDuringCancellation } || Allocator.Error;
 
     /// Re-bind `head` (dispatching through `c`) onto the hosted system
-    /// named `target` — the `system-swap <name>` mechanism (§6 W2b gate
+    /// named `target` — the `app.swap-system <name>` mechanism (§6 W2b gate
     /// (b)). If `c` currently targets a DIFFERENT hosted system, that
     /// system's `detachHead` runs first (saving `head`'s resting mode onto
     /// IT); `c`'s table/service pointers (buffers/commands/keymap/actions/
@@ -676,7 +676,7 @@ pub const Host = struct {
     }
 };
 
-/// The `system-swap <name>` command — `data` is the owning `*Host`. Wires
+/// The `app.swap-system <name>` command — `data` is the owning `*Host`. Wires
 /// `Host.swap` onto the ordinary command surface, so a keybinding (or a
 /// test driving it through `command.run`, exactly like any other command)
 /// can trigger a live re-bind. Not installed by `builtins.install` (a

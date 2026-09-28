@@ -550,7 +550,7 @@ pub const Layout = struct {
     /// panes take part.
     ///
     /// Panes whose `cycles` attribute is false are not in the rotation, which
-    /// is the whole of "a sidebar does not appear in `focus-other`": it is
+    /// is the whole of "a sidebar does not appear in `window.focus-next`": it is
     /// enforced here, once, rather than by every caller remembering to skip
     /// it. `focused` itself may be one (cycling OUT of a companion is fine —
     /// it is cycling INTO one that is unwanted).

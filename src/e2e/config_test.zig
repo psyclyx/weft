@@ -822,7 +822,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 2), relation_provider.queries);
     try t.expectEqual(@as(usize, 3), target_handler.opens);
 
-    // SPC : must open the command PALETTE (pick-commands), not the ex line.
+    // SPC : must open the command PALETTE (palette.open), not the ex line.
     // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
     // own event BETWEEN space and colon — it must not dead-end the chord.
     ed.press("SPC", "");
@@ -1374,7 +1374,7 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     // in the system's viewport registry, attributes already parsed.
     const decl = ed.session.system.viewports.find("sidebar") orelse return error.NoSidebarDeclared;
     try t.expectEqual(@as(?core.viewport.Edge, .left), decl.attrs.dock);
-    try t.expect(!decl.attrs.cycles); // out of focus-other's rotation
+    try t.expect(!decl.attrs.cycles); // out of window.focus-next's rotation
     try t.expect(decl.attrs.persistent); // owns its entry
     try t.expect(!decl.attrs.focus_source); // a companion cannot chase itself
     // It presents the PLACE — the value of the `place` context key, a

@@ -1002,7 +1002,7 @@ pub fn callString(cmd: []const u8) ?[]const u8 {
     const n = e.wl_call_string(p(cmd.ptr), @intCast(cmd.len), p(&call_string_scratch), call_string_scratch.len);
     return if (n < 0) null else call_string_scratch[0..@intCast(n)];
 }
-/// Invoke `cmd` with a single integer arg (e.g. buffer-switch).
+/// Invoke `cmd` with a single integer arg (e.g. buffer.switch).
 pub fn runInt(cmd: []const u8, n: i32) void {
     e.wl_run_int(p(cmd.ptr), @intCast(cmd.len), n);
 }
@@ -1010,7 +1010,7 @@ pub fn runInt(cmd: []const u8, n: i32) void {
 pub fn runStr(cmd: []const u8, s: []const u8) void {
     e.wl_run_str(p(cmd.ptr), @intCast(cmd.len), p(s.ptr), @intCast(s.len));
 }
-/// Invoke `cmd` with two string args (e.g. set-cursor <mode> <style>).
+/// Invoke `cmd` with two string args (e.g. cursor.set-style <mode> <style>).
 pub fn runStr2(cmd: []const u8, a: []const u8, b: []const u8) void {
     e.wl_run_str2(p(cmd.ptr), @intCast(cmd.len), p(a.ptr), @intCast(a.len), p(b.ptr), @intCast(b.len));
 }
@@ -2262,9 +2262,9 @@ pub fn clipboardHoldsRegister(clip: []const u8, own: []const u8, linewise: bool)
 // ── History: the jumplist and macros ──────────────────────────────────
 // Core keeps a per-head jumplist and macro registers; the grammar decides what
 // is a jump and which keys record. Travel and replay are commands:
-// `run("jump-back")`, `runStr("jump-forward", "3")`, `run("jumplist-pick")`,
-// `runStr("macro-record-start", "a")`, `run("macro-record-stop")`,
-// `run("macro-record-toggle")` (register `@`), `runStr2("macro.play", "a",
+// `run("jump.back")`, `runStr("jump.forward", "3")`, `run("jump.pick")`,
+// `runStr("macro.record-start", "a")`, `run("macro.record-stop")`,
+// `run("macro.record-toggle")` (register `@`), `runStr2("macro.play", "a",
 // "3")`, `run("macro.play")` (the last one played or recorded).
 
 /// Remember the caret as a jump (before a search, a goto, a big motion).

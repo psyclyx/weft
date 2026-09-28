@@ -1,4 +1,4 @@
-//! shell — "insert command output", a `.wasm` plugin. `insert-shell "<cmd>"`
+//! shell — "insert command output", a `.wasm` plugin. `shell.insert-output "<cmd>"`
 //! runs the command off the frame thread and inserts its stdout at the cursor
 //! when it finishes, resolved through its CRDT identity if the buffer moved,
 //! authored as the plugin peer. Perms: proc (it shells out) + timer (the async

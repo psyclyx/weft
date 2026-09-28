@@ -670,7 +670,7 @@ pub const Session = struct {
     /// handler in the real editor (`main.zig` binds this directly onto every
     /// hosted system; `core.System.registerSwapCommand` exists for the
     /// synthetic gate fixtures and is not registered here, so there is
-    /// nothing to shadow): identical `system-swap <name>` surface, but
+    /// nothing to shadow): identical `app.swap-system <name>` surface, but
     /// refuses loudly (logged, like `Host.swap`'s own transient refusal)
     /// when `data.isBlocked` says so, BEFORE touching the Host at all.
     pub fn systemSwapHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -953,7 +953,7 @@ test "session: config manifest invokes the production grammar-add command with a
 
     // The PRODUCTION command, which is this test's whole subject — bound the
     // way setup.zig binds it for the real app. `Session.init` does not bind it
-    // (grammar-add hangs off the caller-owned registry, by design), so without
+    // (syntax.add-grammar hangs off the caller-owned registry, by design), so without
     // this the apply below resolves nothing, logs a warning, and the final
     // assertion can never hold. That is what it did while nothing compiled it.
     _ = try sess.system.commands.bind(gpa, "syntax.add-grammar", providers.grammarAddCommand(&grammars));
@@ -1200,7 +1200,7 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
 
     // The swap runs through the ORDINARY command surface — proving this
     // isn't a special path, exactly like `core/System.zig`'s own "via the
-    // system-swap COMMAND" gate test, but against `app.Session` this time.
+    // app.swap-system COMMAND" gate test, but against `app.Session` this time.
     _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "app.swap-system", &.{.{ .string = "agent-ux" }});
 
     // Every table pointer repointed; `sess.system` (the convenience alias)

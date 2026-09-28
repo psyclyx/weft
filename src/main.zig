@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     // persistent remote shells must outlive the buffers whose backings + in-flight
     // save workers use them, and the pool whose workers may still hold one. The
     // registry exists now (before the session) so the session's capability
-    // consumers can bind grammar-add onto it; attach_deps is built later, once
+    // consumers can bind syntax.add-grammar onto it; attach_deps is built later, once
     // caps are known.
     var providers_state: providers.Providers = undefined;
     try providers_state.initRegistries(gpa);
@@ -221,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
     // values come from the config script on every run and the config script is
     // the source of truth, so a persisted blob could only ever shadow an edited
     // config with a stale value. Plugin kv is the opposite — runtime state
-    // (project-recent, frecency, the kill/mark rings) that nothing else can
+    // (project.recent, frecency, the kill/mark rings) that nothing else can
     // reproduce, so losing it at exit loses information.
     var plugin_kv_file = core.kv_file.Binding.open(gpa, &plug.kv, core.kv_file.plugins_file);
     defer plugin_kv_file.close();
@@ -312,7 +312,7 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("dashboard: {t}", .{e});
     }
 
-    // The `system-swap <name>` command — SHADOWS `core.System.
+    // The `app.swap-system <name>` command — SHADOWS `core.System.
     // registerSwapCommand` (registry last-wins, same pattern
     // `buffers_cmds.zig` uses): identical surface, but additionally refuses
     // while a live collab connection is bound to the CURRENT system's
@@ -388,7 +388,7 @@ pub fn main(init: std.process.Init) !void {
 
     // This is the interactive editor, so sharing pre-selects presence and every
     // share path says so; `--no-share-presence`, `weft.set("collab",
-    // "collab.share-presence", "off")`, and the `share-presence` command each opt out.
+    // "collab.share-presence", "off")`, and the `collab.share-presence` command each opt out.
     const share_presence = collab.presenceDefault(args.share_presence, blk: {
         const raw = session.system.config_kv.get("collab", "collab.share-presence") orelse break :blk null;
         break :blk core.framed.first(raw);
@@ -472,7 +472,7 @@ pub fn main(init: std.process.Init) !void {
     try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll.page-up", core.Keymap.prio_core, "shell");
     try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll.page-down", core.Keymap.prio_core, "shell");
 
-    // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
+    // Theme is DATA: a runtime/bindable `theme.set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
     // Re-linearized per-field on mutation (Theme.setColor), so the draw path
     // stays a plain lookup.
@@ -497,7 +497,7 @@ pub fn main(init: std.process.Init) !void {
     // storage: `session.menu_overlay` lives beside `session.head` (see
     // `Session`'s doc — doc/contextual-workspace-architecture.md §7).
     // which-key idle delay (doom-style): don't pop the hint until the menu has
-    // been held this long — unless which-key-now (F1) forces it. Config sets it
+    // been held this long — unless which-key.show (F1) forces it. Config sets it
     // via weft.set("which_key", "delay-ms", "200") — owned by the which_key
     // plugin's namespace, not the old "editor" grab-bag (doc/configuration.md §7's
     // forcing-function finding: every config value needs an owner).

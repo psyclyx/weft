@@ -17,7 +17,7 @@ const PeerFile = @import("peer_file.zig");
 
 /// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
 /// and trust grade, so a user can compare the SAS out of band and then
-/// `verify-peer <fingerprint>`. The full detail goes to the log (many
+/// `collab.verify-peer <fingerprint>`. The full detail goes to the log (many
 /// peers won't fit the status line); the echo is a one-line summary.
 pub fn peersHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
@@ -136,7 +136,7 @@ pub fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "listening ({s} access)…", .{access.label()}) catch "listening…");
 }
 
-/// `share-presence <on|off>` — select cursor sharing, separately from
+/// `collab.share-presence <on|off>` — select cursor sharing, separately from
 /// sharing a document. The choice applies to every already-shared document
 /// and to later ones; `off` retracts the caret peers are already rendering.
 pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -157,7 +157,7 @@ pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args:
     return ok_echo(ctx, if (on) "sharing your cursor" else "cursor hidden — peers no longer see it");
 }
 
-/// `share-fs <selection>` — select which export surfaces of the shared root
+/// `collab.share-fs <selection>` — select which export surfaces of the shared root
 /// peers hold: `hierarchy`, `bytes`, `write` (comma-separated), or a preset
 /// (`none`/`read`/`rw`). Applies to every connected peer at once and to
 /// later ones; narrowing takes effect on their next request.

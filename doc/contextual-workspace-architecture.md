@@ -115,7 +115,7 @@ Consequences include:
 
 Physical key input and committed text are conflated, in two ways. An unbound
 printable key falls through to insertion: the root `default` mode ships an
-`insert-text` text command that every mode inherits unless a plugin manually
+`edit.insert-text` text command that every mode inherits unless a plugin manually
 opts out. And input that fails structural interpretation is synthesized into
 the nearest editable surface: the field-input path runs before the read-only
 check and filters only line breaks, which is why Tab inserts a literal tab
@@ -752,7 +752,7 @@ field holds focus) and overridable by the presentation owner
 with `weft.restingPosture(posture, mode)`; core pairs the two on entry
 switch and on `weft.exitToResting`, so no grammar asks what tool an entry is
 and no entry names a mode. Break-out is the standard intention
-`std.input.break-out` (core command `posture-break-out`), which every
+`std.input.break-out` (core command `mode.break-out`), which every
 shipped grammar keeps bound; declaring `capture` stacks the declaration it
 displaced, and breaking out restores it.
 

@@ -242,7 +242,7 @@ fn publishBoard(board: *Board) !void {
     board.view = try weft.semanticViewPublish(root, null, board.revision);
 }
 
-/// `offers-press <board> <item>`: a click on a button. Runs in the context
+/// `offers.press <board> <item>`: a click on a button. Runs in the context
 /// the board describes, and leaves the head where it was.
 fn press() void {
     const raw = weft.argStr(0) orelse return;

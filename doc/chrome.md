@@ -279,9 +279,9 @@ All of §2, with two departures (below).
 - **The context menu** is the same widget: `offers` builds `weft_menu`
   entries (labels, icons, keys in the context it describes, its rules), so
   it has hover, letters and keyboard cues too; greyed offers stay omitted.
-- **Content.** File (New File, Open File… C-p, Open Path…, Browse Files,
-  Open Recent Project, Open…, Save C-s, Save As…, Close Editor, Close
-  Without Saving, Notes ▸, Quit), Edit (history, clipboard, find, Find in
+- **Content.** File (New File, Open File… C-p, Open…, Open Recent…, Browse
+  Remote Files…, Save C-s, Save As…, Close Editor, Close Without Saving,
+  Notes ▸, Quit), Edit (history, clipboard, find, Find in
   Files, refactor, format, comment, Insert ▸, Lines ▸, Macros ▸,
   Transform ▸), Selection, View (Command Palette, Sidebar, Panel, Problems,
   Source Control, Appearance ▸, Editor Layout ▸), Go (Back/Forward, buffers,
@@ -300,8 +300,8 @@ Departures, and what is left:
   arguments are the menu plugin's `items` list, beside the config tier's
   `weft.command` for placing any command. A second fragment setting `items`
   replaces the first's list (ide.js lists the menubar's toggle with its own).
-- No dynamic submenus (Open Recent is the project picker, not a ▸ of
-  recent files), no Revert for a file (there is no such command), and no
+- No dynamic submenus (Open Recent… is a picker of the files visited, not
+  a ▸ of them), no Revert for a file (there is no such command), and no
   Outline toggle (ide.js composes no outline).
 - **A panel taller than the frame scrolls** (it packs its rows to the text
   grid first). It shows a window of its rows, with a chevron row above
@@ -345,7 +345,7 @@ per-plugin choice.
 **Trying another style must be a one-line change, and live.** There are three
 settings, not two: `text`, `text-icons` (cell-aligned text plus small
 monochrome icons in tabs, status and buttons), and `widget`. The value is
-read at draw time from the theme slot, so `set-color`-style runtime
+read at draw time from the theme slot, so `theme.set-color`-style runtime
 rebinding (`:set-theme chrome widget`, or a palette toggle) switches the
 whole UI without a restart or a config edit. A test switches all three
 styles on one frame and checks every chrome role renders under each.
@@ -428,8 +428,8 @@ What this leaves for the later lanes, and two things found on the way:
   row-role styling, so a producer naming a row role `chrome` or `icons`
   would read them. Harmless (an unknown class reads as `normal`), but a
   sign the family holds two kinds of value.
-- `set-color` bound at the transient tier under one owner and never
-  unbound, so a second `set-color` of the same name tied with the first and
+- `theme.set-color` bound at the transient tier under one owner and never
+  unbound, so a second `theme.set-color` of the same name tied with the first and
   lost (`Container.betterThan` keeps the earlier). Fixed for the class:
   `Container.bind` at the transient tier replaces the same owner's binding
   on that slot, so the chrome switch no longer unbinds first.
@@ -640,14 +640,14 @@ What the build settled:
   carried in the field's flags byte on the wire, so older encoders decode
   unchanged).
 - **Editing under `row`.** `std.editing.begin` is in the vocabulary; the
-  scene adapter offers it on a row that holds a field (labelled as the
-  provider labels `field.edit`, "Edit name"), routed to `field-edit`, which
-  selects the whole name. While an edit is begun the adapter offers
+  scene adapter offers it on a row that holds a field (labelled as its
+  provider labels it, "Edit name"), routed to `field.edit`, which selects
+  the whole name. While an edit is begun the adapter offers
   `std.target.activate` as *commit* (so every grammar's Return commits
   without a binding) and `std.gesture.cancel` as *cancel*; ide binds Escape
-  to `["std.gesture.cancel", "ide-escape"]`. A begun edit takes printable
+  to `["std.gesture.cancel", "ide.escape"]`. A begun edit takes printable
   input itself (`scene_edit.textCommit`: the mode's commit command, else core's
-  `insert-text` while an edit is begun), so ide stays in `ide-structural`
+  `edit.insert-text` while an edit is begun), so ide stays in `ide-structural`
   and needs no field-resting mode. Committing ends the edit and, when the
   text changed, runs the view's `view.apply`. Whether that asks is the files
   listing's policy, read off the draft (`Model.applyAsks`): one name typed —
@@ -675,7 +675,7 @@ What the build settled:
   as its subject part, and type-ahead matches `f.txt`, not `modified`.
 - **Pointer.** The platform marks a press `slow` when it follows the
   previous press of its button after the double-click interval
-  (`multi_click_ms`) but within `slow_click_ms` (3×). `pointer-click` under
+  (`multi_click_ms`) but within `slow_click_ms` (3×). `pointer.click` under
   `row` begins an edit on a slow second click that lands on the focused row
   the previous press also hit, and activates on a double click; a double
   click whose first half began an edit ends it first. A double click

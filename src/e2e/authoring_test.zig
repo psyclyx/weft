@@ -473,7 +473,7 @@ test "authoring: `C-n` completes a word already in the buffer" {
     ed.typeText("gre");
     ed.press("C-n", ""); // opens the buffer-word completion pick (mode → pick)
     ed.settle(30); // let the async candidate source stream in
-    ed.press("Return", ""); // pick-accept: commit the selected candidate
+    ed.press("Return", ""); // pick.accept: commit the selected candidate
     ed.press("Escape", ""); // leave insert
 
     // Save and read back: if completion committed, "greeting" appears twice.
@@ -502,7 +502,7 @@ test "authoring: fix a typo with `cw` — vim's ce special case, not dw" {
     ed.press("Escape", "");
 
     // Fix it the vim way: line-start, change the word, retype it.
-    ed.press("0", ""); // motion.line-start → cursor on the 'c'
+    ed.press("0", ""); // motions.line-start → cursor on the 'c'
     ed.press("c", ""); // operator: change
     ed.press("w", ""); // vim's cw = ce: change the WHOLE word "cnst", KEEP the space
     try t.expectEqualStrings("insert", ed.mode());
@@ -725,7 +725,7 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     const ed = &app.ed;
 
     // Write badly-spaced but valid zig, then format it. `SPC c f` → the `format`
-    // action → format-buffer, which filters .zig through `zig fmt`.
+    // action → fmt.format-buffer, which filters .zig through `zig fmt`.
     ed.runStr("file.open", "fmt_me.zig");
     ed.press("i", "");
     ed.typeText("const    x=1;");
@@ -2239,14 +2239,14 @@ test "authoring: switch between two files with the fuzzy buffer picker" {
     ed.waitSave();
     try t.expectEqualStrings("bravo.js", ed.bufferName()); // we're on bravo now
 
-    // Jump back to alpha.js through the fuzzy picker (SPC b b → buf-pick),
+    // Jump back to alpha.js through the fuzzy picker (SPC b b → buffer.pick),
     // filtering by name, then accept — the natural "switch buffer" motion.
     ed.chord("SPC b b"); // opens the buffer pick (mode → pick)
     ed.settle(10); // let the candidate list populate
     try t.expectEqualStrings("pick", ed.mode());
     ed.typeText("alpha"); // narrow the query
     ed.settle(10);
-    ed.press("Return", ""); // pick-accept → switch buffers
+    ed.press("Return", ""); // pick.accept → switch buffers
     try t.expectEqualStrings("alpha.js", ed.bufferName());
 }
 

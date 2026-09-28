@@ -6,7 +6,7 @@
 //!
 //! A `Principal` names the invoker but does NOT capture its peer id: the
 //! peer is *resolved against the active document at edit time* (a command
-//! can buffer-switch mid-flight, so a captured id would dangle). The grade
+//! can buffer.switch mid-flight, so a captured id would dangle). The grade
 //! is likewise a per-document lookup, not a field — see `command.Context`.
 
 const Document = @import("Document.zig");

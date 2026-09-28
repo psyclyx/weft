@@ -85,7 +85,7 @@ pub const Posture = enum(u32) {
 
 /// How the loaded grammar focuses a ROW of a structural view that holds an
 /// editable field (doc/chrome.md §5.2). Declared by the grammar
-/// (`structural-focus text|row`); a grammar that declares nothing gets `row`,
+/// (`mode.set-structural-focus text|row`); a grammar that declares nothing gets `row`,
 /// which can never show a caret where typing does nothing.
 ///
 ///   text  editable-listing style: focusing a row edits its primary field, and the

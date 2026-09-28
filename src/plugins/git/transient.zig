@@ -143,8 +143,8 @@ pub const stash = weft.transient("git.stash", .{
     },
 });
 
-// `git.log-choose`, not `git-log`: the derived open command would collide with
-// git's own `git-log` verb, which this menu's first key runs. The one place a
+// `git.log-choose`, not `git.log`: the derived open command would collide with
+// git's own `git.log` verb, which this menu's first key runs. The one place a
 // transient's name is not free is where the plugin already used it.
 pub const log = weft.transient("git.log-choose", .{
     .title = "Log",

@@ -44,7 +44,7 @@
 // Reference plugins, each sandboxed under wasmtime behind the perm handshake.
 // weft ships modeless; this config brings up the plugins itself, so the dev
 // entry point needs no --plugin flags.
-weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
+weft.plugin("edit");        // line operators: edit.duplicate-line, edit.upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
 weft.plugin("dashboard");   // structured welcome view
@@ -54,10 +54,10 @@ weft.plugin("shell");       // insert shell-command output
 weft.plugin("palette");     // "std" UI: command/buffer palette, status line
 weft.plugin("motions");     // word/WORD/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
-weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("operators");   // operators.delete/upcase/lowercase — await a range
 weft.plugin("surround");    // add/delete/replace a delimiter pair — operators too
 weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
-weft.plugin("ts");          // tree-sitter navigation: expand-selection, select-function
+weft.plugin("ts");          // tree-sitter navigation: ts.expand-selection, ts.select-function
 weft.set("languages", "query-root", "assets");
 weft.plugin("languages.js"); // parser packages + explicit query paths
 weft.plugin("comment");     // toggle line comments (gc operator)
@@ -65,15 +65,15 @@ weft.plugin("indent");      // indent/dedent operators (> / <)
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " in insert mode
-weft.plugin("consult");     // fuzzy-jump navigation (consult-line, imenu)
+weft.plugin("consult");     // fuzzy-jump navigation (consult.line, consult.imenu)
 weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
 weft.plugin("notes");       // capture/open notes, and resolve their embeds (fs)
-weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
-weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
-weft.plugin("modes");       // language activation (on focus) + lang-run
+weft.plugin("fmt");         // fmt.format-buffer (by extension) + fmt.filter (proc)
+weft.plugin("buffers");     // buffer.pick (fuzzy buffer switch), buffer.scratch
+weft.plugin("modes");       // language activation (on focus) + modes.run
 weft.plugin("snippets");    // expand named templates from a file (fs read)
 weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
 weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
@@ -89,7 +89,7 @@ weft.plugin("marginalia");  // pick-row annotations (size/age, dirty/lang, the k
 weft.plugin("linenumbers"); // a line-number gutter on text entries (never on git, files, …)
 weft.plugin("snipe");       // evil-snipe: s/S two-char, f/F/t/T one-char, highlighted
 weft.plugin("offers");      // what a context offers, as a strip, a list or mouse-3's menu
-weft.plugin("panel");       // panel-toggle: the bottom panel (config/panel.js) on and off
+weft.plugin("panel");       // panel.toggle: the bottom panel (config/panel.js) on and off
 weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
 weft.plugin("terminal");    // a LINE-MODE shell in the panel (SPC o t) — no terminal emulation
 weft.plugin("breadcrumbs"); // path › symbol › symbol for the caret, on the status line
@@ -290,7 +290,7 @@ weft.bind("normal", "SPC b D", "buffer.close-force"); // explicitly discard unsa
 weft.bind("normal", "SPC b n", "buffer.next");
 weft.bind("normal", "SPC b N", "buffer.scratch");
 
-// SPC g — git. `git-status` opens the *git* model buffer, which runs its own
+// SPC g — git. `git.status` opens the *git* model buffer, which runs its own
 // `git` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
 // S/U stage-all, g refresh, RET visits a file (or shows a commit), q leaves.
 // The transients (which-key renders each menu mode):
@@ -316,7 +316,7 @@ weft.bind("normal-source", "SPC g b", "git.blame");
 // by ANY plugin — vim operators, autopair, comment, structural — not just vim's.
 weft.bind("normal", ".", "edit.repeat");
 
-// `/` — search in this buffer (vim's search key). consult-line is a fuzzy
+// `/` — search in this buffer (vim's search key). consult.line is a fuzzy
 // in-buffer jump: type a pattern, Return lands on the match.
 weft.bind("normal", "/", "consult.line");
 
@@ -407,10 +407,10 @@ weft.bind("normal", "C-SPC", "complete.show");
 // to; weft.provide(name, when, cmd[, prio]) registers a provider chosen by
 // {mode, lang} when it fires. Bind the key ONCE — a .zig buffer and a shell
 // script run different commands, and any language plugin can weft.provide a
-// new provider without touching this keymap. `eval` unifies the SPC-c r/x
-// split (lang-run vs run-line) into one language-aware key; a buffer with no
-// provider echoes "no eval provider here". `:action.explain eval` says which
-// provider wins here and why.
+// new provider without touching this keymap. `plugin.code.run` unifies the
+// SPC-c r/x split (modes.run vs run.line) into one language-aware key; a
+// buffer with no provider echoes "no plugin.code.run provider here".
+// `:action.explain plugin.code.run` says which provider wins here and why.
 weft.action("plugin.code.run");
 weft.provide("plugin.code.run", {}, "run.line");                 // default: run the current line
 weft.provide("plugin.code.run", { lang: "zig" }, "make.build");  // a .zig buffer builds the project

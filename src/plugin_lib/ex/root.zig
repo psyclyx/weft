@@ -3,7 +3,7 @@
 //! composition design — vim OWNS the classic abbreviated commands (w/q/wq/x/e/s
 //! + ranges + `!`, :N goto, :noh) with vim semantics; EVERYTHING ELSE falls
 //! THROUGH to the weft command registry, so `:name arg…` runs the command
-//! `name`. Any plugin command (`:git-status`, `:grep foo`, `:sort`) is
+//! `name`. Any plugin command (`:git.status`, `:grep foo`, `:sort`) is
 //! ex-callable with zero integration: plugins compose by registering ordinary
 //! commands.
 //!
@@ -141,7 +141,7 @@ fn execWith(comptime Asker: type, line: []const u8) void {
     }
 
     // The leading alpha run is the candidate builtin keyword (`s`, `wq`, `noh`…).
-    // A command NAME can contain hyphens (`git-status`), so the keyword only
+    // A command NAME can contain hyphens (`git.status`), so the keyword only
     // matches a builtin when it is the WHOLE first token; otherwise fall through.
     const al = alphaLen(rest);
     const kw = rest[0..al];

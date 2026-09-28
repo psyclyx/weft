@@ -369,7 +369,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
 
-    ed.press("i", ""); // git-rebase-interactive: rebase in progress -> re-set, sticky holds it open
+    ed.press("i", ""); // git.rebase-interactive: rebase in progress -> re-set, sticky holds it open
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len); // not grown, not popped
 
@@ -378,7 +378,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     // Seq's `;`-sequenced re-gather always leaves via `weft.setMode("git")`,
     // a DIFFERENT mode than git-rebase-menu, so it closes regardless of
     // stickiness. ──
-    ed.press("c", ""); // git-rebase-continue
+    ed.press("c", ""); // git.rebase-continue
     try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     // Drain `c`'s async `git rebase --continue` (it fails fast — conflict
@@ -402,7 +402,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     // buffer already contains a stale "Branch:" from the `c` step's
     // re-gather, so a text-containment check would pass before the abort's
     // OWN re-gather actually lands). ──
-    ed.press("a", ""); // git-rebase-abort
+    ed.press("a", ""); // git.rebase-abort
     try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     try t.expect(drainUntilOracle(&proj, &ed, "test -d .git/rebase-merge && echo yes || echo no", "no"));
@@ -996,14 +996,14 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
     try t.expect(saw_stale_draft);
 
-    // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
+    // ── 1.5. git.status BEFORE a repo exists says so — and points the way. ──
     // The project is a real isolated tmp dir with no git ancestor, so this is a
     // genuine clean slate (git used to render a fake `Branch: (no branch)`).
     ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Not a git repository."));
     try t.expect(drainToolContains(&ed, "*git*", "git.init")); // and it names the fix
 
-    // ── 2. Start version control from INSIDE the editor (the new git-init). ──
+    // ── 2. Start version control from INSIDE the editor (the new git.init). ──
     ed.run("git.init");
     // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
     // `git status` output to list the untracked file + the `Branch:` header in
@@ -1027,10 +1027,10 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
 
     // ── 4. Stage everything with the git key `S`, then commit with `c c`. ──
-    // We're in the *git* buffer (git-init focused it), so these are real
+    // We're in the *git* buffer (git.init focused it), so these are real
     // git keypresses, not command invocations.
     try t.expectEqualStrings("git", ed.mode());
-    ed.press("S", ""); // git-stage-all → git add -A → re-gather (async)
+    ed.press("S", ""); // git.stage-all → git add -A → re-gather (async)
     // Disk oracle, drained: the file becomes staged once the async `git add`
     // the keypress scheduled actually runs.
     try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "main.zig"));
@@ -1040,7 +1040,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // an ordinary entry in the configuration's own editing modes, not a mode git
     // owns. So the message is typed the way any other text is.
     ed.press("c", ""); // git-commit-dispatch (menu)
-    ed.press("c", ""); // git-commit → a *git-commit* draft entry
+    ed.press("c", ""); // git.commit → a *git-commit* draft entry
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     try t.expectEqualStrings("normal", ed.mode());
     ed.press("i", "");
@@ -1242,7 +1242,7 @@ test "e2e/output: a fill lands on the first row that goes somewhere, and Return 
 
 // ── Truncate-then-act: a path or a name must cross whole or not at all ──
 //
-// grep-visit and output-visit once copied the matched path into a fixed
+// grep.visit and run.visit-output once copied the matched path into a fixed
 // 1024-byte scratch before opening it, and the tool plugins compared a buffer
 // name through a 256-byte copy. Both caps are gone; these fixtures keep them
 // gone by working paths and names that overflow them.

@@ -194,7 +194,7 @@ pub fn pasteClipboard(after: bool) void {
     }
 }
 
-/// `hx-paste-text <after|before> <text>`: text from elsewhere after (before)
+/// `helix.paste-text <after|before> <text>`: text from elsewhere after (before)
 /// the selection — whole lines when it ends in a line break.
 pub fn pasteClipboardText(where: []const u8, t: []const u8) void {
     if (t.len == 0) return;
@@ -211,7 +211,7 @@ pub fn replaceWithClipboard() void {
     }
 }
 
-/// `hx-replace-text <text>`: the selection becomes `t`, selected.
+/// `helix.replace-text <text>`: the selection becomes `t`, selected.
 pub fn replaceText(t: []const u8) void {
     writeSelect(sel.span(sel.get()), t);
     sel.flash();

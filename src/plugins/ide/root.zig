@@ -592,7 +592,7 @@ fn allCarets() bool {
     return true;
 }
 
-/// `ide-paste-each <text|lines|register> [text]`: put the text over this
+/// `ide.paste-each <text|lines|register> [text]`: put the text over this
 /// selection, or (`lines`) at the start of the caret's line, and leave a
 /// caret after what landed (a line paste: where it was, moved down with its
 /// line).

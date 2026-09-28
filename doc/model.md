@@ -21,7 +21,7 @@ that stops composing:
 
 | Symptom | Where | The missing noun |
 |---|---|---|
-| The sidebar presents `"."` (relative to launch); `files` presents `placeRoot()` (absolute); a peer's tree opens as a located target | `config/sidebar.js`, `plugins/files`, `collab_cmds.zig` peer-files | **designation**: one name for content anywhere |
+| The sidebar presents `"."` (relative to launch); `files` presents `placeRoot()` (absolute); a peer's tree opens as a located target | `config/sidebar.js`, `plugins/files`, `collab_cmds.zig` `collab.peer-files` | **designation**: one name for content anywhere |
 | Scratch, tool, REPL and terminal buffers have no name outside a live slot; viewports and jumplists held raw slot ids (two review bugs) | `Buffers.Ref`, `viewport.zig`, `jumplist.zig` | **designation**, and **entry** as distinct from it |
 | Three "follow the primary context" mechanisms: the Zig-only focus feed, `on_offers_changed`, and a sidebar that follows nothing | `focus_feed.zig`, toolbar, sidebar | **context**: one observable, keyed, open |
 | `Facts` is a closed struct; a plugin can't say "a REPL is connected here" | `facts/root.zig` | **context** with open keys |
@@ -402,8 +402,8 @@ kept alive past its phase.
    authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
    tree by the provider's own listing and is presented as every directory
    is; a peer's `doc` opens the offer carrying that id, across reconnects;
-   a peer's `file` is refused, see below); `collab.peer-files` is now `open
-   weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
+   a peer's `file` is refused, see below); `collab.peer-files` is `file.open`
+   of `weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
    `wl_entry_designate` (only on an entry the plugin made — `Buffer.creator`,
    stamped from the guest call it was made in — only `proc` in its own
    namespace or a projection kind it claimed, and never on a file-backed
@@ -490,8 +490,8 @@ kept alive past its phase.
    the previous presentation made is closed through the shell's close once
    nothing shows it — the refusing close, so an entry holding unsaved work
    stays as a tab: a listing says it holds a draft by offering `view.apply`
-   enabled (`Services.holdsDraft`), which `buffer.close-unmodified` refuses like a dirty
-   file; and a presentation drops the placement an `file.open` from a
+   enabled (`Services.holdsDraft`), which `buffer.close` refuses like a dirty
+   file; and a presentation drops the placement a `file.open` from a
    tool entry asks for. `as` rides to `file.open` as the `?as=` view parameter:
    `designation.openHeld` routes `?as=<a claimed kind>` to that producer with
    the subject's entry active (the projection OF the subject), otherwise the
@@ -542,7 +542,7 @@ kept alive past its phase.
    (`menuBindingIntent`), a different question from what a context offers;
    the outline reads the tree an entry has when it is presented (no event
    for a document's revision yet, so a parse or an edit landing later shows
-   at the next presentation or `symbols-refresh`) and asks no language
+   at the next presentation) and asks no language
    server; a `shell:` locus lists no directories and a shell file has no
    place of its own, so the sidebar cannot follow a remote shell; a peer's
    file is read-only, and a peer place's locus is `here` (its locality reads

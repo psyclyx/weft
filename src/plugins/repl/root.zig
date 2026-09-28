@@ -18,7 +18,7 @@
 //! While a session is live it is PUBLISHED: context key `repl.session` holds
 //! that designation on the place it runs in (doc/model.md §2.5), so a config
 //! can offer "Send to REPL" exactly where there is a REPL to send to —
-//! `weft.provide(…, { context: { "repl.session": "*" } }, "repl-send-line")`
+//! `weft.provide(…, { context: { "repl.session": "*" } }, "repl.send-line")`
 //! — and a toolbar shows it with no toolbar code knowing a REPL exists. The
 //! key names the most recent live session in that place, and is retracted
 //! when the last one quits or is found to have exited — at the place it was

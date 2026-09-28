@@ -53,7 +53,7 @@ fn describeExtra() void {
 /// no dispatching head to route through here (unlike `on_fill`/`on_poll`,
 /// `on_activate` has no natural "the async thing that just landed" moment to
 /// defer through a self-dispatched command either — it fires synchronously
-/// off the SAME buffer-switch that would make the echo redundant a frame
+/// off the SAME buffer.switch that would make the echo redundant a frame
 /// later anyway). Downgraded to `weft.log` — still observable (the process
 /// log), no longer a false promise of a user-visible echo this entry can't
 /// honor. A per-head-aware activation echo is real future work, not solved

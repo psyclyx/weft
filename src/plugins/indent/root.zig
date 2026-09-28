@@ -1,7 +1,7 @@
 //! indent — line indent/dedent operators, a `.wasm` plugin with NO core
 //! privilege beyond the edit door (perms `{}`, grant_max edit). `indent.increase` adds
 //! one indent unit at the START of each line a range spans; `indent.decrease` peels one
-//! off. They ride vim's operator-pending machinery exactly like op.comment, so
+//! off. They ride vim's operator-pending machinery exactly like comment.toggle, so
 //! `>ip`, `>j`, `>>`, `<<` and visual `>`/`<` all compose. The unit is two spaces,
 //! hardcoded for now (a shiftwidth/expandtab config comes with the same work that
 //! makes comment's token language-aware).
@@ -68,7 +68,7 @@ fn indentSpan(start: usize, end: usize, dedent: bool) void {
 }
 
 /// The `>` operator: indent the awaited range's lines. Composes with every motion
-/// and text object (`>ip`, `>j`) and — via op-line — `>>` on the current line.
+/// and text object (`>ip`, `>j`) and — via vim.operate-line — `>>` on the current line.
 fn opIndent() void {
     const h = weft.argRange(0) orelse return;
     const r = weft.rangeEnds(h) orelse return;

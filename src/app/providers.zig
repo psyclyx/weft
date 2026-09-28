@@ -12,7 +12,7 @@ const std = @import("std");
 const core = @import("weft_core");
 const collab = @import("collab.zig");
 
-/// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as
+/// `syntax.add-grammar <exts> <grammar> <symbol> [query] [outline]` — grammars as
 /// data. `exts` is comma-separated; `grammar` is a name resolved along the
 /// registry's search path, or an absolute package directory; `query` and
 /// `outline` are query-file paths that default to the package's own
@@ -430,7 +430,7 @@ fn mustBeCensused(entry: contract_data.Entry) bool {
 
 const t = std.testing;
 
-test "providers: no guest command runner can reach grammar-add's arity (it DynLib.opens a caller-named directory)" {
+test "providers: no guest command runner can reach syntax.add-grammar's arity (it DynLib.opens a caller-named directory)" {
     const gpa = t.allocator;
 
     // 1. The census is COMPLETE: every import that could plausibly be a
@@ -446,7 +446,7 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
                 "\nsrc/app/providers.zig: '{s}' is a new membrane import that may run a command.\n" ++
                     "Add it to `guest_command_runners` with the number of arguments it\n" ++
                     "passes to `command.run` (0 if it never calls it) — and if that number\n" ++
-                    "reaches 3, `grammar-add` just became reachable from a wasm guest, which\n" ++
+                    "reaches 3, `syntax.add-grammar` just became reachable from a wasm guest, which\n" ++
                     "means `std.DynLib.open` on a guest-named directory did too.\n" ++
                     "Gate the door before landing the runner, not after.\n",
                 .{entry.name},
@@ -484,9 +484,9 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
     if (grammar_add_min_args <= max_guest_args) {
         std.debug.print(
             "\nsrc/app/providers.zig: a wasm guest can now pass {d} argument(s) to a command\n" ++
-                "by name, and `grammar-add` acts on {d} — so a guest can reach\n" ++
+                "by name, and `syntax.add-grammar` acts on {d} — so a guest can reach\n" ++
                 "`std.DynLib.open` on a directory it chose. The arity coincidence that held\n" ++
-                "this shut is gone; `grammar-add` needs a real permission gate now.\n",
+                "this shut is gone; `syntax.add-grammar` needs a real permission gate now.\n",
             .{ max_guest_args, grammar_add_min_args },
         );
         return error.GrammarAddIsGuestReachable;

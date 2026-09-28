@@ -4,7 +4,7 @@
 //! It is an ordinary status-line provider: it binds `ui/statusline-seg` for
 //! text entries (the same slot the mode chip and the path answer), so it
 //! sits right after the path and a click on a crumb runs the command the
-//! crumb carries — `breadcrumbs-jump <offset>`, the symbol's start. No
+//! crumb carries — `breadcrumbs.jump <offset>`, the symbol's start. No
 //! header door, no knowledge of any language: the symbols are the grammar's
 //! OUTLINE (`weft.outline`, the configured `outline.scm`), and "encloses"
 //! is a span test.
@@ -97,7 +97,7 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     statusline.tell(handle, segs[0..n]);
 }
 
-/// `breadcrumbs-jump <offset>`: what a click on a crumb runs — the caret to
+/// `breadcrumbs.jump <offset>`: what a click on a crumb runs — the caret to
 /// the symbol's start, leaving a jump behind.
 fn jump() void {
     const arg = weft.argStr(0) orelse return;

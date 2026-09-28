@@ -405,7 +405,7 @@ pub fn writeGuarded(
     return error.Failed;
 }
 
-/// Unguarded write (save-as onto a path the caller owns the policy
+/// Unguarded write (file.save-as onto a path the caller owns the policy
 /// for). Returns the written content's token; caller owns.
 pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []const u8) WriteError![]u8 {
     const q = try quote(gpa, path);

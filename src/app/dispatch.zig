@@ -41,7 +41,7 @@
 //! driven through this REAL dispatch (enter/leaf/auto-pop, `mode.leave-menu`,
 //! sticky re-enter, nested LIFO, a leaf's own buffer switch mid-menu, and
 //! the interaction-boundary leak tripwire below) and `project_test.zig`'s
-//! spine test for the real `git.commit-dispatch` → `git-commit` (buffer
+//! spine test for the real `git.commit-dispatch` → `git.commit` (buffer
 //! switch mid-menu) → an ordinary draft entry saved to commit, unmodified
 //! by this migration.
 
@@ -146,7 +146,7 @@ pub fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     const pt = rope.offsetToPoint(cur);
     const rows = rope.lineCount();
     // Skip folded rows (shared fold-aware successor — the git status buffer's
-    // j/k bind to cursor-up/down, which land here).
+    // j/k bind to cursor.up/down, which land here).
     const target_row = ed.nextVisibleRow(pt.row, if (dir < 0) -1 else 1, rows) orelse return;
     const target = try view.xToOffsetOnRow(rope, target_row, gx);
     ed.moveToVisual(target, gx);
@@ -389,7 +389,7 @@ fn macroPlay(ctx: *core.command.Context, reg: u8, count: usize) !void {
     };
 }
 
-/// `macro-record-start <reg>`.
+/// `macro.record-start <reg>`.
 pub fn macroRecordStartHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
     try macroStart(ctx, (try registerArg(args, 0)) orelse return error.ArityMismatch);
@@ -404,7 +404,7 @@ pub fn macroRecordStopHandler(ctx: *core.command.Context, data: ?*anyopaque, arg
     return .nil;
 }
 
-/// `macro-record-toggle [reg]`: stop if recording, else start into `reg`
+/// `macro.record-toggle [reg]`: stop if recording, else start into `reg`
 /// (default `@`) — helix's `Q`, which needs no register prompt.
 pub fn macroRecordToggleHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
@@ -416,7 +416,7 @@ pub fn macroRecordToggleHandler(ctx: *core.command.Context, data: ?*anyopaque, a
     return .nil;
 }
 
-/// `macro-play [reg] [count]`: with no register, the last one played, else the
+/// `macro.play [reg] [count]`: with no register, the last one played, else the
 /// last one recorded (vim's `@@`, helix's `q`).
 pub fn macroPlayHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
@@ -510,7 +510,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // state that shapes the next real key. It must never reach `feed`, or it
     // dead-ends a pending chord: `SPC :` needs Shift to make the colon, and that
     // intervening Shift event would reset the `space` prefix, so `:` then fires
-    // vim-ex instead of the palette. (Same for any leader key with a shifted or
+    // vim.ex instead of the palette. (Same for any leader key with a shifted or
     // uppercase continuation — `g R`, `SPC C`, …) The compositor emits these as
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;

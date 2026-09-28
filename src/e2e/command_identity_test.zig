@@ -105,8 +105,8 @@ test "e2e/identity: every command the shipped configs register is one id in the 
         const commands = b.ed.commands;
 
         // ONE REGISTRATION PER ID. A second bind of a bound id is a command
-        // shadowing another — the duplicate class (`open` and `buffer-close`
-        // re-registered by the shell, `cursor-up` by main(), a grammar
+        // shadowing another — the duplicate class (`file.open` and `buffer.close`
+        // re-registered by the shell, `cursor.up` by main(), a grammar
         // re-registering a window verb). The registry counts them.
         if (commands.rebinds != 0) {
             std.debug.print("[e2e/identity] {s}: {d} id(s) registered twice, the first '{s}'\n", .{ config, commands.rebinds, commands.nameOf(commands.first_rebound.?) });

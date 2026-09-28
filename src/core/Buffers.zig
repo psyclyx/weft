@@ -826,7 +826,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
     // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
-    // inside a menu (`SPC g g` runs git-status while `leader-git` is active) is
+    // inside a menu (`SPC g g` runs git.status while `leader-git` is active) is
     // skipped rather than stamping the buffer with a menu mode. No per-mode
     // bookkeeping — it reuses the fallback declarations config already makes.
     const base = keymap.baseMode(head.currentMode());
@@ -857,7 +857,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // ever reach again — the exact silent leak the pairing exists to kill).
     head.dropAllTransients(gpa);
     self.prev_id = self.active_id;
-    // mechanism-not-policy (task #19 item 3): this is the buffer-switch
+    // mechanism-not-policy (task #19 item 3): this is the buffer.switch
     // resting-mode RESTORE, `switchTo`'s own nuanced semantics (see this
     // function's module doc) — no `*command.Context` to capture a `Ctx`
     // from at this layer, and the door doesn't model "restore mode X
@@ -1071,7 +1071,7 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     try bufs.switchTo(gpa, code, &head, &km);
     try t.expectEqualStrings("git", bufs.get(git).?.mode);
 
-    // A switch made from inside a MENU (git-status while `leader-git` is up)
+    // A switch made from inside a MENU (git.status while `leader-git` is up)
     // must NOT stamp the buffer being left with the menu mode.
     try head.setModeRaw(gpa, "leader-git");
     try bufs.switchTo(gpa, git, &head, &km); // restores git's own mode

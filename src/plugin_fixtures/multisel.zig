@@ -4,7 +4,7 @@
 //! No permissions: selections and registers are editor state and core
 //! mechanism, never an effect.
 //!
-//!   - `ms-add <anchor> <head>` / `ms-remove <i>` / `ms.collapse`: the SDK's
+//!   - `ms.add <anchor> <head>` / `ms.remove <i>` / `ms.collapse`: the SDK's
 //!     add/remove/collapse, which are compositions over `selections_get`/
 //!     `selections_set`, not doors of their own. `.whole`; each answers the
 //!     count.

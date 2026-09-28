@@ -369,7 +369,7 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 /// is without reading it — 0 absent, 1 file, 2 dir, 3 other (`file.statKind`'s
 /// `Kind` enum ordinal).
 ///
-/// It used to be the primitive behind project-root detection, and that is what
+/// It used to be the primitive behind project.show-root detection, and that is what
 /// kept `fs_read` on `git` and `project`: a grant over the whole filesystem,
 /// to probe for `.git` inside the user's own project. Both now ask
 /// `wl_place_has` (`wasm_host/proc.zig`), which is ungated and confined to the

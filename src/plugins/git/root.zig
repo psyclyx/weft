@@ -19,7 +19,7 @@
 //! REPOSITORY SESSIONS (design §14.3). The model is per REPOSITORY, not per
 //! plugin: a `RepoSession` keyed by repository root owns the files/hunks/raw/
 //! render/branch/fold/interaction state and its own instanced buffer (`*git*`,
-//! `*git:2*`, …). `git-status` in a buffer whose repository differs opens THAT
+//! `*git:2*`, …). `git.status` in a buffer whose repository differs opens THAT
 //! repository's session; every other command routes to the session of the
 //! focused git buffer, and a fill routes by the session its token carries. Two
 //! repositories therefore list their own files and stage independently.
@@ -771,7 +771,7 @@ fn gitStatus() void {
 }
 
 /// The opener for `weft://here/git.status/<root>` (arg 0): the status of that
-/// repository, re-gathered. Routed like `git-status` — by the place this
+/// repository, re-gathered. Routed like `git.status` — by the place this
 /// dispatch is in — so it answers only for the repository of that place, and
 /// says which one it is about otherwise rather than showing another.
 fn gitStatusOpen() void {
@@ -787,10 +787,10 @@ fn gitStatusOpen() void {
 }
 
 /// Start version control from inside the editor: `git init` in the project,
-/// then gather straight into `*git*`. Without this, `git-status` on a
+/// then gather straight into `*git*`. Without this, `git.status` on a
 /// non-repo just shows an empty buffer and there is no in-editor way to create
 /// the repo — you had to drop to a shell. Reuses the same gather scaffolding as
-/// every other mutation (no git-init special-casing); after init, GATHER's
+/// every other mutation (no git.init special-casing); after init, GATHER's
 /// `git status --branch` renders the fresh `Branch: main` header.
 fn gitRefresh() void {
     gather_mod.gather();

@@ -609,7 +609,7 @@ pub fn currentMode(self: *const Head) []const u8 {
 /// "Mode changes — REVISED").** Host-side (or generic) mode set: no
 /// menu-return bookkeeping. Abandons any half-typed chord (a stale
 /// `space f` must not combine with the new mode's next key). Used for
-/// buffer-switch restore and host-side save/restore (the picker), neither
+/// buffer.switch restore and host-side save/restore (the picker), neither
 /// of which should poison a menu's return target — and, RAW, by
 /// `Ctx.setMode` itself, the ONE place a `*command.Context`-holding caller
 /// should reach this from. Named `setModeRaw` (not plain `setMode`)
@@ -762,7 +762,7 @@ pub fn popTransientDiscard(self: *Head, gpa: Allocator, depth: usize) TransientP
 /// caller's own decision; any transient frame recorded against the mode
 /// being left behind is now meaningless (it named a scope in the buffer/
 /// interaction the head is LEAVING), so there is nothing honest left to pop
-/// it INTO — this is the buffer-switch/pick-open counterpart of
+/// it INTO — this is the buffer.switch/pick-open counterpart of
 /// `popTransientDiscard`, generalized to "all of them, unconditionally"
 /// rather than "the one on top, if it matches." See those callers' doc
 /// comments for why a plain overwrite (not a pop) has always been legacy's
@@ -885,7 +885,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> find-file, etc.
+    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> files.find, etc.
     try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_config, "cfg");
     try km.bind(gpa, "normal", "space g g", "git.status", Keymap.prio_config, "cfg");
     try km.bind(gpa, "normal", "i", "vim.insert", Keymap.prio_config, "vim");
@@ -997,7 +997,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
         try t.expect(Found.get(&h, "g") != null);
         try t.expectEqual(@as(?Keymap.Binding, null), Found.get(&h, "C-w")); // no global mid-chord
     }
-    // After `space f`: the two leaves `f`→find-file, `r`→recent-files.
+    // After `space f`: the two leaves `f`→files.find, `r`→recent-files.
     {
         const n = try h.completions(gpa, &km, "space f");
         try t.expectEqual(@as(usize, 2), n);

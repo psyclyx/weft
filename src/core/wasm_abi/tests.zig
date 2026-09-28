@@ -709,7 +709,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expectEqual(surface_mod.Role.accent, plugin.surface.rows.items[0].spans.items[0].role);
     try t.expectEqualStrings("leader-file", plugin.surface.rows.items[0].spans.items[1].text);
     try t.expectEqual(surface_mod.Role.group, plugin.surface.rows.items[0].spans.items[1].role); // a submenu
-    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[1].spans.items[1].role); // git-status: leaf
+    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[1].spans.items[1].role); // git.status: leaf
 
     // Leaving the menu closes the surface.
     wasm_host.notifyMenu(plugin, false);
@@ -788,8 +788,8 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
     try t.expectEqualStrings("helix.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
     // A motion leads with its navigation intention (a listing answers it) and
-    // falls back to helix's own selecting motion (`hx/n/…`); select mode binds
-    // the extending twin (`hx/x/…`) of the same key.
+    // falls back to helix's own selecting motion (`helix.move-…`); select mode binds
+    // the extending twin (`helix.extend-…`) of the same key.
     const left = env.keymap.lookupArms(env.head.currentMode(), "h").?;
     try t.expectEqualStrings("std.navigation.left", left[0]);
     try t.expectEqualStrings("helix.move-left", left[1]);
@@ -799,7 +799,7 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expectEqualStrings("helix.extend-word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
     // No operator-pending mode: a verb acts on the selection. `Z` is the one
     // sticky menu; the leader is a key SEQUENCE — no `helix-leader` mode:
-    // `space` opens a chord and `space g` completes to git-status.
+    // `space` opens a chord and `space g` completes to git.status.
     try t.expect(!env.keymap.modeHasTag("helix-leader", "menu"));
     try t.expect(env.keymap.modeHasTag("helix-view", "menu"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
@@ -1032,7 +1032,7 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     // dispatch (still true before and after), not bare-set-and-lost the
     // instant the inner call returns.
     _ = try command.run(&env.commands, &env.ctx, "head.relay", &.{});
-    try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head-poke
+    try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head.poke
     try t.expectEqualStrings("after-relay", env.head.echo.text()); // written AFTER the nesting, still succeeds
 }
 
@@ -1338,7 +1338,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    // Load the edit plugin (provides duplicate-line/upcase-line) then the
+    // Load the edit plugin (provides edit.duplicate-line/upcase-line) then the
     // config that composes them — the same layering as std + user config.
     const edit = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
     defer edit.deinit();
@@ -1353,7 +1353,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "dup-up", &.{});
-    // dup-up ran duplicate-line ("ab\nab") then upcase-line on the current
+    // dup-up ran edit.duplicate-line ("ab\nab") then edit.upcase-line on the current
     // line (cursor still at 0 → the first line) across the membrane.
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -1422,7 +1422,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
 
-    // pick-commands builds a pick over the whole registry and opens it.
+    // palette.open builds a pick over the whole registry and opens it.
     _ = try command.run(&env.commands, &env.ctx, "palette.open", &.{});
     try t.expect(env.head.pick.active);
 
@@ -1571,7 +1571,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-switch
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.switch
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
     // Two more buffers beyond the initial scratch (ids 1 and 2).
@@ -1795,7 +1795,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1936,7 +1936,7 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1974,7 +1974,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -2019,13 +2019,13 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     try t.expectEqualStrings("vim.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
     try t.expectEqualStrings("vim.delete", env.keymap.lookup(env.head.currentMode(), "d").?);
 
-    // Mode switches: i → insert, Escape (vim-normal) → normal.
+    // Mode switches: i → insert, Escape (vim.normal) → normal.
     _ = try command.run(&env.commands, &env.ctx, "vim.insert", &.{});
     try t.expectEqualStrings("insert", env.head.currentMode());
     _ = try command.run(&env.commands, &env.ctx, "vim.normal", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
-    // yank-line + paste duplicates the current line (through the core register).
+    // vim.yank-line + paste duplicates the current line (through the core register).
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello");
     ed.placeCursor(0);
@@ -2154,7 +2154,7 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
     ed.placeCursor(0);
 
     // `d` enters operator-pending; the `w` binding there is vim's op wrapper,
-    // which runs motion.word-fwd and hands its range to op.delete.
+    // which runs motions.word-next and hands its range to operators.delete.
     _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     try t.expectEqualStrings("op-pending", env.head.currentMode());
     try t.expectEqualStrings("vim.operate-to-word-next", env.keymap.lookup(env.head.currentMode(), "w").?);
@@ -2374,7 +2374,7 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create, open
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create, open
 
     const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
     file.deleteFile(gpa, tmp);
@@ -4234,7 +4234,7 @@ test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge ex
             return (try command.run(&e.commands, &e.ctx, "ms.epilogues", &.{})).integer;
         }
     };
-    // Each read runs the epilogue once itself (ms-epilogues is a command).
+    // Each read runs the epilogue once itself (ms.epilogues is a command).
     const start = try Count.of(&env);
 
     // Two carets on one line: the first run selects the line, merging the

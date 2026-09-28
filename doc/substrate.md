@@ -39,8 +39,8 @@ legitimate degenerate case, not a wrong one.
 ## 2. Documents, backings, and persistence
 
 **Typed backings.** A document's backing is its authority, one of:
-`file | shell-remote file | tool | none (scratch)`. `save` writes the
-backing; `save-as` re-points it. A tool backing regenerates content by being
+`file | shell-remote file | tool | none (scratch)`. `file.save` writes the
+backing; `file.save-as` re-points it. A tool backing regenerates content by being
 a plugin peer — refresh merges like a concurrent editor, with no special
 refresh machinery.
 

@@ -8,7 +8,7 @@
 //!     that read/mutate `p.activeCtx().head` (mode + echo line). Dispatched
 //!     "as" a given `core.Head` (via `command.run`'s `ctx`), this must land
 //!     on THAT head, not whichever head loaded the plugin.
-//!   - `head.relay`: `weft.run("head-poke")` (a synchronous, in-guest
+//!   - `head.relay`: `weft.run("head.poke")` (a synchronous, in-guest
 //!     reentrant dispatch — `wl_run`) THEN another `weft.echo` AFTER the
 //!     nested call returns — proving `active_ctx`/`in_dispatch` are saved/
 //!     restored around the nested dispatch (still the SAME dispatching head

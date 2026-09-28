@@ -68,9 +68,9 @@ test "workflow: vim — dw deletes a word (operator + motion compose)" {
     ed.typeText("alpha bravo charlie");
     ed.press("Escape", "");
     // Back to the start of the line, then delete the first word with `dw`.
-    ed.press("0", ""); // motion.line-start (via vim/n/*)
+    ed.press("0", ""); // motions.line-start (vim's motion key)
     ed.press("d", ""); // enter operator-pending
-    ed.press("w", ""); // word motion → op.delete applies
+    ed.press("w", ""); // word motion → operators.delete applies
     const got = try ed.textAlloc();
     defer gpa.free(got);
     // "alpha " is gone (the word + its trailing space, vim `dw`).
@@ -88,7 +88,7 @@ test "workflow: autopair — typing an open paren inserts the matched pair" {
     try ed.keymap.bind(gpa, "insert", "parenleft", "autopair.open-paren", core.Keymap.prio_config, "test");
 
     ed.press("i", "");
-    ed.press("parenleft", "("); // bound → pair-paren, not literal text
+    ed.press("parenleft", "("); // bound → autopair.open-paren, not literal text
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("()", got);
@@ -104,7 +104,7 @@ test "workflow: vim — x deletes the char under the cursor" {
     ed.typeText("abc");
     ed.press("Escape", "");
     ed.press("0", ""); // to line start
-    ed.press("x", ""); // delete-forward
+    ed.press("x", ""); // edit.delete-after
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("bc", got);
@@ -177,7 +177,7 @@ test "workflow: vim — Y yanks a line, p pastes it below" {
     ed.press("i", "");
     ed.typeText("line");
     ed.press("Escape", "");
-    ed.press("Y", ""); // yank-line
+    ed.press("Y", ""); // vim.yank-line
     ed.press("p", ""); // paste below
     const got = try ed.textAlloc();
     defer gpa.free(got);

@@ -61,7 +61,7 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
         const out = try proj.oracle("cd repo-a && printf 'alpha2\\n' >> a.txt");
         gpa.free(out);
     }
-    ed.press("g", ""); // git-refresh
+    ed.press("g", ""); // git.refresh
     try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
 
     // Open repo B's git view WITHOUT losing repo A's — the gate itself. A
@@ -87,7 +87,7 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     }
     ed.press("g", "");
     try t.expect(drainToolContains(&ed, "*git:2*", "b.txt"));
-    ed.press("S", ""); // git-stage-all in repo B
+    ed.press("S", ""); // git.stage-all in repo B
     try t.expect(drainUntilOracle(&proj, &ed, "cd repo-b && git diff --cached --name-only", "b.txt"));
     const staged_a = try proj.oracle("cd repo-a && git diff --cached --name-only");
     defer gpa.free(staged_a);
@@ -249,7 +249,7 @@ test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wron
         const out = try proj.oracle("printf 'scratch\\n' > zz_new.txt");
         gpa.free(out);
     }
-    ed.press("g", ""); // git-refresh: re-gather without the user re-navigating
+    ed.press("g", ""); // git.refresh: re-gather without the user re-navigating
     try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
 
     // Stage what point names. The hunk is at a different byte range now, so a

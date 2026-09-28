@@ -433,7 +433,7 @@ function startAgent(cmd, prompt, name) {
 }
 globalThis.startAgent = startAgent;
 
-// agent-start: launch a NEW conversation and run one turn. The launch command
+// agent.start: launch a NEW conversation and run one turn. The launch command
 // is config data (weft.set("acp", "cmd", "…") — never baked), and the opening
 // prompt is weft.set("acp", "prompt", "…") (default "Hello").
 weft.command("agent.start", () => {
@@ -454,7 +454,7 @@ weft.command("agent.start", () => {
   icon: "bot",
 });
 
-// agent-send: send the SELECTION — or, with none, the current line — as the
+// agent.send: send the SELECTION — or, with none, the current line — as the
 // next prompt of the FOCUSED conversation (a multi-turn turn).
 //
 // The selection arm is the read surface a JS plugin only just got: `weft.slice`
@@ -483,7 +483,7 @@ weft.command("agent.send", () => {
   icon: "bot",
 });
 
-// agent-focus: choose which conversation `agent.send` addresses. It rides
+// agent.focus: choose which conversation `agent.send` addresses. It rides
 // the same continuation token the permission picks use — a second identity
 // sharing one `onPick`, which is the point: an outcome always says which
 // request it answers, so this can never steal a permission answer (nor be

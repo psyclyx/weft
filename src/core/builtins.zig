@@ -99,7 +99,7 @@ pub fn registerSemanticAction(
     name: []const u8,
 ) !void {
     // Keep an existing command's richer compatibility behavior (for example
-    // field-edit's generic-field fallback). Open names only need a trampoline
+    // field.edit's generic-field fallback). Open names only need a trampoline
     // when no plugin/core command already owns the slot.
     if (commands.resolve(name) != null) return;
     const target = try services.declareSemanticCommand(gpa, name);
@@ -858,13 +858,13 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     };
 }
 
-/// `explain-binding <slot>` — the Container's `explain`
+/// `action.explain <slot>` — the Container's `explain`
 /// (doc/configuration.md §7) wired to a REAL consumer, not a debug printf:
 /// echoes which bindings on an ACTION slot are eligible for the active
 /// buffer's facts and why the winner won. The facts mirror
 /// `Context.actionCtx` (same mode/lang/tool) plus the buffer's path/name, so
-/// `explain-binding eval` answers exactly the question
-/// `Actions.resolve("eval", ...)` would have asked.
+/// `action.explain plugin.code.run` answers exactly the question
+/// `Actions.resolve("plugin.code.run", ...)` would have asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
     // The one fact builder resolution itself uses (`intent.factsFor`), so the
     // explanation cannot disagree with what a key or a toolbar would run — a

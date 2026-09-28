@@ -21,7 +21,7 @@
 // extend a selection, Home smart, Tab indent and C-c/C-x/C-v transfer. It
 // composes `motions` and `indent`/`comment` by name, like vim does. The
 // dashboard stays out: its keys fall back to vim's `normal`.
-weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
+weft.plugin("edit");        // line operators: edit.duplicate-line, edit.upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
 weft.plugin("structural");  // tree-sitter node ops
@@ -30,7 +30,7 @@ weft.plugin("shell");       // insert shell-command output
 weft.plugin("palette");     // command/buffer palette, status line
 weft.plugin("motions");     // word/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
-weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("operators");   // operators.delete/upcase/lowercase — await a range
 weft.plugin("ide");         // conventional non-modal editing
 weft.plugin("ts");          // tree-sitter navigation
 weft.set("languages", "query-root", "assets");
@@ -40,16 +40,16 @@ weft.plugin("indent");      // indent/dedent operators (Tab / S-Tab)
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " while typing
-weft.plugin("consult");     // fuzzy-jump navigation (consult-line, imenu)
+weft.plugin("consult");     // fuzzy-jump navigation (consult.line, consult.imenu)
 weft.plugin("find");        // the incremental find/replace bar (C-f, C-h, F3)
 weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
 weft.plugin("notes");       // capture/open notes, and resolve their embeds (fs)
-weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
-weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
-weft.plugin("modes");       // language activation (on focus) + lang-run
+weft.plugin("fmt");         // fmt.format-buffer (by extension) + fmt.filter (proc)
+weft.plugin("buffers");     // buffer.pick (fuzzy buffer switch), buffer.scratch
+weft.plugin("modes");       // language activation (on focus) + modes.run
 weft.plugin("snippets");    // expand named templates from a file (fs read)
 weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
 weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
@@ -132,8 +132,8 @@ weft.set("offers", "pinned", [
 ]);
 
 // ── Actions: one key, a provider per context ─────────────────────────
-// Spelled as intentions (`plugin.ide.*`), not flat names like config.js's
-// `eval`: an intention is an OFFER, so the same word a key binds is what the
+// Spelled as intentions (`plugin.code.*`, as every config spells them), not
+// flat names: an intention is an OFFER, so the same word a key binds is what the
 // toolbar and the context menu list, labelled and grouped by the options
 // object of whichever provider wins here. A flat action name is a command
 // alias and no chrome ever sees it.
@@ -287,7 +287,7 @@ weft.bind("ide", "bracketright", "autopair.close-bracket");
 // core's `viewport.take`; C-j shows and hides whichever it holds. The
 // breadcrumbs are status-line segments, so they need no viewport at all.
 weft.use("panel");
-weft.plugin("panel");        // panel-toggle: show or hide the panel
+weft.plugin("panel");        // panel.toggle: show or hide the panel
 weft.plugin("problems");     // every diagnostic, grouped by file; Return jumps
 weft.plugin("terminal");     // a LINE-MODE shell (no terminal emulation)
 weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret

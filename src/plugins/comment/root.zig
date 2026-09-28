@@ -154,7 +154,7 @@ fn commentSelection() void {
 
 /// The `gc` operator: toggle comments over the awaited range's lines. Composes
 /// with every vim motion and text object (`gcap`, `gcip`, `gc3j`) and — via the
-/// doubled-operator path (op-line) — `gcc` on the current line.
+/// doubled-operator path (vim.operate-line) — `gcc` on the current line.
 fn opComment() void {
     const h = weft.argRange(0) orelse return;
     const r = weft.rangeEnds(h) orelse return;

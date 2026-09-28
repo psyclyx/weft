@@ -12,7 +12,7 @@
 //! distinct pair — two selections inside one pair edit it once, nested pairs
 //! each get theirs, innermost first. A grammar just runs the command.
 //!
-//! Which delimiters is a separate, earlier call: `surround-pair <c> [r]`. The
+//! Which delimiters is a separate, earlier call: `surround.choose-pair <c> [r]`. The
 //! character is the grammar's to read (its own capture mode); this plugin
 //! never takes a key. `c` names the pair — an opening or closing bracket
 //! names both of its brackets, any other character is its own close — and
@@ -85,7 +85,7 @@ const Pair = struct {
 var pair: Pair = .{};
 var replacement: Pair = .{};
 
-/// `surround-pair <c> [r]`: remember the pair (and the replacement pair) the
+/// `surround.choose-pair <c> [r]`: remember the pair (and the replacement pair) the
 /// operators below read.
 fn setPair() void {
     pair = Pair.of(weft.argStr(0) orelse "");

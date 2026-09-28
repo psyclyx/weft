@@ -5,8 +5,8 @@
 //! in another plugin names "marks" — it claims an annotation layer on a
 //! REFERENCED entry and the presentation composites whatever feeds it finds.
 //!
-//! `marks-on [buffer]` decorates that entry (the active one by default) and
-//! republishes; `marks-off [buffer]` takes its paint away. Each round is
+//! `marks.on [buffer]` decorates that entry (the active one by default) and
+//! republishes; `marks.off [buffer]` takes its paint away. Each round is
 //! stamped with the entry revision it was computed against, so an edit drops
 //! the marks until the next `marks.on` — a decorator never guesses where its
 //! spans went.

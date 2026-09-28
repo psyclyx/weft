@@ -35,7 +35,7 @@
 //! the clipboard are core's doors; helix only says which keys drive them and
 //! what counts as a jump (a search, a goto, `gg`/`ge`).
 //!
-//! The caret draws ON the last selected character (`cursor-place inside`),
+//! The caret draws ON the last selected character (`cursor.set-place inside`),
 //! as helix's does, rather than one past it.
 
 const std = @import("std");
@@ -644,7 +644,7 @@ fn initExtra() void {
 
     // Only insert commits typed text; helix-normal is modal and declares
     // nothing, so nothing can leak into it. `helix-insert` falls back to the
-    // core `default` floor for its BINDINGS (Return -> insert-newline, the
+    // core `default` floor for its BINDINGS (Return -> edit.insert-newline, the
     // std.editing.insert-line-break arm; Backspace, Tab-as-indent) the same
     // way vim's `insert` mode does. Typing inserts at every caret (core's
     // `editEach`), so `i` after `C` types on both lines.
@@ -842,7 +842,7 @@ fn initExtra() void {
     weft.bindKey(goto_word.mode, "Escape", "helix.goto-word-cancel");
 
     // Cursor: block in normal and select, bar in insert — helix's own config,
-    // by ITS mode names (proving set-cursor doesn't assume vim's).
+    // by ITS mode names (proving cursor.set-style doesn't assume vim's).
     weft.runStr2("cursor.set-style", "helix-normal", "block");
     weft.runStr2("cursor.set-style", "helix-select", "block");
     weft.runStr2("cursor.set-style", "helix-insert", "bar");

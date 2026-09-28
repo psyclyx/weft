@@ -100,7 +100,7 @@ Debian package recipes use the same build; see [packaging/README.md](packaging/R
 Set the startup text size with `weft.set("editor", "font-size", "16")` in your
 config, or use `--em 16` without a config. `Ctrl++` (or `Ctrl+=`) and `Ctrl+-`
 adjust it while editing; `Ctrl+0` restores the configured size. The command
-palette also offers `font-size-set <size>`, `font.increase`,
+palette also offers `font.set-size <size>`, `font.increase`,
 `font.decrease`, and `font.reset`.
 
 ## Share a session

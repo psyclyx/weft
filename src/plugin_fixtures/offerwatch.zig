@@ -8,13 +8,13 @@
 //!     proves the event fires once per change and never on a quiet frame.
 //!   - `ow.fired`: that count, as the command's integer result.
 //!   - `ow.keys`: the last delivery's moved keys, comma-joined.
-//!   - `ow-context-set <key> <value> <scope>` / `ow-context-get <key>`:
+//!   - `ow.context-set <key> <value> <scope>` / `ow.context-get <key>`:
 //!     `wl_context_set` ("ok", "held", "refused") and `wl_context_get` (the
 //!     value, or "<unset>").
-//!   - `ow-list <where>`: `wl_offers_list` for context `where` (0 active, 1
+//!   - `ow.list <where>`: `wl_offers_list` for context `where` (0 active, 1
 //!     primary), one `intention|provider|availability|reason|label|group|order`
 //!     line per offer, as the command's string result.
-//!   - `ow-invoke <where> <intention>`: `wl_intent_invoke_at` — "invoked",
+//!   - `ow.invoke <where> <intention>`: `wl_intent_invoke_at` — "invoked",
 //!     "unknown", or the refusal text.
 //!   - `ow.provide`: provides `plugin.offerwatch.probe` and labels it through
 //!     `wl_provide_affordance`, so the presentation override is observable.

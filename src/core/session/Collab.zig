@@ -214,7 +214,7 @@ pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8)
 
 pub fn deinit(self: *Collab) void {
     // A joined doc reverts to solo-owned when its collab goes away
-    // (disconnect keeps the buffer as a local file; buffer-close unbinds
+    // (disconnect keeps the buffer as a local file; buffer.close unbinds
     // before the doc is freed — the doc always outlives this).
     if (self.client_bound) self.doc.my_grant = .own;
     self.announced.deinit();

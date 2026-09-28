@@ -147,7 +147,7 @@ test "menu: menu-escape pops through the paired mechanism" {
     defer ed.deinit();
     try initMenuKeymap(gpa, &ed);
 
-    // menu-escape only exists as a command if bound; call the handler
+    // mode.leave-menu only exists as a command if bound; call the handler
     // directly (the same way the GLOBAL layer binds Escape/C-g in a real
     // config — see dispatch.zig's module doc).
     _ = try ed.commands.bind(gpa, "mode.leave-menu", .{ .name = "mode.leave-menu", .summary = "test", .args = &.{}, .handler = h.dispatch.menuEscapeHandler });
@@ -160,7 +160,7 @@ test "menu: menu-escape pops through the paired mechanism" {
     try t.expectEqualStrings("normal", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
 
-    // Outside a menu, menu-escape is a no-op (never forces a mode change —
+    // Outside a menu, mode.leave-menu is a no-op (never forces a mode change —
     // dispatch.zig's module doc: the "wrong mode in a tool buffer" jank).
     ed.run("mode.leave-menu");
     try t.expectEqualStrings("normal", ed.mode());
@@ -197,7 +197,7 @@ test "menu: sticky re-enter is NOT a second push; a sticky leaf leaves the menu 
     try t.expectEqualStrings("sticky-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
 
-    // Only an explicit leave (menu-escape, here) pops it — through the SAME
+    // Only an explicit leave (mode.leave-menu, here) pops it — through the SAME
     // paired mechanism as a plain menu.
     ed.run("mode.leave-menu");
     try t.expectEqualStrings("normal", ed.mode());
@@ -261,7 +261,7 @@ test "menu: a leaf's own buffer switch mid-menu drops the transient stack, match
 
     // A second buffer with its OWN resting mode, and a leaf command bound
     // INSIDE `test-menu` that switches to it directly — the same shape
-    // `src/plugins/git/root.zig`'s `git.commit-dispatch` -> `git-commit` leaf takes
+    // `src/plugins/git/root.zig`'s `git.commit-dispatch` -> `git.commit` leaf takes
     // (opens/focuses a different buffer without going through `mode.leave-menu`
     // or an auto-pop). `Buffers.switchTo` bypasses the keymap dispatch site
     // entirely (its own doc) — legacy just overwrote `head.mode`; the

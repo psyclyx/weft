@@ -156,7 +156,7 @@ pub const Editor = struct {
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
-    /// (window-split/focus/move) through `window_cmds.applyIntents`, exactly as
+    /// (window.split-below/focus/move) through `window_cmds.applyIntents`, exactly as
     /// main's frame loop drives it.
     /// Alias of `render.fb.win_layout`: input, layout, rendering, and capture
     /// share one pane tree. There is no capture-only layout to drift.
@@ -1094,7 +1094,7 @@ pub const SecondHead = struct {
         _ = command.run(self.ctx.commands, &self.ctx, cmd, &.{}) catch {};
     }
 
-    /// Apply pending window-layout intents (window-split/focus/move) AS
+    /// Apply pending window-layout intents (window.split-below/focus/move) AS
     /// THIS head — mirrors `Editor.applyWindow`, but against `ed`'s shared
     /// `win_ctx`/`win_layout` with `self.head` as the acting head, so a
     /// focus/split/close recorded by a command THIS head ran lands on
@@ -1756,7 +1756,7 @@ pub fn toolAvailable(gpa: Allocator, tool: []const u8) bool {
 /// return its absolute path (caller frees). Unlike `std.testing.tmpDir` — which
 /// nests under `<cwd>/.zig-cache/tmp`, INSIDE this repo — this is a real
 /// standalone dir with no git-repo ancestor, so a project here reads as "not a
-/// repository" until it runs git-init, exactly like a person's fresh directory.
+/// repository" until it runs git.init, exactly like a person's fresh directory.
 pub fn makeSystemTmpDir(gpa: Allocator) ![]u8 {
     const base = if (std.c.getenv("TMPDIR")) |p| std.mem.span(p) else "/tmp";
     const suffix = "/weft-e2e-XXXXXX";
@@ -2329,7 +2329,7 @@ pub const ConfigLoader = struct {
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
         // The harness registers these same grammars before boot, and the
         // language parity test checks that list against this shipped plugin.
-        // Re-running its grammar-add calls here would register duplicates.
+        // Re-running its syntax.add-grammar calls here would register duplicates.
         if (std.mem.eql(u8, name, "languages.js")) {
             _ = weft.languages_js;
             return;
@@ -2520,7 +2520,7 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
 /// Drive the async loop until the ACTIVE buffer's own text contains `needle`,
 /// bounded by wall clock — the buffer-content counterpart to
 /// `drainToolContains`/`drainSurfaceText`/`drainEcho`, for a plugin-authored
-/// edit that lands directly in the EDITED buffer (e.g. format-buffer's
+/// edit that lands directly in the EDITED buffer (e.g. fmt.format-buffer's
 /// `procFilter`, task #28) rather than a tool buffer/surface/echo. A fixed
 /// `settle(N)` round count is scheduling opportunities, not elapsed time —
 /// see `drainEcho`'s doc comment for why that's the wrong bound for an async
@@ -2538,7 +2538,7 @@ pub fn drainBufferContains(ed: *Editor, needle: []const u8) bool {
 
 /// Drive the async loop until the named tool buffer contains `needle`, bounded
 /// by wall clock (the proc drain runs on a pool thread and delivers on real
-/// time). Returns whether it appeared. Mirrors the git-status async test's
+/// time). Returns whether it appeared. Mirrors the git.status async test's
 /// drain, generalized over an arbitrary buffer + needle.
 /// Re-fire an async `cmd` until the echo line contains `needle` (or a budget
 /// elapses). Re-fires because an LSP request before the server's handshake is
@@ -2725,7 +2725,7 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
 /// finished, so `tasks.items.len == 0` is a direct observation of subprocess
 /// exit — not an inference from elapsed ticks.
 ///
-/// This is the fix for the git-rebase-interactive flake (task #22): a caller
+/// This is the fix for the git.rebase-interactive flake (task #22): a caller
 /// about to fire a SECOND git subprocess in the same worktree (e.g. abort,
 /// right after continue) must first prove the first one's `git` process has
 /// actually exited, or the two can collide on `.git/index.lock`. The old

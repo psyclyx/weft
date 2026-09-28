@@ -268,7 +268,7 @@ fn onSemanticAction() callconv(.c) void {
     weft.runStr("symbols.jump", arg);
 }
 
-/// `symbols-jump <offset>\t<subject>`: the subject, the caret at the symbol.
+/// `symbols.jump <offset>\t<subject>`: the subject, the caret at the symbol.
 fn jump() void {
     const arg = weft.argStr(0) orelse return;
     const tab = std.mem.indexOfScalar(u8, arg, '\t') orelse return weft.echo("symbols.jump: <offset>\\t<subject>");

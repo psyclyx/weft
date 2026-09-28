@@ -363,7 +363,7 @@ pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?Plug
 /// Evaluate `src` as the user config AND apply it — `evalToManifest` plus
 /// the hash-log + fresh `apply` pass (doc/configuration.md §5's "the approved
 /// artifact is the manifest value plus its hash"). This is the convenience
-/// entry point for a FIRST load; a config-reload wired against a previous
+/// entry point for a FIRST load; a app.reload-config wired against a previous
 /// manifest should call `evalToManifest` + `Manifest.reconcile` directly
 /// (see `config_load.ConfigSession`) so an unchanged reload is a verified
 /// no-op instead of a blind re-apply.
