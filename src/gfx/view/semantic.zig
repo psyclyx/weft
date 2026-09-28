@@ -60,16 +60,24 @@ pub const Span = struct {
     /// Its column is where nesting put it (the scene declared none), and it
     /// starts its row.
     natural: bool = false,
+    /// A cell of a drawn GRAPH (role `edge`): lines from its centre to the
+    /// sides it links, and — an action node — a node drawn there. Its text
+    /// is not drawn; it is what the node's tooltip says.
+    graph: ?Graph = null,
+    /// The scene's focus is on this span's node (not merely on its row).
+    focused: bool = false,
 
     /// Cells the span occupies on the row before its style is known — a
     /// button's label and a cell of padding either side. A style that draws
     /// an icon widens it at draw time (`chrome.buttonCols`).
     fn cells(self: Span) usize {
+        if (self.graph != null) return Graph.cells;
         return visualWidth(self.text) + @as(usize, if (self.chrome == .button or self.chrome == .menu_title) 2 else 0);
     }
 
     /// Cells under `v`'s chrome style.
     fn cellsIn(self: Span, v: *const View) usize {
+        if (self.graph != null) return Graph.cells;
         if (self.chrome == .button) return chrome_mod.buttonCols(v, self.content());
         if (self.chrome == .menu_title) return chrome_mod.titleCols(self.content());
         return visualWidth(self.text);
@@ -77,6 +85,42 @@ pub const Span = struct {
 
     fn content(self: Span) chrome_mod.Content {
         return .{ .label = self.text, .icon = self.icon, .mnemonic = self.mnemonic };
+    }
+};
+
+/// One cell of a graph a scene draws with lines rather than characters — a
+/// history tree, a branch graph. A node whose role's leaf is `edge` is one:
+/// its `links` fact names the sides (`n`, `e`, `s`, `w`) a line runs to from
+/// its centre, and an ACTION node is also a node of the graph, drawn as a
+/// dot at that centre (its `mark` fact: `current`, `applied`, else hollow)
+/// and clicked like any action. Every graph cell is `cells` wide and a lane
+/// is one more (the gap between spans), so a producer puts lane `k` at
+/// column `k * lane`: an `e` line runs on through the gap to the next lane's
+/// `w`, and rows abut, so `n`/`s` lines join the rows above and below.
+pub const Graph = struct {
+    pub const cells = 3;
+    pub const lane = cells + 1;
+
+    links: Links = .{},
+    node: ?Mark = null,
+
+    pub const Links = packed struct { n: bool = false, e: bool = false, s: bool = false, w: bool = false };
+    pub const Mark = enum { hollow, applied, current };
+
+    fn of(node: *const semantic.scene.Node) Graph {
+        var g: Graph = .{};
+        for (factValue(node, "links") orelse "") |c| switch (c) {
+            'n' => g.links.n = true,
+            'e' => g.links.e = true,
+            's' => g.links.s = true,
+            'w' => g.links.w = true,
+            else => {},
+        };
+        if (node.content == .action) {
+            const mark = factValue(node, "mark") orelse "";
+            g.node = if (std.mem.eql(u8, mark, "current")) .current else if (std.mem.eql(u8, mark, "applied")) .applied else .hollow;
+        }
+        return g;
     }
 };
 
@@ -145,9 +189,10 @@ const Builder = struct {
     fn finishRow(self: *Builder, spans: *std.ArrayList(Span), indent: ?u16) Allocator.Error!void {
         const owned = try spans.toOwnedSlice(self.arena);
         var focused = false;
-        if (self.document.focused) |wanted| for (owned) |span| {
+        if (self.document.focused) |wanted| for (owned) |*span| {
             if (span.node == wanted) {
                 focused = true;
+                span.focused = true;
                 break;
             }
         };
@@ -202,7 +247,8 @@ const Builder = struct {
             const prior = preceding[preceding.len - 1];
             break :blk @as(usize, prior.column) + prior.cells() + 2;
         };
-        const role: ?chrome_mod.Role = switch (node.content) {
+        const graph: ?Graph = if (std.mem.eql(u8, leafOf(node.role), "edge")) Graph.of(node) else null;
+        const role: ?chrome_mod.Role = if (graph != null) null else switch (node.content) {
             // An action node is a button, unless its role says it is a
             // menubar title or a ROW (a listing's `..` reads as a row).
             .action => if (std.mem.eql(u8, leafOf(node.role), menu_mod.role_title))
@@ -216,6 +262,7 @@ const Builder = struct {
         };
         return .{
             .chrome = role,
+            .graph = graph,
             .mnemonic = menu_mod.mnemonicOf(node),
             .lit = if (factValue(node, "lit")) |v| std.mem.eql(u8, v, "on") else false,
             .icon = factValue(node, "icon"),
@@ -376,6 +423,16 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 if (end > start) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(start)) * v.cell_w, .y = y, .w = @as(f32, @floatFromInt(end - start)) * v.cell_w, .h = v.line_h, .color = v.theme.selection });
                 if (hud.cursor_on and sel.caret < available_cells) try rects.append(scratch, fieldCaretRect(x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y, v.cell_w, v.line_h, hud.cursor_style, v.theme.cursor));
             }
+            if (span.graph) |g| {
+                const box: region.Rect = .{ .x = x, .y = y, .w = @as(f32, Graph.cells) * v.cell_w, .h = v.line_h };
+                const hovered = hud.pointer.onNode(view_ref, span.node);
+                try drawGraphCell(v, scratch, rects, g, box, colorFor(v, span.tone), .{ .hovered = hovered, .focused = span.focused });
+                occupied = column + Graph.cells + 1;
+                if (g.node == null) continue;
+                if (hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
+                try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });
+                continue;
+            }
             if (span.chrome) |role| {
                 // A chrome node: its style draws it, in the cells (or, in a
                 // menu, the row) it is given, and that box is what a click
@@ -422,6 +479,64 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
             try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = .{ .x = x, .y = y, .w = width, .h = v.line_h } });
         }
     }
+}
+
+/// One graph cell in `box`: a line from the centre to each linked side (an
+/// east line runs on through the gap to the next lane), then the node, if it
+/// is one — a hollow ring, a filled dot for a step applied, a larger accent
+/// dot for the current one — ringed when focused or under the pointer.
+fn drawGraphCell(v: *const View, scratch: Allocator, rects: *std.ArrayList(Rect), g: Graph, box: region.Rect, color: [4]f32, state: struct { hovered: bool, focused: bool }) !void {
+    const th = @max(1, @round(v.cell_w / 8));
+    const cx = @round(box.x + box.w / 2);
+    const cy = @round(box.y + box.h / 2);
+    const line = v.theme.status;
+    if (g.links.n) try rects.append(scratch, .{ .x = cx - @floor(th / 2), .y = box.y, .w = th, .h = cy - box.y, .color = line });
+    if (g.links.s) try rects.append(scratch, .{ .x = cx - @floor(th / 2), .y = cy, .w = th, .h = box.y + box.h - cy, .color = line });
+    if (g.links.w) try rects.append(scratch, .{ .x = box.x, .y = cy - @floor(th / 2), .w = cx - box.x, .h = th, .color = line });
+    if (g.links.e) try rects.append(scratch, .{ .x = cx, .y = cy - @floor(th / 2), .w = box.x + box.w + v.cell_w - cx, .h = th, .color = line });
+    const mark = g.node orelse return;
+    const d = @round(@min(v.cell_w * 1.5, v.line_h * 0.6));
+    const size = if (mark == .current) @round(d * 1.25) else d;
+    const dot: region.Rect = .{ .x = @round(cx - size / 2), .y = @round(cy - size / 2), .w = size, .h = size };
+    switch (mark) {
+        .hollow => {
+            // A ring over the lines, so the lines stop at its edge.
+            try rects.append(scratch, .{ .x = dot.x, .y = dot.y, .w = dot.w, .h = dot.h, .color = v.theme.background, .shape = .{ .rounded = .{ .radius = size / 2 } } });
+            try rects.append(scratch, .{ .x = dot.x, .y = dot.y, .w = dot.w, .h = dot.h, .color = line, .shape = .{ .rounded = .{ .radius = size / 2, .stroke_width = th } } });
+        },
+        .applied => try rects.append(scratch, .{ .x = dot.x, .y = dot.y, .w = dot.w, .h = dot.h, .color = color, .shape = .{ .rounded = .{ .radius = size / 2 } } }),
+        .current => try rects.append(scratch, .{ .x = dot.x, .y = dot.y, .w = dot.w, .h = dot.h, .color = v.theme.accent, .shape = .{ .rounded = .{ .radius = size / 2 } } }),
+    }
+    if (state.focused or state.hovered) {
+        const r = @round(size / 2 + th * 2);
+        try rects.append(scratch, .{ .x = cx - r, .y = cy - r, .w = 2 * r, .h = 2 * r, .color = if (state.focused) v.theme.cursor else line, .shape = .{ .rounded = .{ .radius = r, .stroke_width = th } } });
+    }
+}
+
+test "a graph cell draws its links as lines and its node as a dot, and takes the lane's cells" {
+    const node: semantic.scene.Node = .{ .id = @enumFromInt(2), .role = "undo.edge", .facts = &.{ .{ .name = "links", .value = "nse" }, .{ .name = "mark", .value = "current" } }, .content = .{ .action = .{ .action = "go", .label = "step 1" } } };
+    const g = Graph.of(&node);
+    try std.testing.expect(g.links.n and g.links.s and g.links.e and !g.links.w);
+    try std.testing.expectEqual(@as(?Graph.Mark, .current), g.node);
+    const line: semantic.scene.Node = .{ .id = @enumFromInt(3), .role = "edge", .facts = &.{.{ .name = "links", .value = "ew" }}, .content = .{ .label = "" } };
+    try std.testing.expectEqual(@as(?Graph.Mark, null), Graph.of(&line).node);
+
+    // In a row: the graph cells sit where the producer put them, a lane apart.
+    const cells = [_]semantic.scene.Node{
+        .{ .id = @enumFromInt(4), .role = "edge", .layout = .{ .column = 0 }, .facts = &.{.{ .name = "links", .value = "e" }}, .content = .{ .action = .{ .action = "go", .label = "a" } } },
+        .{ .id = @enumFromInt(5), .role = "edge", .layout = .{ .column = Graph.lane }, .facts = &.{.{ .name = "links", .value = "w" }}, .content = .{ .action = .{ .action = "go", .label = "a much longer label" } } },
+    };
+    const lines = [_]semantic.scene.Node{.{ .id = @enumFromInt(6), .content = .{ .container = .{ .axis = .horizontal, .children = &cells } } }};
+    const root_node: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &lines } } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fields = @import("weft_view_runtime").field.Registry.init(.here);
+    defer fields.deinit(std.testing.allocator);
+    const built = try rowsFor(arena.allocator(), .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root_node, .fields = &fields, .focused = @enumFromInt(5) });
+    try std.testing.expectEqual(@as(usize, 1), built.len);
+    try std.testing.expectEqual(@as(usize, Graph.cells), built[0].spans[1].cells());
+    try std.testing.expect(built[0].spans[1].focused and !built[0].spans[0].focused);
+    try std.testing.expect(built[0].spans[0].chrome == null);
 }
 
 /// The fewest cells a row keeps for its label before its indentation gives
