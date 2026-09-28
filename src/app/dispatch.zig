@@ -658,9 +658,11 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // key there is simply unhandled — nothing is synthesized (§10.1). This IS
     // the hot typing→commit path — fence it so an accidental blocking API here
     // trips in Debug.
-    // A scene focused by ROWS takes the key as type-ahead (core's, over any
-    // rows — doc/chrome.md §5.2): a focused scene consumes text whatever the
-    // mode commits, and a row that is not being edited has none to take.
+    // Rows focused under `row` take the key as type-ahead (core's, over any
+    // rows — doc/chrome.md §5.2) only where no text commit claims it: the
+    // one predicate, `type_ahead.rowsTakeKeys`, asked before any row moves,
+    // so a picker's query, a prompt's line or snipe's character opened over
+    // a focused row gets its letters.
     const jumped = core.type_ahead.feed(ctx, commit.bytes) catch |err| blk: {
         std.log.warn("type-ahead failed: {t}", .{err});
         break :blk true;

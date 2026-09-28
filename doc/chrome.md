@@ -609,8 +609,15 @@ What the build settled:
   leaving the entry by any door — a pane switch, a buffer switch, an open
   (`Buffers.switchTo` runs `leave_edit`) — so no edit is saved half-typed
   into an entry to resume later. Delete mid-edit deletes text, never the row.
-- **Type-ahead** (`core/type_ahead.zig`) runs where an unbound printable key
-  finds no commit, under `row`, with no edit in progress: a 1 s prefix
+- **Type-ahead** (`core/type_ahead.zig`) runs where rows take the key —
+  ONE predicate, `rowsTakeKeys`, which dispatch asks before any row moves
+  and the frame asks to show a focused row instead of a caret: `row`
+  granularity, no picker or interaction holding the keys, no edit begun,
+  and no text commit claiming the key (a picker's query, a prompt's line,
+  snipe's character; a resting mode's own typing yields to a focused
+  scene, which holds none of its entry's text). Type-ahead ran before the
+  commit was looked up, so a palette or a rename prompt opened over a
+  focused sidebar row lost its letters to the rows. It is a 1 s prefix
   searched from the focused row, one repeated key stepping through the rows
   it starts, wrapping, case-insensitive. A scene row's label is its primary
   field's text, else its focusable node's label. A text projection's rows

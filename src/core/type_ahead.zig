@@ -21,6 +21,10 @@ const view_runtime = @import("weft_view_runtime");
 const command = @import("command.zig");
 const projection = @import("projection.zig");
 const Buffers = @import("Buffers.zig");
+const Head = @import("Head.zig");
+const Keymap = @import("Keymap.zig");
+const Services = @import("semantic.zig").Services;
+const scene_edit = @import("scene_edit.zig");
 const task = @import("task.zig");
 
 /// How long a pause ends a prefix — the common desktop value.
@@ -74,26 +78,51 @@ pub const State = struct {
     }
 };
 
+/// Whether ROWS take a printable key nothing bound — the one answer dispatch
+/// (type-ahead, `feed`) and the frame (a focused row shown, not a caret)
+/// both read, so they cannot disagree. Rows take a key only where nothing
+/// else would: the head's mode focuses rows (`row` granularity), no text
+/// commit claims the key there (`scene_edit.textCommit`: a picker's query,
+/// a prompt's line, snipe's character, a begun edit), no picker or
+/// interaction holds the keys, and rows are focused — a scene's, or a text
+/// projection's with point on no editable span. Asked before any row moves,
+/// never after: a key a line would have taken is the line's.
+pub fn rowsTakeKeys(services: *const Services, km: *const Keymap, head: *const Head, entry: *Buffers.Buffer) bool {
+    const mode = head.currentMode();
+    if (services.granularityIn(mode) != .row) return false;
+    if (head.pick.active or head.interactions.active() != null) return false;
+    const scene = head.scene_selection.path() != null;
+    if (scene_edit.textCommit(services, km, head, mode) != null) {
+        // A focused scene holds none of its entry's text: the commit a
+        // RESTING mode declares (the grammar's own typing — ide's `ide`,
+        // where a scene hosted by a text entry rests) is that text's, and
+        // yields to the rows. A mode ENTERED over them that commits — the
+        // picker's query, a prompt's line, snipe's character — and a begun
+        // edit claim the key.
+        const yields = scene and head.scene_selection.edit == null and km.modeHasTag(mode, Keymap.tag_resting);
+        if (!yields) return false;
+    }
+    if (scene) return head.scene_selection.edit == null;
+    return entry.projection != null and !entry.fieldAtPoint();
+}
+
 /// Take `bytes`, a printable commit no binding claimed, as type-ahead. True
-/// when rows under `row` granularity consumed it (whether or not a row
-/// matched); false where type-ahead does not apply — a `text` granularity
-/// grammar, an edit in progress, a field at point, no rows focused.
+/// when rows took it (`rowsTakeKeys`), whether or not a row matched; false
+/// where they do not, and the key is someone else's.
 pub fn feed(ctx: *command.Context, bytes: []const u8) !bool {
     return feedAt(ctx, bytes, task.nowNs());
 }
 
 pub fn feedAt(ctx: *command.Context, bytes: []const u8, now_ns: u64) !bool {
     const services = ctx.semantic orelse return false;
-    if (services.granularityFor(ctx.head) != .row) return false;
+    const entry = ctx.entry() orelse return false;
+    if (!rowsTakeKeys(services, ctx.keymap, ctx.head, entry)) return false;
     const selection = &ctx.head.scene_selection;
     if (selection.path()) |path| {
-        if (selection.edit != null) return false;
         const instance = services.views.get(path.view) orelse return false;
         return feedScene(ctx, services, instance, path, bytes, now_ns);
     }
-    const entry = ctx.entry() orelse return false;
     const view = entry.projection orelse return false;
-    if (entry.fieldAtPoint()) return false;
     const ed = entry.textEditor() orelse return false;
     const state = &ctx.head.type_ahead;
     state.take(.{ .entry = entry.ref() }, bytes, now_ns);

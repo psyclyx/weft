@@ -452,6 +452,44 @@ test "e2e/focus: config.js and helix.js keep editable listings — a click edits
 
 // ── Regressions (review of arc/chrome) ───────────────────────────────
 
+test "e2e/focus: ide.js — over a focused row, a picker, a prompt and snipe's character take the keys; rows do not" {
+    var app: IdeApp = undefined;
+    try sidebarApp(&app);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.click(try pointAtName(ed, "m.txt"));
+    ed.applyWindow();
+    try expectRow(ed, "m.txt");
+
+    // The file picker, opened over the row: its query takes the letters.
+    ed.press("C-p", "");
+    try t.expect(ed.pick.active);
+    ed.typeText("main");
+    try t.expectEqualStrings("main", ed.pick.query.items);
+    try expectRow(ed, "m.txt");
+    ed.press("Escape", "");
+    try t.expect(!ed.pick.active);
+
+    // A one-line prompt over the row: the palette asking a chosen command
+    // for its argument.
+    ed.press("C-S-p", "");
+    ed.typeText("Set Chrome Style");
+    ed.press("Return", "");
+    try t.expectEqualStrings("palette-arg", ed.mode());
+    ed.typeText("zz");
+    try t.expect(std.mem.indexOf(u8, ed.head.echo.items, "zz") != null);
+    try expectRow(ed, "m.txt");
+    ed.press("Escape", "");
+
+    // Snipe's character, read by its own mode.
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, app.loader.loader(), &ed.config_kv, null, "weft.plugin(\"snipe\");");
+    ed.run("snipe.char-next");
+    try t.expectEqualStrings("snipe-char", ed.mode());
+    ed.typeText("z");
+    try expectRow(ed, "m.txt");
+    try t.expect(!std.mem.eql(u8, ed.mode(), "snipe-char"));
+}
+
 test "e2e/focus: config.js with ide's plugin loaded too — each grammar's modes keep their own granularity" {
     var app: h.App = undefined;
     try configSidebar(&app, "config.js");

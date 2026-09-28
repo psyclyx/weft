@@ -454,13 +454,12 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
 }
 
 /// Whether the entry's focus is a ROW of its text: a produced projection (a
-/// status listing) whose point is on no editable span, in a mode where a
-/// printable key inserts nothing, under a grammar that focuses rows
-/// (doc/chrome.md §5.2). Such a pane shows the row, not a caret.
-fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer, mode: []const u8) bool {
-    if (fx.semantic.granularityFor(fx.head) != .row) return false;
-    if (buffer.projection == null or buffer.fieldAtPoint()) return false;
-    return core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, mode) == null;
+/// status listing) whose rows take the keys (`type_ahead.rowsTakeKeys`, the
+/// predicate dispatch asks before type-ahead — doc/chrome.md §5.2). Such a
+/// pane shows the row, not a caret.
+fn rowFocused(fx: *const FrameCtx, buffer: *core.Buffers.Buffer) bool {
+    if (buffer.projection == null) return false;
+    return core.type_ahead.rowsTakeKeys(fx.semantic, fx.keymap, fx.head, buffer);
 }
 
 fn semanticDocumentFor(arena: std.mem.Allocator, fx: *const FrameCtx, buffer: *core.Buffers.Buffer, focus: *const core.Head.SceneSelection, active: bool) ?view_mod.semantic_data.Document {
@@ -1035,7 +1034,7 @@ pub const FrameBuilder = struct {
             .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
-            .row_focus = rowFocused(fx, abuf, cursor_mode),
+            .row_focus = rowFocused(fx, abuf),
             .brand_mark = std.mem.eql(u8, abuf.tool, "dashboard"),
             // Rendering P2: the picker's scene already went into
             // `hud.surfaces` (`pick_surface`, above) — this field is dead in
