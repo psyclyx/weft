@@ -611,6 +611,47 @@ test "e2e/files: config.js — the visual chip names the kind the operators act 
     try t.expect(std.mem.endsWith(u8, left, "ee\nfour\n") and left.len < "three\nfour\n".len);
 }
 
+test "e2e/files: config.js — `gv` is the entry's own last selection ('< '>), carried by edits and absent elsewhere" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "marks-a.txt", "top\none\ntwo\nthree\n");
+    try core.file.writeBytes(gpa, "marks-b.txt", "xxxx\nyyyy\nzzzz\n");
+    ed.runStr("file.open", "marks-a.txt");
+    ed.applyWindow();
+
+    // Lines `one` and `two`, linewise, then left.
+    ed.chord("g g");
+    ed.press("j", "");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("Escape", "");
+
+    // Another file has no last selection: `gv` there selects nothing.
+    ed.runStr("file.open", "marks-b.txt");
+    ed.applyWindow();
+    ed.chord("g v");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("d", "");
+    ed.press("d", "");
+    try expectPrimaryText(ed, "yyyy\nzzzz\n");
+
+    // Back in the first, text typed above the selection carries it along.
+    ed.runStr("file.open", "marks-a.txt");
+    ed.applyWindow();
+    ed.chord("g g");
+    ed.press("A", "");
+    ed.typeText("XX");
+    ed.press("Escape", "");
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "topXX\nthree\n");
+}
+
 test "e2e/files: config.js — `V d` over rows with no motion flags the focused row" {
     const gpa = t.allocator;
     var app: ConfigApp = undefined;

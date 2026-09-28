@@ -1172,9 +1172,30 @@ fn visualSwapEnds() void {
     _ = weft.setSelections(set.items, set.primary);
 }
 
-/// The last visual selection, as it stood when visual was left, and its kind:
-/// what `gv` brings back.
-var last_visual: ?struct { anchor: usize, head: usize, kind: VisualKind } = null;
+/// The last visual selection of each entry, as it stood when visual was
+/// left, and its kind: what `gv` brings back (vim's `'<` and `'>`). Each is
+/// held as a live range anchored in its own document — an edit elsewhere in
+/// the entry carries it along, and it resolves in that entry alone
+/// (`rangeEnds` refuses another), so `gv` in a file never selected in finds
+/// nothing. Oldest first; the oldest gives way when the table is full.
+const LastVisual = struct { range: u32, reversed: bool, kind: VisualKind };
+var last_visual: [16]LastVisual = undefined;
+var last_visual_n: usize = 0;
+
+/// Where this entry's record is in `last_visual`, if one resolves here.
+fn lastVisualHere() ?usize {
+    for (last_visual[0..last_visual_n], 0..) |lv, i| {
+        if (weft.rangeEnds(lv.range) != null) return i;
+    }
+    return null;
+}
+
+/// Drop record `i`, releasing its anchors.
+fn forgetVisual(i: usize) void {
+    weft.releaseRange(last_visual[i].range);
+    std.mem.copyForwards(LastVisual, last_visual[i .. last_visual_n - 1], last_visual[i + 1 .. last_visual_n]);
+    last_visual_n -= 1;
+}
 
 /// Remember the visual selection as it stands, for `gv`: read by every
 /// visual verb before it acts (`visualRange`) and by Escape.
@@ -1182,16 +1203,21 @@ fn rememberVisual() void {
     const set = weft.selections();
     if (set.items.len == 0 or set.items[set.primary].kind != .text) return;
     const s = set.items[set.primary];
-    last_visual = .{ .anchor = s.anchor, .head = s.head, .kind = if (visual_linewise) .line else .char };
+    const range = weft.anchorRange(.{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) }) orelse return;
+    if (!weft.retainRange(range)) return weft.releaseRange(range);
+    if (lastVisualHere()) |i| forgetVisual(i);
+    if (last_visual_n == last_visual.len) forgetVisual(0);
+    last_visual[last_visual_n] = .{ .range = range, .reversed = s.head < s.anchor, .kind = if (visual_linewise) .line else .char };
+    last_visual_n += 1;
 }
 
-/// `gv`: the last visual selection again, of its kind — V-LINE after a `V`.
-/// Its ends are where they were, cut to the text there is now.
+/// `gv`: this entry's last visual selection again, of its kind — V-LINE
+/// after a `V` — where its anchors stand now.
 fn visualReselect() void {
-    const last = last_visual orelse return;
-    const len = weft.byteLen();
+    const last = last_visual[lastVisualHere() orelse return];
+    const r = weft.rangeEnds(last.range) orelse return;
     setVisualKind(last.kind);
-    const again = [_]weft.Selection{.{ .anchor = @min(last.anchor, len), .head = @min(last.head, len) }};
+    const again = [_]weft.Selection{if (last.reversed) .{ .anchor = r.end, .head = r.start } else .{ .anchor = r.start, .head = r.end }};
     if (!weft.setSelections(&again, 0)) return;
     weft.setMode("visual");
 }
