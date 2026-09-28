@@ -248,12 +248,18 @@ const test_prompt = "weft-e2e>";
 /// `ZDOTDIR` (zsh) and `ENV` (sh), published as the environment of the place
 /// the terminal runs in. The user's own rc files — which may take seconds or
 /// print — are not read, and zsh skips the system-wide ones too.
-fn hermeticShellHome(app: *IdeApp) !void {
+fn hermeticShellHome(app: anytype) !void {
+    return hermeticShellHomeWith(app, "");
+}
+
+/// `hermeticShellHome`, with `rc` (a shell line, single-quote free) added
+/// to both shells' startup files after the prompt: `bindkey -v`, say.
+fn hermeticShellHomeWith(app: anytype, comptime rc: []const u8) !void {
     const gpa = app.ed.gpa;
     const out = try app.proj.oracle("mkdir -p home && " ++
-        "printf \"PS1='" ++ test_prompt ++ " '\\n\" > home/.bashrc && " ++
+        "printf \"PS1='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.bashrc && " ++
         "printf 'setopt no_global_rcs\\n' > home/.zshenv && " ++
-        "printf \"PROMPT='" ++ test_prompt ++ " '\\n\" > home/.zshrc && " ++
+        "printf \"PROMPT='" ++ test_prompt ++ " '\\n" ++ rc ++ "\\n\" > home/.zshrc && " ++
         "cp home/.bashrc home/.shrc");
     gpa.free(out);
     const vars = try std.fmt.allocPrint(gpa, "HOME={0s}/home\x00ZDOTDIR={0s}/home\x00ENV={0s}/home/.shrc\x00", .{app.proj.root});
@@ -290,7 +296,7 @@ test "e2e/terminal: $SHELL (bash, zsh or sh) runs in the place's environment, an
 /// takes to reach the screen, and what one frame (read the pty, emulate,
 /// publish the changed rows, build and draw) costs meanwhile. Opt-in
 /// (`WEFT_BENCH_TERMINAL=1`): it measures, it does not gate.
-fn floodBench(cmd: []const u8, label: []const u8) !void {
+fn floodBench(cmd: []const u8, label: []const u8, read: bool) !void {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
     try app.init(gpa);
@@ -301,6 +307,9 @@ fn floodBench(cmd: []const u8, label: []const u8) !void {
     // The marker is spelled apart on the typed line, so only the shell's
     // answer reads `flood-done`.
     enter(ed, try std.fmt.bufPrint(&line_buf, "{s}; echo flood-\"\"done", .{cmd}));
+    // Read rather than captured: every wake also sends the rows that
+    // scrolled into the scrollback, and core keeps the text in step.
+    if (read) ed.press("C-backslash", "");
     var frames: std.ArrayList(u64) = .empty;
     defer frames.deinit(gpa);
     const start = core.task.nowNs();
@@ -324,9 +333,11 @@ fn floodBench(cmd: []const u8, label: []const u8) !void {
 
 test "bench/terminal: yes and ls -R floods" {
     if (std.c.getenv("WEFT_BENCH_TERMINAL") == null) return error.SkipZigTest;
-    try floodBench("yes | head -n 200000", "yes x200000");
-    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000");
-    try floodBench("true", "idle prompt");
+    try floodBench("yes | head -n 200000", "yes x200000", false);
+    try floodBench("yes | head -n 200000", "yes x200000, read (broken out)", true);
+    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000", false);
+    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000, read (broken out)", true);
+    try floodBench("true", "idle prompt", false);
 }
 
 /// The median of `rounds` forced frames of `ed` as it is now, in µs.
@@ -413,5 +424,560 @@ test "e2e/terminal: after the break-out chord, a click in the terminal (ide) or 
         try app.open("y.txt", "y\n");
         ed.press("i", "i");
         try t.expectEqualStrings("insert", ed.head.currentMode());
+    }
+}
+
+/// Render one frame, so the chrome a click aims at is laid out.
+fn frameNow(ed: *Editor) !void {
+    const pixels = try ed.renderComposite();
+    ed.gpa.free(pixels);
+}
+
+fn named(ed: *Editor, name: []const u8) ?*core.Buffers.Buffer {
+    const id = ed.buffers.findByName(name) orelse return null;
+    return ed.buffers.get(id);
+}
+
+test "e2e/terminal: two terminals in the panel are two tabs of its header — a click switches, the × closes one and the panel shows the other" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openShell(&app, test_shell);
+    enter(ed, "echo first-shell");
+    try waitFor(ed, "\nfirst-shell\n");
+    const first_id = (named(ed, term) orelse return error.NoFirstTerminal).id;
+
+    // "+ New Terminal" in the header starts a second one, beside the first.
+    try frameNow(ed);
+    ed.click(ed.pointAtTabCommand("terminal.new") orelse return error.NoNewTerminalTab);
+    ed.applyWindow();
+    const second_name = "*terminal:2*";
+    if (!h.drainToolContains(ed, second_name, "$")) return error.SecondPromptNeverShown;
+    try t.expectEqualStrings(second_name, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo second-shell");
+    if (!h.drainToolContains(ed, second_name, "\nsecond-shell\n")) return error.SecondNeverAnswered;
+    const second_id = (named(ed, second_name) orelse return error.NoSecondTerminal).id;
+    // Each has its own screen.
+    {
+        const text = h.toolText(ed, term) orelse return error.NoScreen;
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "second-shell") == null);
+    }
+
+    // Both are tabs of the panel's header, and neither is an editor tab.
+    try frameNow(ed);
+    try t.expect(ed.pointAtTab(first_id, .body) != null);
+    try t.expect(ed.pointAtTab(second_id, .body) != null);
+    var strip: [16]u32 = undefined;
+    var editor_tabs: usize = 0;
+    for (ed.tabEntries(&strip)) |id| {
+        if (id == first_id or id == second_id) editor_tabs += 1;
+    }
+    // (Each is listed once, by the panel's header, not twice.)
+    try t.expectEqual(@as(usize, 2), editor_tabs);
+
+    // A click on the first's tab shows it in the panel, taking the keys.
+    ed.click(ed.pointAtTab(first_id, .body).?);
+    ed.applyWindow();
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo back-in-first");
+    try waitFor(ed, "\nback-in-first\n");
+
+    // The second's × closes it: its entry goes, its tab goes, and the panel
+    // goes on showing the first.
+    try frameNow(ed);
+    ed.click(ed.pointAtTab(second_id, .close) orelse return error.NoCloseGlyph);
+    ed.applyWindow();
+    ed.settle(2);
+    try t.expect(named(ed, second_name) == null);
+    try frameNow(ed);
+    try t.expect(ed.pointAtTab(first_id, .body) != null);
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+
+    // `terminal.open` shows the one used last rather than starting another;
+    // the next new one is `terminal.3` — a closed terminal's name is never
+    // reused for a different shell.
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    ed.run("terminal.new");
+    ed.applyWindow();
+    try t.expectEqualStrings("*terminal:3*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+    var dbuf: [core.designation.max_len]u8 = undefined;
+    try t.expectEqualStrings("weft://here/proc/terminal.3", core.designation.of(ed.buffers.active(), &dbuf).?);
+
+    // Closing the one shown: the panel shows the other again.
+    try frameNow(ed);
+    ed.click(ed.pointAtTab(ed.buffers.active().id, .close) orelse return error.NoCloseGlyph);
+    ed.applyWindow();
+    ed.settle(2);
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+}
+
+test "e2e/terminal: a terminal is an ordinary entry — in an editor pane it is an editor tab" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("terminal", "viewport", "none");
+    try openShell(&app, test_shell);
+    try t.expect(ed.viewportPane("panel") == null);
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try frameNow(ed);
+    var strip: [16]u32 = undefined;
+    try t.expect(std.mem.indexOfScalar(u32, ed.tabEntries(&strip), ed.buffers.active().id) != null);
+}
+
+// ── Terminal-normal: a terminal read as text ─────────────────────────
+
+/// The terminal's document — its history and screen as text — once it holds
+/// `needle`, driving frames (the pane tells the plugin it is read, and the
+/// plugin sends its scrollback) until it does.
+fn waitText(ed: *Editor, name: []const u8, needle: []const u8) ![]u8 {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        const b = named(ed, name) orelse continue;
+        const te = b.textEditor() orelse continue;
+        const text = try te.text().toOwnedSlice(ed.gpa);
+        if (std.mem.indexOf(u8, text, needle) != null) return text;
+        ed.gpa.free(text);
+    }
+    return error.TextNeverShown;
+}
+
+/// The line of `text` the caret is on.
+fn caretLine(ed: *Editor) ![]u8 {
+    const te = ed.buffers.active().textEditor() orelse return error.NoText;
+    const rope = te.text();
+    const range = rope.lineRange(rope.offsetToPoint(te.cursorOffset()).row);
+    const out = try ed.gpa.alloc(u8, range.end - range.start);
+    rope.copyRange(out, range);
+    return out;
+}
+
+test "e2e/terminal: out of capture a terminal is text — vim searches its scrollback, yanks a line, and `i` takes the keys back" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("x.txt", "x\n");
+    try ed.setConfig("terminal", "shell", test_shell);
+    ed.runStr("terminal.open", "");
+    ed.applyWindow();
+    if (!h.drainToolContains(ed, term, "$")) return screenFailed(ed, error.PromptNeverShown);
+    // Far more than the panel shows: most of it scrolls into the scrollback.
+    enter(ed, "seq 1 300; echo seq-\"\"done");
+    try waitFor(ed, "\nseq-done\n$");
+
+    // Out of capture: the screen and its scrollback are the entry's text,
+    // read-only, with vim's caret where the shell's cursor was.
+    ed.press("C-backslash", "");
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+    {
+        const text = try waitText(ed, term, "\n1\n2\n3\n");
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "\n299\n300\nseq-done\n$") != null);
+    }
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("$", line);
+    }
+
+    // `/142` finds it in the scrollback, far above the screen; `yy` yanks it.
+    ed.press("/", "");
+    ed.settle(5);
+    ed.typeText("142");
+    ed.settle(5);
+    ed.press("Return", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("142", line);
+    }
+    ed.typeText("yy");
+    try t.expectEqualStrings("142", (ed.register.get(0) orelse return error.NothingYanked).slice());
+    // And it is drawn: the pane shows the rows around the caret, from the
+    // scrollback, as cells — not the live screen.
+    try frameNow(ed);
+    {
+        const v = try ed.ensureView();
+        const lines = v.frame_layout.lines;
+        try t.expect(lines.len > 0);
+        var saw = false;
+        for (lines) |vl| {
+            if (vl.src.end - vl.src.start == 3) saw = true;
+        }
+        try t.expect(saw);
+    }
+    // Visual selection over two lines, yanked — and the yank flashes.
+    const flashes = ed.caps.flash.genOf(.edit);
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expectEqualStrings("142\n143", (ed.register.get(0) orelse return error.NothingYanked).slice());
+    try t.expect(ed.caps.flash.genOf(.edit) != flashes);
+    // The text is the program's: an edit is refused, the text unchanged.
+    {
+        const before = try named(ed, term).?.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(before);
+        ed.typeText("dd");
+        const after = try named(ed, term).?.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(after);
+        try t.expectEqualStrings(before, after);
+    }
+
+    // `i` takes the keys back, as in vim's :terminal; the shell answers.
+    ed.press("i", "i");
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo again");
+    try waitFor(ed, "\nagain\n$");
+}
+
+test "e2e/terminal: out of capture under ide, a drag selects the terminal's cells and C-c copies them" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openShell(&app, test_shell);
+    enter(ed, "echo copy-me-please");
+    try waitFor(ed, "\ncopy-me-please\n$");
+    ed.press("C-backslash", "");
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    const text = try waitText(ed, term, "\ncopy-me-please\n");
+    defer gpa.free(text);
+    // The output line (not the typed one): drag from its `me` to its end.
+    const line_at = std.mem.indexOf(u8, text, "\ncopy-me-please\n").? + 1;
+    // Up the text to it (it may have scrolled into the history): the caret
+    // walks the rows as it walks any text, and the pane follows it.
+    for (0..8) |_| {
+        try frameNow(ed);
+        if (ed.pointAt(line_at) != null) break;
+        ed.press("Up", "");
+    }
+    const from = ed.pointAt(line_at + "copy-".len) orelse return error.LineNotShown;
+    const to = ed.pointAt(line_at + "copy-me-please".len) orelse return error.LineNotShown;
+    ed.pointer_ms += 1000;
+    ed.gestures.warp(from[0], from[1]);
+    ed.pointerButton(1, true, .{});
+    ed.pointerMove(.{ (from[0] + to[0]) / 2, from[1] }, .{});
+    ed.pointerMove(.{ to[0] + 2, to[1] }, .{});
+    ed.pointerButton(1, false, .{});
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    ed.press("C-c", "");
+    try t.expectEqualStrings("me-please", ed.head.clipboard.text());
+}
+
+// ── Shell integration (doc/terminal.md §7) ───────────────────────────
+
+/// Whether `program` is on the PATH the tests run with.
+fn have(app: anytype, program: []const u8) !bool {
+    var buf: [128]u8 = undefined;
+    const found = try app.proj.oracle(try std.fmt.bufPrint(&buf, "command -v {s} >/dev/null && echo yes || echo no", .{program}));
+    defer app.ed.gpa.free(found);
+    return std.mem.startsWith(u8, found, "yes");
+}
+
+/// The directory the terminal entry's place is, or "".
+fn placeDir(ed: *Editor) []const u8 {
+    const b = named(ed, term) orelse return "";
+    return switch (core.place.realize(b.place, ed.ctx.realizer)) {
+        .path => |p| p,
+        else => "",
+    };
+}
+
+/// The integration injected into `shell` (a bare program, so `launch` runs
+/// it): the prompt's cells are marked, `cd` moves the entry's place, the
+/// prompts are landmarks the grammar's keys move between, and a command's
+/// output can be selected whole.
+fn integrationCase(app: *IdeApp, shell: []const u8) !void {
+    const gpa = app.ed.gpa;
+    const ed = &app.ed;
+    try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(app);
+    {
+        const made = try app.proj.oracle("mkdir -p sub/deeper");
+        gpa.free(made);
+    }
+    try ed.setConfig("terminal", "shell", shell);
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+
+    // The prompt's cells say they are the prompt (OSC 133 A/B).
+    {
+        const row = rowReading(ed, test_prompt) orelse return screenFailed(ed, error.NoPromptRow);
+        try t.expect(row[0].mark.prompt);
+    }
+    // TERM_PROGRAM says weft, for an rc file to test.
+    enter(ed, "echo \"prog=$TERM_PROGRAM\"");
+    try waitFor(ed, "\nprog=weft\n");
+
+    // OSC 7: the entry's place follows the shell's directory.
+    enter(ed, "cd sub/deeper");
+    const want = try std.fmt.allocPrint(gpa, "{s}/sub/deeper", .{app.proj.root});
+    defer gpa.free(want);
+    {
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline and !std.mem.eql(u8, placeDir(ed), want)) ed.settle(1);
+        try t.expectEqualStrings(want, placeDir(ed));
+    }
+    // OSC 2: the title — the directory, at a prompt — is the entry's label,
+    // what its tab in the panel's header reads.
+    {
+        const b = named(ed, term).?;
+        try t.expect(std.mem.endsWith(u8, b.label(), "sub/deeper"));
+    }
+
+    // Two commands, then out of capture: the prompts are landmarks.
+    enter(ed, "echo landmark-one");
+    try waitFor(ed, "\nlandmark-one\n");
+    enter(ed, "echo landmark-two; echo second-line");
+    try waitFor(ed, "\nsecond-line\n");
+    ed.press("C-backslash", "");
+    {
+        const text = try waitText(ed, term, "second-line");
+        gpa.free(text);
+    }
+    // The caret is on the last prompt (where the shell's cursor was): C-Up
+    // is the one before it.
+    ed.press("C-Up", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-two") != null);
+    }
+    // The caret starts where the command line does.
+    {
+        const te = ed.buffers.active().textEditor().?;
+        const rope = te.text();
+        const range = rope.lineRange(rope.offsetToPoint(te.cursorOffset()).row);
+        const at = te.cursorOffset() - range.start;
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo landmark-two; echo second-line", std.mem.trim(u8, line[at..], " "));
+    }
+    // The command's output, selected whole.
+    ed.run("grid.select-landmark-body");
+    {
+        const te = ed.buffers.active().textEditor().?;
+        const r = te.selectedRange() orelse return error.NothingSelected;
+        const out = try gpa.alloc(u8, r.end - r.start);
+        defer gpa.free(out);
+        te.text().copyRange(out, r);
+        try t.expectEqualStrings("landmark-two\nsecond-line", out);
+    }
+    // From the end of that output: its own prompt, then the one before.
+    ed.press("C-Up", "");
+    ed.press("C-Up", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-one") != null);
+    }
+    ed.press("C-Down", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-two") != null);
+    }
+}
+
+test "e2e/terminal: bash gets weft's integration injected — marked prompts, cd moves the entry's place, prompts are landmarks" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    if (!try have(&app, "bash")) return error.SkipZigTest;
+    try integrationCase(&app, "bash");
+}
+
+test "e2e/terminal: zsh gets weft's integration injected through ZDOTDIR, its own startup files still read" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    // zsh is not in the nix shell itself; the host's may be on PATH.
+    if (!try have(&app, "zsh")) return error.SkipZigTest;
+    try integrationCase(&app, "zsh");
+}
+
+test "e2e/terminal: integration off, or a whole command line, runs the shell as it is" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("terminal", "integration", "off");
+    try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(&app);
+    try ed.setConfig("terminal", "shell", "bash");
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+    const row = rowReading(ed, test_prompt) orelse return screenFailed(ed, error.NoPromptRow);
+    try t.expect(!row[0].mark.prompt);
+}
+
+// ── The command line is a field; keys route by declared state (§8) ──
+
+/// Drive the editor until the terminal's program declares its prompt: the
+/// entry stops capturing, and a command line is there for the grammar.
+fn waitPrompt(ed: *Editor) !void {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        const b = named(ed, term) orelse continue;
+        if (b.declared_posture != .capture and core.grid_mirror.fieldRange(b) != null) return;
+    }
+    return screenFailed(ed, error.PromptNeverDeclared);
+}
+
+/// The terminal's command line as the editor holds it.
+fn fieldText(ed: *Editor) ![]u8 {
+    const b = named(ed, term) orelse return error.NoTerminal;
+    const f = core.grid_mirror.fieldRange(b) orelse return error.NoField;
+    const out = try ed.gpa.alloc(u8, f.end - f.start);
+    b.textEditor().?.text().copyRange(out, f);
+    return out;
+}
+
+/// A vim editor (config.js) with the terminal on `shell`, at its prompt.
+fn vimAtPrompt(app: *chrome.GrammarApp, shell: []const u8, comptime rc: []const u8) !void {
+    const ed = &app.ed;
+    try app.open("x.txt", "x\n");
+    try hermeticShellHomeWith(app, rc);
+    try ed.setConfig("terminal", "shell", shell);
+    ed.runStr("terminal.open", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+    try waitPrompt(ed);
+}
+
+test "e2e/terminal: at a zsh prompt in vi mode, vim edits the command line with undo, and Return runs the edited command" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    if (!try have(&app, "zsh")) return error.SkipZigTest;
+    // The user's zsh is in vi mode: weft's line still lands, whatever
+    // keymap the shell is in.
+    try vimAtPrompt(&app, "zsh", "bindkey -v");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+
+    // vim's own editing: insert, a word motion, a change, undo and redo.
+    ed.press("i", "i");
+    try t.expectEqualStrings("insert", ed.head.currentMode());
+    ed.typeText("echo abc def");
+    ed.press("Escape", "");
+    ed.press("b", "b");
+    ed.press("c", "c");
+    ed.press("w", "w");
+    ed.typeText("xyz");
+    ed.press("Escape", "");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc xyz", line);
+    }
+    ed.press("u", "u");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc def", line);
+    }
+    ed.press("C-r", "");
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo abc xyz", line);
+    }
+    // The shell was told each change: its own echo of the line is weft's.
+    try waitFor(ed, test_prompt ++ " echo abc xyz");
+    // Return — in normal mode as in insert — runs the line as edited.
+    ed.press("Return", "");
+    try waitFor(ed, "\nabc xyz\n" ++ test_prompt);
+    // A fresh prompt: an empty command line again.
+    try waitPrompt(ed);
+    {
+        const line = try fieldText(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("", line);
+    }
+}
+
+test "e2e/terminal: at the prompt workspace chords are the grammar's — C-w moves focus with no break-out" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    try vimAtPrompt(&app, shell, "");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    // The panel is below the editor: C-w k is vim's, and the editor has
+    // the keys now.
+    ed.press("C-w", "");
+    ed.press("k", "k");
+    ed.applyWindow();
+    try t.expectEqualStrings("x.txt", ed.buffers.active().name);
+}
+
+test "e2e/terminal: a running program gets every key — C-w and Escape included — and the prompt gives them back" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    const shell: []const u8 = if (try have(&app, "zsh")) "zsh" else "bash";
+    try vimAtPrompt(&app, shell, "");
+    ed.press("i", "i");
+    // A program reading the keyboard raw: three bytes, then their codes.
+    ed.typeText("stty raw -echo; echo raw-\"\"now; dd bs=1 count=3 2>/dev/null | od -An -tx1; stty sane");
+    ed.press("Return", "");
+    // A command runs (OSC 133 C): the program owns the keys.
+    {
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline and ed.ctx.posture() != core.input.Posture.capture) ed.settle(1);
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    }
+    // C-w (vim's window prefix) and Escape (vim's normal mode) are the
+    // program's, as bytes 0x17 and 0x1b — once the tty is raw.
+    try waitFor(ed, "raw-now");
+    ed.press("C-w", "");
+    ed.press("Escape", "");
+    ed.press("x", "x");
+    try waitFor(ed, "17 1b 78");
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    // The prompt again: the grammar has the keys.
+    try waitPrompt(ed);
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+
+    // A full-screen program declares the alternate screen: every key its.
+    if (try have(&app, "less")) {
+        const made = try app.proj.oracle("printf 'page one\\npage two\\n' > page.txt");
+        gpa.free(made);
+        ed.press("i", "i");
+        ed.typeText("less page.txt");
+        ed.press("Return", "");
+        try waitFor(ed, "page one\npage two");
+        try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+        ed.press("q", "q");
+        try waitPrompt(ed);
+        try t.expect(ed.ctx.posture() != core.input.Posture.capture);
     }
 }

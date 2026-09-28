@@ -47,6 +47,11 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.navigation.line-end", .doc = "Move the editing point to the line-end boundary.", .label = "Line End" },
     .{ .name = "std.navigation.first-non-blank", .doc = "Move the editing point to the first-non-blank boundary.", .label = "First Non-Blank" },
     .{ .name = "std.navigation.back", .doc = "Return to the previous workspace location.", .label = "Back" },
+    // Landmarks are where a program marked its turns — a shell's prompts —
+    // so a grammar reaches them by one word whatever marked them.
+    .{ .name = "std.navigation.landmark-prev", .doc = "Move to the previous landmark the entry marks (a shell's prompt).", .label = "Previous Landmark" },
+    .{ .name = "std.navigation.landmark-next", .doc = "Move to the next landmark the entry marks (a shell's prompt).", .label = "Next Landmark" },
+    .{ .name = "std.selection.landmark-body", .doc = "Select what follows the landmark at the point, up to the next (a command's output).", .label = "Select Landmark Body" },
     // Directional movement shares `navigation`'s package: one package per
     // concept, so `back` and the four moves cannot drift apart.
     .{ .name = "std.navigation.up", .doc = "Move to the neighbour above on the vertical axis.", .label = "Up" },

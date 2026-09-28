@@ -104,6 +104,10 @@ acting: []const u8 = "",
 /// context store retracts entry-scoped values by (`core/context.zig`).
 /// Buffers knows nothing of the store; it only says who is gone.
 closed: std.ArrayList(u64) = .empty,
+/// Bumped whenever an entry holding a grid closes: how the plugin that
+/// publishes grids hears that one of its entries went (a terminal's tab
+/// closed), so it can end what fed it. Compared, never interpreted.
+grid_closes: u32 = 0,
 
 pub const parked_cap = 16;
 
@@ -126,6 +130,11 @@ pub const Buffer = struct {
     editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
+    /// What the entry calls itself for now, owned, or empty: set by its
+    /// maker (`wl_entry_title` — a terminal's OSC 0/2 title) and shown where
+    /// the entry is labeled (a viewport's entry tab). Never an identity: the
+    /// entry is still found by `name` and designated as before.
+    title: []u8 = &.{},
     /// The designation this entry's producer DECLARED (doc/model.md §2.2),
     /// owned, or empty — in which case it is derived (`designation.zig`): a
     /// file-backed entry is named by its file, a scratch entry by its
@@ -217,6 +226,10 @@ pub const Buffer = struct {
     /// (`wl_declare_capture`). Kept across a break-out, so capture can be
     /// declared again without naming it twice.
     capture_endpoint: []u8 = &.{},
+    /// The user left this entry's capture (the break-out chord) and has not
+    /// taken it up again (`resumeCapture`): whatever the program declares, the
+    /// grammar keeps the keys until then.
+    broken_out: bool = false,
     /// The cell grid this entry IS, when its maker publishes one
     /// (`core/grid.zig`, `wl_grid_publish`) — an entry with no text, drawn
     /// cell by cell. Owned here for the same reason `projection` is.
@@ -286,6 +299,19 @@ pub const Buffer = struct {
         return subject.node.role;
     }
 
+    /// What a tab calls this entry: its title when its maker set one, else
+    /// its name.
+    pub fn label(self: *const Buffer) []const u8 {
+        return if (self.title.len > 0) self.title else self.name;
+    }
+
+    /// Replace the title (empty clears it).
+    pub fn setTitle(self: *Buffer, gpa: Allocator, text: []const u8) Error!void {
+        const owned = try gpa.dupe(u8, text);
+        gpa.free(self.title);
+        self.title = owned;
+    }
+
     pub fn ref(self: *const Buffer) Ref {
         return .{ .id = self.id, .generation = self.generation };
     }
@@ -331,7 +357,10 @@ pub const Buffer = struct {
     }
 
     pub fn posture(self: *const Buffer, field_focused: bool) Posture {
-        const derived: Posture = if (self.editor != null and self.read_only == null) .text else .structural;
+        // A grid's document is TEXT, read-only as it is (the program's
+        // output): motions, visual selection and search are a text's, not
+        // a listing's rows.
+        const derived: Posture = if (self.editor != null and (self.read_only == null or self.grid != null)) .text else .structural;
         const declared = self.declared_posture orelse derived;
         return if (declared == .structural and field_focused) .field else declared;
     }
@@ -371,25 +400,57 @@ pub const Buffer = struct {
     /// entry was capturing at all — the grammar's break-out chord is always
     /// bound, so it is pressed far more often than it applies.
     pub fn breakOutOfCapture(self: *Buffer) bool {
+        if (!self.releaseCapture()) return false;
+        self.broken_out = true;
+        return true;
+    }
+
+    /// Leave `capture` for the declaration it displaced, without the user
+    /// having asked: the program gave the keys back (a prompt). False when
+    /// the entry was not capturing.
+    pub fn releaseCapture(self: *Buffer) bool {
         if (self.declared_posture != .capture) return false;
         self.declared_posture = self.pre_capture;
         self.pre_capture = null;
         return true;
     }
 
-    /// Whether this entry broke out of a capture it can take up again: it
-    /// declared an endpoint for raw input, and is not capturing now.
-    pub fn canResumeCapture(self: *const Buffer) bool {
-        return self.capture_endpoint.len > 0 and self.declared_posture != .capture;
+    /// Whether the program behind this entry owns every key now — as it
+    /// DECLARED (a grid's `input` section, doc/terminal.md §8). An entry
+    /// whose program never said otherwise does: capture is its default.
+    pub fn programOwnsKeys(self: *const Buffer) bool {
+        const g = self.grid orelse return true;
+        return g.input.owns_keys;
     }
 
-    /// Capture again, after a break-out: every key but the break-out chord
-    /// goes to the endpoint declared before. False when there is none, or
-    /// the entry is capturing already.
+    /// Whether this entry broke out of a capture it can take up again: it
+    /// declared an endpoint for raw input, and the user left it.
+    pub fn canResumeCapture(self: *const Buffer) bool {
+        return self.capture_endpoint.len > 0 and self.broken_out;
+    }
+
+    /// Take the keys back after a break-out: the program has them again
+    /// when it owns every key (every key but the break-out chord goes to the
+    /// endpoint); at a prompt the grammar keeps them and edits its command
+    /// line. False when there was no break-out to undo.
     pub fn resumeCapture(self: *Buffer) bool {
         if (!self.canResumeCapture()) return false;
-        self.declarePosture(.capture);
+        self.broken_out = false;
+        if (self.programOwnsKeys()) self.declarePosture(.capture);
         return true;
+    }
+
+    /// Follow what the program declared about its keys, unless the user
+    /// broke out: capture while it owns them, the displaced posture while it
+    /// does not. Returns whether capture changed.
+    pub fn followProgram(self: *Buffer) bool {
+        if (self.capture_endpoint.len == 0 or self.broken_out) return false;
+        if (self.programOwnsKeys()) {
+            if (self.declared_posture == .capture) return false;
+            self.declarePosture(.capture);
+            return true;
+        }
+        return self.releaseCapture();
     }
 
     /// Name the projection this entry represents. Idempotent.
@@ -520,6 +581,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         gpa.destroy(g);
     }
     gpa.free(b.capture_endpoint);
+    gpa.free(b.title);
     b.scene_selection.deinit(gpa);
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
@@ -1112,6 +1174,7 @@ pub fn closeTo(self: *Buffers, gpa: Allocator, id: Id, next: ?Id, head: *Head, k
         try self.switchQuietly(gpa, to, head, keymap);
     }
     self.slots.items[id] = null;
+    if (b.grid != null) self.grid_closes +%= 1;
     // Best effort: a generation missed here is never read again anyway
     // (generations are not reused); it only lingers until the store goes.
     self.closed.append(gpa, b.generation) catch {};

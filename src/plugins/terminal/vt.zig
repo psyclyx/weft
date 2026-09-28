@@ -32,6 +32,16 @@ pub const Vt = struct {
     pty: ?u32 = null,
     /// Everything must go out again: a new size, a scroll, a fresh screen.
     all_dirty: bool = true,
+    /// How many scrollback rows core holds (the history it was sent), and
+    /// the newest of them, tracked as the scrollback moves under it — so
+    /// what to send next is exactly the rows that scrolled up past it, and
+    /// how many of the oldest the scrollback dropped. Null: core holds none.
+    hist_sent: usize = 0,
+    hist_mark: c.GhosttyTrackedGridRef = null,
+    /// The title changed (OSC 0/2) since it was last published.
+    title_dirty: bool = false,
+    /// The program said where it is (OSC 7) since that was last published.
+    pwd_dirty: bool = false,
 
     pub const Error = error{VtUnavailable};
 
@@ -68,9 +78,39 @@ pub const Vt = struct {
         if (c.ghostty_mouse_event_new(null, &self.mouse_ev) != c.GHOSTTY_SUCCESS) return error.VtUnavailable;
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_USERDATA, @ptrCast(self));
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @ptrCast(&writePty));
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @ptrCast(&titleChanged));
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_PWD_CHANGED, @ptrCast(&pwdChanged));
+    }
+
+    fn titleChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+        const self: *Vt = @ptrCast(@alignCast(userdata orelse return));
+        self.title_dirty = true;
+    }
+
+    fn pwdChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+        const self: *Vt = @ptrCast(@alignCast(userdata orelse return));
+        self.pwd_dirty = true;
+    }
+
+    /// Where the program says it is (OSC 7, 9 or 1337 — the raw value, a
+    /// `file://host/path` URI or a bare path), borrowed until the next write.
+    pub fn pwd(self: *Vt) []const u8 {
+        var s: c.GhosttyString = undefined;
+        if (c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_PWD, @ptrCast(&s)) != c.GHOSTTY_SUCCESS) return "";
+        if (s.ptr == null) return "";
+        return s.ptr[0..s.len];
+    }
+
+    /// The title the program set (OSC 0/2), borrowed until the next write.
+    pub fn title(self: *Vt) []const u8 {
+        var s: c.GhosttyString = undefined;
+        if (c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_TITLE, @ptrCast(&s)) != c.GHOSTTY_SUCCESS) return "";
+        if (s.ptr == null) return "";
+        return s.ptr[0..s.len];
     }
 
     pub fn deinit(self: *Vt) void {
+        if (self.hist_mark != null) c.ghostty_tracked_grid_ref_free(self.hist_mark);
         c.ghostty_mouse_event_free(self.mouse_ev);
         c.ghostty_mouse_encoder_free(self.mouse_enc);
         c.ghostty_key_event_free(self.key_ev);
@@ -103,6 +143,8 @@ pub const Vt = struct {
         self.cell_w = cell_w;
         self.cell_h = cell_h;
         self.all_dirty = true;
+        // The scrollback reflowed: core's copy of it is sent again whole.
+        self.forgetHistory();
     }
 
     /// Move the viewport `delta` rows into (negative) or out of the
@@ -132,6 +174,13 @@ pub const Vt = struct {
         var screen: c.GhosttyTerminalScreen = c.GHOSTTY_TERMINAL_SCREEN_PRIMARY;
         _ = c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen);
         return screen == c.GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
+    }
+
+    /// The kitty keyboard protocol flags the program pushed (0: none).
+    pub fn kittyFlags(self: *Vt) u8 {
+        var flags: u8 = 0;
+        _ = c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, @ptrCast(&flags));
+        return flags;
     }
 
     pub fn bracketedPaste(self: *Vt) bool {
@@ -200,14 +249,21 @@ pub const Vt = struct {
     }
 
     /// Publish what changed since the last publish into grid entry `name`:
-    /// the dirty rows (all of them after a resize or scroll) and the cursor.
-    /// Nothing when nothing changed. `msg` is scratch the message is built
-    /// in, grown as needed.
-    pub fn publish(self: *Vt, name: []const u8, msg: *std.ArrayList(u8)) void {
+    /// the dirty rows (all of them after a resize or scroll) and the cursor
+    /// — and, while the pane READS the entry (`reading`), the rows that
+    /// scrolled up into the scrollback since core last heard (a history
+    /// section), and a new title. Nothing when nothing changed. `msg` is
+    /// scratch the message is built in, grown as needed.
+    pub fn publish(self: *Vt, name: []const u8, msg: *std.ArrayList(u8), reading: bool, input: ?[]const u8) void {
+        var hist: std.ArrayList(u8) = .empty;
+        defer hist.deinit(weft.allocator);
+        // Read, the screen is the live one, whatever S-Prior scrolled to.
+        if (reading) self.scrollToBottom();
+        const history = reading and !self.altScreen() and (self.historyDelta(&hist) catch false);
         if (c.ghostty_render_state_update(self.render, self.term) != c.GHOSTTY_SUCCESS) return;
         var dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         _ = c.ghostty_render_state_get(self.render, c.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
-        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty) return;
+        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty and !history and !self.title_dirty and !self.pwd_dirty and input == null) return;
         const all = self.all_dirty or dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FULL;
         self.all_dirty = false;
 
@@ -253,7 +309,138 @@ pub const Vt = struct {
             .rows_sent = sent,
         };
         @memcpy(msg.items[0..@sizeOf(weft.grid.Header)], std.mem.asBytes(&header));
+        if (history) weft.grid.appendSection(msg, weft.allocator, .history, hist.items) catch return;
+        if (self.title_dirty) {
+            weft.grid.appendSection(msg, weft.allocator, .title, self.title()) catch return;
+            self.title_dirty = false;
+        }
+        if (input) |payload| weft.grid.appendSection(msg, weft.allocator, .input, payload) catch return;
+        if (self.pwd_dirty) {
+            var buf: [4096]u8 = undefined;
+            if (decodePwd(self.pwd(), &buf)) |dir| weft.grid.appendSection(msg, weft.allocator, .cwd, dir) catch return;
+            self.pwd_dirty = false;
+        }
         _ = weft.gridPublish(name, msg.items);
+    }
+
+    /// The local directory an OSC 7/9/1337 value names, into `out`: the path
+    /// of a `file://host/path` URI, percent-decoded; the path of a
+    /// `kitty-shell-cwd://host/path` one as it is; a bare absolute path as it
+    /// is. Null for anything else.
+    pub fn decodePwd(raw: []const u8, out: []u8) ?[]const u8 {
+        var s = raw;
+        var encoded = false;
+        if (std.mem.startsWith(u8, s, "file://")) {
+            s = s["file://".len..];
+            encoded = true;
+        } else if (std.mem.startsWith(u8, s, "kitty-shell-cwd://")) {
+            s = s["kitty-shell-cwd://".len..];
+        } else if (s.len == 0 or s[0] != '/') return null;
+        if (s.len > 0 and s[0] != '/') s = s[std.mem.indexOfScalar(u8, s, '/') orelse return null ..];
+        if (s.len > out.len) return null;
+        if (!encoded) {
+            @memcpy(out[0..s.len], s);
+            return out[0..s.len];
+        }
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '%' and i + 2 < s.len) {
+                if (std.fmt.parseInt(u8, s[i + 1 .. i + 3], 16)) |byte| {
+                    out[n] = byte;
+                    n += 1;
+                    i += 2;
+                    continue;
+                } else |_| {}
+            }
+            out[n] = s[i];
+            n += 1;
+        }
+        return out[0..n];
+    }
+
+    /// The history section's payload into `out`, when core's copy of the
+    /// scrollback is behind: the rows the scrollback dropped from its front,
+    /// and the rows that scrolled up past the newest one core holds — or,
+    /// when that one can no longer be found (a clear, a resize), all of it
+    /// again. False when core is up to date.
+    fn historyDelta(self: *Vt, out: *std.ArrayList(u8)) !bool {
+        var n: usize = 0;
+        _ = c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, @ptrCast(&n));
+        var head: weft.grid.HistoryHead = .{};
+        var from: usize = 0;
+        find: {
+            if (self.hist_mark == null) break :find;
+            var at: c.GhosttyPointCoordinate = undefined;
+            if (c.ghostty_tracked_grid_ref_point(self.hist_mark, c.GHOSTTY_POINT_TAG_HISTORY, &at) != c.GHOSTTY_SUCCESS) break :find;
+            const y: usize = at.y;
+            if (y + 1 > self.hist_sent or y + 1 > n) break :find;
+            head.dropped = @intCast(self.hist_sent - (y + 1));
+            from = y + 1;
+        }
+        if (self.hist_mark == null or (from == 0 and self.hist_sent > 0)) head.flags = weft.grid.HistoryHead.reset;
+        const count = n - @min(n, from);
+        if (head.flags == 0 and count == 0 and head.dropped == 0) return false;
+        head.count = @intCast(count);
+        try out.appendSlice(weft.allocator, std.mem.asBytes(&head));
+        try self.readHistory(from, count, out);
+        // The newest row core now holds is the one to find next time.
+        if (n > 0) {
+            const point: c.GhosttyPoint = .{ .tag = c.GHOSTTY_POINT_TAG_HISTORY, .value = .{ .coordinate = .{ .x = 0, .y = @intCast(n - 1) } } };
+            const ok = if (self.hist_mark == null)
+                c.ghostty_terminal_grid_ref_track(self.term, point, &self.hist_mark)
+            else
+                c.ghostty_tracked_grid_ref_set(self.hist_mark, self.term, point);
+            if (ok != c.GHOSTTY_SUCCESS) self.forgetHistory();
+        } else self.forgetHistory();
+        self.hist_sent = n;
+        return true;
+    }
+
+    /// Core's history is to be sent whole next time.
+    pub fn forgetHistory(self: *Vt) void {
+        if (self.hist_mark != null) c.ghostty_tracked_grid_ref_free(self.hist_mark);
+        self.hist_mark = null;
+    }
+
+    /// Scrollback rows `[from, from + count)` into `out`, each its cells with
+    /// the trailing blanks trimmed: read a viewport at a time through the
+    /// render state (colours resolved as the screen's are), then the
+    /// viewport goes back to the live screen, which is sent whole next.
+    fn readHistory(self: *Vt, from: usize, count: usize, out: *std.ArrayList(u8)) !void {
+        defer {
+            self.scrollToBottom();
+            self.all_dirty = true;
+        }
+        var row_cells: std.ArrayList(Cell) = .empty;
+        defer row_cells.deinit(weft.allocator);
+        var got: usize = 0;
+        while (got < count) {
+            c.ghostty_terminal_scroll_viewport(self.term, .{ .tag = c.GHOSTTY_SCROLL_VIEWPORT_ROW, .value = .{ .row = from + got } });
+            if (c.ghostty_render_state_update(self.render, self.term) != c.GHOSTTY_SUCCESS) return error.VtUnavailable;
+            var cols: u16 = 0;
+            _ = c.ghostty_render_state_get(self.render, c.GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
+            _ = c.ghostty_render_state_get(self.render, c.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, @ptrCast(&self.rows_it));
+            const take = @min(@as(usize, self.rows), count - got);
+            var y: usize = 0;
+            while (y < take and c.ghostty_render_state_row_iterator_next(self.rows_it)) : (y += 1) {
+                _ = c.ghostty_render_state_row_get(self.rows_it, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.cells_it));
+                row_cells.clearRetainingCapacity();
+                var x: u16 = 0;
+                while (x < cols) : (x += 1) {
+                    try row_cells.append(weft.allocator, if (c.ghostty_render_state_row_cells_next(self.cells_it)) self.cellHere() else .{});
+                }
+                var len = row_cells.items.len;
+                while (len > 0 and blank(row_cells.items[len - 1])) len -= 1;
+                try weft.grid.appendHistoryRow(out, weft.allocator, row_cells.items[0..len]);
+            }
+            if (y == 0) return error.VtUnavailable; // the viewport would not move
+            got += y;
+        }
+    }
+
+    fn blank(cell: Cell) bool {
+        return cell.cp == 0 and cell.bg == Cell.theme_bg and @as(u16, @bitCast(cell.attrs)) == 0 and @as(u8, @bitCast(cell.mark)) == 0;
     }
 
     /// The cell the row-cells iterator is on, as the grid wire says it.
@@ -280,6 +467,14 @@ pub const Vt = struct {
         var rgb: c.GhosttyColorRgb = undefined;
         if (c.ghostty_render_state_row_cells_get(self.cells_it, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, @ptrCast(&rgb)) == c.GHOSTTY_SUCCESS)
             out.bg = pack(rgb);
+        // What the shell said the cell is (OSC 133): prompt, typed input, or
+        // the output it did not mark.
+        var semantic: c.GhosttyCellSemanticContent = c.GHOSTTY_CELL_SEMANTIC_OUTPUT;
+        _ = c.ghostty_cell_get(raw, c.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, @ptrCast(&semantic));
+        out.mark = .{
+            .prompt = semantic == c.GHOSTTY_CELL_SEMANTIC_PROMPT,
+            .input = semantic == c.GHOSTTY_CELL_SEMANTIC_INPUT,
+        };
         var styled: bool = false;
         _ = c.ghostty_render_state_row_cells_get(self.cells_it, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, @ptrCast(&styled));
         if (!styled) return out;

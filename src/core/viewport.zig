@@ -246,7 +246,18 @@ pub const Declaration = struct {
     /// that declares tabs gets one per command, in order (doc/rendering.md);
     /// nothing here says a tab is active — the frame builder decides that
     /// from what is presently shown.
+    ///
+    /// One line may instead be `entries` or `entries:<maker>`: at that place
+    /// the header lists the ENTRIES this viewport has held that are still
+    /// open (`held`) — every one, or only those the plugin named `<maker>`
+    /// made — one tab each, a click showing it here and its × closing it.
     tabs: []u8 = &.{},
+    /// The entries this viewport has shown, by designation (owned), oldest
+    /// first — kept only when `tabs` lists entries (`entryFilter`), and only
+    /// those it admits. An entry that closes, or that some ordinary pane
+    /// shows instead, is let go (the layout phase's `release`), so what the
+    /// header lists is always what is open and nowhere else.
+    held: std.ArrayList([]u8) = .empty,
     /// `"viewport.toggle <name>"`, owned, precomputed alongside `tabs` (empty
     /// when `tabs` is): the header's trailing close affordance's command. A
     /// FRAME builds its `Hud.Tab` list fresh every time from short-lived
@@ -276,6 +287,51 @@ pub const Declaration = struct {
     /// Whether there is anything to present.
     pub fn hasPresentation(self: *const Declaration) bool {
         return self.subject.isSet();
+    }
+
+    /// The `tabs` line that lists entries, if any: null when the header
+    /// lists none, `""` for every entry, else the maker whose entries it
+    /// lists.
+    pub fn entryFilter(self: *const Declaration) ?[]const u8 {
+        var it = std.mem.splitScalar(u8, self.tabs, '\n');
+        while (it.next()) |line| if (entriesLine(line)) |maker| return maker;
+        return null;
+    }
+
+    /// Whether a `tabs` line is the entries line: its maker filter (`""`
+    /// for none), or null for a command id.
+    pub fn entriesLine(line: []const u8) ?[]const u8 {
+        const word = "entries";
+        if (!std.mem.startsWith(u8, line, word)) return null;
+        if (line.len == word.len) return "";
+        if (line[word.len] != ':') return null;
+        return line[word.len + 1 ..];
+    }
+
+    /// Whether this viewport lists an entry `creator` made.
+    pub fn admits(self: *const Declaration, creator: []const u8) bool {
+        const maker = self.entryFilter() orelse return false;
+        return maker.len == 0 or std.mem.eql(u8, maker, creator);
+    }
+
+    /// Where `designation` is in `held`, if it is.
+    pub fn heldIndex(self: *const Declaration, designation: []const u8) ?usize {
+        for (self.held.items, 0..) |h, i| if (std.mem.eql(u8, h, designation)) return i;
+        return null;
+    }
+
+    /// Remember that this viewport showed `designation`, an entry `creator`
+    /// made — when its header lists such entries. Idempotent.
+    pub fn remember(self: *Declaration, gpa: std.mem.Allocator, designation: []const u8, creator: []const u8) std.mem.Allocator.Error!void {
+        if (!self.admits(creator) or self.heldIndex(designation) != null) return;
+        const owned = try gpa.dupe(u8, designation);
+        errdefer gpa.free(owned);
+        try self.held.append(gpa, owned);
+    }
+
+    /// Let `held[i]` go.
+    pub fn release(self: *Declaration, gpa: std.mem.Allocator, i: usize) void {
+        gpa.free(self.held.orderedRemove(i));
     }
 
     fn freeBindings(self: *Declaration, gpa: std.mem.Allocator) void {
@@ -308,6 +364,8 @@ pub const Registry = struct {
             if (d.entry) |held| gpa.free(held);
             if (d.take) |held| gpa.free(held);
             if (d.resolved) |held| gpa.free(held);
+            for (d.held.items) |held| gpa.free(held);
+            d.held.deinit(gpa);
             gpa.free(d.tabs);
             gpa.free(d.close_command);
         }
@@ -361,6 +419,11 @@ pub const Registry = struct {
                 d.tabs = owned_tabs;
                 gpa.free(d.close_command);
                 d.close_command = owned_close;
+                // A header that no longer lists entries holds none.
+                if (d.entryFilter() == null) {
+                    for (d.held.items) |held| gpa.free(held);
+                    d.held.clearRetainingCapacity();
+                }
             }
             return;
         }
@@ -419,8 +482,10 @@ pub const Registry = struct {
     /// toolbar), which the chrome lists apart from the documents (never as a
     /// tab).
     pub fn holdsEntry(self: *const Registry, designation: []const u8) bool {
-        for (self.list.items) |d| {
+        for (self.list.items) |*d| {
             if (d.attrs.dock == null) continue;
+            // A tab of its header is its chrome too.
+            if (d.heldIndex(designation) != null) return true;
             const held = d.entry orelse continue;
             if (std.mem.eql(u8, held, designation)) return true;
         }
@@ -702,4 +767,34 @@ test "viewport: a panel can start hidden, take an entry, and holds it as chrome"
     try reg.declare(gpa, "tiled", .{}, .{ .fraction = 0.5 });
     try Registry.hold(gpa, &reg.find("tiled").?.entry, problems);
     try t.expect(!reg.holdsEntry(problems));
+}
+
+test "viewport: a header line `entries[:maker]` lists the entries the viewport held, and they are its chrome" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+    const panel: Attrs = .{ .dock = .bottom, .persistent = true, .cycles = false };
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "problems.open\nentries:terminal\nterminal.new", .{});
+    const d = reg.find("panel").?;
+    try t.expectEqualStrings("terminal", d.entryFilter().?);
+    try t.expectEqual(@as(?[]const u8, null), Declaration.entriesLine("terminal.new"));
+    try t.expectEqual(@as(?[]const u8, null), Declaration.entriesLine("entriesx"));
+    try t.expectEqualStrings("", Declaration.entriesLine("entries").?);
+
+    // Only what the named maker made is listed; remembering twice is once.
+    try d.remember(gpa, "weft://here/proc/terminal.1", "terminal");
+    try d.remember(gpa, "weft://here/proc/terminal.2", "terminal");
+    try d.remember(gpa, "weft://here/proc/terminal.1", "terminal");
+    try d.remember(gpa, "weft://here/diagnostics/srv", "problems");
+    try t.expectEqual(@as(usize, 2), d.held.items.len);
+    // A listed entry is the viewport's chrome, shown or not.
+    try t.expect(reg.holdsEntry("weft://here/proc/terminal.1"));
+    d.release(gpa, 0);
+    try t.expect(!reg.holdsEntry("weft://here/proc/terminal.1"));
+    try t.expectEqual(@as(?usize, 0), d.heldIndex("weft://here/proc/terminal.2"));
+
+    // A header that stops listing entries lets every one go.
+    try reg.declareWith(gpa, "panel", panel, .{ .rows = 12 }, "problems.open", .{});
+    try t.expectEqual(@as(usize, 0), reg.find("panel").?.held.items.len);
+    try t.expect(!reg.find("panel").?.admits("terminal"));
 }

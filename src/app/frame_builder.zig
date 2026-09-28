@@ -459,16 +459,26 @@ fn dockedTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: *const window
     const decl = fx.viewports.at(pane.viewport) orelse return null;
     if (decl.tabs.len == 0) return null;
     var list: std.ArrayList(view_mod.Tab) = .empty;
+    // An entry tab that is active outranks a command tab of the same maker:
+    // "+ New Terminal" is not what the panel shows when a terminal is.
+    var entry_active = false;
+    for (decl.held.items) |held| if (core.designation.findText(fx.buffers, held)) |b| {
+        if (b == shown) entry_active = true;
+    };
     var it = std.mem.splitScalar(u8, decl.tabs, '\n');
     while (it.next()) |cmd_id| {
         if (cmd_id.len == 0) continue;
+        if (core.viewport.Declaration.entriesLine(cmd_id) != null) {
+            entryTabs(arena, fx, decl, shown, &list);
+            continue;
+        }
         const ns = cmd_id[0..(std.mem.indexOfScalar(u8, cmd_id, '.') orelse cmd_id.len)];
         const pres = core.presentations.of(fx.cmd_ctx, cmd_id);
         const label = if (pres) |p| (if (p.label.len > 0) p.label else cmd_id) else cmd_id;
         const icon = if (pres) |p| p.icon else "";
         list.append(arena, .{
             .name = label,
-            .active = std.mem.eql(u8, ns, shown.creator),
+            .active = !entry_active and std.mem.eql(u8, ns, shown.creator),
             .command = cmd_id,
             .icon = icon,
         }) catch {};
@@ -481,6 +491,40 @@ fn dockedTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: *const window
     // doc: the bug a frame-local `allocPrint` here would reintroduce).
     list.append(arena, .{ .name = view_mod.tab_close_glyph, .active = false, .command = decl.close_command }) catch {};
     return list.items;
+}
+
+/// The entry tabs of `decl`'s header (its `entries` line): one per entry it
+/// held that is still open, oldest first, labeled by the entry (its title,
+/// else its name) and iconed like the command that opens what it
+/// designates. A click shows the entry in this pane; its × closes it.
+fn entryTabs(arena: std.mem.Allocator, fx: *const FrameCtx, decl: *const core.viewport.Declaration, shown: *const core.Buffers.Buffer, list: *std.ArrayList(view_mod.Tab)) void {
+    for (decl.held.items) |held| {
+        const b = core.designation.findText(fx.buffers, held) orelse continue;
+        list.append(arena, .{
+            .name = b.label(),
+            .active = b == shown,
+            .id = b.id,
+            .path = held,
+            .icon = openerIcon(fx, held),
+            .shows_here = true,
+        }) catch {};
+    }
+}
+
+/// The icon of the command that opens `designation`'s kind (a producer's
+/// declared opener — the terminal's for `proc/terminal.N`), or "".
+fn openerIcon(fx: *const FrameCtx, designation: []const u8) []const u8 {
+    const d = semantic.durable.parse(designation) orelse return "";
+    const openers = fx.cmd_ctx.designations orelse return "";
+    var kind_buf: [64]u8 = undefined;
+    const kind: []const u8 = switch (d.kind) {
+        .proc => core.designation.procKind(d.ref, &kind_buf) orelse return "",
+        .projection => |k| k,
+        else => return "",
+    };
+    const opener = openers.find(kind) orelse return "";
+    const pres = core.presentations.of(fx.cmd_ctx, opener.command) orelse return "";
+    return pres.icon;
 }
 
 /// Whether the entry's focus is a ROW of its text: a produced projection (a
@@ -568,6 +612,14 @@ fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
         .presentation = descriptor.presentation,
         .pointer = if (fx.head.pointer.origin.pane != null) .{ fx.head.pointer.origin.x, fx.head.pointer.origin.y } else null,
     };
+}
+
+/// Whether a pane READS grid entry `b` as text — its document is written
+/// (`core.grid_mirror`) and nothing captures its keys — rather than showing
+/// its live screen.
+fn gridReading(b: *core.Buffers.Buffer) bool {
+    const g = b.grid orelse return false;
+    return b.editor != null and g.mirror != null and b.declared_posture != .capture;
 }
 
 /// One pane of a frame's input: everything `View.build` reads for it, taken
@@ -819,8 +871,17 @@ pub const FrameBuilder = struct {
                 publishHighlight(fx, spec.buffer, e, window) catch |err| if (spec.focused) return err;
             }
         }
-        // A grid entry (a terminal's screen) is drawn from its snapshot.
-        if (spec.buffer.grid) |g| hud.grid = try g.snapshot(arena);
+        // A grid entry (a terminal's screen) is drawn from its snapshot: the
+        // live screen while it captures; while it is READ, the rows its
+        // document's scroll shows (settled around the caret above), history
+        // and screen alike.
+        const reading = gridReading(spec.buffer);
+        if (spec.buffer.grid) |g| hud.grid = if (reading)
+            try g.snapshotRows(arena, spec.top_row.*, self.view.bodyRowsIn(hud, spec.rect))
+        else
+            try g.snapshot(arena);
+        var extent = self.view.extentIn(hud, spec.rect);
+        extent.reading = reading;
         const t0 = stats_mod.nowNs();
         const layers = try PaneLayers.take(arena, live, window);
         input.snapshot_ns += stats_mod.nowNs() - t0;
@@ -850,7 +911,7 @@ pub const FrameBuilder = struct {
             .text = text,
             .hud = hud,
             .focused = spec.focused,
-            .extent = self.view.extentIn(hud, spec.rect),
+            .extent = extent,
         });
         text = null; // the input owns it now
     }

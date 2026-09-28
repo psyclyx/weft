@@ -128,6 +128,11 @@ fn initExtra() void {
     // states (§10.4).
     for ([_][]const u8{ "emacs", "emacs-structural" }) |m|
         weft.bindKeys(m, "C-c C-backslash", &.{"std.input.break-out"});
+    // A program's landmarks (a shell's prompts in a terminal read as text)
+    // are comint's: C-c C-p / C-c C-n between prompts, C-c C-o the output.
+    weft.bindKeys("emacs", "C-c C-p", &.{"std.navigation.landmark-prev"});
+    weft.bindKeys("emacs", "C-c C-n", &.{"std.navigation.landmark-next"});
+    weft.bindKeys("emacs", "C-c C-o", &.{"std.selection.landmark-body"});
 
     // Intra-buffer keys. Movement, kill/yank — the everyday editing chords. The
     // C-x/C-c prefix TREE (files.find, save, buffers, windows, git, files) is

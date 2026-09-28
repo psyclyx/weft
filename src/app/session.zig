@@ -432,7 +432,17 @@ pub const Session = struct {
 
     /// This session as the authority that turns its own places into paths.
     pub fn realizer(self: *Session) core.place.Realizer {
-        return .{ .ctx = self, .realizeFn = Session.realizePlaceOpaque };
+        return .{ .ctx = self, .realizeFn = Session.realizePlaceOpaque, .placeFn = Session.placeOfDirectoryOpaque };
+    }
+
+    /// The place local directory `dir` is: that directory's container,
+    /// published without focus (a terminal's shell moved there — its entry's
+    /// place follows it, so what opens from it opens where the shell is).
+    fn placeOfDirectoryOpaque(raw: *anyopaque, cmd: *anyopaque, dir: []const u8) ?core.Place {
+        const self: *Session = @ptrCast(@alignCast(raw));
+        const ctx: *core.command.Context = @ptrCast(@alignCast(cmd));
+        const located = (self.ensureLocalDirectory(ctx, dir, false) catch return null) orelse return null;
+        return .{ .container = .{ .locus = .here, .ref = located.target, .revision = located.revision } };
     }
 
     pub fn placeForFileOpaque(raw: *anyopaque, ctx: *core.command.Context, path: []const u8) ?core.Place {

@@ -617,6 +617,10 @@ fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
 fn cPostureBreakOut(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!ctx.buffer().breakOutOfCapture()) return ok;
+    // A grid's text is read from here on: it catches up with the cells, and
+    // the caret starts where the program's cursor is.
+    @import("grid_mirror.zig").enterReading(ctx.gpa, ctx.buffers, ctx.buffer()) catch |err|
+        std.log.warn("break-out: the grid's text could not catch up: {t}", .{err});
     const resting = ctx.buffers.restingModeFor(ctx.posture());
     if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
     return ok;
@@ -631,6 +635,34 @@ fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
     if (!ctx.buffer().resumeCapture()) return ok;
     const resting = ctx.buffers.restingModeFor(ctx.posture());
     if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
+    // Back at a program's prompt: the caret goes to its command line.
+    if (@import("grid_mirror.zig").fieldRange(ctx.buffer())) |f| if (ctx.buffer().textEditor()) |ed| {
+        ed.clearSelection();
+        ed.placeCursor(f.end);
+    };
+    return ok;
+}
+
+/// `grid.landmark-prev` / `-next`: the caret to the landmark before (after)
+/// it in a grid read as text — a shell's previous (next) prompt, at its
+/// command line (`grid_mirror.landmark`).
+fn cGridLandmarkPrev(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!@import("grid_mirror.zig").moveToLandmark(ctx.buffer(), .prev)) return .{ .string = "no prompt above" };
+    return ok;
+}
+
+fn cGridLandmarkNext(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!@import("grid_mirror.zig").moveToLandmark(ctx.buffer(), .next)) return .{ .string = "no prompt below" };
+    return ok;
+}
+
+/// `grid.select-landmark-body`: select what follows the landmark at the
+/// caret up to the next — the output of the command at a shell's prompt.
+fn cGridSelectLandmarkBody(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!try @import("grid_mirror.zig").selectLandmarkBody(ctx.gpa, ctx.buffer())) return .{ .string = "no command output here" };
     return ok;
 }
 
@@ -1078,6 +1110,9 @@ const table = [_]command.Command{
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
     command.define("mode.resume-capture", "Take raw input again after a break-out.", cPostureResume).present(.{ .internal = true }),
+    command.define("grid.landmark-prev", "Move to the landmark before the caret in a terminal read as text: the previous prompt.", cGridLandmarkPrev).present(.{ .label = "Previous Prompt" }),
+    command.define("grid.landmark-next", "Move to the landmark after the caret in a terminal read as text: the next prompt.", cGridLandmarkNext).present(.{ .label = "Next Prompt" }),
+    command.define("grid.select-landmark-body", "Select what follows the landmark at the caret: the output of the command at that prompt.", cGridSelectLandmarkBody).present(.{ .label = "Select Command Output" }),
     command.define("app.quit", "Quit the editor, refusing while anything unsaved would be lost.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
     command.define("app.quit-force", "Quit the editor, discarding anything unsaved.", cQuitForce).present(.{ .label = "Quit Without Saving" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),

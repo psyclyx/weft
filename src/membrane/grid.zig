@@ -31,7 +31,9 @@ pub const Cell = extern struct {
     /// 1 for an ordinary cell, 2 for the first half of a wide character, 0
     /// for the second half (nothing is drawn there; the first half covers it).
     width: u8 = 1,
-    _pad: u8 = 0,
+    /// What the cell IS, when the program said (a shell's OSC 133 marks):
+    /// part of a prompt, part of a typed command line, or neither (output).
+    mark: Mark = .{},
 
     /// The theme's foreground.
     pub const theme_fg: u32 = 0xff00_0001;
@@ -60,6 +62,15 @@ pub const Attrs = packed struct(u16) {
 };
 
 pub const Underline = enum(u3) { none, single, double, curly, dotted, dashed };
+
+/// A cell's part in a shell's conversation, as the program marked it.
+pub const Mark = packed struct(u8) {
+    /// The shell's prompt.
+    prompt: bool = false,
+    /// A command line being (or that was) typed at a prompt.
+    input: bool = false,
+    _pad: u6 = 0,
+};
 
 pub const CursorShape = enum(u8) { block, bar, underline, hollow };
 
@@ -95,19 +106,208 @@ pub fn messageLen(cols: usize, rows_sent: usize) usize {
 
 pub const DecodeError = error{Malformed};
 
+// ── Sections ────────────────────────────────────────────────────────
+//
+// After the rows, a publish may carry SECTIONS: what else the grid's owner
+// says about the entry, each framed by a `SectionHead` (its tag and length)
+// and read only by tag, so a reader skips what it does not know. The screen
+// is the rows; everything past the screen is a section.
+
+pub const Tag = enum(u8) {
+    /// What the entry is called for now (a terminal's OSC 0/2 title): UTF-8,
+    /// one line. An empty one clears it.
+    title = 1,
+    /// Rows above the screen (a terminal's scrollback): `HistoryHead`, then
+    /// `count` rows, each a little-endian `u32` cell count and its cells.
+    history = 2,
+    /// Where the program is: an absolute local directory (a shell's OSC 7
+    /// cwd, decoded). The entry's place becomes it.
+    cwd = 3,
+    /// Who has the keys, as the program DECLARED it: `InputHead`, then the
+    /// command line's bytes, then the keys the program claims at its
+    /// prompt, '\n'-joined. Sent when it changes.
+    input = 4,
+    _,
+};
+
+/// An input section's head (doc/terminal.md §8). The program owns every
+/// key (`owns_keys`) — it said so: the alternate screen, the kitty keyboard
+/// protocol, mouse tracking, a command running — or it sits at a prompt with
+/// a command LINE the editor edits as a field: at screen row `row`, from cell
+/// `col`, holding `line_len` bytes with the program's cursor at byte
+/// `cursor`. `authoritative`: that line is the program's word (a new prompt,
+/// or the program changed it — completion, history), to replace the field's
+/// text; otherwise it is only what the program shows.
+pub const InputHead = extern struct {
+    flags: u32 = 0,
+    row: u32 = 0,
+    col: u32 = 0,
+    cursor: u32 = 0,
+    line_len: u32 = 0,
+    claimed_len: u32 = 0,
+
+    pub const owns_keys: u32 = 1;
+    pub const line: u32 = 2;
+    pub const authoritative: u32 = 4;
+    /// A new prompt: the line is a fresh field (its edits are a new
+    /// history), and the editor comes to rest there.
+    pub const fresh: u32 = 8;
+};
+
+comptime {
+    std.debug.assert(@sizeOf(InputHead) == 24);
+}
+
+/// An input section, read in place and checked whole.
+pub const Input = struct {
+    head: InputHead,
+    line: []const u8,
+    claimed: []const u8,
+
+    pub fn parse(bytes: []const u8) DecodeError!Input {
+        if (bytes.len < @sizeOf(InputHead)) return error.Malformed;
+        const head = std.mem.bytesToValue(InputHead, bytes[0..@sizeOf(InputHead)]);
+        const rest = bytes[@sizeOf(InputHead)..];
+        if (rest.len != @as(usize, head.line_len) + head.claimed_len) return error.Malformed;
+        if (head.cursor > head.line_len) return error.Malformed;
+        return .{ .head = head, .line = rest[0..head.line_len], .claimed = rest[head.line_len..] };
+    }
+
+    /// The section's payload into `out`.
+    pub fn encode(out: *std.ArrayList(u8), gpa: std.mem.Allocator, head: InputHead, line_text: []const u8, claimed: []const u8) std.mem.Allocator.Error!void {
+        var h = head;
+        h.line_len = @intCast(line_text.len);
+        h.claimed_len = @intCast(claimed.len);
+        try out.appendSlice(gpa, std.mem.asBytes(&h));
+        try out.appendSlice(gpa, line_text);
+        try out.appendSlice(gpa, claimed);
+    }
+};
+
+pub const SectionHead = extern struct {
+    tag: Tag,
+    _pad: [3]u8 = .{ 0, 0, 0 },
+    /// Bytes that follow.
+    len: u32,
+};
+
+/// A history section's head. `dropped` rows go from the FRONT of the history
+/// first (the oldest, past the owner's scrollback), then `count` rows are
+/// appended after the newest — the rows that scrolled off the top of the
+/// screen since the last history said. `reset` drops the whole history first.
+pub const HistoryHead = extern struct {
+    dropped: u32 = 0,
+    count: u32 = 0,
+    flags: u32 = 0,
+    _pad: u32 = 0,
+
+    pub const reset: u32 = 1;
+};
+
+comptime {
+    std.debug.assert(@sizeOf(SectionHead) == 8);
+    std.debug.assert(@sizeOf(HistoryHead) == 16);
+}
+
+/// The most rows one history section may carry.
+pub const max_history_rows = 1 << 20;
+
+/// Append a section tagged `tag` holding `payload` to a message being built.
+pub fn appendSection(list: *std.ArrayList(u8), gpa: std.mem.Allocator, tag: Tag, payload: []const u8) std.mem.Allocator.Error!void {
+    const head: SectionHead = .{ .tag = tag, .len = @intCast(payload.len) };
+    try list.appendSlice(gpa, std.mem.asBytes(&head));
+    try list.appendSlice(gpa, payload);
+}
+
+pub const Section = struct { tag: Tag, bytes: []const u8 };
+
+pub const Sections = struct {
+    rest: []const u8,
+
+    pub fn next(self: *Sections) ?Section {
+        if (self.rest.len < @sizeOf(SectionHead)) return null;
+        const head = std.mem.bytesToValue(SectionHead, self.rest[0..@sizeOf(SectionHead)]);
+        const body = self.rest[@sizeOf(SectionHead)..][0..head.len];
+        self.rest = self.rest[@sizeOf(SectionHead) + head.len ..];
+        return .{ .tag = head.tag, .bytes = body };
+    }
+};
+
+/// A history section, read in place and checked whole before anything is
+/// trusted.
+pub const History = struct {
+    head: HistoryHead,
+    rows: []const u8,
+
+    pub fn parse(bytes: []const u8) DecodeError!History {
+        if (bytes.len < @sizeOf(HistoryHead)) return error.Malformed;
+        const head = std.mem.bytesToValue(HistoryHead, bytes[0..@sizeOf(HistoryHead)]);
+        if (head.count > max_history_rows) return error.Malformed;
+        const rows = bytes[@sizeOf(HistoryHead)..];
+        var it: RowIterator = .{ .rest = rows };
+        var n: usize = 0;
+        while (n < head.count) : (n += 1) _ = try it.next() orelse return error.Malformed;
+        if (it.rest.len != 0) return error.Malformed;
+        return .{ .head = head, .rows = rows };
+    }
+
+    pub fn iterator(self: History) RowIterator {
+        return .{ .rest = self.rows };
+    }
+};
+
+/// Rows of a history section: each one's cells, as bytes (unaligned: copy
+/// them out, never cast).
+pub const RowIterator = struct {
+    rest: []const u8,
+
+    pub fn next(self: *RowIterator) DecodeError!?[]const u8 {
+        if (self.rest.len == 0) return null;
+        if (self.rest.len < 4) return error.Malformed;
+        const n = std.mem.readInt(u32, self.rest[0..4], .little);
+        if (n > max_cells) return error.Malformed;
+        const len = @as(usize, n) * @sizeOf(Cell);
+        if (self.rest.len - 4 < len) return error.Malformed;
+        const cells = self.rest[4..][0..len];
+        self.rest = self.rest[4 + len ..];
+        return cells;
+    }
+};
+
+/// Append one history row (its cells, trailing blanks already trimmed by
+/// the caller if it likes) to a history payload being built.
+pub fn appendHistoryRow(list: *std.ArrayList(u8), gpa: std.mem.Allocator, cells: []const Cell) std.mem.Allocator.Error!void {
+    var n: [4]u8 = undefined;
+    std.mem.writeInt(u32, &n, @intCast(cells.len), .little);
+    try list.appendSlice(gpa, &n);
+    try list.appendSlice(gpa, std.mem.sliceAsBytes(cells));
+}
+
 /// A publish, read in place: the header and each row's cells, checked
-/// against the message's length before anything is trusted.
+/// against the message's length before anything is trusted — and its
+/// sections, framed.
 pub const Message = struct {
     header: Header,
     body: []const u8,
+    /// The section bytes after the rows.
+    extra: []const u8 = &.{},
 
     pub fn parse(bytes: []const u8) DecodeError!Message {
         if (bytes.len < @sizeOf(Header)) return error.Malformed;
         const h = std.mem.bytesToValue(Header, bytes[0..@sizeOf(Header)]);
         if (@as(usize, h.cols) * h.rows > max_cells) return error.Malformed;
         if (h.rows_sent > h.rows) return error.Malformed;
-        if (bytes.len != messageLen(h.cols, h.rows_sent)) return error.Malformed;
-        return .{ .header = h, .body = bytes[@sizeOf(Header)..] };
+        const len = messageLen(h.cols, h.rows_sent);
+        if (bytes.len < len) return error.Malformed;
+        // Every section framed within the message, to its last byte.
+        var rest = bytes[len..];
+        while (rest.len > 0) {
+            if (rest.len < @sizeOf(SectionHead)) return error.Malformed;
+            const head = std.mem.bytesToValue(SectionHead, rest[0..@sizeOf(SectionHead)]);
+            if (rest.len - @sizeOf(SectionHead) < head.len) return error.Malformed;
+            rest = rest[@sizeOf(SectionHead) + head.len ..];
+        }
+        return .{ .header = h, .body = bytes[@sizeOf(Header)..len], .extra = bytes[len..] };
     }
 
     /// The `i`-th row sent: its index and its cells (unaligned: copy them
@@ -116,6 +316,10 @@ pub const Message = struct {
         const stride = 4 + @as(usize, self.header.cols) * @sizeOf(Cell);
         const at = self.body[i * stride ..][0..stride];
         return .{ .index = std.mem.readInt(u32, at[0..4], .little), .cells = at[4..] };
+    }
+
+    pub fn sections(self: Message) Sections {
+        return .{ .rest = self.extra };
     }
 };
 
@@ -136,4 +340,43 @@ test "grid wire: a message round-trips and a short one is refused" {
     try std.testing.expectEqual([3]u8{ 0xff, 0, 0 }, Cell.rgb(first.fg).?);
     try std.testing.expectEqual(@as(?[3]u8, null), Cell.rgb(Cell.theme_fg));
     try std.testing.expectError(error.Malformed, Message.parse(buf[0 .. buf.len - 1]));
+}
+
+test "grid wire: sections follow the rows, framed, and a reader finds them by tag" {
+    const gpa = std.testing.allocator;
+    var msg: std.ArrayList(u8) = .empty;
+    defer msg.deinit(gpa);
+    const h: Header = .{ .cols = 2, .rows = 1 };
+    try msg.appendSlice(gpa, std.mem.asBytes(&h));
+    try appendSection(&msg, gpa, .title, "~/src");
+    var hist: std.ArrayList(u8) = .empty;
+    defer hist.deinit(gpa);
+    const head: HistoryHead = .{ .dropped = 1, .count = 2 };
+    try hist.appendSlice(gpa, std.mem.asBytes(&head));
+    try appendHistoryRow(&hist, gpa, &.{ .{ .cp = 'a' }, .{ .cp = 'b', .mark = .{ .prompt = true } } });
+    try appendHistoryRow(&hist, gpa, &.{});
+    try appendSection(&msg, gpa, .history, hist.items);
+
+    const m = try Message.parse(msg.items);
+    var it = m.sections();
+    const title = it.next().?;
+    try std.testing.expectEqual(Tag.title, title.tag);
+    try std.testing.expectEqualStrings("~/src", title.bytes);
+    const history = it.next().?;
+    const parsed = try History.parse(history.bytes);
+    try std.testing.expectEqual(@as(u32, 1), parsed.head.dropped);
+    var rows = parsed.iterator();
+    const first = (try rows.next()).?;
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(Cell)), first.len);
+    try std.testing.expect(std.mem.bytesToValue(Cell, first[16..32]).mark.prompt);
+    try std.testing.expectEqual(@as(usize, 0), (try rows.next()).?.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), try rows.next());
+    try std.testing.expectEqual(@as(?Section, null), it.next());
+    // A section cut short, or a history that says more rows than it holds,
+    // is refused whole.
+    try std.testing.expectError(error.Malformed, Message.parse(msg.items[0 .. msg.items.len - 1]));
+    var short = head;
+    short.count = 3;
+    @memcpy(hist.items[0..@sizeOf(HistoryHead)], std.mem.asBytes(&short));
+    try std.testing.expectError(error.Malformed, History.parse(hist.items));
 }

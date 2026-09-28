@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const text_engine = @import("weft_text");
 const core = @import("weft_core");
 const region = @import("../region.zig");
+const layout = @import("../layout.zig");
 const View = @import("View.zig");
 
 const Run = View.Run;
@@ -58,7 +59,8 @@ const Face = enum(u2) {
 };
 
 /// Draw `g` into `body`, from its top-left cell. `cursor_on` is the blink
-/// phase: an off phase draws no cursor.
+/// phase: an off phase draws no cursor. `washes` (a selection, a flash) go
+/// over each row's backgrounds and under its cursor and glyphs.
 pub fn draw(
     v: *View,
     scratch: Allocator,
@@ -67,6 +69,7 @@ pub fn draw(
     g: *const core.grid.Snapshot,
     body: region.Rect,
     cursor_on: bool,
+    washes: []const Rect,
 ) !void {
     const x0 = v.origin_x;
     const rows_fit: usize = @intFromFloat(@max(0, @floor(body.h / v.line_h)));
@@ -101,6 +104,7 @@ pub fn draw(
             });
             c = end;
         }
+        for (washes) |w| if (@abs(w.y - y) < 0.5) try rects.append(scratch, w);
 
         // The cursor's block goes under the glyph it covers, which then draws
         // in the cursor's text colour.
@@ -169,4 +173,54 @@ pub fn draw(
             },
         }
     }
+}
+
+/// The geometry of a grid READ as text (`Snapshot.reading`): for each row
+/// drawn, the line of the entry's document it is (`row(0)` is line
+/// `first_row`), with a caret stop at every cell that has text — the byte
+/// offset `core.grid.cellText` gives it, at that cell's x. So the document's
+/// caret, selections and flashes land ON the cells, and a click or a drag
+/// resolves to the offset of the cell under it (the view's geometry map).
+pub fn layoutRows(
+    v: *const View,
+    la: Allocator,
+    rope: anytype,
+    g: *const core.grid.Snapshot,
+    body: region.Rect,
+) ![]layout.VisualLine {
+    const x0 = v.origin_x;
+    const rows_fit: usize = @intFromFloat(@max(0, @floor(body.h / v.line_h)));
+    const rows = @min(g.rows, rows_fit);
+    const lines_total = rope.lineCount();
+    var lines: std.ArrayList(layout.VisualLine) = .empty;
+    var buf: [4]u8 = undefined;
+    for (0..rows) |r| {
+        const line = g.first_row + r;
+        if (line >= lines_total) break;
+        const src = rope.lineRange(line);
+        const y = body.y + @as(f32, @floatFromInt(r)) * v.line_h;
+        var stops: std.ArrayList(layout.Stop) = .empty;
+        var off = src.start;
+        var col: usize = 0;
+        const row = g.row(r);
+        while (col < row.len) : (col += 1) {
+            const t = core.grid.cellText(row[col], &buf);
+            if (t.len == 0) continue;
+            if (off >= src.end) break;
+            try stops.append(la, .{ .off = @intCast(off), .x = x0 + @as(f32, @floatFromInt(col)) * v.cell_w });
+            off += t.len;
+        }
+        try stops.append(la, .{ .off = @intCast(src.end), .x = x0 + @as(f32, @floatFromInt(col)) * v.cell_w });
+        try lines.append(la, .{
+            .src = src,
+            .row = line,
+            .baseline_y = y + v.ascent,
+            .ascent = v.ascent,
+            .descent = v.line_h - v.ascent,
+            .height = v.line_h,
+            .x0 = x0,
+            .stops = try stops.toOwnedSlice(la),
+        });
+    }
+    return lines.toOwnedSlice(la);
 }

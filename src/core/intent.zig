@@ -183,6 +183,9 @@ const CoreOffer = struct {
         /// ABSENT unless the entry broke out of a capture it can resume
         /// (`Buffer.canResumeCapture`).
         resumable,
+        /// ABSENT unless the entry is a grid whose program marked landmarks
+        /// (a shell's prompts, `grid_mirror.landmark`).
+        landmarks,
     };
 };
 
@@ -198,6 +201,11 @@ const core_offers = [_]CoreOffer{
     // Its inverse: absent unless the entry broke out of a capture it can
     // resume, so a grammar can put it ahead of its own insert on one key.
     .{ .intention = "std.input.resume", .command = "mode.resume-capture", .needs_text = false, .gate = .resumable },
+    // Where a program marked its turns: a shell's prompts, in a terminal read
+    // as text.
+    .{ .intention = "std.navigation.landmark-prev", .command = "grid.landmark-prev", .needs_text = false, .gate = .landmarks },
+    .{ .intention = "std.navigation.landmark-next", .command = "grid.landmark-next", .needs_text = false, .gate = .landmarks },
+    .{ .intention = "std.selection.landmark-body", .command = "grid.select-landmark-body", .needs_text = false, .gate = .landmarks },
     // Transfer over TEXT is the grammar's to mean — a caret copies its line in
     // one, a register takes it in another — so core offers the standard words
     // only where a grammar provides the matching action here, and runs it: a
@@ -227,6 +235,8 @@ pub const Shape = struct {
     /// Which `.provided` rows, by index in `core_offers`, have an eligible
     /// provider of their action here. None where no action plane is attached.
     provided: u16 = 0,
+    /// The entry is a grid with landmarks.
+    landmarks: bool = false,
     /// The entry broke out of a capture it can resume.
     resumable: bool = false,
 };
@@ -252,11 +262,12 @@ fn coreAvailability(offer: CoreOffer, row: usize, shape: Shape) ?catalog_mod.Ava
     if (offer.gate == .persists and !shape.persists) return null;
     if (offer.gate == .provided and shape.provided & (@as(u16, 1) << @intCast(row)) == 0) return null;
     if (offer.gate == .resumable and !shape.resumable) return null;
+    if (offer.gate == .landmarks and !shape.landmarks) return null;
     if (offer.needs_text and !shape.has_text) return no_text;
     return switch (offer.gate) {
         .undo => if (shape.can_undo) .enabled else nothing_to_undo,
         .redo => if (shape.can_redo) .enabled else nothing_to_redo,
-        .none, .persists, .provided, .resumable => .enabled,
+        .none, .persists, .provided, .resumable, .landmarks => .enabled,
     };
 }
 
@@ -410,9 +421,10 @@ pub const Plane = struct {
                 provided |= @as(u16, 1) << @intCast(row);
         };
         const resumable = scope.entry.canResumeCapture();
+        const landmarks = if (scope.entry.grid) |g| g.landmarks else false;
         const ed = scope.entry.textEditor() orelse
-            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided, .resumable = resumable };
-        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided, .resumable = resumable };
+            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided, .resumable = resumable, .landmarks = landmarks };
+        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided, .resumable = resumable, .landmarks = landmarks };
     }
 
     fn publishCore(self: *Plane) Allocator.Error!void {

@@ -490,8 +490,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pty_resize", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .sessions, .doc = "give a pty a new size (cols, rows, pixels); the kernel tells its foreground job" },
     .{ .name = "wl_pty_exited", .params = &.{.u32}, .results = &.{.i32}, .group = .sessions, .doc = "how a pty's child ended (exit code, 128 + a killing signal) once its output is read, else -1" },
     .{ .name = "wl_pty_close", .params = &.{.u32}, .results = &.{}, .group = .sessions, .doc = "hang up and reap a pty's child; the handle stays dead" },
-    .{ .name = "wl_grid_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "apply a cell-grid publish (header, cursor, changed rows) to this plugin's text-less entry of that name, making it if absent" },
-    .{ .name = "wl_entry_extent", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the cols, rows and cell pixels the pane showing a named entry had in the last frame; 0 before any pane showed it" },
+    .{ .name = "wl_grid_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "apply a cell-grid publish (header, cursor, changed rows, then tagged sections: title, history) to this plugin's grid entry of that name, making it if absent" },
+    .{ .name = "wl_entry_extent", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "the cols, rows and cell pixels the pane showing a named entry had in the last frame, and whether it read the entry as text (10 bytes); 0 before any pane showed it" },
     .{ .name = "wl_declare_capture", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "the addressed entry (this plugin's own) captures input: every key but the grammar's break-out runs `<cmd>` with its spec and committed text" },
 
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
@@ -590,7 +590,7 @@ pub const exports = [_]Export{
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
-    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent" },
+    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, or an entry holding a grid closed" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_subject_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "a subject this plugin watches (wl_subject_watch) reads differently; bound to the subject's entry for the call, so the document doors read it; at the frame boundary, once per moved subject, never inside a dispatch" },

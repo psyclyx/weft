@@ -18,6 +18,7 @@ const requireDispatch = shared.requireDispatch;
 
 const pty_mod = @import("../pty.zig");
 const grid_mod = @import("../grid.zig");
+const grid_mirror = @import("../grid_mirror.zig");
 const Buffers = @import("../Buffers.zig");
 
 /// `wl_pty_spawn(cmd, cols, rows) -> handle` (perm `proc`): run `cmd` under
@@ -138,15 +139,19 @@ fn ownGridEntry(p: *WasmPlugin, name: []const u8) union(enum) { found: *Buffers.
     const bufs = p.activeCtx().buffers;
     const id = bufs.findByName(name) orelse return .absent;
     const b = bufs.get(id) orelse return .absent;
-    if (!std.mem.eql(u8, b.creator, p.name) or b.editor != null) return .refused;
+    // A text entry is not a grid, whoever made it; a grid entry's only
+    // text is the mirror of its cells.
+    if (!std.mem.eql(u8, b.creator, p.name) or (b.editor != null and b.grid == null)) return .refused;
     return .{ .found = b };
 }
 
 /// `wl_grid_publish(name, msg) -> 0|-1`: apply one publish
 /// (`weft_membrane.grid`) to the grid of the entry named `name`, making the
-/// entry — this plugin's, holding no text — if there is none yet. Refused
-/// for a name another plugin's or the user's entry holds, and for a
-/// malformed message (which changes nothing).
+/// entry — this plugin's grid — if there is none yet. Refused for a name
+/// another plugin's or the user's entry holds, or a text entry, and for a
+/// malformed message (which changes nothing). A title section labels the
+/// entry; while the entry is READ (not capturing) its document follows its
+/// cells (`grid_mirror`).
 pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = -1;
@@ -162,7 +167,7 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .absent => blk: {
             const id = bufs.createView(gpa, name, "") catch return;
             const b = bufs.get(id) orelse return;
-            b.read_only = Buffers.produced;
+            b.read_only = grid_mirror.read_only;
             break :blk b;
         },
     };
@@ -172,13 +177,83 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         b.grid = g;
         break :blk g;
     };
-    g.apply(gpa, msg) catch return;
+    const applied = g.apply(gpa, msg) catch return;
+    if (applied.title) |title| {
+        // A label is one line, and short.
+        const line = title[0 .. std.mem.indexOfAny(u8, title, "\r\n") orelse title.len];
+        b.setTitle(gpa, line[0..@min(line.len, 256)]) catch {};
+    }
+    if (applied.cwd) |dir| followCwd(p, b, dir);
+    // The program's word on its command line: a new prompt's, or one it
+    // changed itself (completion, history) — the field's text from now on.
+    const input = applied.input;
+    if (input) |in| takeLine(gpa, g, in) catch return;
+    _ = grid_mirror.ensureDocument(gpa, bufs, b) catch return;
+    // Who has the keys follows what the program declared, unless the user
+    // broke out.
+    const flipped = b.followProgram();
+    if (b.declared_posture != .capture) grid_mirror.sync(gpa, bufs, b) catch |err| {
+        std.log.warn("grid: the text of {s} could not follow its cells: {t}", .{ b.name, err });
+    };
+    if (input) |in| restAt(p, b, in, flipped);
     results[0] = 0;
 }
 
+fn takeLine(gpa: std.mem.Allocator, g: *grid_mod.Grid, in: @import("weft_membrane").grid.Input) !void {
+    const Head = @import("weft_membrane").grid.InputHead;
+    if (in.head.flags & Head.line == 0) {
+        g.field_text.clearRetainingCapacity();
+        g.field_pushed.clearRetainingCapacity();
+        return;
+    }
+    if (in.head.flags & (Head.fresh | Head.authoritative) == 0) return;
+    try g.field_text.resize(gpa, in.line.len);
+    @memcpy(g.field_text.items, in.line);
+    try g.field_pushed.resize(gpa, in.line.len);
+    @memcpy(g.field_pushed.items, in.line);
+}
+
+/// Where the head rests after the program's declaration: the grammar's
+/// resting mode for what the entry now is — capture when the program took
+/// the keys, text at a prompt — and at a prompt the caret where the
+/// program's cursor is, when the program spoke for its line. Only for the
+/// head whose entry this is; another entry's mode is its own.
+fn restAt(p: *WasmPlugin, b: *Buffers.Buffer, in: @import("weft_membrane").grid.Input, flipped: bool) void {
+    const Head = @import("weft_membrane").grid.InputHead;
+    const ctx = p.activeCtx();
+    const spoke = in.head.flags & (Head.fresh | Head.authoritative) != 0;
+    if (spoke) if (grid_mirror.fieldRange(b)) |f| if (b.textEditor()) |ed| {
+        ed.clearSelection();
+        ed.placeCursor(f.start + @min(in.head.cursor, f.end - f.start));
+    };
+    if (ctx.buffer() != b) return;
+    if (!flipped and in.head.flags & Head.fresh == 0) return;
+    const resting = ctx.buffers.restingModeFor(b.posture(false));
+    if (resting.len > 0) ctx.capturedCtx().setMode(resting) catch {};
+}
+
+/// The program behind grid entry `b` says it is in local directory `dir`
+/// (a shell's OSC 7): the entry's place becomes that directory, so what is
+/// opened or started from it — a relative file, another terminal — lands
+/// where the shell is. A directory that is not one, or no embedding to say
+/// what place it is, leaves the place as it was.
+fn followCwd(p: *WasmPlugin, b: *Buffers.Buffer, dir: []const u8) void {
+    if (dir.len == 0 or dir[0] != '/') return;
+    const ctx = p.activeCtx();
+    const realizer = ctx.realizer orelse return;
+    switch (@import("../place.zig").realize(b.place, realizer)) {
+        .path => |now| if (std.mem.eql(u8, std.mem.trimEnd(u8, now, "/"), std.mem.trimEnd(u8, dir, "/"))) return,
+        else => {},
+    }
+    const place = realizer.placeOf(ctx, dir) orelse return;
+    ctx.buffers.setPlace(b.id, place);
+}
+
 /// `wl_entry_extent(name, out) -> 1|0`: the room the pane showing the entry
-/// named `name` had in the last frame — four little-endian `u16`s: cols,
-/// rows, cell width and height in pixels — into `out`. 0 when no pane has
+/// named `name` had in the last frame, and how it showed it — five
+/// little-endian `u16`s: cols, rows, cell width and height in pixels, and
+/// flags (`grid.Extent.flag_reading`: the pane reads the entry as text, so
+/// what is above its screen is wanted) — into `out`. 0 when no pane has
 /// shown it yet. Asking clears the entry's "moved" flag: the asker has heard.
 pub fn hEntryExtent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -188,19 +263,26 @@ pub fn hEntryExtent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const bufs = p.activeCtx().buffers;
     const b = bufs.get(bufs.findByName(name) orelse return) orelse return;
     const e = b.extent orelse return;
-    var out: [8]u8 = undefined;
+    var out: [10]u8 = undefined;
     std.mem.writeInt(u16, out[0..2], e.cols, .little);
     std.mem.writeInt(u16, out[2..4], e.rows, .little);
     std.mem.writeInt(u16, out[4..6], e.cell_w, .little);
     std.mem.writeInt(u16, out[6..8], e.cell_h, .little);
+    std.mem.writeInt(u16, out[8..10], if (e.reading) grid_mod.Extent.flag_reading else 0, .little);
     _ = caller.writeMemory(@intCast(args[2]), out.len, &out) catch return;
     b.extent_moved = false;
     results[0] = 1;
 }
 
-/// Whether an entry `p` made has a new extent it has not asked for.
+/// Whether an entry `p` made has a new extent it has not asked for — or an
+/// entry holding a grid has closed since `p` last heard (it may have been
+/// one of `p`'s, whose feed `p` should end).
 pub fn anyExtentMoved(p: *WasmPlugin) bool {
-    var it = p.activeCtx().buffers.iterator();
+    const bufs = p.activeCtx().buffers;
+    if (p.seen_grid_closes != bufs.grid_closes) {
+        for (p.resources.ptys.slice()) |maybe| if (maybe != null) return true;
+    }
+    var it = bufs.iterator();
     while (it.next()) |b| if (b.extent_moved and b.grid != null and std.mem.eql(u8, b.creator, p.name)) return true;
     return false;
 }
@@ -209,9 +291,13 @@ pub fn anyExtentMoved(p: *WasmPlugin) bool {
 
 /// `wl_declare_capture(cmd)`: the addressed entry CAPTURES input (§10.4):
 /// every key but the grammar's break-out chord runs `cmd` with the key's
-/// spec and the text it committed (`app/dispatch.zig`). Only the entry's
-/// maker may: capture is how keystrokes leave the grammar, so no plugin may
-/// turn an entry it does not own into a keylogger.
+/// spec and the text it committed (`app/dispatch.zig`) — while its program
+/// owns the keys, which is always, unless a grid's program declared a
+/// prompt (doc/terminal.md §8); then the grammar edits its command line and
+/// `cmd` hears the keys the grammar leaves. It also takes the entry back
+/// from a break-out. Only the entry's maker may: capture is how keystrokes
+/// leave the grammar, so no plugin may turn an entry it does not own into a
+/// keylogger.
 pub fn hDeclareCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -224,5 +310,6 @@ pub fn hDeclareCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     }
     p.gpa.free(b.capture_endpoint);
     b.capture_endpoint = cmd;
-    b.declarePosture(.capture);
+    b.broken_out = false;
+    if (b.programOwnsKeys()) b.declarePosture(.capture) else _ = b.releaseCapture();
 }

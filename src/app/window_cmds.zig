@@ -310,6 +310,7 @@ pub fn materializeViewports(
         const index: u32 = @intCast(at);
         defer if (ctx.context) |context| core.viewport.Registry.publishShown(decl, context, win_layout.paneOfViewport(index) != null);
         const edge = decl.attrs.dock orelse continue;
+        releaseHeld(win_layout, buffers, gpa, decl);
         // On screen is whether a pane IS this viewport; a request to show or
         // hide it is decided against that, here, and only here.
         const on_screen = win_layout.paneOfViewport(index);
@@ -366,6 +367,15 @@ pub fn materializeViewports(
         // entry): open it again, as after a hide, or present what the viewport
         // declares — never fall back to whatever entry happens to be active.
         const lost = !docked and buffers.get(node.pane().buffer_id) == null;
+        // A header listing what it held shows the newest one still open in
+        // place of one that closed (its tab's ×), as any tabbed pane does.
+        if (lost) if (newestHeld(buffers, decl)) |next| {
+            node.pane().buffer_id = next;
+            node.pane().top_row = 0;
+            hold(gpa, buffers, decl, next);
+            dirty = true;
+            continue;
+        };
         if (lost and decl.entry == null) decl.presented = false;
         if ((docked and kept == null) or lost) if (decl.entry) |held| {
             const again = gpa.dupe(u8, held) catch continue;
@@ -657,11 +667,48 @@ fn reopenInto(
 /// designation leaves nothing to remember.
 fn hold(gpa: std.mem.Allocator, buffers: *core.Buffers, decl: *core.viewport.Declaration, id: core.Buffers.Id) void {
     var buf: [core.designation.max_len]u8 = undefined;
-    const held = if (buffers.get(id)) |b| core.designation.of(b, &buf) else null;
+    const b = buffers.get(id);
+    const held = if (b) |entry| core.designation.of(entry, &buf) else null;
+    // A header listing entries lists this one from now on.
+    if (held) |text| decl.remember(gpa, text, b.?.creator) catch {};
     // Asked every frame for a shown viewport: unchanged is the common case,
     // and costs no allocation.
     if (held) |text| if (decl.entry) |old| if (std.mem.eql(u8, old, text)) return;
     core.viewport.Registry.hold(gpa, &decl.entry, held) catch {};
+}
+
+/// Let go of what `decl`'s header lists that is no longer its to list: an
+/// entry that closed, or one an ordinary pane shows now (it moved to the
+/// editor, where it is a document and wears an editor tab).
+fn releaseHeld(win_layout: *window_layout.Layout, buffers: *core.Buffers, gpa: std.mem.Allocator, decl: *core.viewport.Declaration) void {
+    var i: usize = decl.held.items.len;
+    while (i > 0) {
+        i -= 1;
+        const gone = if (core.designation.findText(buffers, decl.held.items[i])) |b| ordinaryPaneShows(win_layout, b.id) else true;
+        if (gone) decl.release(gpa, i);
+    }
+}
+
+/// The newest entry `decl`'s header lists that is still open.
+fn newestHeld(buffers: *core.Buffers, decl: *const core.viewport.Declaration) ?core.Buffers.Id {
+    var i: usize = decl.held.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (core.designation.findText(buffers, decl.held.items[i])) |b| return b.id;
+    }
+    return null;
+}
+
+/// Whether a pane that is no named viewport shows entry `id`.
+fn ordinaryPaneShows(win_layout: *window_layout.Layout, id: core.Buffers.Id) bool {
+    const Probe = struct { id: core.Buffers.Id, found: bool = false };
+    var probe: Probe = .{ .id = id };
+    win_layout.eachPane(&probe, struct {
+        fn visit(p: *Probe, pane: *window_layout.Pane) void {
+            if (pane.viewport == null and pane.buffer_id == p.id) p.found = true;
+        }
+    }.visit);
+    return probe.found;
 }
 
 /// Realize a `viewport.take` (`core.viewport.Registry.takeEntry`): `node`

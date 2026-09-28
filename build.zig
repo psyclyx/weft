@@ -32,6 +32,11 @@ const Guest = struct {
     /// headers under `WEFT_GHOSTTY_VT_WASM`. Only the terminal plugin does —
     /// the emulator is the plugin's, not core's (doc/terminal.md §2).
     ghostty_vt: bool = false,
+    /// Tells this guest where the shell integration it injects lives
+    /// (`@import("terminal_build").shell_integration`): `WEFT_SHELL_INTEGRATION`
+    /// at build time — the nix-packaged directory — or, outside nix, the
+    /// source tree's own `src/plugins/terminal/shell`. The terminal's alone.
+    shell_integration: bool = false,
 
     /// Where this guest's root source lives. Plugins own a directory;
     /// fixtures are single files (they exist to be minimal).
@@ -522,7 +527,7 @@ const guests = [_]Guest{
     .{ .name = "problems", .import = "guest_problems_wasm", .install = true, .libraries = &.{.statusline} },
     // The terminal: a shell on a pty, emulated by libghostty-vt linked into
     // the plugin itself (doc/terminal.md).
-    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true, .ghostty_vt = true },
+    .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true, .ghostty_vt = true, .shell_integration = true },
     .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
 
@@ -1619,6 +1624,12 @@ fn buildGuest(b: *std.Build, comptime guest_spec: Guest) *std.Build.Step.Compile
     guest.entry = .disabled; // reactor: called through exports, not _start
     guest.rdynamic = true; // export the `export fn`s + memory
     if (guest_spec.ghostty_vt) linkGhosttyVt(b, guest);
+    if (guest_spec.shell_integration) {
+        const o = b.addOptions();
+        o.addOption([]const u8, "shell_integration", b.graph.environ_map.get("WEFT_SHELL_INTEGRATION") orelse
+            b.pathFromRoot("src/plugins/terminal/shell"));
+        guest.root_module.addOptions("terminal_build", o);
+    }
     return guest;
 }
 

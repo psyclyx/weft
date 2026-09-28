@@ -5,6 +5,8 @@ let
     weft = pkgs.callPackage ./nix/weft.nix { };
     # The terminal plugin's VT emulator (doc/terminal.md).
     libghostty-vt-wasm = pkgs.callPackage ./nix/libghostty-vt-wasm.nix { ghostty-src = npins.ghostty; };
+    # The scripts the terminal plugin injects into a shell (doc/terminal.md).
+    weft-shell-integration = pkgs.callPackage ./nix/shell-integration.nix { };
   };
 
   overlay = final: _prev: mkPackages final;

@@ -505,7 +505,7 @@ pub const Context = struct {
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) |why| return self.refuse(why);
+        if (@import("grid_mirror.zig").writeRefusal(self.buffer(), r, bytes)) |why| return self.refuse(why);
         if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
             .ok => {},
@@ -525,7 +525,7 @@ pub const Context = struct {
         if (ranges.len == 1) return self.edit(ranges[0], bytes);
         if (ranges.len == 0) return;
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) |why| return self.refuse(why);
+        for (ranges) |r| if (@import("grid_mirror.zig").writeRefusal(self.buffer(), r, bytes)) |why| return self.refuse(why);
         for (ranges) |r| {
             if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
             switch (self.checkDocRegion(r.start, r.end)) {
@@ -560,6 +560,14 @@ pub const Context = struct {
             self.noteRefusal("read-only: view access");
             return error.Unauthorized;
         }
+        // A grid's text is the program's but for its command line: an undo
+        // reaching past it (a line long since run) is refused, as the edit.
+        if (self.buffer().grid != null) for (repls) |r| {
+            if (@import("grid_mirror.zig").writeRefusal(self.buffer(), r.range, r.bytes)) |why| {
+                self.noteRefusal(why);
+                return error.Unauthorized;
+            }
+        };
         for (repls) |r| switch (self.checkDocRegion(r.range.start, r.range.end)) {
             .ok => {},
             .out_of_limit => {

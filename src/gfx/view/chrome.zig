@@ -437,7 +437,7 @@ pub const TabBox = struct { index: usize, box: region.Rect, close: region.Rect }
 /// shows its own icon from its presentation, or none (the trailing close
 /// affordance, whose glyph IS its label — see `Hud.Tab`'s doc).
 pub fn tabIconName(tab: hud_mod.Tab) ?[]const u8 {
-    if (tab.command.len == 0) return "file";
+    if (tab.command.len == 0) return if (tab.icon.len > 0) tab.icon else "file";
     return if (tab.icon.len > 0) tab.icon else null;
 }
 
