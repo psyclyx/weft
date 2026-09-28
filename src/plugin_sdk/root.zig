@@ -797,11 +797,24 @@ pub fn configList(key: []const u8) ?ConfigIter {
 }
 
 /// This plugin's single config value for `key` (the first record of its list),
-/// or "" if unset. Borrows `config_scratch` — valid until the next config read.
+/// or "" if unset. Valid for the plugin's LIFETIME: every distinct value is
+/// interned once, so reading a second key never rewrites the first one's
+/// answer (it used to borrow `config_scratch`, and silently did). A plugin
+/// sees only a handful of distinct values, so the table stays small.
 pub fn config(key: []const u8) []const u8 {
     var it = configList(key) orelse return "";
-    return it.next() orelse "";
+    const value = it.next() orelse return "";
+    for (config_interned.items) |kept| if (std.mem.eql(u8, kept, value)) return kept;
+    const kept = allocator.dupe(u8, value) catch return "";
+    config_interned.append(allocator, kept) catch {
+        allocator.free(kept);
+        return "";
+    };
+    return kept;
 }
+
+/// Every distinct value `config` has answered with (see there).
+var config_interned: std.ArrayList([]u8) = .empty;
 
 /// Show a transient status-line message.
 pub fn echo(msg: []const u8) void {
