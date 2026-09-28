@@ -224,22 +224,20 @@ test "echo timing: a message shows for its duration from its saying, and again w
     defer echo.deinit(std.testing.allocator);
     var timing: EchoTiming = .{};
     const s = std.time.ns_per_s;
-    echo.clearRetainingCapacity();
-    try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 10 * s, null));
+    try echo.say(std.testing.allocator, "no hover");
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 10 * s, null));
     try std.testing.expect(timing.showing);
-    try std.testing.expect(!timing.note(echo.said, echo.items.len > 0, 13 * s, null)); // nothing moved
+    try std.testing.expect(!timing.note(echo.sayings(), echo.text().len > 0, 13 * s, null)); // nothing moved
     try std.testing.expect(timing.showing);
     try std.testing.expectEqual(@as(?u64, 14 * s), timing.due(13 * s));
-    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 15 * s, null)); // gone
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 15 * s, null)); // gone
     try std.testing.expect(!timing.showing);
     try std.testing.expect(timing.due(15 * s) == null);
     // The same words, said again: shown again.
-    echo.clearRetainingCapacity();
-    try echo.appendSlice(std.testing.allocator, "no hover");
-    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 20 * s, 1000));
+    try echo.say(std.testing.allocator, "no hover");
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 20 * s, 1000));
     try std.testing.expect(timing.showing);
-    try std.testing.expect(timing.note(echo.said, echo.items.len > 0, 21 * s + 1, 1000));
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 21 * s + 1, 1000));
     try std.testing.expect(!timing.showing);
 }
 

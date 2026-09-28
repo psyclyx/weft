@@ -310,8 +310,7 @@ pub fn hRunArgvAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         .invoked => 0,
         .unknown => -1,
         .refused => |why| blk: {
-            p.activeCtx().head.echo.clearRetainingCapacity();
-            p.activeCtx().head.echo.appendSlice(gpa, why) catch {};
+            p.activeCtx().head.echo.say(gpa, why) catch {};
             break :blk 0;
         },
     };
@@ -345,8 +344,7 @@ const Argv = struct {
             const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
                 cmd, argc, max_argv,
             }) catch "too many arguments";
-            p.activeCtx().head.echo.clearRetainingCapacity();
-            p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+            p.activeCtx().head.echo.say(gpa, msg) catch {};
             return false;
         }
         const vec = caller.readMemory(gpa, @intCast(vec_ptr), argc * 8) catch return false;

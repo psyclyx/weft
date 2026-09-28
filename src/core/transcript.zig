@@ -562,10 +562,9 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
         // surface to build, not duplicated here; the honest floor for
         // this slice is an echoed refusal reason on the one channel every
         // command already reports through.
-        ctx.head.echo.clearRetainingCapacity();
         var buf: [96]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "transcript.save: refused ({t})", .{err}) catch "transcript.save: refused";
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        ctx.head.echo.say(gpa, msg) catch {};
         return .{ .boolean = false };
     };
     // Re-fill: the buffer now shows the model's own canonical text for
@@ -575,10 +574,9 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // `on_save_apply` follows.
     try fill(gpa, &ctx.buffers.notices, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
-        ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "transcript.save: {d} row(s) were stale, discarded", .{report.stale}) catch "transcript.save: some rows were stale";
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        ctx.head.echo.say(gpa, msg) catch {};
     }
     return .{ .boolean = true };
 }

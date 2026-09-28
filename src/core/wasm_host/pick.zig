@@ -185,8 +185,7 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     // against. The guest names no directory.
     const ctx = p.activeCtx();
     const root = (designation.resolveRelative(ctx, gpa, ".") catch return) orelse {
-        ctx.head.echo.clearRetainingCapacity();
-        ctx.head.echo.appendSlice(gpa, "open: this place has no local directory to list") catch {};
+        ctx.head.echo.say(gpa, "open: this place has no local directory to list") catch {};
         return;
     };
     defer gpa.free(root);

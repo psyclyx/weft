@@ -711,8 +711,7 @@ pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const com
     const n = sys.revoke(args[0].string, args[1].string);
     var buf: [160]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "revoke: {s}/{s} — {d} row(s) invalidated", .{ args[0].string, args[1].string, n }) catch "revoke: done";
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     return .nil;
 }
 
@@ -776,8 +775,7 @@ pub fn grantsShowHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
         std.log.info("grants-show:{s}", .{line});
     }
     if (sys.grants.rows.items.len == 0) out.appendSlice(gpa, " (empty)") catch {};
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, out.items) catch {};
+    ctx.head.echo.say(gpa, out.items) catch {};
     return .nil;
 }
 
@@ -1026,7 +1024,7 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
     try t.expect(head.pick.active);
 
     // Head-personal state that should SURVIVE the swap untouched.
-    try head.echo.appendSlice(gpa, "kept across swap");
+    try head.echo.say(gpa, "kept across swap");
     head.dot.reg_n = 1;
     head.dot.reg[0] = .{ .slen = 1, .tlen = 0 };
     head.dot.reg[0].spec[0] = 'x';
@@ -1037,7 +1035,7 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
     try t.expect(!head.pick.active);
     try t.expect(sink.cancelled);
     // dot/echo untouched — head-personal, not system-referencing.
-    try t.expectEqualStrings("kept across swap", head.echo.items);
+    try t.expectEqualStrings("kept across swap", head.echo.text());
     try t.expectEqual(@as(usize, 1), head.dot.reg_n);
 }
 
@@ -1097,7 +1095,7 @@ test "system: a second manifest hosts a SECOND system end-to-end" {
     try t.expectEqualStrings("agent-ux-quit", agent_sys.keymap.lookup("normal", "q").?);
     try t.expectEqualStrings("agent-ux-status", agent_sys.keymap.lookup("normal", "space a s").?); // "SPC a s" normalizes to "space a s" — Keymap.zig's canonical form
     // The startup echo landed on the system's default head.
-    try t.expectEqualStrings("agent-ux: minimal system loaded", agent_sys.default_head.echo.items);
+    try t.expectEqualStrings("agent-ux: minimal system loaded", agent_sys.default_head.echo.text());
 
     // Headless the whole time: no Head other than `default_head` ever
     // attached, and the system fully evaluated + applied its own manifest.
@@ -1140,7 +1138,7 @@ test "system: W4 slice 1 — the System-owned grant table, capture-time resoluti
 
     try t.expect(!sys.grants.check(h));
     try t.expectEqual(grants_mod.Reason.revoked, sys.grants.reasonFor(h));
-    try t.expectEqualStrings("revoke: notes/fs_read — 1 row(s) invalidated", sys.default_head.echo.items);
+    try t.expectEqualStrings("revoke: notes/fs_read — 1 row(s) invalidated", sys.default_head.echo.text());
 
     // A capture AFTER revocation no longer collects the dead row.
     try t.expectEqual(@as(usize, 0), c.capturedCtx().grants.len);
@@ -1161,7 +1159,7 @@ test "system: W4 slice 4 — grants-show lists every row, alive and dead, with i
     var c = sys.contextFor(&sys.default_head);
     _ = try command.run(&sys.commands, &c, "grants.show", &.{});
 
-    const echoed = sys.default_head.echo.items;
+    const echoed = sys.default_head.echo.text();
     try t.expect(std.mem.indexOf(u8, echoed, "notes/fs_read limit=none state=revoked") != null);
     try t.expect(std.mem.indexOf(u8, echoed, "git/fs_write limit=fs_root(repo) state=alive") != null);
 }

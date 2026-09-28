@@ -350,8 +350,7 @@ pub fn countArg(args: []const Value, i: usize) error{TypeMismatch}!usize {
 }
 
 fn say(ctx: *Context, msg: []const u8) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// Reopen through the ordinary `open`: whatever it does for a designation

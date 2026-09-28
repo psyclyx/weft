@@ -370,10 +370,8 @@ test "two heads: distinct echo lines" {
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    ed.head.echo.clearRetainingCapacity();
-    ed.head.echo.appendSlice(gpa, "from A") catch unreachable;
-    b.head.echo.clearRetainingCapacity();
-    b.head.echo.appendSlice(gpa, "from B") catch unreachable;
+    ed.head.echo.say(gpa, "from A") catch unreachable;
+    b.head.echo.say(gpa, "from B") catch unreachable;
 
     try t.expectEqualStrings("from A", ed.echoText());
     try t.expectEqualStrings("from B", b.echoText());
@@ -410,7 +408,7 @@ test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head,
     // second head silently acted on the plugin's LOAD-TIME ctx (head A)
     // instead — `wpCmdTrampoline` discarded the dispatching `ctx` entirely.
     try t.expectEqualStrings("default", ed.mode());
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
 }
 
 test "two heads: a wl_run-nested guest command keeps the dispatching head through the nesting" {
@@ -438,7 +436,7 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
 
     // A never touched, at any point in the nesting.
     try t.expectEqualStrings("default", ed.mode());
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
 }
 
 test "two heads: on_poll (background) can no longer force a mode or echo onto ANY head (task #19 item 4)" {
@@ -484,7 +482,7 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     // `wasm_host/plugin.zig`) — the guest call unwinds right there, so the
     // `weft.echo` right after it never runs either. Neither head moves.
     try t.expectEqualStrings("default", ed.mode()); // A: never touched, was "polled" before this fix
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
     // B, meanwhile, is untouched by the background entry either way — still
     // exactly where its own last dispatch (head-poke) left it.
     try t.expectEqualStrings("poked", b.mode());

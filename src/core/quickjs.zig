@@ -1657,8 +1657,7 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
         const msg = std.fmt.allocPrint(gpa, "config: weft.use(\"{s}\") nested inside an imported config — flattens to the same 'imported' tier, not a deeper one", .{name}) catch "";
         defer if (msg.len > 0) gpa.free(msg);
         std.log.warn("{s}", .{msg});
-        br.activeCtx().head.echo.clearRetainingCapacity();
-        br.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+        br.activeCtx().head.echo.say(gpa, msg) catch {};
     }
     const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
@@ -1893,8 +1892,7 @@ fn echoProvideMalformed(br: *Bridge, action: []const u8, why: []const u8) void {
     defer ctx.gpa.free(msg);
     std.log.warn("config: {s}", .{msg});
     if (br.in_dispatch or br.loading) {
-        ctx.head.echo.clearRetainingCapacity();
-        ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+        ctx.head.echo.say(ctx.gpa, msg) catch {};
     }
 }
 
@@ -2058,8 +2056,7 @@ fn echoProvideRefused(br: *Bridge, action: []const u8) void {
     // head.echo only from a dispatching path or load — a BACKGROUND entry's
     // error lands in the log instead (the gated class; see #19 item 4).
     if (br.in_dispatch or br.loading) {
-        ctx.head.echo.clearRetainingCapacity();
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        ctx.head.echo.say(gpa, msg) catch {};
     } else {
         std.log.warn("js plugin: {s}", .{msg});
     }
@@ -2083,8 +2080,7 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     // what it says is a notice to the system (`Buffers.notices`), exactly as the wasm
     // plane's `hEcho` routes it — never the head's echo line, never a trap.
     if (!(br.in_dispatch or br.loading)) return perm_gate.noteBackground(br.activeCtx(), br.owner, msg);
-    br.activeCtx().head.echo.clearRetainingCapacity();
-    br.activeCtx().head.echo.appendSlice(br.activeCtx().gpa, msg) catch {};
+    br.activeCtx().head.echo.say(br.activeCtx().gpa, msg) catch {};
 }
 
 fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

@@ -791,8 +791,7 @@ pub fn bindManifestSegment(ctx_ptr: *anyopaque, apply_ctx: *core.command.Context
         std.log.warn("weft.statusSegment('{s}'): unrecognized role '{s}' — falling back to 'normal'", .{ decl.text, decl.role });
         const msg = std.fmt.allocPrint(gpa, "weft.statusSegment('{s}'): unrecognized role '{s}' — using 'normal'", .{ decl.text, decl.role }) catch break :blk .normal;
         defer gpa.free(msg);
-        apply_ctx.head.echo.clearRetainingCapacity();
-        apply_ctx.head.echo.appendSlice(gpa, msg) catch {};
+        apply_ctx.head.echo.say(gpa, msg) catch {};
         break :blk .normal;
     };
     try c.bind(.{

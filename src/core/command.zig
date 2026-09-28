@@ -594,8 +594,7 @@ pub const Context = struct {
     }
 
     fn noteRefusal(self: *Context, why: []const u8) void {
-        self.head.echo.clearRetainingCapacity();
-        self.head.echo.appendSlice(self.gpa, why) catch {};
+        self.head.echo.say(self.gpa, why) catch {};
     }
 
     /// Whether `r` overlaps a read-only SPAN of the active buffer — the
@@ -959,8 +958,7 @@ pub fn invoke(commands: *const Commands, ctx: *Context, name: []const u8, args: 
 }
 
 fn echo(ctx: *Context, msg: []const u8) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// Turn a failed invocation into a line worth reading. An argument mismatch
@@ -1017,14 +1015,13 @@ pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) a
     if (ctx.actions.container.resolveOne(tr.name, ctx.capturedCtx().mergedFacts())) |b| {
         return run(ctx.commands, ctx, b.provider.command, args);
     }
-    ctx.head.echo.clearRetainingCapacity();
     const lang = Actions.langOfName(ctx.buffers.active().name);
     var buf: [128]u8 = undefined;
     const msg = if (lang.len > 0)
         std.fmt.bufPrint(&buf, "no {s} provider for .{s}", .{ tr.name, lang }) catch tr.name
     else
         std.fmt.bufPrint(&buf, "no {s} provider here", .{tr.name}) catch tr.name;
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     return .nil;
 }
 
@@ -1195,29 +1192,29 @@ test "command: invoking on a user's behalf reports — the answer AND the refusa
     // keymap promoted this — the palette and every guest `wl_run*` dropped it,
     // which is why `:share` answering "already shared" looked like a no-op.
     invoke(&env.commands, ctx, "share", &.{});
-    try t.expectEqualStrings("already shared", ctx.head.echo.items);
+    try t.expectEqualStrings("already shared", ctx.head.echo.text());
 
     // An arity refusal answers with the command's SHAPE. This is the palette's
     // whole failure mode: it calls every command with no arguments, so
     // `listen` used to refuse into a discarded error and say nothing at all.
     invoke(&env.commands, ctx, "listen", &.{});
-    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "listen <port> <access>") != null);
-    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "given 0") != null);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.text(), "listen <port> <access>") != null);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.text(), "given 0") != null);
 
     // An unknown name is named, not swallowed.
     invoke(&env.commands, ctx, "lisen", &.{});
-    try t.expectEqualStrings("no such command: lisen", ctx.head.echo.items);
+    try t.expectEqualStrings("no such command: lisen", ctx.head.echo.text());
 
     // The same call, given what it asked for, replaces the refusal with its
     // own answer — the two arrive on one line, in order, like a conversation.
     invoke(&env.commands, ctx, "listen", &.{ .{ .string = "7777" }, .{ .string = "edit" } });
-    try t.expectEqualStrings("listening…", ctx.head.echo.items);
+    try t.expectEqualStrings("listening…", ctx.head.echo.text());
 
     // A command with nothing to say leaves the line as it found it: this
     // promotes what a command REPORTS, and is not a log of what ran.
     _ = try env.commands.bind(gpa, "quiet", comptime define("quiet", "Say nothing.", saysNothing));
     invoke(&env.commands, ctx, "quiet", &.{});
-    try t.expectEqualStrings("listening…", ctx.head.echo.items);
+    try t.expectEqualStrings("listening…", ctx.head.echo.text());
 }
 
 test "command Value: a borrowed live range follows edits and rejects another document" {

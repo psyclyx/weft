@@ -690,7 +690,7 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     // and an honest echo is set — no divergent local ghost.
     _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before, host.editor().text().byteLen());
-    try t.expectEqualStrings("read-only: view access", host.head.echo.items);
+    try t.expectEqualStrings("read-only: view access", host.head.echo.text());
 
     // With edit grade restored, the same command applies.
     host.editor().doc.my_grant = .own;
@@ -700,10 +700,10 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     // A read-only buffer is refused by the same door, and says which refusal
     // it was — the builtin holds no permission check of its own.
     host.buffers.active().read_only = core.Buffers.produced;
-    host.head.echo.clearRetainingCapacity();
+    try host.head.echo.say(gpa, "");
     _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());
-    try t.expectEqualStrings("read-only buffer", host.head.echo.items);
+    try t.expectEqualStrings("read-only buffer", host.head.echo.text());
 }
 
 test "entries: a view carries no editor — text ops refuse politely, undo is a no-op" {
@@ -721,25 +721,25 @@ test "entries: a view carries no editor — text ops refuse politely, undo is a 
     // Typing, deleting, and moving the caret are echoed refusals, not errors —
     // the same door the grade gate and read-only flag report through.
     for ([_][]const u8{ "edit.delete-before", "cursor.left" }) |cmd| {
-        host.head.echo.clearRetainingCapacity();
+        try host.head.echo.say(gpa, "");
         _ = try core.command.run(&host.commands, &host.ctx, cmd, &.{});
-        try t.expectEqualStrings("no text in this view", host.head.echo.items);
+        try t.expectEqualStrings("no text in this view", host.head.echo.text());
     }
-    host.head.echo.clearRetainingCapacity();
+    try host.head.echo.say(gpa, "");
     _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
-    try t.expectEqualStrings("no text in this view", host.head.echo.items);
+    try t.expectEqualStrings("no text in this view", host.head.echo.text());
 
     // A mode transition can seal text undo without inventing a document for
     // an object entry or reporting an irrelevant refusal.
-    host.head.echo.clearRetainingCapacity();
+    try host.head.echo.say(gpa, "");
     _ = try core.command.run(&host.commands, &host.ctx, "edit.seal-undo", &.{});
-    try t.expectEqualStrings("", host.head.echo.items);
+    try t.expectEqualStrings("", host.head.echo.text());
 
     // Undo reports "nothing undone" instead of reaching a stand-in history.
-    host.head.echo.clearRetainingCapacity();
+    try host.head.echo.say(gpa, "");
     const undone = try core.command.run(&host.commands, &host.ctx, "edit.undo", &.{});
     try t.expect(undone.boolean == false);
-    try t.expectEqualStrings("no text in this view", host.head.echo.items);
+    try t.expectEqualStrings("no text in this view", host.head.echo.text());
 }
 
 // ── Syntax (milestone 7) ────────────────────────────────────────────

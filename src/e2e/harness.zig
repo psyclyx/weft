@@ -659,7 +659,7 @@ pub const Editor = struct {
 
     /// The current transient echo line (what a plugin last reported to the user).
     pub fn echoText(self: *Editor) []const u8 {
-        return self.session.head.echo.items;
+        return self.session.head.echo.text();
     }
 
     /// Drive complete application wakes until the active buffer's async save
@@ -1120,7 +1120,7 @@ pub const SecondHead = struct {
     }
 
     pub fn echoText(self: *SecondHead) []const u8 {
-        return self.head.echo.items;
+        return self.head.echo.text();
     }
 };
 

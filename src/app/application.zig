@@ -356,7 +356,7 @@ pub const Application = struct {
         const echo = &self.session.head.echo;
         const notices = &self.driver.ctx.buffers.notices;
         const ms = echoMs(self.driver.ctx.config);
-        if (self.echo_timing.note(echo.said, echo.items.len > 0, self.wake_ns, ms)) damaged = true;
+        if (self.echo_timing.note(echo.sayings(), echo.text().len > 0, self.wake_ns, ms)) damaged = true;
         if (self.notice_timing.note(notices.said, notices.len > 0, self.wake_ns, ms)) damaged = true;
         // The vim-goggles flash, by the same rule: its start and its lapse are
         // this wake's to note, so the frame draws it without timing it.

@@ -811,13 +811,11 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
 /// Show a transient message on the status line — the generic surface
 /// plugins and commands report through (cleared by the next echo).
 fn echoLine(ctx: *Context, text: []const u8) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, text) catch {};
+    ctx.head.echo.say(ctx.gpa, text) catch {};
 }
 
 fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
-    ctx.head.echo.clearRetainingCapacity();
-    try ctx.head.echo.appendSlice(ctx.gpa, args.text);
+    try ctx.head.echo.say(ctx.gpa, args.text);
     return ok;
 }
 
@@ -875,9 +873,8 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();
 
-    ctx.head.echo.clearRetainingCapacity();
     if (ex.eligible.len == 0) {
-        try ctx.head.echo.appendSlice(ctx.gpa, "action.explain: no eligible binding");
+        try ctx.head.echo.say(ctx.gpa, "action.explain: no eligible binding");
         return ok;
     }
     const w = ex.eligible[ex.winner.?];
@@ -892,7 +889,7 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
         w.specificity,
         if (ex.collision) " COLLISION" else "",
     }) catch "action.explain: (result too long to display)";
-    try ctx.head.echo.appendSlice(ctx.gpa, msg);
+    try ctx.head.echo.say(ctx.gpa, msg);
     return ok;
 }
 
@@ -1112,12 +1109,12 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     };
 
     _ = try command.run(&commands, &ctx, "action.explain", &.{.{ .string = "file.save" }});
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "projection-save") != null);
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "2 eligible") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "projection-save") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "2 eligible") != null);
 
     // An unknown slot: no eligible bindings, no crash, an honest echo.
     _ = try command.run(&commands, &ctx, "action.explain", &.{.{ .string = "nonexistent-slot" }});
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "no eligible binding") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "no eligible binding") != null);
 }
 
 test {

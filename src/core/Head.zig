@@ -543,42 +543,43 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.* = .{};
 }
 
-/// Set the pending sequence (owned copy); "" clears it (no allocation).
-/// A head's one-line message. Every writer SAYS it — clears, then writes —
-/// and each saying is counted (`said`), so a reader tells a message said
-/// again from one still standing: the frame shows a message for
+/// A head's one-line message. There is one way to write it: `say`, which
+/// replaces what it says and counts the saying, so a reader tells a message
+/// said again from one still standing — the frame shows a message for
 /// `editor/echo-ms` from its saying, and a second "no hover" is a second
-/// saying though its text is the first's. The list's own methods, by the
-/// same names, so a writer cannot change the text without the count.
+/// saying though its text is the first's. There is no append: a message is
+/// composed first and said whole, so no writer can change the text without
+/// the count. `text` and `sayings` are the reads; `private` is theirs alone.
 pub const Echo = struct {
-    list: std.ArrayList(u8) = .empty,
-    /// What it says now — `list.items`, kept in step by every method.
-    items: []u8 = &.{},
+    private: struct {
+        text: std.ArrayList(u8) = .empty,
+        said: u64 = 0,
+    } = .{},
+
+    /// Say `msg` (empty says nothing, and still counts): the line becomes it.
+    pub fn say(self: *Echo, gpa: Allocator, msg: []const u8) Allocator.Error!void {
+        self.private.said +%= 1;
+        self.private.text.clearRetainingCapacity();
+        try self.private.text.appendSlice(gpa, msg);
+    }
+
+    /// What it says now. Borrowed until the next `say`.
+    pub fn text(self: *const Echo) []const u8 {
+        return self.private.text.items;
+    }
+
     /// Sayings so far.
-    said: u64 = 0,
-
-    pub fn clearRetainingCapacity(self: *Echo) void {
-        self.list.clearRetainingCapacity();
-        self.items = self.list.items;
-        self.said +%= 1;
-    }
-
-    pub fn appendSlice(self: *Echo, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
-        defer self.items = self.list.items;
-        try self.list.appendSlice(gpa, bytes);
-    }
-
-    pub fn print(self: *Echo, gpa: Allocator, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
-        defer self.items = self.list.items;
-        try self.list.print(gpa, fmt, args);
+    pub fn sayings(self: *const Echo) u64 {
+        return self.private.said;
     }
 
     pub fn deinit(self: *Echo, gpa: Allocator) void {
-        self.list.deinit(gpa);
+        self.private.text.deinit(gpa);
         self.* = .{};
     }
 };
 
+/// Set the pending sequence (owned copy); "" clears it (no allocation).
 pub fn setPending(self: *Head, gpa: Allocator, seq: []const u8) Allocator.Error!void {
     if (seq.len == 0) {
         gpa.free(self.pending);
@@ -844,6 +845,19 @@ pub fn resolvedIsGroup(self: *const Head, i: usize) bool {
 
 const t = std.testing;
 
+test "head: every message written to the echo is a saying the frame counts" {
+    const gpa = t.allocator;
+    var echo: Echo = .{};
+    defer echo.deinit(gpa);
+    try echo.say(gpa, "saved");
+    const first = echo.sayings();
+    try echo.say(gpa, "saved");
+    try t.expect(echo.sayings() != first);
+    try t.expectEqualStrings("saved", echo.text());
+    try echo.say(gpa, "");
+    try t.expectEqualStrings("", echo.text());
+}
+
 test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
@@ -1107,10 +1121,10 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     try t.expectEqualStrings("b-prompt", head_b.pick.prompt);
 
     // Distinct echo lines.
-    try head_a.echo.appendSlice(gpa, "from A");
-    try head_b.echo.appendSlice(gpa, "from B");
-    try t.expectEqualStrings("from A", head_a.echo.items);
-    try t.expectEqualStrings("from B", head_b.echo.items);
+    try head_a.echo.say(gpa, "from A");
+    try head_b.echo.say(gpa, "from B");
+    try t.expectEqualStrings("from A", head_a.echo.text());
+    try t.expectEqualStrings("from B", head_b.echo.text());
 
     // Opening A's pick set A's mode to "pick" (Pick.open routes mode changes
     // through the ctx's own head); B's mode is untouched by it.

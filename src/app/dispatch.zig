@@ -309,8 +309,9 @@ fn macroRecord(ctx: *core.command.Context, spec: []const u8, commit: core.TextCo
 }
 
 fn say(ctx: *core.command.Context, comptime fmt: []const u8, args: anytype) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.print(ctx.gpa, fmt, args) catch {};
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// A register argument: one printable byte. `null` when the argument is
@@ -798,8 +799,7 @@ fn echoDisabled(ctx: *core.command.Context, plane: *const core.intent.Plane, d: 
     const why = if (d.reason.message.len > 0) d.reason.message else d.reason.reason;
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}: {s}", .{ plane.catalog.intentionName(d.intention), why }) catch why;
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 fn echoAmbiguity(ctx: *core.command.Context, plane: *const core.intent.Plane, a: core.catalog.Ambiguity) void {
@@ -809,7 +809,6 @@ fn echoAmbiguity(ctx: *core.command.Context, plane: *const core.intent.Plane, a:
         a.a.owner,
         a.b.owner,
     }) catch "intention: ambiguous";
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     std.log.warn("dispatch: {s}", .{msg});
 }

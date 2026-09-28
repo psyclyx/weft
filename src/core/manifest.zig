@@ -1024,8 +1024,7 @@ pub const Manifest = struct {
             };
         }
         for (self.echoes.items) |d| {
-            actx.ctx.head.echo.clearRetainingCapacity();
-            actx.ctx.head.echo.appendSlice(gpa, d.message) catch {};
+            actx.ctx.head.echo.say(gpa, d.message) catch {};
         }
         for (self.logs.items) |d| std.log.info("config: {s}", .{d.message});
         // D2's `weft.slot` (§2.2 form 3): unlike `status_segments`, no opaque
@@ -1536,8 +1535,7 @@ fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32)
 fn echoProvideRefused(ctx: *command.Context, gpa: Allocator, action: []const u8) void {
     const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
     defer gpa.free(msg);
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, msg) catch {};
+    ctx.head.echo.say(gpa, msg) catch {};
 }
 
 /// Surface a dropped `weft.set` to the config author (nit a: the closed-
@@ -1545,8 +1543,7 @@ fn echoProvideRefused(ctx: *command.Context, gpa: Allocator, action: []const u8)
 fn echoValueDropped(ctx: *command.Context, gpa: Allocator, owner: []const u8, key: []const u8) void {
     const msg = std.fmt.allocPrint(gpa, "config: weft.set(\"{s}\", \"{s}\", ...) dropped — '{s}' is not a loaded plugin or a declared value namespace", .{ owner, key, owner }) catch return;
     defer gpa.free(msg);
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, msg) catch {};
+    ctx.head.echo.say(gpa, msg) catch {};
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

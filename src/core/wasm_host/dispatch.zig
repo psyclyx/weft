@@ -23,8 +23,7 @@ pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     // `wl_run` to say anything off a keystroke, and three did not. Head state
     // is still never written from the background.
     if (!shared.canDispatch(p)) return shared.noteBackground(p.activeCtx(), p.name, msg);
-    p.activeCtx().head.echo.clearRetainingCapacity();
-    p.activeCtx().head.echo.appendSlice(p.gpa, msg) catch {};
+    p.activeCtx().head.echo.say(p.gpa, msg) catch {};
 }
 
 // Command args in + result out. Integers cross as i32 — the membrane word.

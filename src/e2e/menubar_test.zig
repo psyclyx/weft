@@ -553,7 +553,7 @@ test "e2e/menubar: a row that asks for an argument runs in the primary context t
     // The save writes on a worker (`Editor.requestSave`).
     ed.waitSaveOf(editor);
     const disk = core.file.readAlloc(gpa, "b.txt") catch |err| {
-        std.debug.print("[e2e/menubar] Save As… wrote nothing (echo: '{s}')\n", .{ed.head.echo.items});
+        std.debug.print("[e2e/menubar] Save As… wrote nothing (echo: '{s}')\n", .{ed.head.echo.text()});
         return err;
     };
     defer gpa.free(disk);

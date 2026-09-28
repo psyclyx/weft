@@ -477,7 +477,7 @@ test "e2e/focus: ide.js — over a focused row, a picker, a prompt and snipe's c
     ed.press("Return", "");
     try t.expectEqualStrings("palette-arg", ed.mode());
     ed.typeText("zz");
-    try t.expect(std.mem.indexOf(u8, ed.head.echo.items, "zz") != null);
+    try t.expect(std.mem.indexOf(u8, ed.head.echo.text(), "zz") != null);
     try expectRow(ed, "m.txt");
     ed.press("Escape", "");
 

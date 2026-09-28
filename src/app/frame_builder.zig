@@ -1027,7 +1027,7 @@ pub const FrameBuilder = struct {
             .link = link_note,
             // A message while it is brief (`EchoTiming`), else what the line
             // shows at rest: the diagnostic under the caret.
-            .echo = if (echo_live) try arena.dupe(u8, fx.head.echo.items) else cursor_diag,
+            .echo = if (echo_live) try arena.dupe(u8, fx.head.echo.text()) else cursor_diag,
             .feed = if (fx.buffers.status.get()) |s| try arena.dupe(u8, s) else null,
             // What no head asked to hear, while it is brief — beside the
             // chip, never in it.

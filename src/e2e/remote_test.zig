@@ -296,7 +296,7 @@ test "e2e/remote: a peer's file without a write grant is read-only and says why"
     try t.expectEqualStrings("remote", fact(b, "locality"));
     // Said when it opens…
     try t.expect(std.mem.indexOf(u8, b.echoText(), "without a write grant") != null);
-    b.head.echo.clearRetainingCapacity();
+    try b.head.echo.say(gpa, "");
     // …and by every edit it refuses: the entry rests structural, so a key
     // types nothing, and an edit that reaches the door is refused with the
     // entry's own reason.

@@ -113,8 +113,7 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
         defer gpa.free(msg);
         if (p.in_dispatch or p.loading) {
-            p.activeCtx().head.echo.clearRetainingCapacity();
-            p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+            p.activeCtx().head.echo.say(gpa, msg) catch {};
         } else {
             std.log.warn("plugin '{s}': {s}", .{ p.name, msg });
         }

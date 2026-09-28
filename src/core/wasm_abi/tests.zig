@@ -875,11 +875,11 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
 
     // Composition: an unknown `:name` falls through to the registry and, when no
     // such command exists, reports it (vim's E492) rather than silently no-op.
-    env.head.echo.clearRetainingCapacity();
+    try env.head.echo.say(gpa, "");
     _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
     _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "definitely-not-a-command" }});
     _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
-    try t.expect(std.mem.indexOf(u8, env.head.echo.items, "not an editor command") != null);
+    try t.expect(std.mem.indexOf(u8, env.head.echo.text(), "not an editor command") != null);
 }
 
 test "wasm plugin: upcase-line edits in place across the membrane" {
@@ -969,7 +969,7 @@ test "wasm plugin: a handle the guest never got is refused, not fatal to the hos
     // rather than failing it, so the guest also echoes on the way out to
     // prove it ran the whole gauntlet instead of trapping partway.
     _ = try command.run(&env.commands, &env.ctx, "hostile-handles", &.{});
-    try t.expectEqualStrings("survived", env.head.echo.items);
+    try t.expectEqualStrings("survived", env.head.echo.text());
 
     // Nothing was opened, so nothing can have been closed: a bogus handle
     // must never have found a slot to null.
@@ -1004,7 +1004,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     // guest call unwinds right there, so the echo never runs either.
     try t.expectError(error.Trap, contract.callOptionalExport("on_poll", plugin, .{}));
     try t.expectEqualStrings("start", env.head.currentMode()); // untouched
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len); // untouched
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len); // untouched
 }
 
 test "wasm plugin: the SAME head-gated import works from a dispatching entry, and a nested wl_run keeps dispatch status (task #19 item 4)" {
@@ -1023,7 +1023,7 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     // `weft.echo` pair `on_poll` traps on above now succeeds.
     _ = try command.run(&env.commands, &env.ctx, "head.poke", &.{});
     try t.expectEqualStrings("poked", env.head.currentMode());
-    try t.expectEqualStrings("poked", env.head.echo.items);
+    try t.expectEqualStrings("poked", env.head.echo.text());
 
     // `head.relay` (on_command -> wl_run("head.poke") -> on_command, nested)
     // THEN a second `weft.echo` write after the nested call returns. Both the
@@ -1033,7 +1033,7 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     // instant the inner call returns.
     _ = try command.run(&env.commands, &env.ctx, "head.relay", &.{});
     try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head-poke
-    try t.expectEqualStrings("after-relay", env.head.echo.items); // written AFTER the nesting, still succeeds
+    try t.expectEqualStrings("after-relay", env.head.echo.text()); // written AFTER the nesting, still succeeds
 }
 
 test "wasm plugin: nested same-plugin dispatch preserves its caller's live ranges" {
@@ -1406,7 +1406,7 @@ test "wasm plugin: palette status echoes the active buffer (introspection)" {
     // status walks the buffers (bufferCount/bufferAt) and echoes the active
     // one's name — the whole introspection surface across the membrane.
     _ = try command.run(&env.commands, &env.ctx, "palette.show-status", &.{});
-    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
+    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.text());
 }
 
 test "wasm plugin: palette opens a command pick; accept dispatches back and runs the choice" {
@@ -1431,7 +1431,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "status" }});
     _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active); // accept closed the pick
-    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
+    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.text());
 }
 
 test "wasm plugins: consult-line combines anchored row identity with exact match evidence" {
@@ -2248,7 +2248,7 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     // But the operator's edit dies at the gate: the buffer is unchanged, and no
     // ghost commit was authored.
     const before = ed.doc.commitCount();
-    env.head.echo.clearRetainingCapacity();
+    try env.head.echo.say(gpa, "");
     _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -2256,7 +2256,7 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     try t.expectEqual(before, ed.doc.commitCount());
     // The guest door is silent, so the refusal is only honest because the ONE
     // edit door echoed it — same feedback a builtin's refusal gets.
-    try t.expectEqualStrings("read-only: view access", env.head.echo.items);
+    try t.expectEqualStrings("read-only: view access", env.head.echo.text());
 }
 
 test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
@@ -2278,12 +2278,12 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     env.buffers.active().read_only = @import("../Buffers.zig").produced;
 
     const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
-    env.head.echo.clearRetainingCapacity();
+    try env.head.echo.say(gpa, "");
     _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
-    try t.expectEqualStrings("read-only buffer", env.head.echo.items);
+    try t.expectEqualStrings("read-only buffer", env.head.echo.text());
 }
 
 test "wasm plugin: comment toggles a line comment, preserving indent" {
@@ -2482,13 +2482,13 @@ test "wasm plugin: modes reacts to the activation event by language, without tou
     // structural guarantee this task adds: a BACKGROUND entry never touches
     // `env.head.echo`, for any of these activations — not a crash, not a
     // trap-then-silently-recover, just never reached at all.
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "src/main.py");
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "build.zig");
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "LICENSE"); // unrecognized extension: still a no-op
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
 }
 
 test "wasm plugin: snippets-expand inserts a template body from an fs file" {
@@ -4209,7 +4209,7 @@ test "wasm plugin: a command that declares no mapping is refused on several sele
     try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "ms.undeclared", &.{}));
     try expectDoc(gpa, ed, "?abc");
     command.invoke(&env.commands, &env.ctx, "ms.undeclared", &.{});
-    try t.expectEqualStrings("ms.undeclared: acts on one selection; several are selected", env.head.echo.items);
+    try t.expectEqualStrings("ms.undeclared: acts on one selection; several are selected", env.head.echo.text());
     try expectDoc(gpa, ed, "?abc");
     // Both selections survive the refusal.
     try t.expectEqual(@as(usize, 2), ed.selectionCount());
