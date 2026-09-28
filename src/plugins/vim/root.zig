@@ -844,6 +844,10 @@ fn initExtra() void {
         .{ "y", "vim.yank" },            .{ "quotedbl", "vim.select-register" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
+    // In a terminal you broke out of, `i`/`a` take you back in, as in vim's
+    // :terminal — the resume offer is absent everywhere else, so insert runs.
+    weft.bindKeys("normal", "i", &.{ "std.input.resume", "vim.insert" });
+    weft.bindKeys("normal", "a", &.{ "std.input.resume", "vim.append" });
     // `-` steps OUT of the focused container where something encloses it, and
     // is vim's previous-line/first-non-blank everywhere else.
     weft.bindKeys("normal", "minus", &.{ "std.hierarchy.step-out", "vim.prev-line" });

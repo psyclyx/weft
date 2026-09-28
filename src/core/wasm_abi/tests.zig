@@ -787,7 +787,10 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     // helix.init sets its OWN initial mode and binds in its OWN namespace —
     // nothing here assumes vim's "normal". If core privileged vim, this breaks.
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
-    try t.expectEqualStrings("helix.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    // `i` resumes a broken-out capture where there is one, else inserts.
+    const helix_i = env.keymap.lookupArms(env.head.currentMode(), "i").?;
+    try t.expectEqualStrings("std.input.resume", helix_i[0]);
+    try t.expectEqualStrings("helix.insert", helix_i[1]);
     // A motion leads with its navigation intention (a listing answers it) and
     // falls back to helix's own selecting motion (`helix.move-…`); select mode binds
     // the extending twin (`helix.extend-…`) of the same key.
@@ -2017,7 +2020,10 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     // init() booted into normal and wired the whole keymap through the config
     // surface — motions, operators, insert entries — all across the membrane.
     try t.expectEqualStrings("normal", env.head.currentMode());
-    try t.expectEqualStrings("vim.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    // `i` resumes a broken-out capture where there is one, else inserts.
+    const vim_i = env.keymap.lookupArms(env.head.currentMode(), "i").?;
+    try t.expectEqualStrings("std.input.resume", vim_i[0]);
+    try t.expectEqualStrings("vim.insert", vim_i[1]);
     try t.expectEqualStrings("vim.delete", env.keymap.lookup(env.head.currentMode(), "d").?);
 
     // Mode switches: i → insert, Escape (vim.normal) → normal.

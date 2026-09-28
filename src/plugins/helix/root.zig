@@ -756,6 +756,10 @@ fn initExtra() void {
         .{ "q", "helix.macro-play" },
     };
     for (normal) |b| weft.bindKey("helix-normal", b[0], b[1]);
+    // In a terminal you broke out of, `i`/`a` take you back in; the resume
+    // offer is absent everywhere else, so insert runs.
+    weft.bindKeys("helix-normal", "i", &.{ "std.input.resume", "helix.insert" });
+    weft.bindKeys("helix-normal", "a", &.{ "std.input.resume", "helix.append" });
     // `C-o` asks the focused view for its own history first (a listing's
     // back), then walks the jumplist.
     weft.bindKeys("helix-normal", "C-o", &.{ "std.navigation.back", "helix.jump-back" });

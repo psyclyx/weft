@@ -371,6 +371,21 @@ pub const Buffer = struct {
         return true;
     }
 
+    /// Whether this entry broke out of a capture it can take up again: it
+    /// declared an endpoint for raw input, and is not capturing now.
+    pub fn canResumeCapture(self: *const Buffer) bool {
+        return self.capture_endpoint.len > 0 and self.declared_posture != .capture;
+    }
+
+    /// Capture again, after a break-out: every key but the break-out chord
+    /// goes to the endpoint declared before. False when there is none, or
+    /// the entry is capturing already.
+    pub fn resumeCapture(self: *Buffer) bool {
+        if (!self.canResumeCapture()) return false;
+        self.declarePosture(.capture);
+        return true;
+    }
+
     /// Name the projection this entry represents. Idempotent.
     pub fn setTool(self: *Buffer, gpa: Allocator, name: []const u8) Error!void {
         const owned = try gpa.dupe(u8, name);

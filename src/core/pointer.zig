@@ -354,7 +354,14 @@ fn cPointerAddSelection(ctx: *Context, args: struct {}) anyerror!Value {
 fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.head.pointer.hit.chrome) |chrome| return if (actsThisClick(ctx)) clickChrome(ctx, chrome) else ok;
-    if (!focusHitPane(ctx)) return activateInPlace(ctx);
+    const moved = focusHitPane(ctx);
+    // A click in the body of an entry that broke out of a capture (a
+    // terminal after the break-out chord) is "type here": it captures again.
+    if ((moved or ctx.head.pointer.hit.focused) and ctx.buffer().canResumeCapture()) {
+        _ = try command.run(ctx.commands, ctx, "mode.resume-capture", &.{});
+        return ok;
+    }
+    if (!moved) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
         // A list focused by ROWS reads the pointer as a list control does

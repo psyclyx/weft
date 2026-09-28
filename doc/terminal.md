@@ -149,6 +149,19 @@ binding mode's fallback chain and `global`.
   If the next key is not `C-\`, both keys go to the terminal, in order. A lone
   C-c still interrupts, one key late, as in emacs's own `term`.
 
+Breaking out leaves you in the terminal's pane, in the grammar's own mode,
+with the endpoint kept. Two ways back in, neither terminal-specific:
+
+- **A click in the pane body.** `pointer.click` on an entry that can resume
+  a capture (`Buffer.canResumeCapture`) resumes it, as focusing any IDE's
+  terminal does.
+- **The `std.input.resume` intention** (`mode.resume-capture`), a core offer
+  that is absent unless there is a capture to resume. vim and helix bind it
+  ahead of their own insert on `i` and `a`, as in vim's `:terminal`; on any
+  other entry the key's next arm, insert, runs.
+
+C-` and the leader chord still reopen the terminal and capture again.
+
 Only an entry's maker may declare capture on it. Otherwise any plugin could
 make an entry into a keylogger.
 
