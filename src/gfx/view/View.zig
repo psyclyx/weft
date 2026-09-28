@@ -37,6 +37,7 @@ const popup = @import("popup.zig");
 const semantic = @import("semantic.zig");
 const decoration = @import("decoration.zig");
 const linelayout = @import("linelayout.zig");
+const grid_draw = @import("grid.zig");
 const render = @import("render.zig");
 
 const Theme = @import("Theme.zig");
@@ -576,6 +577,20 @@ pub fn bodyRowsIn(self: *const View, hud: Hud, frame: region.Rect) usize {
     return self.bodyRowsOf(self.carve(frame, hud).body);
 }
 
+/// The room a pane's body has in `frame` under `hud`, in whole cells, and
+/// the cell's size in pixels — what an entry sized to its pane (a
+/// terminal's grid) is told (`Buffer.extent`).
+pub fn extentIn(self: *const View, hud: Hud, frame: region.Rect) core.grid.Extent {
+    const body = self.carve(frame, hud).body;
+    const cols: usize = @intFromFloat(@max(1, @floor(body.w / self.cell_w)));
+    return .{
+        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
+        .rows = @intCast(@min(self.bodyRowsOf(body), std.math.maxInt(u16))),
+        .cell_w = @intFromFloat(@min(@round(self.cell_w), std.math.maxInt(u16))),
+        .cell_h = @intFromFloat(@min(@round(self.line_h), std.math.maxInt(u16))),
+    };
+}
+
 // ── Frame assembly ───────────────────────────────────────────────
 
 /// Build the visible picture: lay out each body row into runs + the
@@ -650,6 +665,11 @@ pub fn build(
             self.semantic_active = true;
             self.semantic_hits = hits;
         }
+    } else if (hud.grid) |*g| {
+        // A grid entry (a terminal): cells, not text — no rope, no geometry
+        // map, and the cursor is the grid's own.
+        self.frame_layout = .{ .lines = &.{} };
+        try grid_draw.draw(self, scratch, &runs, &rects, g, body_rect, hud.cursor_on);
     } else if (editor) |ed| {
         const rope = ed.text();
         const total_rows = rope.lineCount();

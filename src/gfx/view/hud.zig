@@ -140,6 +140,9 @@ pub const Hud = struct {
     /// The renderer consumes nodes and generic fields; it does not know which
     /// plugin authored them or whether the interaction style is modal.
     semantic_view: ?semantic_data.Document = null,
+    /// A cell grid (a terminal's screen, `core.grid`) replaces the text in
+    /// this pane: the frame's snapshot of it, cursor included.
+    grid: ?core.grid.Snapshot = null,
     /// The active head-local interaction, rendered above the document. Local
     /// bindings are resolved by the interaction stack, not global which-key.
     semantic_overlay: ?semantic_data.Overlay = null,

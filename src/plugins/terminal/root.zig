@@ -1,44 +1,64 @@
-//! terminal — a shell in the panel, LINE-MODE: what you type is held as one
-//! input line, echoed into the buffer, and written to the shell's stdin when
-//! you press Return; the shell's output streams in below. It is the `repl`
-//! plugin's persistent session (`weft.replStart`) with a shell at the other
-//! end and a mode that owns the input line, NOT a terminal emulator: there
-//! is no VT100 screen, so full-screen programs (an editor, a pager, `top`)
-//! do not work, and core strips the colors and cursor controls a shell
-//! prints (`repl_session.stripControls`).
+//! terminal — a shell in the panel, on a real terminal: the shell runs on a
+//! pseudo-terminal (`weft.ptySpawn`, core's door), and its output is
+//! emulated HERE, by libghostty-vt linked into this plugin (`vt.zig`), into
+//! a grid of styled cells the panel draws (`weft.gridPublish`). Colours,
+//! cursor shapes, full-screen programs (`less`, `vim`, `top`), line editing,
+//! job control — all of it is the shell's and the emulator's, as in any
+//! terminal (doc/terminal.md).
 //!
 //! `terminal` opens it — starting the shell the first time — and puts its
 //! entry in the viewport named by `viewport` (default `panel`) through core's
 //! generic `viewport.take`, focused there. `shell` names what runs (see
-//! `invocation`; default `$SHELL`, interactive, its own line editing off).
+//! `invocation`; default `$SHELL`); `scrollback` how many lines are kept
+//! (default 10000).
 //!
-//! A shell that exits (`exit`, a crash) is noticed on the next C-` or
-//! keystroke: the buffer says `[process exited N]`, and a fresh shell starts
-//! below it — input never goes to a dead child.
+//! KEYS. The entry CAPTURES input (`weft.declareCapture`, architecture
+//! §10.4): every key reaches `terminal.input` raw — C-c, C-d, C-z, Tab,
+//! Escape, the arrows, function keys, every M- chord — and libghostty-vt's
+//! encoder turns it into the bytes the child reads, in the modes the child
+//! set (application cursor keys, the kitty keyboard protocol). The one
+//! sequence it never sees is the grammar's break-out chord (C-\ under vim,
+//! helix and ide; C-c C-\ under emacs), which hands keys back to the editor;
+//! focusing the terminal again, or C-`, captures them again. Of the keys, the
+//! terminal keeps three for itself, as terminals do: S-Prior/S-Next page
+//! through the scrollback, and C-S-v / S-Insert paste the clipboard
+//! (bracketed when the child asked). The wheel scrolls the scrollback — or,
+//! when the child asked for the mouse, reaches it as wheel reports.
 //!
-//! The `terminal` mode commits typed text into the input line and falls back
-//! to `default`, so every workspace key the config binds globally still
-//! reaches it. Return sends, BackSpace edits, C-u clears.
+//! The pane's size is the terminal's: when layout gives the entry new room
+//! (`weft.entryExtent`, told through `on_poll`), the emulator and the pty are
+//! resized and the child hears SIGWINCH.
+//!
+//! A shell that exits (`exit`, C-d, a crash) says `[process exited N]` on the
+//! screen; the next key or C-` starts a fresh one below it — input never goes
+//! to a dead child.
 //!
 //! While a shell runs, context key `terminal.session` holds the terminal's
 //! designation, `weft://here/proc/terminal`, on the place it runs in
-//! (doc/model.md §2.5) — the `repl` plugin's `repl.session`, for the same
-//! reason: a config can offer an action only where there is a live shell to
-//! take it. It is retracted on that place, named, wherever the shell ends.
+//! (doc/model.md §2.5), so a config can offer an action only where there is
+//! a live shell to take it. It is retracted on that place, named, wherever
+//! the shell ends.
 
 const std = @import("std");
 const weft = @import("weft");
+const Vt = @import("vt.zig").Vt;
+const keys = @import("keys.zig");
 
 const buffer_name = "*terminal*";
-const mode = "terminal";
 const session_key = "terminal.session";
 
-/// The shell's session handle, while it runs.
-var session: ?u32 = null;
-/// The line being typed, not yet sent. It is also echoed at the end of the
-/// buffer; this is the copy that is sent.
-var input: [1 << 12]u8 = undefined;
-var input_len: usize = 0;
+/// The emulator, once the terminal has been opened.
+var vt: Vt = undefined;
+var vt_live = false;
+/// The shell's pty, while one runs.
+var pty: ?u32 = null;
+/// Where a publish is built; kept between publishes.
+var msg: std.ArrayList(u8) = .empty;
+
+/// Output digested per wake: a flood (`yes`) is drawn as it goes, frame by
+/// frame, instead of the frame waiting on all of it. What is left wakes the
+/// plugin again.
+const read_budget = 256 * 1024;
 
 fn orDefault(key: []const u8, default: []const u8) []const u8 {
     const v = weft.config(key);
@@ -47,75 +67,110 @@ fn orDefault(key: []const u8, default: []const u8) []const u8 {
 
 fn describeExtra() void {
     weft.requestPerm(.proc);
-    weft.requestPerm(.timer);
 }
 
 fn init() void {
     // `weft://here/proc/terminal` is this plugin's: opening it with no entry
     // showing it brings the terminal back (and a shell with it).
     _ = weft.designationOpener("proc.terminal", "terminal.open");
-    weft.textInput(mode, "terminal.type");
-    weft.setFallback(mode, "default");
-    const keys = [_][2][]const u8{
-        .{ "Return", "terminal.send" },         .{ "KP_Enter", "terminal.send" },
-        .{ "BackSpace", "terminal.backspace" }, .{ "C-u", "terminal.clear" },
-    };
-    for (keys) |k| weft.bindKey(mode, k[0], k[1]);
 }
 
 var command_buf: [1024]u8 = undefined;
 
-/// What runs, under `/bin/sh -c`: the `shell` setting. A whole command line
-/// (anything with a space) runs as written. A bare program — `bash`,
-/// `/bin/zsh`, or by default `$SHELL` — starts interactive with ITS OWN line
-/// editing off: this plugin owns the input line and echoes it, so a shell
-/// that also edited it (bash's readline, zsh's ZLE) would print every line a
-/// second time. bash takes `--noediting` and zsh `+Z`; every shell gets
-/// `TERM=dumb`, which the rest (and the programs they run) honour.
+/// What runs, under `/bin/sh -c`: the `shell` setting — a whole command line
+/// (anything with a space) as written, a bare program (`bash`, `/bin/zsh`) or
+/// by default `$SHELL`, exec'd. It gets a terminal's environment: TERM names
+/// an xterm-compatible terminal with 256 colours and COLORTERM says truecolor,
+/// which is what the emulator speaks.
 fn invocation() []const u8 {
     const v = weft.config("shell");
-    if (std.mem.indexOfAny(u8, v, " \t") != null) return v;
-    const program = if (v.len > 0) v else "${SHELL:-sh}";
-    return std.fmt.bufPrint(&command_buf,
-        \\p="{s}"; export TERM=dumb; case "${{p##*/}}" in bash) exec "$p" --noediting -i;; zsh) exec "$p" +Z -i;; *) exec "$p" -i;; esac
-    , .{program}) catch "exec \"${SHELL:-sh}\" -i";
+    const env = "export TERM=xterm-256color COLORTERM=truecolor TERM_PROGRAM=weft; ";
+    if (std.mem.indexOfAny(u8, v, " \t") != null)
+        return std.fmt.bufPrint(&command_buf, "{s}{s}", .{ env, v }) catch v;
+    const program = if (v.len > 0) v else "${SHELL:-/bin/sh}";
+    return std.fmt.bufPrint(&command_buf, "{s}exec \"{s}\"", .{ env, program }) catch "exec /bin/sh";
 }
 
-/// Is the focused entry the terminal's buffer? Every input verb acts only
-/// there.
-fn onTerminal() bool {
-    var buf: [64]u8 = undefined;
-    const name = weft.activeBufferName(&buf) orelse return false;
-    return std.mem.eql(u8, name, buffer_name);
+/// The terminal's size: the room its pane had last frame, or a conventional
+/// one before any pane has shown it (the first frame corrects it).
+fn size() struct { cols: u16, rows: u16, cell_w: u16, cell_h: u16 } {
+    if (weft.entryExtent(buffer_name)) |e| return .{ .cols = @max(e.cols, 2), .rows = @max(e.rows, 1), .cell_w = e.cell_w, .cell_h = e.cell_h };
+    return .{ .cols = 80, .rows = 24, .cell_w = 0, .cell_h = 0 };
 }
 
-/// The running shell, with the terminal's buffer focused: the one there is,
-/// or — none yet, or the last one exited — a fresh one, after the buffer
-/// says how the last one ended. Null when none will start (said so).
+/// The emulator, made on first use.
+fn emulator() ?*Vt {
+    if (vt_live) return &vt;
+    const s = size();
+    const lines = std.fmt.parseInt(usize, orDefault("scrollback", "10000"), 10) catch 10000;
+    vt.init(s.cols, s.rows, lines) catch {
+        weft.echo("terminal: the emulator could not start");
+        return null;
+    };
+    vt.resize(s.cols, s.rows, s.cell_w, s.cell_h);
+    vt_live = true;
+    return &vt;
+}
+
+/// The running shell: the one there is, or a fresh one. Null when none will
+/// start (said so).
 fn shell() ?u32 {
-    if (session) |h| {
-        const code = weft.replExited(h) orelse return h;
-        var note: [48]u8 = undefined;
-        const end = weft.byteLen();
-        const at_line_start = end == 0 or weft.slice(end - 1, end)[0] == '\n';
-        echoAtEnd(std.fmt.bufPrint(&note, "{s}[process exited {d}]\n", .{ if (at_line_start) "" else "\n", code }) catch "[process exited]\n");
-        // Reap it and free its slot; the handle stays dead.
-        weft.replQuit(h);
-        session = null;
-        publish("");
-    }
-    input_len = 0;
-    weft.toolBacking("terminal");
-    session = weft.replStart(invocation(), buffer_name) orelse {
+    if (pty) |h| return h;
+    const t = emulator() orelse return null;
+    const h = weft.ptySpawn(invocation(), t.cols, t.rows) orelse {
         weft.echo("terminal: could not start the shell");
         return null;
     };
-    // The entry is a live resource (doc/model.md §2.1): it designates the
-    // shell while one runs here, and a jump back to it once the buffer is
-    // closed is refused rather than answered with a new shell.
-    _ = weft.designate(designation);
-    publish(designation);
-    return session;
+    t.resize(t.cols, t.rows, t.cell_w, t.cell_h);
+    weft.ptyResize(h, t.cols, t.rows, t.cols *| t.cell_w, t.rows *| t.cell_h);
+    t.pty = h;
+    pty = h;
+    return h;
+}
+
+/// Draw whatever changed.
+fn repaint() void {
+    if (vt_live) vt.publish(buffer_name, &msg);
+}
+
+/// `on_poll`: something of ours is ready — the shell printed, the shell
+/// ended, or the panel changed size.
+fn onPoll() callconv(.c) void {
+    if (!vt_live) return;
+    if (pty) |h| {
+        var buf: [64 * 1024]u8 = undefined;
+        var taken: usize = 0;
+        while (taken < read_budget) {
+            const got = weft.ptyRead(h, &buf) orelse break;
+            if (got.len == 0) break;
+            vt.write(got);
+            taken += got.len;
+        }
+        if (weft.ptyExited(h)) |code| ended(h, code);
+    }
+    fitToPane();
+    repaint();
+}
+
+/// The shell is gone: say so on its screen, and let the next key start
+/// another.
+fn ended(h: u32, code: u8) void {
+    var note: [48]u8 = undefined;
+    vt.write(std.fmt.bufPrint(&note, "\r\n[process exited {d}]\r\n", .{code}) catch "\r\n[process exited]\r\n");
+    weft.ptyClose(h);
+    pty = null;
+    vt.pty = null;
+    publish("");
+}
+
+/// Size the emulator and the pty to the pane.
+fn fitToPane() void {
+    const e = weft.entryExtent(buffer_name) orelse return;
+    const cols = @max(e.cols, 2);
+    const rows = @max(e.rows, 1);
+    if (cols == vt.cols and rows == vt.rows and e.cell_w == vt.cell_w and e.cell_h == vt.cell_h) return;
+    vt.resize(cols, rows, e.cell_w, e.cell_h);
+    if (pty) |h| weft.ptyResize(h, cols, rows, cols *| e.cell_w, rows *| e.cell_h);
 }
 
 /// What the terminal's entry is.
@@ -147,85 +202,104 @@ fn publish(value: []const u8) void {
     if (value.len == 0) published_len = 0;
 }
 
-/// `terminal`: the shell in the panel, focused; started on first use, and
-/// again once it has exited.
+/// `terminal`: the shell in the panel, focused and taking the keys; started
+/// on first use, and again once it has exited.
 fn open() void {
+    _ = shell() orelse return;
+    // The first publish makes the entry the pane will show.
+    vt.all_dirty = true;
+    repaint();
     weft.focusOrCreateBuffer(buffer_name);
-    _ = shell() orelse return;
-    weft.setMode(mode);
-    // The caret rides the end, where output and the echoed input land.
-    weft.jump(weft.byteLen());
+    // The entry is a live resource (doc/model.md §2.1): it designates the
+    // shell while one runs here, and a jump back to it once the entry is
+    // closed is refused rather than answered with a new shell. It is also
+    // what the viewport holds.
+    _ = weft.designate(designation);
     weft.runStr("viewport.take", orDefault("viewport", "panel"));
+    publish(designation);
+    weft.declareCapture("terminal.input");
+    weft.exitToResting();
 }
 
-fn echoAtEnd(text: []const u8) void {
-    const end = weft.byteLen();
-    weft.render(.{ .start = end, .end = end }, text);
-    weft.jump(weft.byteLen());
+/// `terminal.input`: one captured key — its spec and the text it committed.
+fn input(spec: []const u8, text: []const u8) void {
+    const t = emulator() orelse return;
+    // A key to a terminal whose shell has ended starts the next one; the key
+    // itself was meant for the old one.
+    const h = pty orelse {
+        if (shell() != null) publish(designation);
+        return repaint();
+    };
+    defer repaint();
+    if (std.mem.eql(u8, spec, "S-Prior")) return t.scroll(-@as(isize, @max(1, t.rows - 1)));
+    if (std.mem.eql(u8, spec, "S-Next")) return t.scroll(@as(isize, @max(1, t.rows - 1)));
+    if (std.mem.eql(u8, spec, "C-S-V") or std.mem.eql(u8, spec, "C-S-v") or std.mem.eql(u8, spec, "S-Insert")) return paste();
+    if (std.mem.startsWith(u8, spec, "wheel-")) return wheel(t, h, std.mem.eql(u8, spec, "wheel-up"), std.mem.eql(u8, spec, "wheel-down"));
+    var text_buf: [8]u8 = undefined;
+    const k = keys.parse(spec, text, &text_buf) orelse return; // a click, a bare modifier
+    var out: [128]u8 = undefined;
+    const bytes = t.encodeKey(k, &out);
+    if (bytes.len == 0) return;
+    t.scrollToBottom();
+    weft.ptyWrite(h, bytes);
 }
 
-fn typeText() void {
-    if (!onTerminal()) return;
-    _ = shell() orelse return;
-    const s = weft.argStr(0) orelse return;
-    if (input_len + s.len > input.len) return weft.echo("terminal: the input line is full");
-    @memcpy(input[input_len..][0..s.len], s);
-    input_len += s.len;
-    echoAtEnd(s);
+/// A wheel notch: the child's, as a wheel report, when it asked for the
+/// mouse; arrow keys on the alternate screen (a pager scrolls, as in any
+/// terminal); otherwise the scrollback.
+fn wheel(t: *Vt, h: u32, up: bool, down: bool) void {
+    if (!up and !down) return; // sideways
+    if (t.mouseTracking()) {
+        const at = t.cursorCell();
+        var out: [64]u8 = undefined;
+        const bytes = t.encodeWheel(up, at.col, at.row, &out);
+        if (bytes.len > 0) weft.ptyWrite(h, bytes);
+        return;
+    }
+    if (t.altScreen()) {
+        var key_buf: [8]u8 = undefined;
+        const k = keys.parse(if (up) "Up" else "Down", "", &key_buf).?;
+        var out: [16]u8 = undefined;
+        const bytes = t.encodeKey(k, &out);
+        for (0..3) |_| weft.ptyWrite(h, bytes);
+        return;
+    }
+    t.scroll(if (up) -3 else 3);
 }
 
-/// Take the last character back out of the input line, and out of the
-/// buffer when the echo is still the last thing there (output that arrived
-/// since is left alone).
-fn backspace() void {
-    if (!onTerminal() or input_len == 0) return;
-    var cut = input_len - 1;
-    while (cut > 0 and input[cut] & 0xc0 == 0x80) cut -= 1;
-    const gone = input[cut..input_len];
-    input_len = cut;
-    const end = weft.byteLen();
-    if (end < gone.len) return;
-    if (std.mem.eql(u8, weft.slice(end - gone.len, end), gone))
-        weft.render(.{ .start = end - gone.len, .end = end }, "");
+/// `terminal.paste`: the clipboard, typed into the shell — control bytes
+/// that could run a command stripped, and bracketed when the child asked.
+/// Needs the `clipboard` grant (config: `weft.grant("terminal", "clipboard")`).
+fn paste() void {
+    const t = emulator() orelse return;
+    const h = pty orelse return;
+    const clip = weft.clipboardGet() orelse return;
+    if (clip.len == 0) return;
+    const text = weft.allocator.dupe(u8, clip) catch return;
+    defer weft.allocator.free(text);
+    const out = weft.allocator.alloc(u8, text.len + 16) catch return;
+    defer weft.allocator.free(out);
+    const bytes = t.encodePaste(text, out);
+    t.scrollToBottom();
+    weft.ptyWrite(h, bytes);
+    repaint();
 }
 
-fn clearLine() void {
-    while (input_len > 0) backspace();
-}
-
-/// Return: the line goes to the shell's stdin, the echo gets its newline. A
-/// shell that exited meanwhile is reported and replaced, and the line is
-/// the new one's.
-fn send() void {
-    if (!onTerminal()) return;
-    const typed = input_len;
-    const was = session;
-    const handle = shell() orelse return;
-    // A restart emptied the line: the old shell never read it.
-    if (was != handle) return;
-    echoAtEnd("\n");
-    weft.replSend(handle, input[0..typed]);
-    input_len = 0;
-}
-
-/// `terminal.quit`: stop the shell; the buffer stays with what it printed.
+/// `terminal.quit`: stop the shell; the screen stays with what it printed.
 fn quit() void {
-    const handle = session orelse return;
-    weft.replQuit(handle);
-    session = null;
-    input_len = 0;
-    publish("");
+    const h = pty orelse return;
+    ended(h, 0);
+    repaint();
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "terminal.open", .arity = .whole, .call = open, .summary = "Open the shell in the panel, in line mode without terminal emulation.", .label = "New Terminal", .menu = "Terminal", .group = "new", .order = 1, .icon = "terminal" },
-    .{ .name = "terminal.type", .arity = .whole, .call = typeText, .params = "text", .summary = "Add typed text to the terminal's input line.", .internal = true },
-    .{ .name = "terminal.send", .arity = .whole, .call = send, .summary = "Send the terminal's input line to the shell.", .internal = true },
-    .{ .name = "terminal.backspace", .arity = .whole, .call = backspace, .summary = "Delete the last character of the terminal's input line.", .internal = true },
-    .{ .name = "terminal.clear", .arity = .whole, .call = clearLine, .summary = "Clear the terminal's input line.", .internal = true },
+    .{ .name = "terminal.open", .arity = .whole, .call = open, .summary = "Open the shell in the panel, on a terminal that takes every key.", .label = "New Terminal", .menu = "Terminal", .group = "new", .order = 1, .icon = "terminal" },
+    .{ .name = "terminal.input", .arity = .whole, .call = weft.thunk(input), .params = "key text", .summary = "Send one captured key to the terminal's shell.", .internal = true },
+    .{ .name = "terminal.paste", .arity = .whole, .call = paste, .summary = "Paste the clipboard into the terminal's shell.", .label = "Paste into Terminal", .menu = "Terminal", .group = "terminal", .order = 2, .icon = "clipboard-paste" },
     .{ .name = "terminal.quit", .arity = .whole, .call = quit, .summary = "Stop the terminal's shell.", .label = "Stop Terminal", .menu = "Terminal", .group = "terminal", .order = 1, .icon = "stop" },
 };
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra, .init = init }).exportAll();
+    weft.exportCallback("on_poll", &onPoll);
 }

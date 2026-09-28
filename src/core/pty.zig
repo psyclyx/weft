@@ -88,6 +88,9 @@ pub const Pty = struct {
     /// How the child ended — exit code, or 128 + the signal — once the reader
     /// saw it end and read what it printed; -1 until then.
     status: std.atomic.Value(i32) = .init(-1),
+    /// Frame thread: the consumer was told how the child ended (`exitCode`
+    /// answered it), so the end is no longer news (`ready`).
+    exit_told: bool = false,
     reader: task.Handle(void),
 
     /// Open a pty `size` big and start `cmd` (under `/bin/sh -c`, like the
@@ -180,7 +183,14 @@ pub const Pty = struct {
     pub fn exitCode(s: *Pty) ?u8 {
         const code = s.status.load(.acquire);
         if (code < 0 or s.pending() > 0) return null;
+        s.exit_told = true;
         return @intCast(code);
+    }
+
+    /// Frame thread: whether there is news for the consumer — output to
+    /// read, or an end it has not been told of.
+    pub fn ready(s: *Pty) bool {
+        return s.pending() > 0 or (s.status.load(.acquire) >= 0 and !s.exit_told);
     }
 
     /// Stop the reader (it hangs the child up and reaps it on the way out),

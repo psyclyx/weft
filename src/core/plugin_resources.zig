@@ -42,6 +42,7 @@ const handles = @import("handles.zig");
 const proc_stream = @import("proc_stream.zig");
 const repl_session = @import("repl_session.zig");
 const net_session = @import("net_session.zig");
+const pty_mod = @import("pty.zig");
 const Pool = @import("task.zig").Pool;
 const command_mod = @import("command.zig");
 
@@ -85,6 +86,9 @@ pub const Resources = struct {
     sessions: handles.Slots(repl_session.Session) = .empty,
     /// Network connections (design §6.5) — the socket mirror of `sessions`.
     net_sessions: handles.Slots(net_session.Session) = .empty,
+    /// Children on pseudo-terminals (`wl_pty_spawn`, doc/terminal.md §1): raw
+    /// output back to the guest, which emulates the terminal itself.
+    ptys: handles.Slots(pty_mod.Pty) = .empty,
 
     /// WHAT THIS GUEST'S COMMANDS SAY ABOUT THEMSELVES — name, one-line
     /// summary, argument shape. Owned.
@@ -235,6 +239,7 @@ pub const Resources = struct {
         self.streams.deinit(self.gpa); // kill + join each
         self.sessions.deinit(self.gpa); // kill + join each
         self.net_sessions.deinit(self.gpa); // shut + join each
+        self.ptys.deinit(self.gpa); // hang up + join each
         if (self.exec) |*e| e.deinit(self.gpa); // an unload mid-callback
         for (self.declared.items) |*d| d.deinit(self.gpa);
         self.declared.deinit(self.gpa);
@@ -250,7 +255,9 @@ pub const Resources = struct {
 
     /// Whether anything here still has buffered output or a live reader — the
     /// frame loop's "is this plugin worth waking for" question, asked the same
-    /// way of both planes.
+    /// way of both planes. A pty is not asked: it rings the frame loop itself
+    /// (the pool's notify fd) when output lands or its child ends, so a shell
+    /// idling in a panel costs no poll.
     pub fn hasLiveStream(self: *const Resources) bool {
         return anyLive(proc_stream.ProcStream, self.streams.slice()) or
             anyLive(repl_session.Session, self.sessions.slice()) or

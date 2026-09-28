@@ -554,6 +554,8 @@ pub const PaneInput = struct {
     text: ?core.TextSnapshot,
     hud: view_mod.Hud,
     focused: bool,
+    /// The room the pane's body has, in cells (`Buffer.extent`).
+    extent: core.grid.Extent = .{ .cols = 0, .rows = 0 },
 };
 
 /// A frame's input: every pane's `PaneInput`, in draw order (the focused
@@ -627,9 +629,14 @@ pub const FrameBuilder = struct {
 
     /// Ask the plugins what the last frame had no answer to
     /// (`answerRequestsFor`). The loop calls this after every build; true
-    /// means answers landed and the next frame should draw them.
+    /// means answers landed and the next frame should draw them. The owners
+    /// of entries whose pane the frame resized hear it here too (a terminal
+    /// re-sizes its grid and its pty), for the same reason: after the frame,
+    /// never inside it.
     pub fn answerRequests(self: *FrameBuilder, fx: *const FrameCtx) !bool {
-        return answerRequestsFor(fx, &self.answers);
+        const answered = try answerRequestsFor(fx, &self.answers);
+        const resized = core.wasm_host.notifyExtents(fx.plugins.items);
+        return answered or resized;
     }
 
     /// True when a partial checkout can't be read yet: content rendering is
@@ -774,6 +781,8 @@ pub const FrameBuilder = struct {
                 publishHighlight(fx, spec.buffer, e, window) catch |err| if (spec.focused) return err;
             }
         }
+        // A grid entry (a terminal's screen) is drawn from its snapshot.
+        if (spec.buffer.grid) |g| hud.grid = try g.snapshot(arena);
         const t0 = stats_mod.nowNs();
         const layers = try PaneLayers.take(arena, live, window);
         input.snapshot_ns += stats_mod.nowNs() - t0;
@@ -803,6 +812,7 @@ pub const FrameBuilder = struct {
             .text = text,
             .hud = hud,
             .focused = spec.focused,
+            .extent = self.view.extentIn(hud, spec.rect),
         });
         text = null; // the input owns it now
     }
@@ -832,6 +842,15 @@ pub const FrameBuilder = struct {
         for (input.panes.items, tops[0..input.panes.items.len], 0..) |p, top, i| {
             p.top_row_at.* = top;
             live[i] = p.pane;
+            // The room the entry had, for an owner that sizes to it (a
+            // terminal); told after the frame when it moved. Panes draw
+            // focused-last, so a split showing one entry twice leaves it
+            // the focused pane's.
+            if (fx.buffers.resolve(p.entry)) |b| {
+                const was = b.extent;
+                b.extent = p.extent;
+                if (was == null or !was.?.eql(p.extent)) b.extent_moved = true;
+            }
             const gf = p.hud.gutter orelse continue;
             const batch = gf.batch orelse continue;
             const first = batch.wanted orelse continue;

@@ -91,7 +91,7 @@ weft.plugin("snipe");       // evil-snipe: s/S two-char, f/F/t/T one-char, highl
 weft.plugin("offers");      // what a context offers, as a strip, a list or mouse-3's menu
 weft.plugin("panel");       // panel.toggle: the bottom panel (config/panel.js) on and off
 weft.plugin("problems");    // every diagnostic in one list, in the panel (SPC o p)
-weft.plugin("terminal");    // a LINE-MODE shell in the panel (SPC o t) — no terminal emulation
+weft.plugin("terminal");    // a shell on a real terminal in the panel (SPC o t); C-\ hands keys back
 weft.plugin("breadcrumbs"); // path › symbol › symbol for the caret, on the status line
 
 // ── BREADTH, written down ────────────────────────────────────────────
@@ -114,6 +114,9 @@ weft.plugin("breadcrumbs"); // path › symbol › symbol for the caret, on the 
 // to a `root:` and the browser refuses to leave it.
 weft.grant("files", "fs_read",  { root: "/" }); // browse anywhere you point it
 weft.grant("files", "fs_write", { root: "/" }); // …and act there: rename, delete, create
+// The terminal pastes the clipboard into its shell (C-S-v, S-Insert); reading
+// what you copied elsewhere is config's to grant, like every clipboard read.
+weft.grant("terminal", "clipboard");
 
 // ── `.js` plugins and their GRANTS ───────────────────────────────────
 // A `.js` plugin has no describe() handshake to ask for anything, so

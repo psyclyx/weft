@@ -132,6 +132,7 @@ Terminal	tasks	1	Build Project	make.build
 Terminal	tasks	2	Run Tests	make.test
 Terminal	tasks	3	Run Project	make.run
 Terminal	terminal	1	Stop Terminal	terminal.quit
+Terminal	terminal	2	Paste into Terminal	terminal.paste
 Terminal/Direnv	direnv	1	Show Direnv Status	direnv.status
 Terminal/Direnv	direnv	2	Allow Direnv	direnv.allow
 Terminal/Direnv	direnv	3	Reload Direnv Environment	direnv.reload

@@ -600,6 +600,47 @@ pub fn isPrefix(self: *const Keymap, mode: []const u8, seq: []const u8) bool {
     return false;
 }
 
+/// How far `seq` is along the grammar's BREAK-OUT chord in `mode` (§10.4):
+/// the binding whose arms name `std.input.break-out` (or the command behind
+/// it) in `mode`, its fallback chain, or `global`. A capturing entry takes
+/// every key but this one sequence — so what a capture has to ask is not
+/// "is this key bound" (everything is, in some grammar) but "is it the way
+/// out". A prefix is held; anything else is the capture's.
+pub const BreakOut = enum { none, prefix, complete };
+
+pub const break_out_names = [_][]const u8{ "std.input.break-out", "mode.break-out" };
+
+pub fn breakOutMatch(self: *const Keymap, mode: []const u8, seq: []const u8) BreakOut {
+    var best: BreakOut = .none;
+    var m: []const u8 = mode;
+    var depth: usize = 0;
+    while (depth < 9) : (depth += 1) {
+        if (self.modes.getPtr(m)) |b| {
+            const here = breakOutIn(b, seq);
+            if (here == .complete) return .complete;
+            if (here == .prefix) best = .prefix;
+        }
+        if (depth == 8 or std.mem.eql(u8, m, global_mode)) break;
+        m = self.parents.get(m) orelse global_mode;
+    }
+    return best;
+}
+
+fn breakOutIn(b: *const Bindings, seq: []const u8) BreakOut {
+    var best: BreakOut = .none;
+    for (b.keys(), b.values()) |k, entry| {
+        if (!namesBreakOut(entry.commands)) continue;
+        if (std.mem.eql(u8, k, seq)) return .complete;
+        if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') best = .prefix;
+    }
+    return best;
+}
+
+fn namesBreakOut(arms: []const []const u8) bool {
+    for (arms) |c| for (break_out_names) |name| if (std.mem.eql(u8, c, name)) return true;
+    return false;
+}
+
 fn prefixIn(b: *const Bindings, seq: []const u8) bool {
     for (b.keys()) |k| {
         if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') return true;
@@ -1451,4 +1492,21 @@ test "keymap: structural focus granularity is per mode — two grammars keep the
     try t.expectEqual(Granularity.row, km.granularityOf("ide-structural").?);
     // A mode no grammar declared for, on its chain, says nothing.
     try t.expect(km.granularityOf("pick") == null);
+}
+
+test "keymap: the break-out chord is found through the fallback chain, and its prefix is held" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setFallback(gpa, "emacs-structural", "emacs");
+    try km.bindArms(gpa, "emacs", "C-c C-backslash", &.{"std.input.break-out"}, prio_plugin, "emacs");
+    try km.bind(gpa, "emacs", "C-c C-c", "compile", prio_plugin, "emacs");
+    try t.expectEqual(BreakOut.prefix, km.breakOutMatch("emacs-structural", "C-c"));
+    try t.expectEqual(BreakOut.complete, km.breakOutMatch("emacs-structural", "C-c C-backslash"));
+    // Another chord under the same prefix is not the way out.
+    try t.expectEqual(BreakOut.none, km.breakOutMatch("emacs-structural", "C-c C-c"));
+    try t.expectEqual(BreakOut.none, km.breakOutMatch("emacs", "C-d"));
+    // A break-out bound globally applies under every mode.
+    try km.bind(gpa, global_mode, "C-backslash", "mode.break-out", prio_plugin, "vim");
+    try t.expectEqual(BreakOut.complete, km.breakOutMatch("anything", "C-backslash"));
 }

@@ -58,6 +58,7 @@ pub const deliverToBuffer = fs.deliverToBuffer;
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
+pub const notifyExtents = activation.notifyExtents;
 pub const deliverSignals = activation.deliverSignals;
 
 /// The context doors, whose set and get bodies both membranes run.

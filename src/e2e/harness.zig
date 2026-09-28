@@ -2512,9 +2512,38 @@ pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
 pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
     var it = ed.buffers.iterator();
     while (it.next()) |b| {
-        if (std.mem.eql(u8, b.name, name))
-            return b.textEditor().?.text().toOwnedSlice(ed.gpa) catch null;
+        if (!std.mem.eql(u8, b.name, name)) continue;
+        if (b.grid) |g| return gridText(ed.gpa, g) catch null;
+        return (b.textEditor() orelse return null).text().toOwnedSlice(ed.gpa) catch null;
     }
+    return null;
+}
+
+/// A grid entry's cells as text (a terminal's screen, as a person reads
+/// it): one line per row, trailing blanks dropped, a wide character's
+/// second half skipped. Caller frees.
+pub fn gridText(gpa: std.mem.Allocator, g: *const core.grid.Grid) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (0..g.rows) |r| {
+        const row_start = out.items.len;
+        for (g.row(r)) |cell| {
+            if (cell.width == 0) continue;
+            var buf: [4]u8 = undefined;
+            const cp: u21 = std.math.cast(u21, cell.cp) orelse ' ';
+            const n = std.unicode.utf8Encode(if (cp == 0) ' ' else cp, &buf) catch 1;
+            try out.appendSlice(gpa, buf[0..n]);
+        }
+        while (out.items.len > row_start and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+        if (r + 1 < g.rows) try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// The grid of entry `name`, or null (no such entry, or it is not a grid).
+pub fn gridOf(ed: *Editor, name: []const u8) ?*core.grid.Grid {
+    var it = ed.buffers.iterator();
+    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) return b.grid;
     return null;
 }
 

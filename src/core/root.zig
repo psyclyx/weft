@@ -65,6 +65,11 @@ pub const layers = @import("layers.zig");
 /// A node tree rendered into a text buffer, with the host owning every
 /// offset — the primitive every tool projection was hand-rolling.
 pub const projection = @import("projection.zig");
+/// An entry that is a grid of styled cells (a terminal's screen), and the
+/// room the pane showing it has (doc/terminal.md §3).
+pub const grid = @import("grid.zig");
+/// A child on a pseudo-terminal (doc/terminal.md §1).
+pub const pty = @import("pty.zig");
 pub const action_offers = @import("action_offers.zig");
 /// The one context vocabulary and its predicate — shared with every guest as
 /// the `weft_facts` module, re-exported here so host-side consumers name it
@@ -169,4 +174,5 @@ test {
     _ = @import("container.zig");
     _ = @import("repl_session.zig");
     _ = @import("pty.zig");
+    _ = @import("grid.zig");
 }

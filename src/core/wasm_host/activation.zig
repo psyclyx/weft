@@ -8,6 +8,7 @@ const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const pty_doors = @import("pty.zig");
 
 /// Fire the activation event (design §3): tell a plugin a buffer with `path`
 /// took focus, so it can attach language keymaps/facts. A no-op for a plugin
@@ -27,10 +28,34 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
 pub fn notifyPollIfReady(p: *WasmPlugin) bool {
     const ready = for (p.resources.streams.slice()) |maybe| {
         if (maybe) |s| if (s.pending() > 0) break true;
-    } else false;
+    } else pty_doors.anyPtyReady(p) or pty_doors.anyExtentMoved(p);
     if (!ready) return false;
-    contract.callOptionalExport("on_poll", p, .{}) catch {}; // MissingExport → skip
+    notifyPoll(p);
     return true;
+}
+
+/// Fire `on_poll` now. What it answers for includes every grid entry of the
+/// plugin's whose pane moved (`Buffer.extent_moved`): those are cleared
+/// here, heard or not, so an owner that never asks is not asked again.
+pub fn notifyPoll(p: *WasmPlugin) void {
+    var it = p.activeCtx().buffers.iterator();
+    while (it.next()) |b| if (b.extent_moved and std.mem.eql(u8, b.creator, p.name)) {
+        b.extent_moved = false;
+    };
+    contract.callOptionalExport("on_poll", p, .{}) catch {}; // MissingExport → skip
+}
+
+/// After a frame: tell every plugin whose grid entry the frame gave a new
+/// extent (the pane it shows in grew, shrank, or first showed it), so it
+/// can size its grid — and its terminal — before the next one. Returns
+/// whether any was told (their publishes are the next frame's to draw).
+pub fn notifyExtents(plugins: []const *WasmPlugin) bool {
+    var any = false;
+    for (plugins) |p| if (pty_doors.anyExtentMoved(p)) {
+        notifyPoll(p);
+        any = true;
+    };
+    return any;
 }
 
 pub fn hActivatePath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

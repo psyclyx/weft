@@ -74,6 +74,8 @@ weft.grant("files", "fs_write", { root: "/" });
 // which only config can grant — and which register mirrors it is the
 // grammar's setting (vim keeps `"+` apart instead).
 weft.grant("ide", "clipboard");
+// The terminal pastes the clipboard into its shell (C-S-v, S-Insert).
+weft.grant("terminal", "clipboard");
 weft.set("ide", "clipboard", "unnamed");
 weft.grant("dap", "proc");
 weft.plugin("dap.js");         // DAP client: F5/F10/F11
@@ -296,7 +298,7 @@ weft.bind("ide", "bracketright", "autopair.close-bracket");
 weft.use("panel");
 weft.plugin("panel");        // panel.toggle: show or hide the panel
 weft.plugin("problems");     // every diagnostic, grouped by file; Return jumps
-weft.plugin("terminal");     // a LINE-MODE shell (no terminal emulation)
+weft.plugin("terminal");     // a shell on a real terminal; C-\ hands the keys back
 weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
 bindWorkspace("C-j", "panel.toggle");
 bindWorkspace("C-grave", "terminal.open");

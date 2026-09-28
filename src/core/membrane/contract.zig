@@ -66,6 +66,7 @@ const semantic_relation = @import("../wasm_host/semantic_relation.zig");
 const semantic_fs = @import("../wasm_host/semantic_fs.zig");
 const transfer_attachment = @import("../wasm_host/transfer_attachment.zig");
 const sessions = @import("../wasm_host/sessions.zig");
+const pty_doors = @import("../wasm_host/pty.zig");
 const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
 const syntax = @import("../wasm_host/syntax.zig");
@@ -385,6 +386,17 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_net_send", .handler = sessions.hNetSend },
     .{ .name = "wl_net_close", .handler = sessions.hNetClose },
 
+    // ── pty.zig — a child on a pseudo-terminal, a cell grid, capture ────
+    .{ .name = "wl_pty_spawn", .handler = pty_doors.hPtySpawn },
+    .{ .name = "wl_pty_write", .handler = pty_doors.hPtyWrite },
+    .{ .name = "wl_pty_read", .handler = pty_doors.hPtyRead },
+    .{ .name = "wl_pty_resize", .handler = pty_doors.hPtyResize },
+    .{ .name = "wl_pty_exited", .handler = pty_doors.hPtyExited },
+    .{ .name = "wl_pty_close", .handler = pty_doors.hPtyClose },
+    .{ .name = "wl_grid_publish", .handler = pty_doors.hGridPublish },
+    .{ .name = "wl_entry_extent", .handler = pty_doors.hEntryExtent },
+    .{ .name = "wl_declare_capture", .handler = pty_doors.hDeclareCapture },
+
     // ── fs.zig — perm-gated local filesystem doors ─────────────────────
     .{ .name = "wl_fs_read", .handler = fs.hFsRead },
     .{ .name = "wl_fs_exists", .handler = fs.hFsExists },
@@ -622,6 +634,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_exec", .perm = .proc_timer }, // proc.zig hExec: .proc + .timer
     .{ .name = "wl_repl_start", .perm = .proc_timer }, // sessions.zig hReplStart: .proc + .timer
     .{ .name = "wl_net_connect", .perm = .net }, // sessions.zig hNetConnect: .net
+    .{ .name = "wl_pty_spawn", .perm = .proc }, // pty.zig hPtySpawn: .proc
     .{ .name = "wl_fs_read", .perm = .fs_read }, // fs.zig hFsRead: .fs_read
     .{ .name = "wl_fs_exists", .perm = .fs_read }, // fs.zig hFsExists: .fs_read
     .{ .name = "wl_fs_stat", .perm = .fs_read }, // fs.zig hFsStat: .fs_read
@@ -681,6 +694,7 @@ const head_gated_list = [_][]const u8{
     "wl_set_mode", // keymap.zig hSetMode
     "wl_exit_to_resting", // keymap.zig hExitToResting
     "wl_declare_posture", // keymap.zig hDeclarePosture
+    "wl_declare_capture", // pty.zig hDeclareCapture
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus

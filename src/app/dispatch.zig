@@ -556,6 +556,11 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
         }) |_| return;
     }
 
+    // A capturing entry (§10.4) takes the key raw — unless it is on the way
+    // out. Before dot-repeat: a keystroke sent to a terminal is not an edit
+    // to repeat.
+    if (try captureKey(ctx, spec, commit)) return;
+
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
     // A pointer gesture is not recorded: replayed later it would act wherever
@@ -693,6 +698,65 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
         std.log.warn("{s} failed: {t}", .{ commit_cmd, err });
+    };
+}
+
+// ── Capture (architecture §10.4) ─────────────────────────────────────
+//
+// An entry that CAPTURES input — a terminal — is handed every key raw: `C-c`
+// is the child's interrupt there, not the editor's, and so are Tab, Escape,
+// the arrows and every `M-` chord. Its presentation declared the endpoint
+// (`wl_declare_capture`); the grammar declared nothing about it and needs
+// no terminal mode. The one sequence capture never takes is the grammar's
+// BREAK-OUT chord, which every grammar keeps bound in every resting state:
+// that is what makes capture a posture you can always leave. A break-out
+// that is a chord (`C-c C-backslash` under emacs) holds its prefix; the
+// next key either completes it or releases the held keys to the endpoint,
+// in order, so a lone `C-c` still reaches the child — one key late.
+
+/// Route `spec` to the focused entry's capture endpoint when the entry
+/// captures. False: the key is the grammar's (not capturing, the break-out,
+/// a pointer gesture off the entry's pane).
+fn captureKey(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) !bool {
+    const b = ctx.buffer();
+    if (b.declared_posture != .capture or b.capture_endpoint.len == 0) return false;
+    // A gesture elsewhere — another pane, the pane's own chrome — is about
+    // that, never input to the capture.
+    if (core.pointer.isPointerSpec(spec)) {
+        const hit = ctx.head.pointer.hit;
+        if (!hit.focused or hit.chrome != null) return false;
+    }
+    const held = ctx.head.pending;
+    const at_top = held.len == 0;
+    const seq = if (at_top) spec else try std.fmt.allocPrint(ctx.gpa, "{s} {s}", .{ held, spec });
+    defer if (!at_top) ctx.gpa.free(seq);
+    switch (ctx.keymap.breakOutMatch(ctx.bindingMode(), seq)) {
+        // The way out: the ordinary feed runs it, from the held prefix.
+        .complete => return false,
+        .prefix => {
+            try ctx.head.setPending(ctx.gpa, seq);
+            return true;
+        },
+        .none => {},
+    }
+    // Not the way out after all: what was held goes first, then this key.
+    // The endpoint is copied: the command it names may declare another.
+    const endpoint = try ctx.gpa.dupe(u8, b.capture_endpoint);
+    defer ctx.gpa.free(endpoint);
+    if (!at_top) {
+        const keys = try ctx.gpa.dupe(u8, held);
+        defer ctx.gpa.free(keys);
+        try ctx.head.setPending(ctx.gpa, "");
+        var it = std.mem.tokenizeScalar(u8, keys, ' ');
+        while (it.next()) |k| deliverCaptured(ctx, endpoint, k, "");
+    }
+    deliverCaptured(ctx, endpoint, spec, commit.bytes);
+    return true;
+}
+
+fn deliverCaptured(ctx: *core.command.Context, endpoint: []const u8, spec: []const u8, text: []const u8) void {
+    _ = core.command.run(ctx.commands, ctx, endpoint, &.{ .{ .string = spec }, .{ .string = text } }) catch |err| {
+        std.log.warn("capture: {s} failed: {t}", .{ endpoint, err });
     };
 }
 
