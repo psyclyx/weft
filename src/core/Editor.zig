@@ -749,6 +749,13 @@ pub fn redo(self: *Editor, gpa: Allocator, gate: undo_mod.Gate) undo_mod.Error!b
     return did;
 }
 
+/// Bring the document to step `node` of its history tree, wherever it is:
+/// the undos and redos that reach it, each through `gate`.
+pub fn undoTo(self: *Editor, gpa: Allocator, node: undo_mod.NodeId, gate: undo_mod.Gate) (undo_mod.Error || error{NoSuchNode})!void {
+    defer self.clearGoal();
+    return self.history.jump(gpa, &self.doc, node, gate);
+}
+
 /// Whether `undo`/`redo` would find a unit right now — the availability the
 /// history offers publish, read without touching the log.
 pub fn canUndo(self: *const Editor) bool {

@@ -373,6 +373,39 @@ fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     return undid(did);
 }
 
+/// `edit.undo-tree` — the active entry's history TREE as text, one line a
+/// step (`UndoLog.describe` says the shape): a data source for a tool that
+/// draws it (`weft.callString`). Empty where the entry holds no text.
+fn cUndoTree(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const ed = ctx.textEditor() catch return .{ .string = "" };
+    return .{ .string = try ed.history.describe(ctx.gpa, &ed.doc) };
+}
+
+/// `edit.undo-to <step> <entry>` — bring the active entry to step `<step>` of
+/// its history tree, wherever it is: undo up to the common ancestor, redo
+/// down the other branch, each through the invoking principal's undo gate.
+/// `<entry>` is the designation of the entry whose tree the step was read
+/// from; a different active entry refuses (a step number means nothing in
+/// another entry's tree). Empty: the active entry, whatever it is.
+fn cUndoTo(ctx: *Context, args: struct { step: []const u8, entry: []const u8 }) anyerror!Value {
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    if (args.entry.len > 0) {
+        var buf: [designation.max_len]u8 = undefined;
+        const here = designation.of(ctx.buffers.active(), &buf) orelse "";
+        if (!std.mem.eql(u8, here, args.entry)) return .{ .string = "undo: that step is in another entry's history" };
+    }
+    const step = std.fmt.parseInt(@import("undo.zig").NodeId, std.mem.trim(u8, args.step, " "), 10) catch return error.InvalidArgument;
+    const before = ed.doc.commitCount();
+    defer flashChanged(ctx, &ed.doc, before);
+    ed.undoTo(ctx.gpa, step, ctx.undoGate()) catch |e| return switch (e) {
+        error.NoSuchNode => .{ .string = "undo: no such step" },
+        error.Unauthorized, error.OutOfLimit, error.Collapsed => .{ .boolean = false },
+        else => e,
+    };
+    return ok;
+}
+
 /// Record what an undo/redo just put back as an `undo` flash. Only core sees
 /// that span — the grammar that pressed the key never learns which bytes
 /// came back — so core records it, and the frame shows it only where the
@@ -977,6 +1010,8 @@ const table = [_]command.Command{
     command.define("edit.delete-after", "Delete the selection, or the character after the cursor.", cDeleteForward).present(.{ .label = "Delete Forward" }),
     command.define("edit.undo", "Undo your most recent edit.", cUndo).present(.{ .label = "Undo", .icon = "undo" }),
     command.define("edit.redo", "Redo the edit you most recently undid.", cRedo).present(.{ .label = "Redo", .icon = "redo" }),
+    command.define("edit.undo-tree", "The entry's undo history as a tree, one line a step (a data source).", cUndoTree).present(.{ .internal = true }),
+    command.define("edit.undo-to", "Bring the entry to a step of its undo tree, across branches.", cUndoTo).present(.{ .internal = true }),
     command.define("file.write", "Write the buffer to its file.", cSaveFile).present(.{ .internal = true }),
     command.define("field.word-prev", "Move the field cursor to the start of the previous word.", fieldMotion(.word_previous)).present(.{ .internal = true }),
     command.define("field.word-next", "Move the field cursor to the start of the next word.", fieldMotion(.word_next)).present(.{ .internal = true }),
