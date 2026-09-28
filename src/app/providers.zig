@@ -168,13 +168,14 @@ pub const AttachDeps = struct {
 
     fn shell(self: *AttachDeps, host: []const u8) !*Shell {
         if (self.shells.get(host)) |sh| return sh;
+        if (!core.designation.durable.validShellHost(host)) return error.InvalidShellHost;
         const sh = try self.gpa.create(Shell);
         errdefer self.gpa.destroy(sh);
         // BatchMode=yes: never block on an interactive password prompt (a
         // classic hang); ConnectTimeout bounds an unreachable host. The spawn
         // does not wait for the far side at all: the channel is `connecting`
         // until its first round trip, which is whoever needs it first.
-        const ssh_argv = [_][]const u8{ "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "sh" };
+        const ssh_argv = sshArgv(host);
         const argv: []const []const u8 = switch (self.spawner) {
             .ssh => &ssh_argv,
             .command => |argv| argv,
@@ -428,7 +429,22 @@ fn mustBeCensused(entry: contract_data.Entry) bool {
     return entry.group == .commands or std.mem.indexOf(u8, entry.name, "run") != null;
 }
 
+/// How a persistent shell on `host` is reached. The host comes after `--`:
+/// the parsers already refuse one ssh could read as an option
+/// (`durable.validShellHost`), and this keeps a host from ever being one.
+fn sshArgv(host: []const u8) [8][]const u8 {
+    return .{ "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", host, "sh" };
+}
+
 const t = std.testing;
+
+test "providers: ssh is handed its host after `--`, so a host is never an option" {
+    const argv = sshArgv("box");
+    for (argv, 0..) |arg, i| if (std.mem.eql(u8, arg, "--")) {
+        return t.expectEqualStrings("box", argv[i + 1]);
+    };
+    return error.NoOptionEnd;
+}
 
 test "providers: no guest command runner can reach syntax.add-grammar's arity (it DynLib.opens a caller-named directory)" {
     const gpa = t.allocator;

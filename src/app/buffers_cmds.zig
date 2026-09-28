@@ -197,11 +197,12 @@ fn openLocalWith(ctx: *core.command.Context, command_context: *Context, raw: []c
     return .{ .integer = @intCast(id) };
 }
 
-/// scp-style `host:path` — no `/` before the first `:`.
+/// scp-style `host:path` — the text before the first `:` a host ssh would
+/// read as one (`durable.validShellHost`, the grammar's own test).
 fn scpSpec(spec: []const u8) ?struct { host: []const u8, path: []const u8 } {
     const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return null;
-    if (std.mem.indexOfScalar(u8, spec[0..colon], '/') != null) return null;
-    if (colon == 0 or colon + 1 >= spec.len) return null;
+    if (!durable.validShellHost(spec[0..colon])) return null;
+    if (colon + 1 >= spec.len) return null;
     return .{ .host = spec[0..colon], .path = spec[colon + 1 ..] };
 }
 
@@ -395,4 +396,14 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .data = context,
         .meta = .{ .label = "Browse Remote Files", .icon = "globe", .prompts = true },
     });
+}
+
+test "buffers: scp form names a host only when ssh would read it as one" {
+    const t = std.testing;
+    try t.expectEqualStrings("box", scpSpec("box:/etc/hosts").?.host);
+    try t.expectEqualStrings("me@box", scpSpec("me@box:notes.txt").?.host);
+    try t.expect(scpSpec("-oProxyCommand=x:/y") == null);
+    try t.expect(scpSpec("me@-oProxyCommand=x:/y") == null);
+    try t.expect(scpSpec("box;touch:/y") == null);
+    try t.expect(scpSpec(":/y") == null);
 }

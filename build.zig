@@ -988,6 +988,10 @@ pub fn build(b: *std.Build) void {
     embedGuests(b, app_mod);
     const app_tests = b.addTest(.{ .root_module = app_mod });
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = app_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-app-only", "Run the app module's tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     // `weft_scene` (6 tests) and `weft_text` (4) have been named modules since
     // before this refactor and never had a test binary — src/weft.zig's
     // `_ = scene; _ = text_engine;` looked like coverage but a module's tests
