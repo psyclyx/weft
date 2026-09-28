@@ -37,6 +37,9 @@ pub fn drain(
 ) !usize {
     const commits = doc.commitsSince(self.cursor);
     for (commits) |*commit| {
+        // A lean commit keeps no text; only a producer's document has one,
+        // and a producer's document has no backing to mirror.
+        std.debug.assert(!commit.lean());
         var i = commit.patches.len;
         while (i > 0) {
             i -= 1;

@@ -67,6 +67,9 @@ weft.bind("global", "triple-mouse-1", "pointer.click");
 // it. A status segment that names a command runs it on a click.
 weft.bind("global", "mouse-2", "pointer.close-tab");
 weft.bind("global", "drag-mouse-1", "pointer.drag-select");
+// Its release: a click in a terminal you broke out of — one that did not
+// drag a selection — takes you back in ("type here").
+weft.bind("global", "up-mouse-1", "pointer.release");
 weft.bind("global", "S-mouse-1", "pointer.extend-selection");
 weft.bind("global", "wheel-up", "scroll.wheel-up");
 weft.bind("global", "wheel-down", "scroll.wheel-down");

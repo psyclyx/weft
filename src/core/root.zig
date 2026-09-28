@@ -69,6 +69,7 @@ pub const projection = @import("projection.zig");
 /// An entry that is a grid of styled cells (a terminal's screen), and the
 /// room the pane showing it has (doc/terminal.md §3).
 pub const grid = @import("grid.zig");
+pub const grid_mirror = @import("grid_mirror.zig");
 /// A child on a pseudo-terminal (doc/terminal.md §1).
 pub const pty = @import("pty.zig");
 pub const action_offers = @import("action_offers.zig");

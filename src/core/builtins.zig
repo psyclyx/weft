@@ -617,6 +617,10 @@ fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
 fn cPostureBreakOut(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!ctx.buffer().breakOutOfCapture()) return ok;
+    // A grid's text is read from here on: it catches up with the cells, and
+    // the caret starts where the program's cursor is.
+    @import("grid_mirror.zig").enterReading(ctx.gpa, ctx.buffers, ctx.buffer()) catch |err|
+        std.log.warn("break-out: the grid's text could not catch up: {t}", .{err});
     const resting = ctx.buffers.restingModeFor(ctx.posture());
     if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
     return ok;

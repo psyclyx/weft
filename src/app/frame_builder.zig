@@ -614,6 +614,14 @@ fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
     };
 }
 
+/// Whether a pane READS grid entry `b` as text — its document is written
+/// (`core.grid_mirror`) and nothing captures its keys — rather than showing
+/// its live screen.
+fn gridReading(b: *core.Buffers.Buffer) bool {
+    const g = b.grid orelse return false;
+    return b.editor != null and g.mirror != null and b.declared_posture != .capture;
+}
+
 /// One pane of a frame's input: everything `View.build` reads for it, taken
 /// before any pane is laid out (doc/model.md §2.7). The text is a
 /// `core.TextSnapshot` and every layer on `hud` a `layers.Snapshot`; the rest
@@ -863,8 +871,17 @@ pub const FrameBuilder = struct {
                 publishHighlight(fx, spec.buffer, e, window) catch |err| if (spec.focused) return err;
             }
         }
-        // A grid entry (a terminal's screen) is drawn from its snapshot.
-        if (spec.buffer.grid) |g| hud.grid = try g.snapshot(arena);
+        // A grid entry (a terminal's screen) is drawn from its snapshot: the
+        // live screen while it captures; while it is READ, the rows its
+        // document's scroll shows (settled around the caret above), history
+        // and screen alike.
+        const reading = gridReading(spec.buffer);
+        if (spec.buffer.grid) |g| hud.grid = if (reading)
+            try g.snapshotRows(arena, spec.top_row.*, self.view.bodyRowsIn(hud, spec.rect))
+        else
+            try g.snapshot(arena);
+        var extent = self.view.extentIn(hud, spec.rect);
+        extent.reading = reading;
         const t0 = stats_mod.nowNs();
         const layers = try PaneLayers.take(arena, live, window);
         input.snapshot_ns += stats_mod.nowNs() - t0;
@@ -894,7 +911,7 @@ pub const FrameBuilder = struct {
             .text = text,
             .hud = hud,
             .focused = spec.focused,
-            .extent = self.view.extentIn(hud, spec.rect),
+            .extent = extent,
         });
         text = null; // the input owns it now
     }

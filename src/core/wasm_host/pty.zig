@@ -18,6 +18,7 @@ const requireDispatch = shared.requireDispatch;
 
 const pty_mod = @import("../pty.zig");
 const grid_mod = @import("../grid.zig");
+const grid_mirror = @import("../grid_mirror.zig");
 const Buffers = @import("../Buffers.zig");
 
 /// `wl_pty_spawn(cmd, cols, rows) -> handle` (perm `proc`): run `cmd` under
@@ -138,15 +139,19 @@ fn ownGridEntry(p: *WasmPlugin, name: []const u8) union(enum) { found: *Buffers.
     const bufs = p.activeCtx().buffers;
     const id = bufs.findByName(name) orelse return .absent;
     const b = bufs.get(id) orelse return .absent;
-    if (!std.mem.eql(u8, b.creator, p.name) or b.editor != null) return .refused;
+    // A text entry is not a grid, whoever made it; a grid entry's only
+    // text is the mirror of its cells.
+    if (!std.mem.eql(u8, b.creator, p.name) or (b.editor != null and b.grid == null)) return .refused;
     return .{ .found = b };
 }
 
 /// `wl_grid_publish(name, msg) -> 0|-1`: apply one publish
 /// (`weft_membrane.grid`) to the grid of the entry named `name`, making the
-/// entry — this plugin's, holding no text — if there is none yet. Refused
-/// for a name another plugin's or the user's entry holds, and for a
-/// malformed message (which changes nothing).
+/// entry — this plugin's grid — if there is none yet. Refused for a name
+/// another plugin's or the user's entry holds, or a text entry, and for a
+/// malformed message (which changes nothing). A title section labels the
+/// entry; while the entry is READ (not capturing) its document follows its
+/// cells (`grid_mirror`).
 pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = -1;
@@ -162,7 +167,7 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .absent => blk: {
             const id = bufs.createView(gpa, name, "") catch return;
             const b = bufs.get(id) orelse return;
-            b.read_only = Buffers.produced;
+            b.read_only = grid_mirror.read_only;
             break :blk b;
         },
     };
@@ -172,13 +177,24 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         b.grid = g;
         break :blk g;
     };
-    g.apply(gpa, msg) catch return;
+    const applied = g.apply(gpa, msg) catch return;
+    if (applied.title) |title| {
+        // A label is one line, and short.
+        const line = title[0 .. std.mem.indexOfAny(u8, title, "\r\n") orelse title.len];
+        b.setTitle(gpa, line[0..@min(line.len, 256)]) catch {};
+    }
+    _ = grid_mirror.ensureDocument(gpa, bufs, b) catch return;
+    if (b.declared_posture != .capture) grid_mirror.sync(gpa, bufs, b) catch |err| {
+        std.log.warn("grid: the text of {s} could not follow its cells: {t}", .{ b.name, err });
+    };
     results[0] = 0;
 }
 
 /// `wl_entry_extent(name, out) -> 1|0`: the room the pane showing the entry
-/// named `name` had in the last frame — four little-endian `u16`s: cols,
-/// rows, cell width and height in pixels — into `out`. 0 when no pane has
+/// named `name` had in the last frame, and how it showed it — five
+/// little-endian `u16`s: cols, rows, cell width and height in pixels, and
+/// flags (`grid.Extent.flag_reading`: the pane reads the entry as text, so
+/// what is above its screen is wanted) — into `out`. 0 when no pane has
 /// shown it yet. Asking clears the entry's "moved" flag: the asker has heard.
 pub fn hEntryExtent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -188,11 +204,12 @@ pub fn hEntryExtent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const bufs = p.activeCtx().buffers;
     const b = bufs.get(bufs.findByName(name) orelse return) orelse return;
     const e = b.extent orelse return;
-    var out: [8]u8 = undefined;
+    var out: [10]u8 = undefined;
     std.mem.writeInt(u16, out[0..2], e.cols, .little);
     std.mem.writeInt(u16, out[2..4], e.rows, .little);
     std.mem.writeInt(u16, out[4..6], e.cell_w, .little);
     std.mem.writeInt(u16, out[6..8], e.cell_h, .little);
+    std.mem.writeInt(u16, out[8..10], if (e.reading) grid_mod.Extent.flag_reading else 0, .little);
     _ = caller.writeMemory(@intCast(args[2]), out.len, &out) catch return;
     b.extent_moved = false;
     results[0] = 1;

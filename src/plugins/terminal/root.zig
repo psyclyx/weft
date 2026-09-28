@@ -91,7 +91,8 @@ const Term = struct {
     }
 
     fn repaint(self: *Term) void {
-        self.vt.publish(self.name(), &self.msg);
+        const reading = if (weft.entryExtent(self.name())) |e| e.reading else false;
+        self.vt.publish(self.name(), &self.msg, reading);
         self.shown = true;
     }
 };

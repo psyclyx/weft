@@ -160,6 +160,11 @@ pub const Gesture = struct {
     /// Whether a drag has already anchored its selection at `origin`.
     /// Cleared by every press; set by `pointer.drag-select`.
     selecting: bool = false,
+    /// This gesture's press was in the body of an entry that can resume a
+    /// capture: if it is released without a drag, it was a click — "type
+    /// here" — and capture resumes (`pointer.release`). A drag selects the
+    /// text it shows instead (a terminal read as text).
+    resume_on_release: bool = false,
     /// Whether this gesture's first click BEGAN an edit (a slow click on
     /// the focused row). Its double click is then an activation that ends
     /// the edit on the way, not a double click inside a name being edited.
@@ -362,12 +367,20 @@ fn cPointerAddSelection(ctx: *Context, args: struct {}) anyerror!Value {
 /// action node acts, and in place.
 fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    ctx.head.pointer.resume_on_release = false;
     if (ctx.head.pointer.hit.chrome) |chrome| return if (actsThisClick(ctx)) clickChrome(ctx, chrome) else ok;
     const moved = focusHitPane(ctx);
     // A click in the body of an entry that broke out of a capture (a
-    // terminal after the break-out chord) is "type here": it captures again.
+    // terminal after the break-out chord) is "type here": it captures again
+    // — once released without a drag (`pointer.release`), because a drag
+    // there selects the text the entry shows. The caret goes where the
+    // press was, for the drag to start from.
     if ((moved or ctx.head.pointer.hit.focused) and ctx.buffer().canResumeCapture()) {
-        _ = try command.run(ctx.commands, ctx, "mode.resume-capture", &.{});
+        ctx.head.pointer.resume_on_release = true;
+        if (ctx.head.pointer.hit.offset) |off| if (hitEditor(ctx)) |ed| {
+            ed.clearSelection();
+            ed.placeCursor(off);
+        };
         return ok;
     }
     if (!moved) return activateInPlace(ctx);
@@ -448,6 +461,19 @@ fn runLine(ctx: *Context, line: []const u8) !void {
 fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
     if (ctx.buffers.get(entry) == null) return ok;
     return try ctx.buffers.withEntry(ctx.gpa, entry, ctx.head, ctx.keymap, closeActive, .{ctx});
+}
+
+/// The button came up. A press that was a click in an entry that can
+/// resume a capture — no drag selected anything since — resumes it: "type
+/// here", decided now that it is known not to have been a drag.
+fn cPointerRelease(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const g = &ctx.head.pointer;
+    defer g.resume_on_release = false;
+    if (!g.resume_on_release or g.selecting) return ok;
+    if (!ctx.buffer().canResumeCapture()) return ok;
+    _ = try command.run(ctx.commands, ctx, "mode.resume-capture", &.{});
+    return ok;
 }
 
 fn closeActive(ctx: *Context) anyerror!Value {
@@ -686,6 +712,7 @@ pub const table = [_]command.Command{
     command.define("pointer.open-row", "Open the row under the pointer on one click: a row that folds opens or closes in place, an action row runs, anything else opens.", cPointerOpenRow).present(.{ .internal = true }),
     command.define("pointer.activate", "Activate the node under the pointer, running its action or opening its target.", cPointerActivate).present(.{ .internal = true }),
     command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab).present(.{ .internal = true }),
+    command.define("pointer.release", "The button came up: a click in an entry that can resume a capture, released without a drag, resumes it.", cPointerRelease).present(.{ .internal = true }),
     command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp).present(.{ .internal = true }),
     command.define("scroll.wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown).present(.{ .internal = true }),
     command.define("view.run-focused-action", "Run the action the focused action node names.", cActivateFocusedAction).present(.{ .internal = true }),

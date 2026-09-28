@@ -169,6 +169,10 @@ my_grant: @import("authority.zig").Grade = .own,
 pub const PeerId = enum(u32) {
     user = 0,
     remote = std.math.maxInt(u32),
+    /// A PRODUCER writing on the main replica (`produce`): text that
+    /// mirrors something else's state — a terminal's cells — which no undo
+    /// log owns and no peer shadows.
+    producer = std.math.maxInt(u32) - 1,
     _,
 
     fn index(self: PeerId) usize {
@@ -208,15 +212,29 @@ pub const Commit = struct {
     bytes: []u8,
     removed_bytes: []u8,
 
-    /// Inserted content of `patches[i]`.
+    /// Positions only: a `.producer`'s commit (`produce`) keeps no text —
+    /// `bytes` and `removed_bytes` are empty — because what a producer
+    /// streams through a document (a terminal's output) must not pile up in
+    /// its log. Such a commit is never undone (no log owns `.producer`) and
+    /// its text is the document's own; what reads commit TEXT — a backing's
+    /// mirror — never sees one, since a producer's document has no backing.
+    /// Read off the author, not stored: the log is scanned on every undo
+    /// step, and a wider commit is a slower scan.
+    pub fn lean(self: *const Commit) bool {
+        return self.author == .producer;
+    }
+
+    /// Inserted content of `patches[i]` ("" for a lean commit).
     pub fn insertedBytes(self: *const Commit, i: usize) []const u8 {
+        if (self.lean()) return "";
         var start: usize = 0;
         for (self.patches[0..i]) |p| start += p.inserted;
         return self.bytes[start..][0..self.patches[i].inserted];
     }
 
-    /// Removed (pre-commit) content of `patches[i]`.
+    /// Removed (pre-commit) content of `patches[i]` ("" for a lean commit).
     pub fn removedBytes(self: *const Commit, i: usize) []const u8 {
+        if (self.lean()) return "";
         var start: usize = 0;
         for (self.patches[0..i]) |p| start += p.removed;
         return self.removed_bytes[start..][0..self.patches[i].removed];
@@ -743,8 +761,10 @@ fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const E
     var removed: std.ArrayList(u8) = .empty;
     errdefer removed.deinit(gpa);
     const rope = self.text();
+    const lean = author == .producer;
     var delta: isize = 0;
     for (patches) |p| {
+        if (lean) continue;
         const new_off: usize = @intCast(@as(isize, @intCast(p.offset)) + delta);
         if (p.inserted > 0) {
             const dest = try bytes.addManyAsSlice(gpa, p.inserted);
@@ -768,6 +788,60 @@ fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const E
         .bytes = try bytes.toOwnedSlice(gpa),
         .removed_bytes = try removed.toOwnedSlice(gpa),
     });
+}
+
+/// Whether any peer shadows this document.
+pub fn hasPeers(self: *const Document) bool {
+    for (self.peers.items) |slot| if (slot != null) return true;
+    return false;
+}
+
+/// Re-found this document on its current text: a fresh replica whose base
+/// IS the text (the bulk-load path, O(text), one event) — every event of
+/// its history folded away at once, where `compact` folds them one by one
+/// (seconds, for the millions a terminal's output makes). What is local is
+/// kept, because the text did not move: anchors, the commit log (its
+/// positions still map), grants. Only for a document no one else
+/// replicates — it has no peers (asserted) — and identity anchors into the
+/// old history (`exportAnchor`) no longer resolve.
+pub fn refound(self: *Document, gpa: Allocator) Error!void {
+    assert(!self.hasPeers());
+    const rope = self.text();
+    const content = try gpa.alloc(u8, rope.byteLen());
+    defer gpa.free(content);
+    rope.copyRange(content, .{ .start = 0, .end = content.len });
+    var fresh = ObjectDoc.openFromContent(gpa, content, body_key) catch |e| switch (e) {
+        error.Corrupt => unreachable, // the document's own text is UTF-8
+        else => |err| return err,
+    };
+    errdefer fresh.deinit(gpa);
+    try fresh.setAgent(gpa, self.user_name);
+    self.doc.deinit(gpa);
+    self.doc = fresh;
+    self.body = resolveBody(&self.doc);
+}
+
+/// A PRODUCER's edit: several non-overlapping replacements (ascending) as
+/// one commit authored `.producer`, straight on the main replica — what a
+/// mirror of something else's state writes (a terminal's text following
+/// its cells, `grid_mirror`). No peer shadow is bootstrapped or merged
+/// (that costs seconds on a large document), no undo log owns the commit,
+/// and it is lean (`Commit.lean`): a producer streaming output through a
+/// document must not pile its text up in the log. A document written this
+/// way has no backing; nothing that reads commit text reads it.
+pub fn produce(self: *Document, gpa: Allocator, items: []const Replacement) Error!void {
+    var pre = self.text().snapshot();
+    defer pre.deinit(gpa);
+    var edits: std.ArrayList(Edit) = .empty;
+    defer edits.deinit(gpa);
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        const r = items[i];
+        if (!r.range.isEmpty()) try edits.append(gpa, try self.doc.textDelete(gpa, self.body, r.range));
+        if (r.bytes.len > 0) try edits.append(gpa, try self.doc.textInsert(gpa, self.body, r.range.start, r.bytes));
+    }
+    try self.commitEdits(gpa, .producer, edits.items, &pre);
 }
 
 // ── Anchors ─────────────────────────────────────────────────────────

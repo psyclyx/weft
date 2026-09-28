@@ -290,7 +290,7 @@ test "e2e/terminal: $SHELL (bash, zsh or sh) runs in the place's environment, an
 /// takes to reach the screen, and what one frame (read the pty, emulate,
 /// publish the changed rows, build and draw) costs meanwhile. Opt-in
 /// (`WEFT_BENCH_TERMINAL=1`): it measures, it does not gate.
-fn floodBench(cmd: []const u8, label: []const u8) !void {
+fn floodBench(cmd: []const u8, label: []const u8, read: bool) !void {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
     try app.init(gpa);
@@ -301,6 +301,9 @@ fn floodBench(cmd: []const u8, label: []const u8) !void {
     // The marker is spelled apart on the typed line, so only the shell's
     // answer reads `flood-done`.
     enter(ed, try std.fmt.bufPrint(&line_buf, "{s}; echo flood-\"\"done", .{cmd}));
+    // Read rather than captured: every wake also sends the rows that
+    // scrolled into the scrollback, and core keeps the text in step.
+    if (read) ed.press("C-backslash", "");
     var frames: std.ArrayList(u64) = .empty;
     defer frames.deinit(gpa);
     const start = core.task.nowNs();
@@ -324,9 +327,11 @@ fn floodBench(cmd: []const u8, label: []const u8) !void {
 
 test "bench/terminal: yes and ls -R floods" {
     if (std.c.getenv("WEFT_BENCH_TERMINAL") == null) return error.SkipZigTest;
-    try floodBench("yes | head -n 200000", "yes x200000");
-    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000");
-    try floodBench("true", "idle prompt");
+    try floodBench("yes | head -n 200000", "yes x200000", false);
+    try floodBench("yes | head -n 200000", "yes x200000, read (broken out)", true);
+    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000", false);
+    try floodBench("ls -R /nix/store 2>/dev/null | head -n 100000", "ls -R | head -100000, read (broken out)", true);
+    try floodBench("true", "idle prompt", false);
 }
 
 /// The median of `rounds` forced frames of `ed` as it is now, in µs.
@@ -521,4 +526,148 @@ test "e2e/terminal: a terminal is an ordinary entry — in an editor pane it is 
     try frameNow(ed);
     var strip: [16]u32 = undefined;
     try t.expect(std.mem.indexOfScalar(u32, ed.tabEntries(&strip), ed.buffers.active().id) != null);
+}
+
+// ── Terminal-normal: a terminal read as text ─────────────────────────
+
+/// The terminal's document — its history and screen as text — once it holds
+/// `needle`, driving frames (the pane tells the plugin it is read, and the
+/// plugin sends its scrollback) until it does.
+fn waitText(ed: *Editor, name: []const u8, needle: []const u8) ![]u8 {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        const b = named(ed, name) orelse continue;
+        const te = b.textEditor() orelse continue;
+        const text = try te.text().toOwnedSlice(ed.gpa);
+        if (std.mem.indexOf(u8, text, needle) != null) return text;
+        ed.gpa.free(text);
+    }
+    return error.TextNeverShown;
+}
+
+/// The line of `text` the caret is on.
+fn caretLine(ed: *Editor) ![]u8 {
+    const te = ed.buffers.active().textEditor() orelse return error.NoText;
+    const rope = te.text();
+    const range = rope.lineRange(rope.offsetToPoint(te.cursorOffset()).row);
+    const out = try ed.gpa.alloc(u8, range.end - range.start);
+    rope.copyRange(out, range);
+    return out;
+}
+
+test "e2e/terminal: out of capture a terminal is text — vim searches its scrollback, yanks a line, and `i` takes the keys back" {
+    const gpa = t.allocator;
+    var app: chrome.GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("x.txt", "x\n");
+    try ed.setConfig("terminal", "shell", test_shell);
+    ed.runStr("terminal.open", "");
+    ed.applyWindow();
+    if (!h.drainToolContains(ed, term, "$")) return screenFailed(ed, error.PromptNeverShown);
+    // Far more than the panel shows: most of it scrolls into the scrollback.
+    enter(ed, "seq 1 300; echo seq-\"\"done");
+    try waitFor(ed, "\nseq-done\n$");
+
+    // Out of capture: the screen and its scrollback are the entry's text,
+    // read-only, with vim's caret where the shell's cursor was.
+    ed.press("C-backslash", "");
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+    {
+        const text = try waitText(ed, term, "\n1\n2\n3\n");
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "\n299\n300\nseq-done\n$") != null);
+    }
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("$", line);
+    }
+
+    // `/142` finds it in the scrollback, far above the screen; `yy` yanks it.
+    ed.press("/", "");
+    ed.settle(5);
+    ed.typeText("142");
+    ed.settle(5);
+    ed.press("Return", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("142", line);
+    }
+    ed.typeText("yy");
+    try t.expectEqualStrings("142", (ed.register.get(0) orelse return error.NothingYanked).slice());
+    // And it is drawn: the pane shows the rows around the caret, from the
+    // scrollback, as cells — not the live screen.
+    try frameNow(ed);
+    {
+        const v = try ed.ensureView();
+        const lines = v.frame_layout.lines;
+        try t.expect(lines.len > 0);
+        var saw = false;
+        for (lines) |vl| {
+            if (vl.src.end - vl.src.start == 3) saw = true;
+        }
+        try t.expect(saw);
+    }
+    // Visual selection over two lines, yanked — and the yank flashes.
+    const flashes = ed.caps.flash.genOf(.edit);
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expectEqualStrings("142\n143", (ed.register.get(0) orelse return error.NothingYanked).slice());
+    try t.expect(ed.caps.flash.genOf(.edit) != flashes);
+    // The text is the program's: an edit is refused, the text unchanged.
+    {
+        const before = try named(ed, term).?.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(before);
+        ed.typeText("dd");
+        const after = try named(ed, term).?.textEditor().?.text().toOwnedSlice(gpa);
+        defer gpa.free(after);
+        try t.expectEqualStrings(before, after);
+    }
+
+    // `i` takes the keys back, as in vim's :terminal; the shell answers.
+    ed.press("i", "i");
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo again");
+    try waitFor(ed, "\nagain\n$");
+}
+
+test "e2e/terminal: out of capture under ide, a drag selects the terminal's cells and C-c copies them" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openShell(&app, test_shell);
+    enter(ed, "echo copy-me-please");
+    try waitFor(ed, "\ncopy-me-please\n$");
+    ed.press("C-backslash", "");
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    const text = try waitText(ed, term, "\ncopy-me-please\n");
+    defer gpa.free(text);
+    // The output line (not the typed one): drag from its `me` to its end.
+    const line_at = std.mem.indexOf(u8, text, "\ncopy-me-please\n").? + 1;
+    // Up the text to it (it may have scrolled into the history): the caret
+    // walks the rows as it walks any text, and the pane follows it.
+    for (0..8) |_| {
+        try frameNow(ed);
+        if (ed.pointAt(line_at) != null) break;
+        ed.press("Up", "");
+    }
+    const from = ed.pointAt(line_at + "copy-".len) orelse return error.LineNotShown;
+    const to = ed.pointAt(line_at + "copy-me-please".len) orelse return error.LineNotShown;
+    ed.pointer_ms += 1000;
+    ed.gestures.warp(from[0], from[1]);
+    ed.pointerButton(1, true, .{});
+    ed.pointerMove(.{ (from[0] + to[0]) / 2, from[1] }, .{});
+    ed.pointerMove(.{ to[0] + 2, to[1] }, .{});
+    ed.pointerButton(1, false, .{});
+    try t.expect(ed.ctx.posture() != core.input.Posture.capture);
+    ed.press("C-c", "");
+    try t.expectEqualStrings("me-please", ed.head.clipboard.text());
 }

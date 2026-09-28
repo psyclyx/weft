@@ -353,7 +353,10 @@ pub const Buffer = struct {
     }
 
     pub fn posture(self: *const Buffer, field_focused: bool) Posture {
-        const derived: Posture = if (self.editor != null and self.read_only == null) .text else .structural;
+        // A grid's document is TEXT, read-only as it is (the program's
+        // output): motions, visual selection and search are a text's, not
+        // a listing's rows.
+        const derived: Posture = if (self.editor != null and (self.read_only == null or self.grid != null)) .text else .structural;
         const declared = self.declared_posture orelse derived;
         return if (declared == .structural and field_focused) .field else declared;
     }

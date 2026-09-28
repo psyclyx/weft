@@ -2894,19 +2894,22 @@ pub fn gridPublish(name: []const u8, msg: []const u8) bool {
 }
 
 /// Room, in cells, of the pane showing an entry — and its cells' size in
-/// pixels — as the last frame laid it out.
-pub const Extent = struct { cols: u16, rows: u16, cell_w: u16, cell_h: u16 };
+/// pixels — as the last frame laid it out, and whether the pane READS the
+/// entry as text (it is not capturing): then the rows above a grid's screen
+/// are wanted too (a `history` section).
+pub const Extent = struct { cols: u16, rows: u16, cell_w: u16, cell_h: u16, reading: bool = false };
 
 /// The room the pane showing entry `name` had in the last frame, or null
 /// when no pane has shown it. `on_poll` fires when it moves.
 pub fn entryExtent(name: []const u8) ?Extent {
-    var out: [8]u8 = undefined;
+    var out: [10]u8 = undefined;
     if (e.wl_entry_extent(p(name.ptr), @intCast(name.len), p(&out)) != 1) return null;
     return .{
         .cols = std.mem.readInt(u16, out[0..2], .little),
         .rows = std.mem.readInt(u16, out[2..4], .little),
         .cell_w = std.mem.readInt(u16, out[4..6], .little),
         .cell_h = std.mem.readInt(u16, out[6..8], .little),
+        .reading = std.mem.readInt(u16, out[8..10], .little) & 1 != 0,
     };
 }
 

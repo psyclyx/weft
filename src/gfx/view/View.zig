@@ -666,10 +666,44 @@ pub fn build(
             self.semantic_hits = hits;
         }
     } else if (hud.grid) |*g| {
-        // A grid entry (a terminal): cells, not text — no rope, no geometry
-        // map, and the cursor is the grid's own.
-        self.frame_layout = .{ .lines = &.{} };
-        try grid_draw.draw(self, scratch, &runs, &rects, g, body_rect, hud.cursor_on);
+        if (g.reading and editor != null) {
+            // A grid READ as text: its cells drawn as ever, over the rows its
+            // document's scroll shows, with the document's geometry — so the
+            // caret, the selections and a flash are drawn on the cells, and
+            // a click or a drag lands on the cell under it.
+            const ed = editor.?;
+            settleRows(ed, top_row, rows_visible);
+            const la = self.layout_arena.allocator();
+            self.frame_layout = .{ .lines = try grid_draw.layoutRows(self, la, ed.text(), g, body_rect) };
+            var washes: std.ArrayList(Rect) = .empty;
+            defer washes.deinit(scratch);
+            for (0..ed.selectionCount()) |i| {
+                if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &washes, r, self.theme.selection);
+            }
+            for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &washes, fl, self.theme.accent);
+            // The document's caret is the cursor drawn: at its cell, in the
+            // shape the grammar's mode asks for.
+            var shown = g.*;
+            if (!hud.row_focus) if (self.frame_layout.pointAtOffset(cursor_off)) |c| {
+                const row = self.frame_layout.lineForOffset(cursor_off).?;
+                shown.cursor = .{
+                    .x = @intFromFloat(@max(0, @round((c.x - self.origin_x) / self.cell_w))),
+                    .y = @intCast(row),
+                    .shape = switch (hud.cursor_style) {
+                        .block => .block,
+                        .bar => .bar,
+                        .underline => .underline,
+                    },
+                    .visible = true,
+                };
+            };
+            try grid_draw.draw(self, scratch, &runs, &rects, &shown, body_rect, hud.cursor_on, washes.items);
+        } else {
+            // A grid entry (a terminal) taking its input: the live screen —
+            // no geometry map, and the cursor is the grid's own.
+            self.frame_layout = .{ .lines = &.{} };
+            try grid_draw.draw(self, scratch, &runs, &rects, g, body_rect, hud.cursor_on, &.{});
+        }
     } else if (editor) |ed| {
         const rope = ed.text();
         const total_rows = rope.lineCount();

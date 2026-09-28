@@ -84,15 +84,24 @@ Cost: `terminal.wasm` is about 720 KB, against about 170 KB for `vim.wasm`.
 
 ## 3. Rendering: a grid entry
 
-A terminal screen is not text. There is no rope, no history, and it may
-redraw sixty times a second. So core gained a second kind of text-less entry
-next to projections: **a grid** (`core/grid.zig`, `Buffer.grid`).
+A terminal screen is not text first. It may redraw sixty times a second, and
+what it shows is cells with colours. So core has a kind of entry next to
+projections: **a grid** (`core/grid.zig`, `Buffer.grid`). Its text — the
+cells as a read-only document — is derived from it, and only while someone
+reads it (§6).
 
 - **Publishing.** `wl_grid_publish(name, msg)` applies one message to the
-  plugin's own text-less entry, and creates the entry if it does not exist.
+  plugin's own grid entry, and creates the entry if it does not exist.
   The layout is in `membrane/grid.zig`: a 16-byte header (size, cursor
   position and shape, rows sent), then the changed rows only. Each row is an
-  index followed by 16-byte cells: codepoint, fg, bg, attributes, width.
+  index followed by 16-byte cells: codepoint, fg, bg, attributes, width, and
+  a mark (what the program said the cell is: prompt, typed input, or
+  output — the shell integration marks it).
+- **Sections.** After the rows a publish may carry tagged sections, each
+  framed by its tag and length and skipped by a reader that does not know it:
+  `title` (the entry's label, a terminal's OSC 0/2 title — `Buffer.title`)
+  and `history` (rows that scrolled off the top of the screen: how many to
+  drop from the oldest end, then the new rows, each its own cell count).
 - **Colours** are raw RGB, or one of two theme values, `theme_fg` and
   `theme_bg`. This is the one render door that carries RGB, because 256-colour
   and truecolor output has no theme role to map onto. Plain output still takes
@@ -107,10 +116,11 @@ next to projections: **a grid** (`core/grid.zig`, `Buffer.grid`).
   geometry as text rows. The cursor is the grid's own, in the shape the VT
   reports (block, bar, underline or hollow), and blinks with the head.
 - **Size.** After each frame, the room the pane had goes into `Buffer.extent`
-  (cols, rows, cell pixels). If it changed, the owner's `on_poll` fires *after*
-  the frame (`notifyExtents`), and the owner reads it with `wl_entry_extent`.
-  The terminal then resizes the emulator and the pty, and the child gets
-  SIGWINCH.
+  (cols, rows, cell pixels, and whether the pane READ the entry as text —
+  §6). If it changed, the owner's `on_poll` fires *after* the frame
+  (`notifyExtents`), and the owner reads it with `wl_entry_extent` (ten
+  bytes: five `u16`s, the last the flags). The terminal then resizes the
+  emulator and the pty, and the child gets SIGWINCH.
 
 **Dirty rows.** The plugin reads ghostty's render state and republishes only
 the rows it marks dirty. Everything is republished after a resize or a
@@ -122,15 +132,65 @@ cover a full composite: read, emulate, publish, build and CPU raster.
 
 | case | time to reach the screen | frames | per-frame time |
 |---|---|---|---|
-| `yes \| head -n 200000` | 48 ms | 5 | p50 8.7 ms, max 15.7 ms |
-| `ls -R /nix/store \| head -n 100000` | 539 ms | 84 | p50 4.8 ms, p90 12.8 ms |
+| `yes \| head -n 200000` | 43 ms | 6 | p50 6.9 ms, max 11.0 ms |
+| `ls -R /nix/store \| head -n 100000` | 428 ms | 65 | p50 5.0 ms, p90 12.3 ms |
+| `yes …`, read (broken out, §6) | 155 ms | 4 | p50 52 ms |
+| `ls -R …`, read (broken out, §6) | 1984 ms | 76 | p50 4.2 ms, p90 81 ms |
 
+- The first two rows are the terminal capturing, as before this document's
+  §6 existed: they are unchanged (48 and 539 ms then, on this machine's
+  earlier measure). History is not copied while nothing reads it.
+- The last two are the flood with the terminal READ as text: every wake also
+  sends the rows that scrolled into the scrollback and core keeps the
+  document in step. `ls -R` turns over ~2500 wide rows a wake; the cost is
+  the rows' cells and their text, not the CRDT (below).
 - Each wake digests at most 256 KiB, so a flood draws as it goes rather than
   one frame waiting on all of it.
-- A frame with the panel full of 40 coloured rows has a median of 4.2 ms,
-  against 3.7 ms for the problems list in the same panel.
+- A frame with the panel full of 40 coloured rows has a median of 4.9 ms,
+  against 4.5 ms for the problems list in the same panel.
 
-## 4. Keys: capture
+## 4. Several terminals, and a header that lists entries
+
+The plugin holds one emulator and one pty per terminal (`Term` in
+`plugins/terminal/root.zig`), never globals. Each terminal is an ordinary
+entry: `*terminal*`, `*terminal:2*`, … designated
+`weft://here/proc/terminal.N`, where N counts up for the whole run and is
+never reused, so a designation always names one shell.
+
+- `terminal.open` shows the terminal used last, starting one when there is
+  none. Given a designation — the plugin is the `proc.terminal` opener — it
+  shows that terminal while its shell lives and refuses once it has gone.
+- `terminal.new` always starts another.
+- Either takes the entry into the viewport named by the `viewport` setting
+  (`panel`), through core's `viewport.take`; `none` leaves it in the editor,
+  where it is a document with an editor tab, like any entry, and can be
+  split.
+- Closing a terminal's entry hangs its shell up. Core bumps
+  `Buffers.grid_closes` when an entry holding a grid closes, and that wakes
+  the grid's owner (`on_poll`), which lets go of whatever fed the entry.
+
+**A viewport header of entries** (`core/viewport.zig`). A docked
+viewport's `tabs` may contain, besides command ids, a line `entries` or
+`entries:<maker>`. At that place the header lists the entries the viewport
+has held that are still open (`Declaration.held`), all of them or only those
+the named plugin made:
+
+- labeled by the entry — `Buffer.title` when its maker set one (a
+  terminal's OSC title), else its name;
+- iconed like the command that opens its designation's kind (the terminal's
+  opener, `terminal.open`);
+- a click shows the entry in that pane (`Panes.show`: a docked panel owns its
+  entry against a plain `buffer.switch`); its × closes it, and the pane shows
+  the newest held entry left;
+- an entry an ordinary pane shows is let go — in the editor it is a
+  document again — and a header that stops listing entries forgets them.
+
+A command tab of the same maker is lit only when no entry tab is: "+ New
+Terminal" is not what the panel shows when a terminal is. `config/panel.js`
+declares `["problems.open", "entries:terminal", "terminal.new"]`. Nothing
+here knows what a terminal is: any plugin's entries can be listed so.
+
+## 5. Keys: capture
 
 The terminal's entry declares the capture posture
 (`wl_declare_capture("terminal.input")`,
@@ -152,8 +212,10 @@ binding mode's fallback chain and `global`.
 Breaking out leaves you in the terminal's pane, in the grammar's own mode,
 with the endpoint kept. Two ways back in, neither terminal-specific:
 
-- **A click in the pane body.** `pointer.click` on an entry that can resume
-  a capture (`Buffer.canResumeCapture`) resumes it, as focusing any IDE's
+- **A click in the pane body.** A press on an entry that can resume a
+  capture (`Buffer.canResumeCapture`) marks the gesture, and its release
+  (`up-mouse-1`, `pointer.release`) resumes the capture — unless the press
+  became a drag, which selects the text instead (§6). As focusing any IDE's
   terminal does.
 - **The `std.input.resume` intention** (`mode.resume-capture`), a core offer
   that is absent unless there is a capture to resume. vim and helix bind it
@@ -188,7 +250,68 @@ The terminal keeps three keys for itself, as terminals do:
 **Getting back in.** C-` (or `SPC o t`) captures again. Focusing the panel by
 another route keeps whatever posture the entry was left in.
 
-## 5. What stayed
+## 6. Terminal-normal: the grid read as text
+
+Out of capture — after the break-out chord, or whenever a terminal is not
+capturing — the screen and its scrollback are a READ-ONLY TEXT DOCUMENT, so
+the grammar's own keys work on them unchanged: vim and helix motions, `/`
+search, snipe, visual selection and yank (with its flash), the pointer's
+drag-select, ide's selection and C-c. Nothing of this knows what a
+terminal is; it is what a grid entry is.
+
+**The document is derived from the cells** (`core/grid_mirror.zig`). Row
+`i` of the grid — its history, then its screen — is line `i` of the
+document, and a cell's text is `grid.cellText` (its scalar, a space for an
+empty cell, nothing for the second half of a wide one), trailing blanks
+dropped. So an offset names a cell, and the one function both the document
+and the view read is the only place that could disagree.
+
+- **Written only while read.** A publish on an entry that is not capturing
+  brings the document up to date; so does leaving capture
+  (`grid_mirror.enterReading`, run by `mode.break-out`), which also puts the
+  caret where the program's cursor is. While a program takes every key,
+  nothing moves a caret through its output, and a flood is not copied twice.
+- **History only when read.** The frame tells the owner whether its pane
+  reads the entry (`Extent.reading`, `wl_entry_extent`'s flags). Only then
+  does the terminal send its scrollback: the rows that scrolled up past the
+  newest one core holds, found through a tracked ghostty grid reference that
+  follows the scrollback as it moves, and how many of the oldest the
+  scrollback dropped. A resize, a clear, or a reference ghostty lost sends
+  all of it again (`reset`). The rows are read a viewport at a time through
+  the render state, so their colours are resolved as the screen's are.
+  `core.grid` keeps them end to end in one store, not an allocation a row.
+- **Written as a producer, minimally.** `Document.produce` edits the main
+  replica directly and logs the commit as `.producer`: no undo log owns it,
+  and it is LEAN — positions without text — so output streamed through the
+  document never piles up in its log. Only the change is written: rows gone
+  from the front cut, rows scrolled up appended, and the screen's common
+  prefix and suffix kept, so a caret or a selection in the scrollback holds
+  still under new output. A peer shadow (`renderInto`) was the first cut and
+  cost seconds per flood wake — bootstrapping and merging a replica of a
+  large document; direct edits cost milliseconds.
+- **Re-founded now and then.** A CRDT keeps every scalar that passed through
+  as an event and what scrolled away as a tombstone. Past 64 Ki events the
+  document is re-founded on its text (`Document.refound`: a bulk load, one
+  base event, ~1 ms per MB; `compact` took seconds for the same). Anchors
+  and the commit log are local and survive; the text did not move.
+- **Posture.** A grid's document is text (`Buffer.posture` derives `.text`
+  for a grid with a document, read-only as it is): vim's `V` is a line
+  selection, not a listing's rows. Edits are refused (`read_only`: "terminal
+  output").
+
+**Drawn as the terminal** (`gfx/view/grid.zig`). The frame snapshot of a
+READ grid is the rows its document's scroll shows (`Grid.snapshotRows`,
+settled around the caret before capture), history or screen alike, drawn
+cell by cell as ever — colours and attributes kept. The view builds the
+pane's geometry map from the cells (`grid.layoutRows`: a caret stop at every
+cell with text, at its x), so the text machinery's selection washes, flash
+and hit-testing land on cells, and the caret is drawn as the grid's cursor at
+its cell, in the shape the grammar's mode asks for.
+
+**Back in.** `i` (vim, helix), a click, or C-` resume capture as before; a
+drag in the pane selects instead of resuming.
+
+## 7. What stayed
 
 - `terminal.session` is still published on the place the shell starts in.
 - `[process exited N]` is written onto the screen, and the next key or C-`
@@ -202,17 +325,15 @@ mode, its input line, and `TERM=dumb`/`--noediting`.
 person edits and searches, with output appended as a CRDT peer. That is a
 different thing from a screen, so moving them is not a rename.
 
-## 6. Not done
+## 8. Not done
 
 - **A remote pty.** A shell in a peer's or ssh's place needs the pty door
   answered by that place's authority (§1).
-- **Selecting and copying text with the mouse.** ghostty has a selection API
-  (`GHOSTTY_TERMINAL_OPT_SELECTION`, the formatter). What is missing is a
-  pointer door carrying the cell under the pointer: `wl_pointer` gives a byte
-  offset, which a grid has none of.
 - **Clicks and drags to the child** when it tracks the mouse. The wheel is
-  reported at the cursor's cell, not the pointer's, for the same missing
-  reason.
-- **Kitty graphics, hyperlinks (OSC 8), title and cwd (OSC 0/7)**, and a
-  terminal status segment.
-- **Multiple terminals.** There is one `*terminal*` per editor.
+  reported at the cursor's cell, not the pointer's.
+- **Soft-wrapped lines** are one document line per ROW: a long line wrapped
+  by the terminal yanks with a line break where it wrapped, and a search
+  does not match across the wrap.
+- **Search matches** are not highlighted on the cells; the caret lands on
+  them.
+- **Kitty graphics and hyperlinks (OSC 8)**, and a terminal status segment.
