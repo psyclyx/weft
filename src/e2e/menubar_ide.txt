@@ -94,20 +94,20 @@ Help	keys	20	Explain Binding…	action.explain
 Run	breakpoints	1	Toggle Breakpoint	debug.toggle-breakpoint
 Run	breakpoints	2	Clear All Breakpoints	debug.clear-breakpoints
 Run	breakpoints	3	List Breakpoints	debug.list-breakpoints
-Run	debug	1	Start Debugging	debug.start
+Run	debug	1	Start Debugging	dap.start
 Run	debug	1	Start Debugging	plugin.code.debug
-Run	debug	2	Stop Debugging	debug.stop
+Run	debug	2	Stop Debugging	dap.stop
 Run	run	1	Run	plugin.code.run
 Run	run	1	Run File	modes.run
 Run	run	2	Run Line	run.line
 Run	run	2	Test	plugin.code.test
-Run	step	1	Continue	debug.continue
-Run	step	2	Step Over	debug.step-over
-Run	step	3	Step Into	debug.step-into
-Run	step	4	Step Out	debug.step-out
-Run/Agents	agents	1	Start Agent	agent.start
-Run/Agents	agents	2	Send to Agent	agent.send
-Run/Agents	agents	3	Focus Agent Conversation…	agent.focus
+Run	step	1	Continue	dap.continue
+Run	step	2	Step Over	dap.step-over
+Run	step	3	Step Into	dap.step-into
+Run	step	4	Step Out	dap.step-out
+Run/Agents	agents	1	Start Agent	acp.start
+Run/Agents	agents	2	Send to Agent	acp.send
+Run/Agents	agents	3	Focus Agent Conversation…	acp.focus
 Run/REPL	repl	1	Start REPL	repl.start
 Run/REPL	repl	2	Send Line to REPL	repl.send-line
 Run/REPL	repl	3	Stop REPL	repl.quit
