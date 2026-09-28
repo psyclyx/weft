@@ -533,9 +533,12 @@ static JSValue js_group(JSContext *ctx, JSValueConst this_val,
 // registered with weft.provide resolve it by context at fire time. Policy is
 // `pick` (the config plane drives synchronous, command-shaped actions).
 // ── A command's presentation, as the shared text form ───────────────────
-// One `key\tvalue\n` line per field that is set (`weft_membrane.presentation`
-// is the one reader). String fields are taken as written; a tab or newline
-// in one would break the form, so such a value is dropped. `with_summary`
+// One `key\tvalue\n` line per field the object NAMES (`weft_membrane.
+// presentation` is the one reader). String fields are taken as written; a
+// tab or newline in one would break the form, so such a value is dropped. A
+// field named with nothing (`""`, `null`, `false`) is written empty (`off`
+// for a flag): at the config tier that clears it, where an absent one is
+// left to the rows beneath. `with_summary`
 // says whether `summary` belongs here: config describes it, while a plugin's
 // command declares its summary through `declare_command_doc`.
 static const char *const meta_string_keys[] = { "label", "menu", "group", "icon", "toggle" };
@@ -567,10 +570,13 @@ static int meta_from_object(JSContext *ctx, JSValueConst obj, int with_summary, 
                 at = meta_put(out, cap, at, key, s, vl);
                 JS_FreeCString(ctx, s);
             }
+        } else if (JS_IsNull(v)) {
+            at = meta_put(out, cap, at, key, "", 0);
         }
         JS_FreeValue(ctx, v);
     }
     JSValue order = JS_GetPropertyStr(ctx, obj, "order");
+    if (JS_IsNull(order)) at = meta_put(out, cap, at, "order", "", 0);
     if (JS_IsNumber(order)) {
         int32_t o = 0;
         if (JS_ToInt32(ctx, &o, order) == 0) {
@@ -593,6 +599,7 @@ static int meta_from_object(JSContext *ctx, JSValueConst obj, int with_summary, 
         const char *key = b == 0 ? "prompts" : "internal";
         JSValue v = JS_GetPropertyStr(ctx, obj, key);
         if (JS_ToBool(ctx, v) > 0) at = meta_put(out, cap, at, key, "on", 2);
+        else if (!JS_IsUndefined(v)) at = meta_put(out, cap, at, key, "off", 3);
         JS_FreeValue(ctx, v);
     }
     return at;

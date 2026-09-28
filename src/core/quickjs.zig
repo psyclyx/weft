@@ -1859,7 +1859,7 @@ fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         return;
     }
     const table = br.activeCtx().presentations orelse return;
-    table.put(gpa, name, @import("weft_membrane").presentation.decode(meta), br.owner) catch {};
+    table.put(gpa, name, meta, br.owner, .plugin) catch {};
 }
 
 /// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`

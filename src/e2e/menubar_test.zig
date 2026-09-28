@@ -270,6 +270,11 @@ const VimApp = struct {
     loader: ConfigLoader = undefined,
 
     fn init(self: *VimApp, gpa: std.mem.Allocator) !void {
+        return self.initWith(gpa, "");
+    }
+
+    /// With `extra` evaluated after the fragments: a person's own lines.
+    fn initWith(self: *VimApp, gpa: std.mem.Allocator, extra: []const u8) !void {
         try self.proj.init(gpa);
         errdefer self.proj.deinit();
         try Editor.init(gpa, &self.ed);
@@ -283,7 +288,7 @@ const VimApp = struct {
         const base = try core.file.readAlloc(gpa, path);
         defer gpa.free(base);
         // What a person adds to config.js to get the bar: the line in its comment.
-        const src = try std.fmt.allocPrint(gpa, "{s}\nweft.use(\"menus\");\nweft.use(\"menubar\");\n", .{base});
+        const src = try std.fmt.allocPrint(gpa, "{s}\nweft.use(\"menus\");\nweft.use(\"menubar\");\n{s}", .{ base, extra });
         defer gpa.free(src);
         try core.quickjs.evalConfig(&self.ed.engine, self.ed.ctx, self.loader.loader(), &self.ed.config_kv, config_dir, src);
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
@@ -322,6 +327,50 @@ test "e2e/menubar: under config.js with the fragment, the same File menu shows v
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);
     try t.expectEqualStrings("normal", ed.mode());
+}
+
+test "e2e/menubar: a config that relabels a command keeps the place menus.js gave it; naming a field empty clears it" {
+    // A config row sets only the fields it names: relabelling Save (say, to
+    // localize it) must not drop the menu, group and order menus.js placed
+    // it with, or every translated row would silently leave its menu.
+    const gpa = t.allocator;
+    var app: VimApp = undefined;
+    try app.initWith(gpa,
+        \\weft.command("file.save", { label: "Sichern" });
+        \\weft.command("file.save-as", { menu: "" });
+        \\weft.command("buffer.close", { menu: null });
+        \\weft.command("buffer.close-force", { label: "Verwerfen" });
+        \\
+    );
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "a.txt", "one\n");
+    ed.runStr("file.open", "a.txt");
+    ed.applyWindow();
+
+    const save = core.presentations.of(ed.ctx, "file.save").?;
+    try t.expectEqualStrings("Sichern", save.label);
+    try t.expectEqualStrings("File", save.menu);
+    try t.expectEqualStrings("save", save.group);
+    try t.expectEqual(@as(?i32, 10), save.order);
+    // What core declared (its icon, its summary) is untouched too.
+    try t.expectEqualStrings("save", save.icon);
+    try t.expect(save.summary.len > 0);
+
+    try clickTitle(ed, "File");
+    const file = try menu(ed);
+    // The new label in the old place, with its key; the rows whose menu was
+    // named empty are gone.
+    try expectKeys(file, "Sichern", "C-s");
+    try t.expect(row(file, "Save") == null);
+    try t.expect(row(file, "Save As…") == null);
+    try t.expect(row(file, "Close Editor") == null);
+    var buf: [4096]u8 = undefined;
+    const got = chrome.panelText(&buf, file);
+    if (std.mem.indexOf(u8, got, "| Sichern | Verwerfen |") == null) {
+        std.debug.print("[e2e/menubar] menu: '{s}'\n", .{got});
+        return error.TestUnexpectedMenu;
+    }
 }
 
 // ── State: disabled and checked ─────────────────────────────────────

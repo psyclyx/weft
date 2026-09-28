@@ -961,7 +961,7 @@ pub const Manifest = struct {
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
         for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick, command.action_summary, .{}) catch {};
         if (actx.ctx.presentations) |table| for (self.describes.items) |d|
-            table.put(gpa, d.name, @import("weft_membrane").presentation.decode(d.meta), self.owner) catch {};
+            table.put(gpa, d.name, d.meta, self.owner, .config) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {

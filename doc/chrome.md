@@ -116,7 +116,11 @@ All of §1.
   `CommandEntry` fields in a wasm plugin (`wl_declare_command_meta`), by
   `weft.command(name, fn, {…})` in a JS plugin (`qjs_declare_command_meta`,
   the same body), and at the config tier by `weft.command(id, {…})`, which
-  wins field by field (`Presentations`). `presentations.of(ctx, name)` is the
+  wins field by field (`Presentations`): each call is a row that sets only
+  the fields it names (`""`/`null`/`false` names one to clear it), over the
+  declaration and a resident plugin's rows, later config rows over earlier —
+  so relabelling Save keeps the menu menus.js placed it in.
+  `presentations.of(ctx, name)` is the
   one reading — an intention's is its provider's here, else the std label —
   served by `wl_command_meta`/`qjs_command_meta`. Every command has a
   one-sentence summary and every one a person runs has a label. `internal`

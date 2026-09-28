@@ -7,7 +7,9 @@
 //!
 //! The text form is one `key<TAB>value` line per field that is set, in any
 //! order; a line with an unknown key is skipped, so a field added here does
-//! not break an older reader. A value never holds a tab or a newline.
+//! not break an older reader. A value never holds a tab or a newline. A
+//! config-tier description (`Description`) also says which fields it names:
+//! a line with an empty value (or `off`) names a field to clear it.
 
 const std = @import("std");
 
@@ -45,22 +47,6 @@ pub const Presentation = struct {
             self.toggle.len == 0 and !self.internal;
     }
 
-    /// `over`'s fields where it sets them, this one's elsewhere: the config
-    /// tier describing a command a plugin already described.
-    pub fn overlaid(self: Presentation, over: Presentation) Presentation {
-        return .{
-            .label = if (over.label.len > 0) over.label else self.label,
-            .summary = if (over.summary.len > 0) over.summary else self.summary,
-            .menu = if (over.menu.len > 0) over.menu else self.menu,
-            .group = if (over.group.len > 0) over.group else self.group,
-            .order = over.order orelse self.order,
-            .icon = if (over.icon.len > 0) over.icon else self.icon,
-            .prompts = over.prompts or self.prompts,
-            .toggle = if (over.toggle.len > 0) over.toggle else self.toggle,
-            .internal = over.internal or self.internal,
-        };
-    }
-
     /// The label as shown: `label`, then `…` when the command prompts.
     /// Falls back to `fallback` (the id, say) when there is no label.
     pub fn shown(self: Presentation, buf: []u8, fallback: []const u8) []const u8 {
@@ -70,7 +56,27 @@ pub const Presentation = struct {
     }
 };
 
-const Field = enum { label, summary, menu, group, order, icon, prompts, toggle, internal };
+pub const Field = enum { label, summary, menu, group, order, icon, prompts, toggle, internal };
+
+/// A description at the config tier: the fields it NAMES, and their values.
+/// A row sets only what it names, so a config relabelling a command keeps
+/// the menu another row placed it in; naming a field with nothing (`menu:
+/// ""`, `order: null`, `prompts: false`) clears it. Whether a field was
+/// named is never inferred from its value — an empty menu and an unnamed
+/// one are different rows.
+pub const Description = struct {
+    value: Presentation = .{},
+    named: std.enums.EnumSet(Field) = .initEmpty(),
+
+    /// `base` with every field this description names set to its value.
+    pub fn over(self: Description, base: Presentation) Presentation {
+        var out = base;
+        inline for (std.meta.fields(Field)) |f| {
+            if (self.named.contains(@enumFromInt(f.value))) @field(out, f.name) = @field(self.value, f.name);
+        }
+        return out;
+    }
+};
 
 /// Why a presentation cannot be written down.
 pub const Error = error{
@@ -102,7 +108,16 @@ pub fn encode(buf: []u8, p: Presentation) Error![]const u8 {
 /// The presentation `text` spells. Strings BORROW `text`. Malformed lines and
 /// unknown keys are skipped rather than failing the whole description.
 pub fn decode(text: []const u8) Presentation {
-    var p: Presentation = .{};
+    return describe(text).value;
+}
+
+/// The description `text` spells: its values, and which fields it names. A
+/// line with an empty value (`menu\t`, `order\t`) or `off` names its field
+/// and clears it. Strings BORROW `text`; a malformed line or an unknown key
+/// names nothing.
+pub fn describe(text: []const u8) Description {
+    var d: Description = .{};
+    const p = &d.value;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
@@ -114,14 +129,15 @@ pub fn decode(text: []const u8) Presentation {
             .summary => p.summary = value,
             .menu => p.menu = value,
             .group => p.group = value,
-            .order => p.order = std.fmt.parseInt(i32, value, 10) catch null,
+            .order => p.order = if (value.len == 0) null else std.fmt.parseInt(i32, value, 10) catch continue,
             .icon => p.icon = value,
             .prompts => p.prompts = std.mem.eql(u8, value, "on"),
             .toggle => p.toggle = value,
             .internal => p.internal = std.mem.eql(u8, value, "on"),
         }
+        d.named.insert(field);
     }
-    return p;
+    return d;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -156,14 +172,22 @@ test "presentation: unknown keys and malformed lines are skipped, a tab in a val
     try t.expectError(error.NoSpaceLeft, encode(buf[0..4], .{ .label = "Save" }));
 }
 
-test "presentation: a label shows its prompt mark, and the config tier overlays field by field" {
+test "presentation: a label shows its prompt mark, and a description sets only the fields it names" {
     var buf: [64]u8 = undefined;
     try t.expectEqualStrings("Open File…", (Presentation{ .label = "Open File", .prompts = true }).shown(&buf, "files.find"));
     try t.expectEqualStrings("files.find", (Presentation{}).shown(&buf, "files.find"));
-    const plugin: Presentation = .{ .label = "Find File", .menu = "File", .icon = "file" };
-    const config: Presentation = .{ .label = "Datei öffnen", .order = 2 };
-    const both = plugin.overlaid(config);
+    const plugin: Presentation = .{ .label = "Find File", .menu = "File", .icon = "file", .prompts = true };
+    const both = describe("label\tDatei öffnen\norder\t2\n").over(plugin);
     try t.expectEqualStrings("Datei öffnen", both.label);
     try t.expectEqualStrings("File", both.menu);
     try t.expectEqual(@as(?i32, 2), both.order);
+    try t.expect(both.prompts);
+    // Naming a field with nothing clears it; a malformed value names nothing.
+    const cleared = describe("menu\t\norder\t\nprompts\toff\nicon\t\ngroup\tx\norder\tlots\n").over(both);
+    try t.expectEqualStrings("", cleared.menu);
+    try t.expectEqual(@as(?i32, null), cleared.order);
+    try t.expect(!cleared.prompts);
+    try t.expectEqualStrings("", cleared.icon);
+    try t.expectEqualStrings("Datei öffnen", cleared.label);
+    try t.expectEqualStrings("x", cleared.group);
 }
