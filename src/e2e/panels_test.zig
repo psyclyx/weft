@@ -306,34 +306,35 @@ test "e2e/panels: the panel's header lists Problems and Terminal from their meta
 
     // C-S-m opens the panel on Problems, with a header over it: one tab per
     // command `config/panel.js` named (`tabs: ["problems.open",
-    // "terminal.open"]`), labeled straight from each command's own
+    // "entries:terminal", "terminal.new"]`), labeled straight from each command's own
     // presentation — the same table the palette and which-key read.
     ed.press("C-S-m", "");
     ed.applyWindow();
     try frame(ed);
     try t.expectEqualStrings("*problems*", (panelEntry(ed) orelse return error.PanelNotShown).name);
     try t.expectEqualStrings("Problems", core.presentations.of(ed.ctx, "problems.open").?.label);
-    try t.expectEqualStrings("New Terminal", core.presentations.of(ed.ctx, "terminal.open").?.label);
+    try t.expectEqualStrings("New Terminal", core.presentations.of(ed.ctx, "terminal.new").?.label);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
-    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
-    const close_tab = ed.pointAtTabCommand("viewport.toggle panel") orelse return error.NoCloseTab;
+    try t.expect(ed.pointAtTabCommand("terminal.new") != null);
+    try t.expect(ed.pointAtTabCommand("viewport.toggle panel") != null);
 
     // An artifact to eyeball: ide.js with the panel's header over Problems.
     app.proj.shot(ed, "ide-panel-header");
 
-    // A click on Terminal's tab switches the panel to it — the active tab
-    // follows what the pane shows NOW (its entry's `creator`), so Problems'
-    // tab lights off and Terminal's lights on; Problems' tab stays there to
-    // switch back to.
-    ed.click(ed.pointAtTabCommand("terminal.open").?);
+    // A click on New Terminal's tab starts a terminal in the panel, and the
+    // header lists it: an entry tab (the `entries:terminal` line) beside the
+    // commands; Problems' tab stays there to switch back to.
+    ed.click(ed.pointAtTabCommand("terminal.new").?);
     ed.applyWindow();
     try frame(ed);
-    try t.expectEqualStrings("*terminal*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+    const term_entry = panelEntry(ed) orelse return error.PanelNotShown;
+    try t.expectEqualStrings("*terminal*", term_entry.name);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
+    try t.expect(ed.pointAtTab(term_entry.id, .body) != null);
 
     // Its × (a distinct trailing tab, "viewport.toggle panel") hides the
     // whole panel — not just the entry it showed.
-    ed.click(close_tab);
+    ed.click(ed.pointAtTabCommand("viewport.toggle panel") orelse return error.NoCloseTab);
     ed.applyWindow();
     try t.expect(ed.viewportPane("panel") == null);
     // Focus left with the pane: the active entry is one a pane shows, so
@@ -346,17 +347,17 @@ test "e2e/panels: the panel's header lists Problems and Terminal from their meta
     try frame(ed);
     try t.expectEqualStrings("*terminal*", (panelEntry(ed) orelse return error.PanelNotShown).name);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
-    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
+    try t.expect(ed.pointAtTabCommand("terminal.new") != null);
 
     // The header survives a chrome-style switch, in both directions.
     ed.runStr("theme.set-chrome", "widget");
     try frame(ed);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
-    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
+    try t.expect(ed.pointAtTabCommand("terminal.new") != null);
     ed.runStr("theme.set-chrome", "text");
     try frame(ed);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
-    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
+    try t.expect(ed.pointAtTabCommand("terminal.new") != null);
 }
 
 test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, focus leaves with it, and showing it again brings back what it held" {

@@ -1700,7 +1700,7 @@ test "e2e/config: SPC o t opens the panel with its header, same as ide.js's C-`"
     const shown = ed.buffers.get(node.pane().buffer_id) orelse return error.NoPanelEntry;
     try t.expectEqualStrings("*terminal*", shown.name);
     try t.expect(ed.pointAtTabCommand("problems.open") != null);
-    try t.expect(ed.pointAtTabCommand("terminal.open") != null);
+    try t.expect(ed.pointAtTabCommand("terminal.new") != null);
     try t.expect(ed.pointAtTabCommand("viewport.toggle panel") != null);
 }
 

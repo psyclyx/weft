@@ -128,7 +128,8 @@ Selection	syntax	3	Select Class	ts.select-class
 Selection	syntax	4	Select Call	ts.select-call
 Selection	syntax	5	Select Block	ts.select-block
 Selection	syntax	6	Select Comment	ts.select-comment
-Terminal	new	1	New Terminal	terminal.open
+Terminal	new	0	Terminal	terminal.open
+Terminal	new	1	New Terminal	terminal.new
 Terminal	new	2	New Console	console.open
 Terminal	run	1	Run Command…	run.command
 Terminal	tasks	1	Build Project	make.build

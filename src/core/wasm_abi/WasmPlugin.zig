@@ -320,6 +320,10 @@ query_caps: std.ArrayList(QueryCap) = .empty,
 /// The path of the buffer being activated (design §3): valid only during an
 /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
 cur_activate_path: []const u8 = &.{},
+/// `Buffers.grid_closes` as this plugin last heard it: when it moves, an
+/// entry holding a grid closed, and a plugin that publishes grids is woken
+/// (`on_poll`) to end whatever fed the one it lost.
+seen_grid_closes: u32 = 0,
 /// Signal names this plugin listens for (`wl_signal_subscribe`); a name's
 /// index is the id `on_signal` hears it as. Owned.
 signal_subscriptions: std.ArrayList([]u8) = .empty,

@@ -415,3 +415,110 @@ test "e2e/terminal: after the break-out chord, a click in the terminal (ide) or 
         try t.expectEqualStrings("insert", ed.head.currentMode());
     }
 }
+
+/// Render one frame, so the chrome a click aims at is laid out.
+fn frameNow(ed: *Editor) !void {
+    const pixels = try ed.renderComposite();
+    ed.gpa.free(pixels);
+}
+
+fn named(ed: *Editor, name: []const u8) ?*core.Buffers.Buffer {
+    const id = ed.buffers.findByName(name) orelse return null;
+    return ed.buffers.get(id);
+}
+
+test "e2e/terminal: two terminals in the panel are two tabs of its header — a click switches, the × closes one and the panel shows the other" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openShell(&app, test_shell);
+    enter(ed, "echo first-shell");
+    try waitFor(ed, "\nfirst-shell\n");
+    const first_id = (named(ed, term) orelse return error.NoFirstTerminal).id;
+
+    // "+ New Terminal" in the header starts a second one, beside the first.
+    try frameNow(ed);
+    ed.click(ed.pointAtTabCommand("terminal.new") orelse return error.NoNewTerminalTab);
+    ed.applyWindow();
+    const second_name = "*terminal:2*";
+    if (!h.drainToolContains(ed, second_name, "$")) return error.SecondPromptNeverShown;
+    try t.expectEqualStrings(second_name, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo second-shell");
+    if (!h.drainToolContains(ed, second_name, "\nsecond-shell\n")) return error.SecondNeverAnswered;
+    const second_id = (named(ed, second_name) orelse return error.NoSecondTerminal).id;
+    // Each has its own screen.
+    {
+        const text = h.toolText(ed, term) orelse return error.NoScreen;
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "second-shell") == null);
+    }
+
+    // Both are tabs of the panel's header, and neither is an editor tab.
+    try frameNow(ed);
+    try t.expect(ed.pointAtTab(first_id, .body) != null);
+    try t.expect(ed.pointAtTab(second_id, .body) != null);
+    var strip: [16]u32 = undefined;
+    var editor_tabs: usize = 0;
+    for (ed.tabEntries(&strip)) |id| {
+        if (id == first_id or id == second_id) editor_tabs += 1;
+    }
+    // (Each is listed once, by the panel's header, not twice.)
+    try t.expectEqual(@as(usize, 2), editor_tabs);
+
+    // A click on the first's tab shows it in the panel, taking the keys.
+    ed.click(ed.pointAtTab(first_id, .body).?);
+    ed.applyWindow();
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
+    enter(ed, "echo back-in-first");
+    try waitFor(ed, "\nback-in-first\n");
+
+    // The second's × closes it: its entry goes, its tab goes, and the panel
+    // goes on showing the first.
+    try frameNow(ed);
+    ed.click(ed.pointAtTab(second_id, .close) orelse return error.NoCloseGlyph);
+    ed.applyWindow();
+    ed.settle(2);
+    try t.expect(named(ed, second_name) == null);
+    try frameNow(ed);
+    try t.expect(ed.pointAtTab(first_id, .body) != null);
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+
+    // `terminal.open` shows the one used last rather than starting another;
+    // the next new one is `terminal.3` — a closed terminal's name is never
+    // reused for a different shell.
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+    ed.run("terminal.new");
+    ed.applyWindow();
+    try t.expectEqualStrings("*terminal:3*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+    var dbuf: [core.designation.max_len]u8 = undefined;
+    try t.expectEqualStrings("weft://here/proc/terminal.3", core.designation.of(ed.buffers.active(), &dbuf).?);
+
+    // Closing the one shown: the panel shows the other again.
+    try frameNow(ed);
+    ed.click(ed.pointAtTab(ed.buffers.active().id, .close) orelse return error.NoCloseGlyph);
+    ed.applyWindow();
+    ed.settle(2);
+    try t.expectEqualStrings(term, (panelEntry(ed) orelse return error.PanelNotShown).name);
+}
+
+test "e2e/terminal: a terminal is an ordinary entry — in an editor pane it is an editor tab" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("terminal", "viewport", "none");
+    try openShell(&app, test_shell);
+    try t.expect(ed.viewportPane("panel") == null);
+    try t.expectEqualStrings(term, ed.buffers.active().name);
+    try frameNow(ed);
+    var strip: [16]u32 = undefined;
+    try t.expect(std.mem.indexOfScalar(u32, ed.tabEntries(&strip), ed.buffers.active().id) != null);
+}

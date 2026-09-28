@@ -104,6 +104,10 @@ acting: []const u8 = "",
 /// context store retracts entry-scoped values by (`core/context.zig`).
 /// Buffers knows nothing of the store; it only says who is gone.
 closed: std.ArrayList(u64) = .empty,
+/// Bumped whenever an entry holding a grid closes: how the plugin that
+/// publishes grids hears that one of its entries went (a terminal's tab
+/// closed), so it can end what fed it. Compared, never interpreted.
+grid_closes: u32 = 0,
 
 pub const parked_cap = 16;
 
@@ -126,6 +130,11 @@ pub const Buffer = struct {
     editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
+    /// What the entry calls itself for now, owned, or empty: set by its
+    /// maker (`wl_entry_title` — a terminal's OSC 0/2 title) and shown where
+    /// the entry is labeled (a viewport's entry tab). Never an identity: the
+    /// entry is still found by `name` and designated as before.
+    title: []u8 = &.{},
     /// The designation this entry's producer DECLARED (doc/model.md §2.2),
     /// owned, or empty — in which case it is derived (`designation.zig`): a
     /// file-backed entry is named by its file, a scratch entry by its
@@ -284,6 +293,19 @@ pub const Buffer = struct {
         // are a field.
         const subject = view.subjectAt(ed.cursorOffset()) orelse return "";
         return subject.node.role;
+    }
+
+    /// What a tab calls this entry: its title when its maker set one, else
+    /// its name.
+    pub fn label(self: *const Buffer) []const u8 {
+        return if (self.title.len > 0) self.title else self.name;
+    }
+
+    /// Replace the title (empty clears it).
+    pub fn setTitle(self: *Buffer, gpa: Allocator, text: []const u8) Error!void {
+        const owned = try gpa.dupe(u8, text);
+        gpa.free(self.title);
+        self.title = owned;
     }
 
     pub fn ref(self: *const Buffer) Ref {
@@ -520,6 +542,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
         gpa.destroy(g);
     }
     gpa.free(b.capture_endpoint);
+    gpa.free(b.title);
     b.scene_selection.deinit(gpa);
     b.view_cursors.deinit(gpa);
     gpa.free(b.name);
@@ -1112,6 +1135,7 @@ pub fn closeTo(self: *Buffers, gpa: Allocator, id: Id, next: ?Id, head: *Head, k
         try self.switchQuietly(gpa, to, head, keymap);
     }
     self.slots.items[id] = null;
+    if (b.grid != null) self.grid_closes +%= 1;
     // Best effort: a generation missed here is never read again anyway
     // (generations are not reused); it only lingers until the store goes.
     self.closed.append(gpa, b.generation) catch {};

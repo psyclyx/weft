@@ -198,9 +198,15 @@ pub fn hEntryExtent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     results[0] = 1;
 }
 
-/// Whether an entry `p` made has a new extent it has not asked for.
+/// Whether an entry `p` made has a new extent it has not asked for — or an
+/// entry holding a grid has closed since `p` last heard (it may have been
+/// one of `p`'s, whose feed `p` should end).
 pub fn anyExtentMoved(p: *WasmPlugin) bool {
-    var it = p.activeCtx().buffers.iterator();
+    const bufs = p.activeCtx().buffers;
+    if (p.seen_grid_closes != bufs.grid_closes) {
+        for (p.resources.ptys.slice()) |maybe| if (maybe != null) return true;
+    }
+    var it = bufs.iterator();
     while (it.next()) |b| if (b.extent_moved and b.grid != null and std.mem.eql(u8, b.creator, p.name)) return true;
     return false;
 }

@@ -80,6 +80,9 @@ pub const Chrome = struct {
     part: Part = .body,
     /// The entry a tab shows.
     entry: ?Buffers.Id = null,
+    /// A tab of a viewport's header that lists its entries: a click shows
+    /// the entry in the pane the header is on (`Panes.show`).
+    shows_here: bool = false,
     /// The pane a status segment describes, when the status line it is on
     /// is PRESENTED by another pane (a bar showing the primary context's
     /// status): its command acts there, not in the pane it is drawn in.
@@ -182,6 +185,11 @@ pub const Panes = struct {
     /// then move by logical line. One command, a door for what core cannot
     /// see — not a second registration shadowing the first.
     vertical: ?*const fn (*anyopaque, *Context, i32) bool = null,
+    /// Show entry `id` in `pane` and focus it there — what a click on a
+    /// header's entry tab does, whatever the pane's attributes (a docked
+    /// panel owns its entry against a plain switch). False when the pane or
+    /// the entry is gone.
+    show: ?*const fn (*anyopaque, *Context, PaneRef, Buffers.Id) bool = null,
 };
 
 // ── Keyspecs ────────────────────────────────────────────────────────
@@ -411,6 +419,11 @@ fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
             }
             const entry = chrome.entry orelse return ok;
             if (chrome.part == .close) return closeEntry(ctx, entry);
+            // A header's entry tab shows it where the header is — a panel
+            // keeps its own entry against a plain switch, as it should.
+            if (chrome.shows_here) if (ctx.panes) |panes| if (panes.show) |show| if (ctx.head.pointer.hit.pane) |pane| {
+                if (show(panes.context, ctx, pane, entry)) return ok;
+            };
             _ = try command.run(ctx.commands, ctx, "buffer.switch", &.{.{ .integer = entry }});
         },
         .status => try runLine(ctx, chrome.command()),

@@ -201,9 +201,13 @@ pub const Tab = struct {
     /// segment's command is) instead of switching to an entry by `id`. Empty
     /// for an ordinary buffer tab.
     command: []const u8 = "",
-    /// An icon name for a command tab (from its presentation); a buffer tab
-    /// defaults to "file" at the paint site regardless of this field.
+    /// An icon name (a command's, from its presentation); an entry tab
+    /// without one draws "file".
     icon: []const u8 = "",
+    /// An entry tab of a viewport's header (`weft.viewport`'s `entries`
+    /// line): a click shows the entry HERE, in the pane the header is on,
+    /// whatever that pane's attributes — not wherever the active entry goes.
+    shows_here: bool = false,
 };
 
 /// The glyph a text-style tab closes through (a style that draws icons draws
@@ -226,6 +230,8 @@ pub const ChromeHit = struct {
     part: TabPart = .body,
     /// The entry a tab shows.
     entry: ?u32 = null,
+    /// An entry tab that shows its entry in this pane (`Tab.shows_here`).
+    shows_here: bool = false,
     /// The command a status segment declared for a click, or "".
     command: []const u8 = "",
     /// The pane a status segment's command acts in, when it is not the one

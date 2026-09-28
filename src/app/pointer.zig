@@ -272,6 +272,7 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
                 .close => .close,
             },
             .entry = c.entry,
+            .shows_here = c.shows_here,
             .acts_in = if (c.pane) |id| if (driver.layout.paneGen(id)) |g| .{ .id = id, .gen = g } else null else null,
         };
         chrome.setCommand(c.command);
@@ -286,7 +287,25 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
 // ── The Panes door ──────────────────────────────────────────────────
 
 pub fn panesDoor(driver: *frame.Driver) Pointer.Panes {
-    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane, .vertical = verticalMove };
+    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane, .vertical = verticalMove, .show = showInPane };
+}
+
+/// Show `id` in `pane` and focus it: the pane's entry is set first, so the
+/// focus that follows makes it the active one whichever way the pane's
+/// mirror runs (a persistent panel's active entry follows the pane).
+fn showInPane(raw: *anyopaque, ctx: *core.command.Context, pane: Pointer.PaneRef, id: core.Buffers.Id) bool {
+    const driver = driverOf(raw);
+    const node = driver.layout.resolvePane(pane.id, pane.gen) orelse return false;
+    if (ctx.buffers.get(id) == null) return false;
+    const focused = window_layout.headFocus(driver.layout, ctx.head);
+    if (node.pane().buffer_id == id and node == focused) return true;
+    if (node != focused) focused.pane().top_row = driver.view.top_row;
+    node.pane().buffer_id = id;
+    node.pane().top_row = 0;
+    if (node.pane().attrs.takes_focus) window_layout.setHeadFocus(ctx.head, node, driver.layout);
+    window_cmds.applyWindowFocus(driver.layout, driver.view, ctx.buffers, ctx.gpa, ctx.head, ctx.keymap);
+    driver.ctx.view_dirty.* = true;
+    return true;
 }
 
 /// `cursor.up`/`cursor.down` in a text pane: one visual line, goal column

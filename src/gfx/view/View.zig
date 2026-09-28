@@ -772,7 +772,7 @@ pub fn build(
             // here, the same door a status segment's click runs through
             // (`core.pointer.clickChrome`); it has no close sub-region (see
             // `layoutTabs`), so only the body hit is ever recorded for one.
-            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id, .command = tab.command });
+            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id, .command = tab.command, .shows_here = tab.shows_here });
             if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id });
         }
     }

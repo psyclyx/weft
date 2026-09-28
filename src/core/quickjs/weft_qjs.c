@@ -794,7 +794,8 @@ static int opt_bool(JSContext *ctx, JSValueConst opts, const char *key, int dflt
 // followFocus/takesFocus/statusLine are the remaining attributes.
 // "sidebar" is a fragment that sets these — never a kind this shim knows.
 // `opts.tabs`: a list of command ids — a docked pane's header strip, one tab
-// per command (doc/rendering.md). Lives on the declaration, like `edge`, not
+// per command (doc/rendering.md), or `entries[:maker]` for the entries the
+// viewport has held (core/viewport.zig). Lives on the declaration, like `edge`, not
 // in the attribute bits: it names things, it is not a flag.
 #define WEFT_VP_TABS_MAX_BYTES 2048
 static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,

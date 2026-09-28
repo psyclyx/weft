@@ -38,6 +38,7 @@ pub fn notifyPollIfReady(p: *WasmPlugin) bool {
 /// plugin's whose pane moved (`Buffer.extent_moved`): those are cleared
 /// here, heard or not, so an owner that never asks is not asked again.
 pub fn notifyPoll(p: *WasmPlugin) void {
+    p.seen_grid_closes = p.activeCtx().buffers.grid_closes;
     var it = p.activeCtx().buffers.iterator();
     while (it.next()) |b| if (b.extent_moved and std.mem.eql(u8, b.creator, p.name)) {
         b.extent_moved = false;
