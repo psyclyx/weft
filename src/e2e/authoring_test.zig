@@ -1554,7 +1554,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     var clean_field: ?semantic.scene.FieldRef = null;
     var clean_target: ?semantic.scene.TargetLink = null;
     for (view.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         const name_node = row.content.container.children[2];
         const field_ref = name_node.content.field.ref;
         var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
@@ -1597,7 +1597,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     var saw_removed = false;
     var saw_dirty_stale = false;
     for (view.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         const name_node = row.content.container.children[2];
         var snapshot = try ed.session.system.semantic.fields.get(name_node.content.field.ref).?.snapshot(gpa);
         defer snapshot.deinit();
@@ -1655,7 +1655,7 @@ test "authoring/files: refresh rollback restores retained fields after an interl
     for (view.scene.content.container.children) |row| {
         // The listing's own leading `..` row is not a model entry; it takes
         // no ordinal among the fixture rows below.
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         defer index += 1;
         if (index >= fixture_names.len) return error.TestExpectedEqual;
         const name_node = row.content.container.children[2];
@@ -1806,7 +1806,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     var found_link = false;
     var link_leaf: ?semantic.scene.NodeId = null;
     for (source_rows) |row| {
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         const columns = row.content.container.children;
         const field_ref = columns[2].content.field.ref;
         var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
@@ -1988,7 +1988,7 @@ test "authoring/files: generic create and permissions actions apply from an empt
     // The two created entries, plus the listing's own leading `..` row.
     try t.expectEqual(@as(usize, 3), staged.scene.content.container.children.len);
     for (staged.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         const columns = row.content.container.children;
         try t.expectEqual(@as(usize, 4), columns.len);
         try t.expectEqualStrings("files.metadata", columns[0].role);
@@ -2008,7 +2008,7 @@ test "authoring/files: generic create and permissions actions apply from an empt
     const refreshed = ed.session.system.semantic.views.get(view_ref).?;
     var found_mode = false;
     for (refreshed.scene.content.container.children) |row| {
-        if (row.content != .container) continue;
+        if (!isEntryRow(row)) continue;
         const columns = row.content.container.children;
         var name = try ed.session.system.semantic.fields.get(columns[2].content.field.ref).?.snapshot(gpa);
         defer name.deinit();
@@ -2466,7 +2466,7 @@ fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?*con
     for (view.scene.content.container.children) |*row| {
         if (row.content != .container) continue;
         for (row.content.container.children) |*node| {
-            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
             defer snap.deinit();
             if (std.mem.eql(u8, snap.value.bytes, want)) return node;
@@ -2758,4 +2758,52 @@ test "files: vim motions selection insertion and search use the semantic view" {
     var snap = try ed.session.system.semantic.fields.get(ed.fieldHere().?).?.snapshot(gpa);
     defer snap.deinit();
     try t.expectEqualStrings("below.txt", snap.value.bytes);
+}
+
+/// Whether `row` is an ENTRY row of a files listing — one with a name field
+/// to read — rather than its `..` row, which names its parent with a label.
+fn isEntryRow(row: semantic.scene.Node) bool {
+    if (row.content != .container) return false;
+    const columns = row.content.container.children;
+    return columns.len > 2 and columns[2].content == .field;
+}
+
+/// The `..` cell of the listing `view` shows: the node declaring itself a
+/// shortcut (`scene.shortcut`).
+fn parentCell(ed: *h.Editor, view: semantic.view.Ref) ?semantic.scene.NodeId {
+    const instance = ed.session.system.semantic.views.get(view) orelse return null;
+    for (instance.focus_order) |id| {
+        const node = instance.node(id) orelse continue;
+        if (semantic.scene.isShortcut(node.*)) return id;
+    }
+    return null;
+}
+
+test "authoring/files: `..` is a row, not a button — focus starts past it, a click focuses it, Return opens the parent" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    gpa.free(try app.proj.oracle("mkdir sub && echo a > sub/a.txt"));
+    ed.runStr("file.open", "sub");
+    const listing = ed.buffers.active().id;
+    const view = ed.toolView().?;
+    const parent = parentCell(ed, view) orelse return error.NoParentRow;
+
+    // A fresh listing starts on its first entry, not on `..`.
+    try t.expect(ed.subjectHere().? != parent);
+
+    // A click on `..` FOCUSES it, as a click on any row does — it is not a
+    // button that fires on press.
+    const pixels = try ed.renderComposite();
+    gpa.free(pixels);
+    ed.click(ed.pointAtNode(parent) orelse return error.ParentNotShown);
+    try t.expectEqual(listing, ed.buffers.active().id);
+    try t.expectEqual(parent, ed.subjectHere().?);
+
+    // And it opens the way any row opens: here, Return — to the parent.
+    ed.press("Return", "");
+    try t.expect(!std.mem.endsWith(u8, ed.buffers.active().name, "/sub"));
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files:"));
 }

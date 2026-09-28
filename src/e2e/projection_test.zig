@@ -92,11 +92,7 @@ test "e2e/projection: the sidebar presents the place, keeps what you navigate to
     // Navigate inside the sidebar: the keys go there, and it steps out to
     // the directory above the project.
     const pane = try sidebarPane(ed);
-    const view = try ed.ensureView();
-    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
-        if (m.pane == pane.pane().id and m.hits.len > 0) break m.hits[0];
-    } else return error.SidebarNotDrawn;
-    ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    try clickBlank(ed, pane);
     ed.applyWindow();
     try t.expectEqual(pane.pane().buffer_id, ed.buffers.active_id);
     ed.run("target.open-container");
@@ -142,11 +138,7 @@ test "e2e/projection: a following sidebar never discards a draft — the listing
     // Into the sidebar, and delete a row there: a draft, not yet applied (a
     // delete asks before it applies, whatever ends the gesture).
     const pane = try sidebarPane(ed);
-    const view = try ed.ensureView();
-    const row = for (view.pane_maps[0..view.pane_map_count]) |m| {
-        if (m.pane == pane.pane().id and m.hits.len > 0) break m.hits[0];
-    } else return error.SidebarNotDrawn;
-    ed.click(.{ row.rect.x + 2, row.rect.y + row.rect.h / 2 });
+    try clickBlank(ed, pane);
     ed.applyWindow();
     const listing = (try paneEntry(ed, pane)).ref();
     try t.expectEqual(listing.id, ed.buffers.active_id);
@@ -760,4 +752,12 @@ test "e2e/projection: a deep reveal opens its folders in one publish, off the la
         try t.expect(std.mem.indexOf(u8, text, "leaf.txt") == null);
         try t.expect(std.mem.indexOf(u8, text, "two") == null);
     }
+}
+
+/// Focus `pane` with a click on its empty space, below its rows: the pane,
+/// and no row — a click on a row may open it (in ide, one click does).
+fn clickBlank(ed: *h.Editor, pane: *h.window_layout.Node) !void {
+    _ = try ed.ensureView();
+    const r = ed.win_layout.focusedRect(pane, ed.application.last_frame_rect);
+    ed.click(.{ r.x + 20, r.y + r.h - 20 });
 }

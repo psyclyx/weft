@@ -72,6 +72,22 @@ pub const Node = struct {
     content: Content,
 };
 
+/// The fact a focusable node declares when it is a SHORTCUT, not content: a
+/// listing's `..`. It is reachable and does what it declares, but it is not
+/// an entry of the list, so
+/// - focus that has to be recovered (a fresh view, a stale preference) lands
+///   on the first focusable node that is not one;
+/// - type-ahead never matches it (typing `.` finds a dotfile, not `..`);
+/// - marking skips it (a bulk transfer has nothing of it to act on).
+pub const shortcut: Fact = .{ .name = "shortcut", .value = "yes" };
+
+/// Whether `node` declares `shortcut`.
+pub fn isShortcut(node: Node) bool {
+    for (node.facts) |fact| if (std.mem.eql(u8, fact.name, shortcut.name))
+        return std.mem.eql(u8, fact.value, shortcut.value);
+    return false;
+}
+
 pub const ValidationError = error{
     InvalidId,
     DuplicateId,

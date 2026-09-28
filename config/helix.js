@@ -266,6 +266,7 @@ weft.bind("helix-normal", "SPC x x", "collab.disconnect");
 });
 
 weft.bind("helix-normal", "SPC q q", "app.quit");
+weft.bind("helix-normal", "SPC q Q", "app.quit-force");
 weft.bind("helix-normal", "SPC H h", "palette.open");
 weft.bind("helix-normal", "SPC H g", "grants.show");
 weft.bind("helix-normal", "SPC t w", "whitespace.trim-buffer");

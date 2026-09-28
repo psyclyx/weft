@@ -1414,11 +1414,10 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     _ = try run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "yes" }});
     try t.expectEqual(@as(usize, 3), host.editor().text().byteLen());
 
-    // Dirty close refuses; a clean one proceeds and refocuses.
+    // No file is behind this entry, so its text is nothing unsaved: the
+    // close proceeds and refocuses (a file's unsaved edits refuse — e2e/panels).
     const res = try run(&host.commands, &host.ctx, "buffer.close-unmodified", &.{});
-    try t.expect(res == .string); // "dirty"
-    // The explicit discard path closes even a dirty tool draft.
-    _ = try run(&host.commands, &host.ctx, "buffer.close-force", &.{});
+    try t.expect(res != .string);
     try t.expectEqual(@as(usize, 1), host.buffers.count());
     try t.expectEqual(scratch_id, host.buffers.active().id);
     // A fresh scratch can still close normally. Closing the last buffer

@@ -1,5 +1,11 @@
 //! Configured startup surface. Sections are semantic nodes; candidate sources
 //! are ordinary string-result commands, the same lists a picker can consume.
+//!
+//! It knows no grammar. Each item is an ACTION node, so whatever activates an
+//! action node activates it: a click, or the grammar's own activate key
+//! (vim's Return, ide's Enter), reached through the entry's resting posture
+//! — the same structural mode every scene view gets. It binds no keys and
+//! declares no mode of its own.
 const std = @import("std");
 const weft = @import("weft");
 const Node = weft.semantic.scene.Node;
@@ -41,7 +47,6 @@ var activations: std.ArrayList(Activation) = .empty;
 
 const commands = [_]weft.CommandEntry{
     .{ .name = "dashboard.open", .arity = .whole, .call = openDashboard, .summary = "Open the welcome dashboard.", .label = "Welcome", .menu = "Help", .group = "welcome", .order = 1, .icon = "layout-dashboard" },
-    .{ .name = "dashboard.activate", .arity = .one, .call = activate, .summary = "Activate the selected dashboard item.", .internal = true },
 };
 
 comptime {
@@ -53,19 +58,6 @@ fn init() void {
     arena = std.heap.ArenaAllocator.init(weft.allocator);
     _ = weft.semanticActionProvider();
     _ = weft.designationOpener(kind, "dashboard.open");
-    weft.restingMode("dashboard");
-    // The dashboard only specializes its small local vocabulary below. Keep
-    // the ordinary workspace chords available for everything it does not
-    // claim (SPC f f, buffer/window commands, the palette, ...).
-    weft.setFallback("dashboard", "normal");
-    weft.bindKey("dashboard", "j", "cursor.down");
-    weft.bindKey("dashboard", "k", "cursor.up");
-    weft.bindKey("dashboard", "Down", "cursor.down");
-    weft.bindKey("dashboard", "Up", "cursor.up");
-    weft.bindKey("dashboard", "Return", "dashboard.activate");
-    weft.bindKey("dashboard", "o", "files.find");
-    weft.bindKey("dashboard", "n", "buffer.scratch");
-    weft.bindKey("dashboard", "q", "buffer.back");
 }
 
 fn fields(rec: []const u8, out: [][]const u8) void {
@@ -113,13 +105,15 @@ fn configuredItems(a: std.mem.Allocator, fallback: bool) ![]const Item {
 fn appendAction(a: std.mem.Allocator, nodes: *std.ArrayList(Node), next_id: *u64, label: []const u8, command: []const u8, arg: []const u8) !void {
     const id: NodeId = @enumFromInt(next_id.*);
     next_id.* += 1;
+    // An action node IS its activation: a click on it and the grammar's
+    // activate key run the same reference (`dashboard.activate`, answered
+    // below with this node as the subject).
     try nodes.append(a, .{
         .id = id,
-        .role = "action",
+        .role = "dashboard.item",
         .layout = .{ .column = 2 },
         .focusable = true,
-        .actions = &.{.{ .id = activate_action, .label = "Open" }},
-        .content = .{ .label = try a.dupe(u8, label) },
+        .content = .{ .action = .{ .action = activate_action, .label = try a.dupe(u8, label) } },
     });
     try activations.append(a, .{ .id = id, .command = try a.dupe(u8, command), .arg = try a.dupe(u8, arg) });
 }
@@ -127,9 +121,11 @@ fn appendAction(a: std.mem.Allocator, nodes: *std.ArrayList(Node), next_id: *u64
 fn openDashboard() void {
     weft.focusOrCreateBuffer(name);
     weft.toolBacking("dashboard");
+    // What it shows is a scene, not text: the grammar treats it as it treats
+    // every scene view (its structural keys, its pointer).
+    weft.declarePosture(.structural);
     // The entry IS the dashboard: re-run by name, never remembered by slot.
     _ = weft.designate(designation);
-    weft.setMode("dashboard");
 
     arena.deinit();
     arena = std.heap.ArenaAllocator.init(weft.allocator);
@@ -166,15 +162,14 @@ fn openDashboard() void {
     if (view_ref) |old| {
         if (weft.semanticViewReplace(old, revision, root)) |_| {
             _ = weft.semanticViewFocus(old, null);
+            weft.exitToResting();
             return;
         } else |_| view_ref = null;
     }
     view_ref = weft.semanticViewPublish(root, null, revision) catch return;
     _ = weft.semanticViewFocus(view_ref.?, null);
-}
-
-fn activate() void {
-    _ = weft.semanticAction(activate_action);
+    // Rest where the grammar rests on a scene view: its keys, its pointer.
+    weft.exitToResting();
 }
 
 fn onSemanticAction() callconv(.c) void {

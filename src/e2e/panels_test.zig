@@ -374,7 +374,7 @@ test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, fo
     try t.expectEqualStrings("*problems*", ed.buffers.active().name);
 
     // The ordinary window close: one pane leaving the tree, like any other.
-    ed.runStr("window.close", "");
+    ed.run("window.close");
     ed.applyWindow();
     try t.expect(ed.viewportPane("panel") == null);
     try t.expectEqualStrings("a.txt", activeName(ed));
@@ -390,4 +390,133 @@ test "e2e/panels: window.close on the panel IS hiding it — it stays hidden, fo
     ed.press("C-j", "");
     ed.applyWindow();
     try t.expectEqualStrings("*problems*", (panelEntry(ed) orelse return error.PanelNotShown).name);
+}
+
+/// What each named viewport's pane shows, by viewport index — to check that
+/// closing and cycling documents never touches chrome.
+fn chromeEntries(ed: *Editor, out: *[8]?u32) void {
+    out.* = @splat(null);
+    const Visit = struct {
+        fn f(o: *[8]?u32, p: *window_layout.Pane) void {
+            if (p.viewport) |i| if (i < o.len) {
+                o[i] = p.buffer_id;
+            };
+        }
+    };
+    ed.win_layout.eachPane(out, Visit.f);
+}
+
+test "e2e/panels: closing and cycling documents never hands a pane a viewport's chrome, and a viewport whose entry closed shows it again" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "a.txt", "alpha\n");
+    try ide.openFile(ed, "b.txt", "beta\n");
+    try frame(ed);
+    var chrome: [8]?u32 = undefined;
+    chromeEntries(ed, &chrome);
+
+    // Cycling steps through documents only — the scratch, a, b — never the
+    // toolbar or the file tree, and comes back round.
+    const start = ed.buffers.active_id;
+    for (0..3) |_| {
+        ed.run("buffer.next");
+        ed.applyWindow();
+        try t.expect(ed.session.system.viewports.isDocument(ed.buffers.active()));
+    }
+    try t.expectEqual(start, ed.buffers.active_id);
+
+    // Closing every document leaves a fresh scratch in the editor — and every
+    // chrome pane exactly as it was.
+    for (0..3) |_| {
+        ed.run("buffer.close-force");
+        ed.applyWindow();
+    }
+    try t.expectEqualStrings("*scratch*", ed.buffers.active().name);
+    var after: [8]?u32 = undefined;
+    chromeEntries(ed, &after);
+    try t.expectEqualSlices(?u32, &chrome, &after);
+
+    // C-w with the sidebar focused closes its listing — which the sidebar
+    // opens again rather than showing whatever is active.
+    try frame(ed);
+    const sb = ed.viewportPane("sidebar") orelse return error.NoSidebar;
+    const r = ed.win_layout.focusedRect(sb, ed.application.last_frame_rect);
+    ed.click(.{ r.x + 20, r.y + r.h - 20 });
+    ed.press("C-w", "");
+    ed.applyWindow();
+    const listing = ed.buffers.get(ed.viewportPane("sidebar").?.pane().buffer_id) orelse return error.SidebarLost;
+    try t.expect(std.mem.startsWith(u8, listing.name, "files:"));
+    chromeEntries(ed, &after);
+    for (chrome, after, 0..) |was, now, i| if (i != 0) try t.expectEqual(was, now);
+}
+
+/// The dashboard item labeled `label`.
+fn dashboardItem(ed: *Editor, label: []const u8) ?h.semantic_model.scene.NodeId {
+    const view_ref = ed.toolView() orelse return null;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return null;
+    for (instance.focus_order) |id| {
+        const node = instance.node(id) orelse continue;
+        if (node.content == .action and std.mem.eql(u8, node.content.action.label, label)) return id;
+    }
+    return null;
+}
+
+test "e2e/panels: ide.js — the dashboard's items are clicked, or Enter'd, with no key or mode of the dashboard's own" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.run("dashboard.open");
+    ed.applyWindow();
+    try t.expectEqualStrings("*dashboard*", ed.buffers.active().name);
+    try t.expect(!std.mem.eql(u8, ed.head.currentMode(), "dashboard"));
+
+    // A click on "New buffer" runs it.
+    try frame(ed);
+    const new_buffer = dashboardItem(ed, "New buffer") orelse return error.NoItem;
+    const here = window_layout.headFocus(ed.win_layout, ed.head).pane().id;
+    ed.click(ed.pointAtNodeIn(here, new_buffer) orelse return error.ItemNotShown);
+    ed.applyWindow();
+    try t.expect(!std.mem.eql(u8, ed.buffers.active().name, "*dashboard*"));
+
+    // Enter on "Open file" — ide's own activate key — opens the file picker.
+    ed.run("dashboard.open");
+    ed.applyWindow();
+    const open_file = dashboardItem(ed, "Open file") orelse return error.NoItem;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, ed.toolView().?, open_file);
+    ed.press("Return", "");
+    try t.expect(ed.pick.active);
+}
+
+test "e2e/panels: only a FILE's edits are unsaved work — a scratch or a REPL closes; quit names what it would lose, and quit-force quits" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // An entry with no file behind it — a REPL's transcript, a command's
+    // output — has never been saved, and that is no reason to refuse closing.
+    const out = try ed.buffers.create(gpa, "*output*");
+    try ed.buffers.switchTo(gpa, out, ed.head, ed.keymap);
+    try ed.buffers.active().textEditor().?.doc.insert(gpa, 0, "transcript\n");
+    ed.run("buffer.close-unmodified");
+    try t.expect(ed.buffers.get(out) == null);
+
+    // A file's unsaved edits refuse the close, and the quit.
+    try ide.openFile(ed, "a.txt", "alpha\n");
+    ed.typeText("x");
+    try t.expect(try ed.buffers.active().hasUnsavedFile(gpa));
+    const a = ed.buffers.active_id;
+    ed.run("buffer.close-unmodified");
+    try t.expect(ed.buffers.get(a) != null);
+    ed.run("app.quit");
+    try t.expect(!ed.session.system.quit);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "a.txt") != null);
+    ed.run("app.quit-force");
+    try t.expect(ed.session.system.quit);
 }

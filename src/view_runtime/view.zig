@@ -59,9 +59,9 @@ pub const Instance = struct {
     /// Stable ids survive a scene reorder. If a focused node vanished, choose
     /// the first remaining focusable node; no text offset participates.
     ///
-    /// "First" here skips a leading focusable `action` leaf — a shortcut row
-    /// (a listing's `..`, say) rather than content — landing on it only when
-    /// nothing else is focusable at all. `move`'s explicit `.first`/`.last`
+    /// "First" here skips a node that declares `scene.shortcut` — a
+    /// shortcut row (a listing's `..`, say) rather than content — landing on
+    /// one only when nothing else is focusable at all. `move`'s explicit `.first`/`.last`
     /// make no such exception: gg still visits the shortcut like any other
     /// row. This is the one fallback with no explicit target to honor
     /// instead, so it is the one place "first" means "first content."
@@ -70,7 +70,7 @@ pub const Instance = struct {
         if (self.focus_order.len == 0) return null;
         for (self.focus_order) |id| {
             const candidate = self.node(id) orelse continue;
-            if (candidate.content != .action) return id;
+            if (!semantic.scene.isShortcut(candidate.*)) return id;
         }
         return self.focus_order[0];
     }

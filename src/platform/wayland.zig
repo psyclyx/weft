@@ -320,6 +320,13 @@ pub const Window = struct {
         return self.close_requested;
     }
 
+    /// Take the compositor's close request, if there is one: the app decides
+    /// what it means (a quit that may refuse while work is unsaved).
+    pub fn takeCloseRequest(self: *Window) bool {
+        defer self.close_requested = false;
+        return self.close_requested;
+    }
+
     /// The xkb name for a keysym (e.g. "a", "Escape", "F1") — `""` if xkb
     /// can't name it. `app/dispatch.zig:dispatchKey` calls this to turn a
     /// `KeyEvent.keysym` into the string `core.Keymap.keyspec` builds a

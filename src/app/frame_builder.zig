@@ -1028,8 +1028,7 @@ pub const FrameBuilder = struct {
             while (bit3.next()) |b| {
                 // A docked companion's entry (the file tree, a panel, a
                 // toolbar) is chrome, not a document: never a tab.
-                var held_buf: [core.designation.max_len]u8 = undefined;
-                if (core.designation.of(b, &held_buf)) |held| if (fx.viewports.holdsEntry(held)) continue;
+                if (!fx.viewports.isDocument(b)) continue;
                 const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
                 tab_list.append(arena, .{ .name = std.fs.path.basename(nm), .active = b == abuf, .id = b.id, .path = nm }) catch {};
             }

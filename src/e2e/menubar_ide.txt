@@ -44,6 +44,7 @@ Edit/Transform	numbers	2	Decrement Number	numbers.decrement
 File	close	10	Close Editor	buffer.close
 File	close	20	Close Without Saving	buffer.close-force
 File	exit	10	Quit	app.quit
+File	exit	11	Quit Without Saving	app.quit-force
 File	new	1	New File	buffer.scratch
 File	open	1	Open File…	files.find
 File	open	5	Open…	file.open
@@ -91,6 +92,7 @@ Go	symbol	5	Go to Symbol…	lsp.pick-symbol
 Go	symbol	6	Go to Symbol in Buffer…	consult.imenu
 Help	keys	10	Show Key Hints	which-key.show
 Help	keys	20	Explain Binding…	action.explain
+Help	welcome	1	Welcome	dashboard.open
 Run	breakpoints	1	Toggle Breakpoint	debug.toggle-breakpoint
 Run	breakpoints	2	Clear All Breakpoints	debug.clear-breakpoints
 Run	breakpoints	3	List Breakpoints	debug.list-breakpoints

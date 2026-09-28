@@ -303,6 +303,12 @@ pub const Buffer = struct {
     pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
         if (self.read_only != null or self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
+        // Edits a FILE never received: an entry with no file behind it (a
+        // REPL, a command's output, a scratch) has never been saved, so it
+        // always differs from "the last save" — which is no reason to refuse
+        // closing it. A bare document with text is parked on close anyway
+        // (`keepsDocument`); quitting asks about it separately.
+        if (ed.backingPath() == null) return false;
         return ed.isDirty(gpa);
     }
 
@@ -1056,22 +1062,30 @@ pub fn back(self: *Buffers, gpa: Allocator, head: *Head, keymap: *const Keymap) 
 
 /// Next live buffer after the active one (cyclic) — `buffer.next`.
 pub fn nextId(self: *const Buffers) Id {
-    const n = self.slots.items.len;
-    var i = (self.active_id + 1) % n;
-    while (i != self.active_id) : (i = (i + 1) % n) {
-        if (self.slots.items[i] != null) return @intCast(i);
-    }
-    return self.active_id;
+    return self.cycle(.next, {}, anyEntry) orelse self.active_id;
 }
 
 /// The live buffer before the active one, cyclically (`nextId` reversed).
 pub fn prevId(self: *const Buffers) Id {
+    return self.cycle(.prev, {}, anyEntry) orelse self.active_id;
+}
+
+fn anyEntry(_: void, _: *Buffer) bool {
+    return true;
+}
+
+/// The first live entry `admits` takes, walking from the active one in
+/// `dir` (cyclic, never the active one itself): null when none
+/// does. What a caller that knows which entries are documents — not a
+/// viewport's chrome — cycles and closes through.
+pub fn cycle(self: *const Buffers, dir: enum { next, prev }, ctx: anytype, comptime admits: fn (@TypeOf(ctx), *Buffer) bool) ?Id {
     const n = self.slots.items.len;
-    var i = (self.active_id + n - 1) % n;
-    while (i != self.active_id) : (i = (i + n - 1) % n) {
-        if (self.slots.items[i] != null) return @intCast(i);
+    const step: usize = if (dir == .next) 1 else n - 1;
+    var i = (self.active_id + step) % n;
+    while (i != self.active_id) : (i = (i + step) % n) {
+        if (self.slots.items[i]) |b| if (admits(ctx, b)) return @intCast(i);
     }
-    return self.active_id;
+    return null;
 }
 
 /// Close a buffer. Closing the active buffer focuses the next one;
@@ -1084,12 +1098,18 @@ pub fn prevId(self: *const Buffers) Id {
 /// `parked`); every other entry's document dies with it, and `head`'s jumps
 /// into it keep their offsets for when its designation is opened afresh.
 pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
+    return self.closeTo(gpa, id, if (self.count() == 1) null else self.nextId(), head, keymap);
+}
+
+/// `close`, naming what the head goes to when `id` is the active entry:
+/// `next`, or a fresh scratch when it is null — the caller that knows which
+/// entries are documents (`buffer.close`) hands the pane the next document,
+/// never a viewport's chrome.
+pub fn closeTo(self: *Buffers, gpa: Allocator, id: Id, next: ?Id, head: *Head, keymap: *const Keymap) Error!void {
     const b = self.get(id) orelse return;
-    if (self.count() == 1) {
-        const fresh = try self.create(gpa, "*scratch*");
-        try self.switchQuietly(gpa, fresh, head, keymap);
-    } else if (id == self.active_id) {
-        try self.switchQuietly(gpa, self.nextId(), head, keymap);
+    if (id == self.active_id) {
+        const to = next orelse try self.create(gpa, "*scratch*");
+        try self.switchQuietly(gpa, to, head, keymap);
     }
     self.slots.items[id] = null;
     // Best effort: a generation missed here is never read again anyway

@@ -522,12 +522,12 @@ fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
 fn cMarkRows(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const scene = sceneRows(ctx) orelse return ok;
-    // An action row (a listing's `..`) names nothing a bulk transfer could
-    // act on; starting a row range there is the same no-op C-click makes of
-    // it (§ the pointer's own rule, `isActionNode`).
+    // An action node (a menu item read as a row) or a shortcut (a listing's
+    // `..`, `scene.shortcut`) names nothing a bulk transfer could act on;
+    // starting a row range there is the same no-op C-click makes of it.
     const head_id = scene.head() orelse return ok;
     if (scene.view) |view_ref| if (ctx.semantic) |services| if (services.views.get(view_ref)) |instance| {
-        if (instance.node(head_id)) |node| if (node.content == .action) return ok;
+        if (instance.node(head_id)) |node| if (node.content == .action or semantic_model.scene.isShortcut(node.*)) return ok;
     };
     scene.anchor = head_id;
     return ok;
@@ -593,7 +593,37 @@ fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Quit — refused while anything would be lost: a file's unsaved edits, a
+/// listing's unapplied draft, or text with no file behind it (a scratch, a
+/// parked one), which closing keeps but quitting cannot. The refusal names
+/// them; `app.quit-force` quits anyway.
 fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    var names: std.ArrayList(u8) = .empty;
+    defer names.deinit(ctx.gpa);
+    var count: usize = 0;
+    var it = ctx.buffers.iterator();
+    while (it.next()) |b| {
+        if (!holdsUnsavedWork(ctx, b) and !b.keepsDocument()) continue;
+        count += 1;
+        if (count > 4) continue;
+        const shown = if (b.textEditor()) |ed| std.fs.path.basename(ed.backingPath() orelse b.name) else b.name;
+        try names.appendSlice(ctx.gpa, if (count == 1) "" else ", ");
+        try names.appendSlice(ctx.gpa, shown);
+    }
+    count += ctx.buffers.parked.items.len;
+    if (count == 0) {
+        ctx.quit.* = true;
+        return ok;
+    }
+    const more = if (count > 4 or ctx.buffers.parked.items.len > 0) " and more" else "";
+    const msg = try std.fmt.allocPrint(ctx.gpa, "{d} unsaved ({s}{s}): save, or Quit Without Saving (app.quit-force)", .{ count, names.items, more });
+    defer ctx.gpa.free(msg);
+    try ctx.head.echo.say(ctx.gpa, msg);
+    return .{ .string = "unsaved" };
+}
+
+fn cQuitForce(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     ctx.quit.* = true;
     return ok;
@@ -634,14 +664,23 @@ fn fieldHere(ctx: *Context) bool {
 
 fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.head, ctx.keymap);
+    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument) orelse return ok;
+    try ctx.buffers.switchTo(ctx.gpa, next, ctx.head, ctx.keymap);
     return ok;
 }
 
 fn cBufferPrevious(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.prevId(), ctx.head, ctx.keymap);
+    const prev = ctx.buffers.cycle(.prev, ctx.viewports, isDocument) orelse return ok;
+    try ctx.buffers.switchTo(ctx.gpa, prev, ctx.head, ctx.keymap);
     return ok;
+}
+
+/// A document, not a docked viewport's chrome (`viewport.Registry.isDocument`);
+/// with no workspace, every entry is one.
+fn isDocument(viewports: ?*@import("viewport.zig").Registry, b: *@import("Buffers.zig").Buffer) bool {
+    const registry = viewports orelse return true;
+    return registry.isDocument(b);
 }
 
 /// Return to the previously active buffer — where a tool's `q` lands you (back
@@ -703,7 +742,10 @@ pub fn holdsUnsavedWork(ctx: *Context, b: *@import("Buffers.zig").Buffer) bool {
 fn retireActive(ctx: *Context) anyerror!Value {
     const b = ctx.buffers.active();
     if (ctx.entry_shell) |shell| shell.retire(shell.context, ctx, b);
-    try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
+    // The pane gets the next DOCUMENT, or a fresh scratch — never a docked
+    // viewport's chrome, which the next close would then take down.
+    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument);
+    try ctx.buffers.closeTo(ctx.gpa, b.id, next, ctx.head, ctx.keymap);
     return ok;
 }
 
@@ -992,7 +1034,8 @@ const table = [_]command.Command{
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
     command.define("mode.resume-capture", "Take raw input again after a break-out.", cPostureResume).present(.{ .internal = true }),
-    command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
+    command.define("app.quit", "Quit the editor, refusing while anything unsaved would be lost.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
+    command.define("app.quit-force", "Quit the editor, discarding anything unsaved.", cQuitForce).present(.{ .label = "Quit Without Saving" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
     command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),
 };

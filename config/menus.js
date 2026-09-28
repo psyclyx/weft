@@ -24,6 +24,7 @@ weft.command("buffer.close", { menu: "File", group: "close", order: 10 });
 weft.command("buffer.close-force", { menu: "File", group: "close", order: 20 });
 weft.command("app.reload-config", { menu: "File", group: "preferences", order: 10 });
 weft.command("app.quit", { menu: "File", group: "exit", order: 10 });
+weft.command("app.quit-force", { menu: "File", group: "exit", order: 11 });
 
 // File ▸ Share: collaboration.
 weft.command("collab.connect", { menu: "File/Share", group: "session", order: 10 });

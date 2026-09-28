@@ -427,6 +427,17 @@ pub const Registry = struct {
         return false;
     }
 
+    /// Whether `b` is a DOCUMENT — not what a docked viewport holds (its
+    /// chrome: a file tree, a panel's list, a toolbar). The one rule every
+    /// document-wide verb reads: the tab strip lists documents, cycling
+    /// (`buffer.next`) steps through them, and closing the active entry
+    /// hands the pane the next one — never a toolbar.
+    pub fn isDocument(self: *const Registry, b: *Buffers.Buffer) bool {
+        var buf: [@import("designation.zig").max_len]u8 = undefined;
+        const held = @import("designation.zig").of(b, &buf) orelse return true;
+        return !self.holdsEntry(held);
+    }
+
     /// "Present resource R in viewport V" as a declaration. A NEW
     /// presentation clears `presented`, so the layout phase presents it; the
     /// same one again changes nothing. A literal subject must name something

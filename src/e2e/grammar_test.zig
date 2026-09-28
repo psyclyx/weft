@@ -105,11 +105,11 @@ fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
     }
     const view = focusedView(ed) orelse return error.TestExpectedEqual;
     for (view.scene.content.container.children) |row| {
-        // The listing's `..` row is an action leaf, not a row of columns —
-        // it names no `files.name` field to read.
+        // The listing's `..` row names its parent with a label, not a
+        // `files.name` field: there is nothing of it to read here.
         if (row.content != .container) continue;
         for (row.content.container.children) |node| {
-            if (std.mem.eql(u8, node.role, "files.name"))
+            if (std.mem.eql(u8, node.role, "files.name") and node.content == .field)
                 try out.append(gpa, try fieldText(ed, gpa, node.content.field.ref));
         }
     }
@@ -122,7 +122,7 @@ fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
     for (view.scene.content.container.children) |row| {
         if (row.content != .container) continue;
         for (row.content.container.children) |node| {
-            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             const name = try fieldText(ed, gpa, node.content.field.ref);
             defer gpa.free(name);
             if (std.mem.eql(u8, name, want)) return node.layout.column;
@@ -483,7 +483,7 @@ fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: 
     for (view.scene.content.container.children) |row| {
         if (row.content != .container) continue;
         for (row.content.container.children) |node| {
-            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             const name = try fieldText(ed, gpa, node.content.field.ref);
             defer gpa.free(name);
             if (!std.mem.eql(u8, name, want)) continue;

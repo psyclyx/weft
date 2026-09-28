@@ -362,7 +362,12 @@ pub fn materializeViewports(
             dirty = true;
             continue;
         }
-        if (docked and kept == null) if (decl.entry) |held| {
+        // What it showed was closed (a `C-w` in it, a plugin retiring its
+        // entry): open it again, as after a hide, or present what the viewport
+        // declares — never fall back to whatever entry happens to be active.
+        const lost = !docked and buffers.get(node.pane().buffer_id) == null;
+        if (lost and decl.entry == null) decl.presented = false;
+        if ((docked and kept == null) or lost) if (decl.entry) |held| {
             const again = gpa.dupe(u8, held) catch continue;
             defer gpa.free(again);
             if (core.Buffers.quietly(gpa, buffers, head, reopenInto, .{ ctx, buffers, gpa, head, keymap, node, again })) {

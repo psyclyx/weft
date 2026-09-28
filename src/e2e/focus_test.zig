@@ -600,3 +600,29 @@ test "e2e/focus: config.js with ide's plugin loaded too — each grammar's modes
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try t.expect(ed.head.scene_selection.edit != null);
 }
+
+test "e2e/focus: ide.js — `..` is a sidebar row: one click goes up, as one click opens any row" {
+    var app: IdeApp = undefined;
+    try app.init(t.allocator);
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(ed.gpa, "m.txt", "x\n");
+    try ide.openFile(ed, "zeta.txt", "zeta\n");
+    ed.applyWindow();
+    const before = ed.buffers.get(ed.viewportPane("sidebar").?.pane().buffer_id).?.name;
+    const was = try ed.gpa.dupe(u8, before);
+    defer ed.gpa.free(was);
+
+    const view_ref = sidebarView(ed) orelse return error.NoSidebar;
+    const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
+    const parent = for (instance.focus_order) |id| {
+        if (h.semantic_model.scene.isShortcut(instance.node(id).?.*)) break id;
+    } else return error.NoParentRow;
+    try frame(ed);
+    ed.click(ed.pointAtNode(parent) orelse return error.ParentNotShown);
+    ed.applyWindow();
+    const now = ed.buffers.get(ed.viewportPane("sidebar").?.pane().buffer_id).?.name;
+    // The sidebar now lists the directory above the one it listed.
+    try t.expect(!std.mem.eql(u8, was, now));
+    try t.expect(std.mem.startsWith(u8, was, now[0..@min(now.len, was.len)]));
+}

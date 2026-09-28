@@ -689,7 +689,7 @@ pub fn main(init: std.process.Init) !void {
     // tracked so it's registered/removed exactly once per transition.
     var hub_src_id: ?scheduler.Id = null;
 
-    while (!whead.window.shouldClose() and !session.system.quit) {
+    while (!session.system.quit) {
         _ = try sched.step();
         const frame_start = stats_mod.nowNs();
         whead.window.pumpEvents();
@@ -747,7 +747,13 @@ pub fn main(init: std.process.Init) !void {
         while (whead.window.nextPointerEvent()) |ev| {
             try whead.dispatchPointer(&application, ev);
         }
-        if (whead.window.shouldClose()) break;
+        // The window's close button is a quit like any other: it refuses,
+        // and says why, while anything unsaved would be lost.
+        if (whead.window.takeCloseRequest()) {
+            _ = core.command.run(&session.system.commands, &session.cmd_ctx, "app.quit", &.{}) catch {};
+            if (session.system.quit) break;
+            application.noteInput();
+        }
 
         // One application wake owns every platform-neutral phase through the
         // completed scene. The desktop contributes input and collaboration via

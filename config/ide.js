@@ -19,8 +19,7 @@
 // ── The plugins ──────────────────────────────────────────────────────
 // config.js's set, minus vim and plus `ide`: the grammar that makes shift
 // extend a selection, Home smart, Tab indent and C-c/C-x/C-v transfer. It
-// composes `motions` and `indent`/`comment` by name, like vim does. The
-// dashboard stays out: its keys fall back to vim's `normal`.
+// composes `motions` and `indent`/`comment` by name, like vim does.
 weft.plugin("edit");        // line operators: edit.duplicate-line, edit.upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
@@ -32,6 +31,7 @@ weft.plugin("motions");     // word/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // operators.delete/upcase/lowercase — await a range
 weft.plugin("ide");         // conventional non-modal editing
+weft.plugin("dashboard");   // structured welcome view: its items are clicked, or Enter
 weft.plugin("ts");          // tree-sitter navigation
 weft.set("languages", "query-root", "assets");
 weft.plugin("languages.js"); // parser packages + explicit query paths
@@ -125,6 +125,16 @@ weft.set("palette", "arguments", "ask");
 // matches. Only values: the palette plugin and the picker stay as they are.
 weft.set("editor", "picker", "top");
 weft.set("palette", "detail", "brief");
+// The welcome view (Help ▸ Welcome): the same sections as config.js.
+weft.set("dashboard", "sections", [
+  "start\tStart\t\t\t0",
+  "files\tRecent files\tproject.recent\tfile.open\t5",
+  "projects\tProjects\tproject.recent-roots\tfile.open\t4",
+]);
+weft.set("dashboard", "items", [
+  "start\tOpen file\tfiles.find",
+  "start\tNew buffer\tbuffer.scratch",
+]);
 weft.set("palette", "recent", "on");
 // Chrome as widgets: flat buttons that show a face on hover, real tabs whose
 // close glyph shows on hover, icons, shadowed menus (doc/chrome.md §3.2).
