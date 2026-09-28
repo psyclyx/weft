@@ -238,13 +238,9 @@ fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
     if (op_copies) yankCurrent(r.start, r.end, false);
     if (op_edit_cmd) |cmd| {
-        // A change (`c`) moves FIRST: a motion cuts the undo unit, and the
-        // delete and the typing that follows it are one change, one `u`.
-        const changes = std.mem.eql(u8, op_after, "insert");
-        if (changes) weft.jump(r.start);
         weft.runRangeArg(cmd, hnd);
         flashAfter(hnd);
-        if (!changes) weft.jump(r.start);
+        weft.jump(r.start);
         enterAfterOp();
     } else {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
@@ -760,6 +756,11 @@ fn initExtra() void {
     // Only insert commits typed text. `normal`/`visual` need no opt-out:
     // a mode commits text ONLY where it says so (architecture §10.1).
     weft.textInput("insert", "edit.insert-text");
+    // What one undo step is, in vim's terms: a normal-mode command (every mode
+    // left undeclared cuts at each command), and `insert` CONTINUES the step
+    // that entered it — `cw…Esc`, `o…Esc`, `i…Esc` are one `u`, and a motion
+    // between two commands is no step at all.
+    weft.runStr2("mode.set-undo-step", "insert", "continue");
 
     // §10.4: what each POSTURE means in vim's own vocabulary (and, implicitly,
     // that `normal` is a mode a buffer rests in — not visual/insert). Vim's
@@ -1343,15 +1344,12 @@ fn visualChange() void {
         selected_register = slot;
     }
     const r = visualRange();
-    const range = if (r) |s| anchored: {
+    if (r) |s| {
         yankVisual(s);
-        break :anchored weft.anchorRange(.{ .start = s.start, .end = s.end });
-    } else null;
-    // Clear and move FIRST: a motion cuts the undo unit, and the delete and
-    // the typing that follows it are one change, one `u`.
+        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("operators.delete", h);
+    }
     weft.run("selection.clear");
     if (r) |s| weft.jump(s.start);
-    if (range) |h| weft.runRangeArg("operators.delete", h);
     enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (comment.toggle, operators.upcase, …) over
@@ -1372,11 +1370,9 @@ fn visualOp(comptime cmd: []const u8) fn () void {
     }.h;
 }
 fn normal() void {
-    // Leaving insert/visual SEALS the undo unit: `i…Esc` is one unit, so the
-    // next normal-mode command (dd, x, …) is its own — `Esc` then `dd` then `u`
-    // undoes just the delete, not the typing too. (Cursor motions already
-    // barrier; this covers the mode-change boundary a motion doesn't.)
-    weft.run("edit.seal-undo");
+    // No undo seal here: `i…Esc` is one step because `insert` continues the
+    // step that entered it, and the next normal-mode command begins its own
+    // (the declaration in `initExtra`).
     weft.run("selection.clear");
     // §10.4: Escape RETURNS to the entry's declared resting state — it never
     // picks one. Where that is comes from the posture pairing (vim declared

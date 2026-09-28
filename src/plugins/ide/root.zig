@@ -709,6 +709,9 @@ fn initExtra() void {
     // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("ide", "default");
     weft.textInput("ide", "edit.insert-text");
+    // One undo step is a RUN of one command (a word typed, a run of
+    // Backspaces); moving the caret, or any other command, begins the next.
+    weft.runStr2("mode.set-undo-step", "ide", "run");
 
     // §10.4: a modeless grammar's resting mode commits text, so a structural
     // entry needs a second state that does not. `ide-structural` inherits

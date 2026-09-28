@@ -13,8 +13,9 @@
 //! user-authored commit empties the redo stack.
 //!
 //! Grouping: consecutive user commits coalesce into one undo unit until
-//! `barrier()` (the editor calls it on cursor motion, mode change,
-//! command boundaries — vim-flavored units for free).
+//! `barrier()`. Dispatch calls it where the grammar DECLARED that a step
+//! begins (`step.zig`, `mode.set-undo-step`): a caret motion or a mode change
+//! is no boundary of its own.
 //!
 //! Authority: applying an inverse is applying an edit, so `undo`/`redo`
 //! take a `Gate` the one apply site must clear — a narrowed principal

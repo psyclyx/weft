@@ -640,6 +640,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
                 null;
             defer if (menu_before) |m| ctx.gpa.free(m);
 
+            // Where a keystroke runs something, an undo step may begin — the
+            // grammar's declaration for this mode decides (`core/step.zig`).
+            core.step.begin(ctx, switch (arm) {
+                .command => |name| name,
+                .decision => |d| arms[d.arm],
+            });
             invokeArm(ctx, arm);
             if (menu_before) |m| {
                 if (!ctx.keymap.modeHasTag(m, "sticky") and std.mem.eql(u8, ctx.head.currentMode(), m)) {
@@ -694,6 +700,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // A begun field edit commits too (`scene_edit.textCommit`); anywhere nothing
     // does, the key is unhandled.
     const commit_cmd = core.scene_edit.textCommit(ctx.semantic, ctx.keymap, ctx.head, ctx.head.currentMode()) orelse return;
+    core.step.begin(ctx, commit_cmd);
     core.task.beginHotSection();
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {

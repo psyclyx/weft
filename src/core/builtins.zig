@@ -281,6 +281,16 @@ fn cStructuralFocus(ctx: *Context, args: struct { mode: []const u8, granularity:
     return ok;
 }
 
+/// `mode.set-undo-step <mode> command|continue|run` — a grammar's DECLARATION
+/// of what one undo step is while a head is in `mode` (`Keymap.UndoStep`).
+/// Per mode, read down the fallback chain; dispatch reads it wherever a
+/// keystroke runs something (`step.zig`) and knows no grammar's name.
+fn cUndoStep(ctx: *Context, args: struct { mode: []const u8, step: []const u8 }) anyerror!Value {
+    const step = @import("Keymap.zig").UndoStep.parse(args.step) orelse return error.InvalidArgument;
+    try ctx.keymap.setUndoStep(ctx.gpa, args.mode, step);
+    return ok;
+}
+
 fn cViewRefresh(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     return invokeSemanticAction(ctx, semantic_model.action.standard.refresh);
@@ -548,12 +558,10 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
 fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffers.active().textEditor() == null) return ok;
-    // Seal the open undo unit so the next edit starts a fresh one. Cursor
-    // motions already barrier (Editor.moveTo); this exposes the same seam to a
-    // modal plugin, which fires it on the boundaries a motion doesn't cover —
-    // notably LEAVING insert (vim's `i…Esc` is one undo unit; the next command
-    // must be its own, or `Esc` then `dd` then `u` reverses BOTH the typing and
-    // the delete instead of just the delete).
+    // Seal the open undo unit so the next edit starts a fresh one — a cut in
+    // the middle of a step, for a command that means one there. Where steps
+    // begin is otherwise the grammar's per-mode declaration, cut by dispatch
+    // (`mode.set-undo-step`, `step.zig`); nothing needs this to end a step.
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.history.barrier();
     return ok;
@@ -957,6 +965,7 @@ const table = [_]command.Command{
     command.define("field.commit-edit", "Finish the field edit, applying the change when there is one.", cFieldEditCommit).present(.{ .internal = true }),
     command.define("field.cancel-edit", "Cancel the field edit, restoring the original text.", cFieldEditCancel).present(.{ .internal = true }),
     command.define("mode.set-structural-focus", "Declare whether a head in a mode focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
+    command.define("mode.set-undo-step", "Declare what one undo step is in a mode: each command, the step that entered it, or a run of one command.", cUndoStep).present(.{ .internal = true }),
     command.define("view.refresh", "Refresh the focused view.", cViewRefresh).present(.{ .label = "Refresh" }),
     command.define("view.revert", "Discard the focused view's draft and show it as it is.", cViewRevert).present(.{ .label = "Revert" }),
     command.define("view.apply", "Apply the focused view's draft.", cViewApply).present(.{ .label = "Apply" }),

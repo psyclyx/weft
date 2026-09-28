@@ -2,7 +2,7 @@
 //! (one or many; each a head and an optional anchor in the Document's
 //! auto-shifted AnchorSet, never bare offsets — the cursor/mark API reads the
 //! primary one and collapses the set to it on write), movement over the rope's line/scalar queries, undo
-//! delegation with vim-flavored unit barriers, dirty tracking by
+//! delegation (a step is cut by dispatch, never by a motion — step.zig), dirty tracking by
 //! version comparison, and saving as a *fallible request* on the task
 //! pool — never an op, never a wait.
 //!
@@ -908,7 +908,6 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
     self.primary = @min(primary, ends.len - 1);
     self.normalize();
     self.clearGoal();
-    self.history.barrier(); // a selection change is a motion
 }
 
 /// Inside a visit: replace the VISITED selection with `ends` (at least one),
@@ -951,7 +950,6 @@ pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocat
     self.selections.appendSliceAssumeCapacity(fresh);
     self.normalize(); // the visited one stays primary wherever it lands
     self.clearGoal();
-    self.history.barrier();
 }
 
 /// Add one selection and make it primary (helix `C`, ide's add-next-match).
@@ -964,7 +962,6 @@ pub fn addSelection(self: *Editor, gpa: Allocator, e: Ends) Allocator.Error!void
     self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor, .inclusive = e.inclusive });
     self.primary = self.selections.items.len - 1;
     self.normalize();
-    self.history.barrier();
 }
 
 /// Drop selection `i`. The last selection cannot be removed — an editor
@@ -974,13 +971,11 @@ pub fn removeSelection(self: *Editor, i: usize) void {
     if (self.selections.items.len <= 1 or i >= self.selections.items.len) return;
     self.releaseSelection(self.selections.orderedRemove(i));
     if (self.primary > i or (self.primary == i and i > 0)) self.primary -= 1;
-    self.history.barrier();
 }
 
 /// Keep only the primary selection (helix `,`, ide's Escape).
 pub fn collapseToPrimary(self: *Editor) void {
     self.dropSecondaries();
-    self.history.barrier();
 }
 
 fn dropSecondaries(self: *Editor) void {
@@ -1082,8 +1077,8 @@ fn mergeInto(self: *Editor, into: *Selection, other: Selection, span: Range) voi
 }
 
 // ── Movement ────────────────────────────────────────────────────────
-// Every motion is an undo barrier: typing after moving starts a new
-// undo unit (the vim-flavored grouping). A motion is a single-selection write:
+// A motion is not an undo boundary: what one step is, is the grammar's
+// declaration, cut by dispatch (`step.zig`). A motion is a single-selection write:
 // it collapses the set to the primary and moves that (inside a visit, the
 // visited selection alone). A grammar that moves every selection computes the
 // targets itself and hands them to `setSelections`.
@@ -1099,14 +1094,12 @@ pub fn moveTo(self: *Editor, offset: usize) void {
         self.doc.anchors.set(a, .{ .offset = if (forward) pinned else self.stepOffset(pinned, .fwd, .char), .bias = .left });
         self.doc.anchors.set(sel.head, .{ .offset = if (forward) self.stepOffset(offset, .fwd, .char) else offset, .bias = .right });
         self.normalize();
-        self.history.barrier();
         return;
     };
     self.doc.anchors.set(sel.head, .{ .offset = offset, .bias = .right });
     // Moving one head can carry it onto or past another selection; keep the
     // set sorted and disjoint (free for a single selection).
     self.normalize();
-    self.history.barrier();
 }
 
 /// Both vertical goals reset together: any horizontal or edit motion
