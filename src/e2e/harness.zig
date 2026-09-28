@@ -965,8 +965,10 @@ pub const Editor = struct {
     /// gave it, or null while it is hidden. What an edge cannot say once two
     /// viewports share one (a panel and a status bar, both at the bottom).
     pub fn viewportPane(self: *Editor, name: []const u8) ?*window_layout.Node {
-        const decl = self.session.system.viewports.find(name) orelse return null;
-        return self.win_layout.paneById(decl.pane orelse return null);
+        const registry = &self.session.system.viewports;
+        for (registry.list.items, 0..) |d, i| if (std.mem.eql(u8, d.name, name))
+            return self.win_layout.paneOfViewport(@intCast(i));
+        return null;
     }
 
     /// Number of panes currently tiled.
